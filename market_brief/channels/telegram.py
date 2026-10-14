@@ -55,19 +55,22 @@ def format_telegram_html(briefing: Briefing) -> str:
         is_down = chg.startswith("-") and chg not in {"-0.00%", "-0.0bp"}
         icon = "🔴" if is_up else ("🔵" if is_down else "⚪")
 
+        ind_name = html.escape(a.indicator)
+
         if a.unit == "PERCENT_YIELD":
-            val_txt = f": <code>{a.value:.3f}%</code> " if a.value is not None else ""
-            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+            val_txt = f"<code>{a.value:.3f}%</code>" if a.value is not None else "-"
+            return f"  {icon} {ind_name} : {val_txt} ({html.escape(chg)})"
         elif a.unit == "FX":
-            val_txt = f": <code>{a.value:,.1f}원</code> " if a.value is not None else ""
-            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+            val_txt = f"<code>{a.value:,.1f}원</code>" if a.value is not None else "-"
+            diff_txt = f"{a.diff:+,.1f}원, " if a.diff is not None else ""
+            return f"  {icon} {ind_name} : {val_txt} ({html.escape(diff_txt)}{html.escape(chg)})"
         elif a.unit == "PRICE":
-            val_txt = f": <code>${a.value:,.2f}</code> " if a.value is not None else ""
-            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+            val_txt = f"<code>${a.value:,.2f}</code>" if a.value is not None else "-"
+            return f"  {icon} {ind_name} : {val_txt} ({html.escape(chg)})"
         else: # INDEX
-            val_txt = f": <code>{a.value:,.2f} pt</code> " if a.value is not None else ""
+            val_txt = f"<code>{a.value:,.2f} pt</code>" if a.value is not None else "-"
             diff_txt = f"{a.diff:+,.2f}pt, " if a.diff is not None else ""
-            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(diff_txt)}{html.escape(chg)})"
+            return f"  {icon} {ind_name} : {val_txt} ({html.escape(diff_txt)}{html.escape(chg)})"
 
     if kr_equities:
         lines.append("<b>■ 🇰🇷 국내 증시 (종가)</b>")

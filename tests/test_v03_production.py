@@ -232,8 +232,8 @@ class ProductionV03Tests(unittest.TestCase):
         )
         rendered = format_telegram_html(b)
         self.assertIn("<b>[15:40 장마감 시황 브리핑]</b>", rendered)
-        self.assertIn("🔵 <b>국내주식</b>", rendered)
-        self.assertIn("🔴 <b>대체자산</b>", rendered)
+        self.assertIn("🔵 KOSPI", rendered)
+        self.assertIn("🔴 USD/KRW", rendered)
         self.assertIn('<a href="https://myuser.github.io/market-daily-briefing/reports/briefing_20261013_1540_closing.html?sig=abc">', rendered)
 
 
