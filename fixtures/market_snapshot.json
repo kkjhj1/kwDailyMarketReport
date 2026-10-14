@@ -1,0 +1,13 @@
+[
+  {"symbol":"KOSPI","asset_class":"KR_EQUITY","market":"KR","session":"REGULAR","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3025.50","previous_close":"3050.00","unit":"INDEX","source":"FIXTURE:KR","is_final":true},
+  {"symbol":"KOSDAQ","asset_class":"KR_EQUITY","market":"KR","session":"REGULAR","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"825.11","previous_close":"830.00","unit":"INDEX","source":"FIXTURE:KR","is_final":true},
+  {"symbol":"KR3Y","asset_class":"KR_BOND","market":"KR","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3.015","previous_close":"3.045","unit":"PERCENT_YIELD","source":"FIXTURE:KR","is_final":true},
+  {"symbol":"KR10Y","asset_class":"KR_BOND","market":"KR","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3.140","previous_close":"3.165","unit":"PERCENT_YIELD","source":"FIXTURE:KR","is_final":true},
+  {"symbol":"SP500","asset_class":"US_EQUITY","market":"US","session":"REGULAR","trade_date":"2026-10-12","as_of":"2026-10-12T16:00:00-04:00","value":"5750.00","previous_close":"5730.00","unit":"INDEX","source":"FIXTURE:US","is_final":true},
+  {"symbol":"NASDAQ_COMPOSITE","asset_class":"US_EQUITY","market":"US","session":"REGULAR","trade_date":"2026-10-12","as_of":"2026-10-12T16:00:00-04:00","value":"18050.00","previous_close":"18000.00","unit":"INDEX","source":"FIXTURE:US","is_final":true},
+  {"symbol":"US10Y","asset_class":"US_BOND","market":"US","session":"REFERENCE","trade_date":"2026-10-12","as_of":"2026-10-12T23:59:00+00:00","value":"4.10","previous_close":"4.05","unit":"PERCENT_YIELD","source":"FIXTURE:FRED","is_final":true},
+  {"symbol":"US2Y","asset_class":"US_BOND","market":"US","session":"REFERENCE","trade_date":"2026-10-12","as_of":"2026-10-12T23:59:00+00:00","value":"3.96","previous_close":"3.92","unit":"PERCENT_YIELD","source":"FIXTURE:FRED","is_final":true},
+  {"symbol":"USDKRW","asset_class":"ALTERNATIVE","market":"GLOBAL","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"1350.00","previous_close":"1342.00","unit":"FX","source":"FIXTURE:FX","is_final":true},
+  {"symbol":"WTI","asset_class":"ALTERNATIVE","market":"GLOBAL","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"74.20","previous_close":"75.10","unit":"PRICE","source":"FIXTURE:CMD","is_final":true},
+  {"symbol":"GOLD","asset_class":"ALTERNATIVE","market":"GLOBAL","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"2665.40","previous_close":"2651.00","unit":"PRICE","source":"FIXTURE:CMD","is_final":true}
+]

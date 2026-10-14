@@ -1,0 +1,26 @@
+[
+  {
+    "title": "외국인 차익실현 매물에 코스피 3,020선 후퇴…반도체 숨고르기",
+    "summary": "미국 국채 금리 상승 여파와 외국인 현·선물 동반 매도세로 국내 양대 지수가 소폭 하락 마감했습니다.",
+    "source": "네이버금융 시황",
+    "url": "https://finance.naver.com/news/",
+    "published_at": "2026-10-13T15:35:00+09:00",
+    "asset_class": "KR_EQUITY"
+  },
+  {
+    "title": "국고채 3년물 금리 3.0bp 하락…한은 금리 인하 기대감 유입",
+    "summary": "국내 기관 매수세가 유입되며 국고채 3년물과 10년물 금리가 나란히 하락(채권 강세)했습니다.",
+    "source": "네이버금융 채권",
+    "url": "https://finance.naver.com/marketindex/",
+    "published_at": "2026-10-13T15:32:00+09:00",
+    "asset_class": "KR_BOND"
+  },
+  {
+    "title": "미 10년물 국채금리 4.10% 돌파에 원/달러 환율 1,350원선 상승",
+    "summary": "글로벌 달러 강세와 미 국채 금리 상승이 맞물리며 원/달러 환율이 전일 대비 8.0원 상승 마감했습니다.",
+    "source": "네이버금융 환율",
+    "url": "https://finance.naver.com/marketindex/",
+    "published_at": "2026-10-13T15:34:00+09:00",
+    "asset_class": "ALTERNATIVE"
+  }
+]

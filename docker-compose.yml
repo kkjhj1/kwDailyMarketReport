@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  market-brief-worker:
+    build: .
+    container_name: market-brief-worker
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    ports:
+      - "8080:8080"
+    command: ["python", "ingest_demo.py"]

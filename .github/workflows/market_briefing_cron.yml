@@ -1,0 +1,89 @@
+name: Market Briefing 24-7 Cron & Pages Report
+
+on:
+  # 1. GitHub 웹페이지에서 언제든 버튼 한 번으로 수시/즉시 발송 가능 (Manual Trigger)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "발송할 브리핑 종류 선택 (closing / morning / urgent / check-urgent)"
+        required: true
+        default: "closing"
+        type: choice
+        options:
+          - closing
+          - morning
+          - urgent
+          - check-urgent
+
+  # 2. 24시간 365일 무중단 정기 시황 & 장중 ±3% 수시 감시 크론 (UTC 기준 -> KST 자동 변환)
+  schedule:
+    # ① 한국시간(KST) 평일 아침 07:30 장전 모닝 브리핑 (UTC 전일 22:30, 일~목 밤 = 월~금 아침)
+    - cron: "30 22 * * 0-4"
+    # ② 한국시간(KST) 평일 오후 15:40 장마감 브리핑 (UTC 06:40, 월~금)
+    - cron: "40 6 * * 1-5"
+    # ③ 한국 정규장(09:00~15:30 KST = UTC 00:00~06:30) 15분 간격 ±3% 급변동 수시 감시
+    - cron: "*/15 0-6 * * 1-5"
+    # ④ 미국 정규장(22:30~06:00 KST = UTC 13:30~21:00) 15분 간격 ±3% 급변동 수시 감시
+    - cron: "*/15 13-21 * * 1-5"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "market-briefing-pages"
+  cancel-in-progress: false
+
+jobs:
+  briefing-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      REPORT_BASE_URL: ${{ secrets.REPORT_BASE_URL }}
+    steps:
+      - name: 1. 저장소 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 2. Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 3. 당일 ±3% 중복방지 DB 캐시 복원 (거래일당 1회 발송 보장)
+        uses: actions/cache@v4
+        with:
+          path: |
+            alerts.sqlite3
+            quotes.sqlite3
+            reports
+          key: market-brief-state-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            market-brief-state-${{ runner.os }}-
+
+      - name: 4. 상세 HTML 리포트 먼저 생성 및 GitHub Pages 배포 준비
+        run: |
+          mkdir -p reports
+          # 수동 실행(workflow_dispatch)인 경우 선택한 모드로 실행, 스케줄(cron)인 경우 시각에 맞춰 자동 실행
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ github.event.inputs.mode }}"
+            if [ "$MODE" = "check-urgent" ]; then
+              python telegram_bot_runner.py --check-urgent --live-naver
+            else
+              python telegram_bot_runner.py --send-now "$MODE" --live-naver
+            fi
+          else
+            python telegram_bot_runner.py --auto-schedule --live-naver
+          fi
+
+      - name: 5. GitHub Pages 아티팩트 업로드 (상세 HTML 리포트 웹 호스팅)
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      - name: 6. GitHub Pages 배포 실행 (클릭 가능한 HTTPS 리포트 링크 활성화)
+        if: always()
+        id: deployment
+        uses: actions/deploy-pages@v4

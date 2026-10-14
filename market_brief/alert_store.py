@@ -1,0 +1,85 @@
+"""Durable one-per-market-per-trading-day reservation and transactional outbox for alerts."""
+import sqlite3
+from datetime import date, datetime, timezone
+from market_brief.core import alert_key, is_alert_threshold_met
+
+
+class AlertStore:
+    """Manages market-day alert deduplication and per-channel delivery audit state."""
+
+    def __init__(self, path="alerts.sqlite3"):
+        self.path = path
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS alert_reservations (
+                    key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    change_pct REAL,
+                    symbol TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS delivery_audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    provider_msg_id TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 1,
+                    error_detail TEXT,
+                    logged_at TEXT NOT NULL
+                )"""
+            )
+
+    def reserve_if_threshold(self, market: str, market_trade_date: date, change_pct: float,
+                             *, symbol: str | None = None) -> bool:
+        if not is_alert_threshold_met(change_pct):
+            return False
+        key = alert_key(market, market_trade_date)
+        with sqlite3.connect(self.path) as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO alert_reservations (key, status, change_pct, symbol) VALUES (?, 'reserved', ?, ?)",
+                (key, float(change_pct), symbol),
+            )
+            return cursor.rowcount == 1
+
+    def update_reservation_status(self, key: str, status: str) -> None:
+        if status not in {"reserved", "sent", "failed_dead_letter"}:
+            raise ValueError(f"Invalid status: {status}")
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE alert_reservations SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?",
+                (status, key),
+            )
+
+    def get_reservation_status(self, key: str) -> str | None:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT status FROM alert_reservations WHERE key = ?", (key,)).fetchone()
+            return row[0] if row else None
+
+    def log_delivery(self, event_key: str, channel: str, recipient: str, status: str,
+                     *, provider_msg_id: str | None = None, attempts: int = 1,
+                     error_detail: str | None = None) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                """INSERT INTO delivery_audit_logs
+                   (event_key, channel, recipient, status, provider_msg_id, attempts, error_detail, logged_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_key, channel, recipient, status, provider_msg_id, attempts, error_detail, now_iso),
+            )
+
+    def list_delivery_logs(self, event_key: str | None = None) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            if event_key:
+                rows = db.execute(
+                    "SELECT * FROM delivery_audit_logs WHERE event_key = ? ORDER BY id ASC",
+                    (event_key,),
+                ).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM delivery_audit_logs ORDER BY id ASC").fetchall()
+            return [dict(r) for r in rows]
