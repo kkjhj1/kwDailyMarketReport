@@ -92,6 +92,15 @@ class HTMLReportRenderer:
             )
 
         msg_preview = html.escape(format_briefing(briefing))
+        summary_html = ""
+        if briefing.one_line_summary:
+            summary_html = f"""
+            <div style="margin-top:14px;padding:12px 16px;background:#f1f5f9;border-left:4px solid #2563eb;border-radius:8px;">
+              <div style="font-size:12px;font-weight:700;color:#1e40af;margin-bottom:2px;">📌 오늘의 한 줄 요약</div>
+              <div style="font-size:14px;font-weight:600;color:#1e293b;line-height:1.5;">{html.escape(briefing.one_line_summary)}</div>
+            </div>
+            """
+
         doc = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -136,7 +145,8 @@ class HTMLReportRenderer:
     <div class="header-card">
       <span class="badge">{html.escape(kind_badge[0])}</span>
       <h1>{html.escape(briefing.headline)}</h1>
-      <div class="as-of">기준 시각: {html.escape(briefing.as_of)} · 채널 독립형 리포트 엔진</div>
+      <div class="as-of">기준 시각: {html.escape(briefing.as_of)} · 국내·해외 전 지표 종가(Close) 기준</div>
+      {summary_html}
     </div>
 
     <div class="section-title">

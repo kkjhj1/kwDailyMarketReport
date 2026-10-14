@@ -112,14 +112,14 @@ def verify_numeric_fidelity(narrative: str, quotes: list[Quote]) -> bool:
 class BriefingBuilder:
     """Builds channel-neutral Briefing and detailed commentary with deterministic fallback."""
 
-    PRIMARY_REPRESENTATIVES = ("KOSPI", "KR3Y", "SP500", "US10Y", "USDKRW")
+    PRIMARY_REPRESENTATIVES = ("KOSPI", "KOSDAQ", "SP500", "NASDAQ_COMPOSITE", "KR3Y", "KR10Y", "US10Y", "US2Y", "USDKRW", "WTI", "GOLD")
 
     def build(
         self,
         quotes: list[Quote],
         *,
         kind: str = "closing",
-        as_of_label: str = "2026-10-13 15:40 KST",
+        as_of_label: str = "2026-10-14 15:40 KST",
         report_url: str = "http://localhost:8080/reports/latest",
         news: list[NewsItem] | None = None,
         ai_headline: str | None = None,
@@ -127,19 +127,40 @@ class BriefingBuilder:
         by_symbol = {q.symbol: q for q in quotes}
         summaries: list[AssetSummary] = []
 
-        selected = [by_symbol[s] for s in self.PRIMARY_REPRESENTATIVES if s in by_symbol]
-        if not selected:
-            selected = quotes[:5]
+        # Maintain consistent ordering based on PRIMARY_REPRESENTATIVES, followed by any others
+        ordered_quotes = [by_symbol[s] for s in self.PRIMARY_REPRESENTATIVES if s in by_symbol]
+        for q in quotes:
+            if q.symbol not in by_symbol:
+                ordered_quotes.append(q)
 
-        for q in selected:
+        for q in ordered_quotes:
+            cat = "KR_EQUITY"
+            if q.symbol in {"SP500", "NASDAQ_COMPOSITE"}:
+                cat = "US_EQUITY"
+            elif q.symbol in {"KR3Y", "KR10Y", "US10Y", "US2Y"}:
+                cat = "BOND"
+            elif q.symbol in {"USDKRW", "WTI", "GOLD"}:
+                cat = "ALTERNATIVE"
+
+            diff = (q.value - q.previous_close) if q.previous_close is not None else None
+            t_date = q.trade_date.strftime("%m/%d") if q.trade_date else ""
+
             summaries.append(
                 AssetSummary(
                     label=ASSET_LABELS.get(q.asset_class, q.asset_class),
                     indicator=DISPLAY_NAMES.get(q.symbol, q.symbol),
                     change=format_movement(q),
                     keyword=deterministic_keyword(q),
+                    value=q.value,
+                    diff=diff,
+                    unit=q.unit,
+                    trade_date=t_date,
+                    category=cat,
                 )
             )
+
+        # Build catchy and informative one-line summary
+        one_line = self._build_one_line_summary(quotes, kind)
 
         # Determine headline deterministically unless verified AI headline is provided
         if ai_headline and verify_numeric_fidelity(ai_headline, quotes):
@@ -153,7 +174,44 @@ class BriefingBuilder:
             as_of=as_of_label,
             assets=tuple(summaries),
             report_url=report_url,
+            one_line_summary=one_line,
+            news=tuple(news or []),
         )
+
+    @staticmethod
+    def _build_one_line_summary(quotes: list[Quote], kind: str) -> str:
+        by_sym = {q.symbol: q for q in quotes}
+        kospi = by_sym.get("KOSPI")
+        kosdaq = by_sym.get("KOSDAQ")
+        nasdaq = by_sym.get("NASDAQ_COMPOSITE")
+        usdkrw = by_sym.get("USDKRW")
+
+        if kind == "urgent":
+            urgent_q = max(
+                (q for q in quotes if q.change_pct is not None),
+                key=lambda x: abs(x.change_pct or Decimal("0")),
+                default=None,
+            )
+            if urgent_q and urgent_q.change_pct is not None:
+                d_str = "급등" if urgent_q.change_pct > 0 else "급락"
+                name = DISPLAY_NAMES.get(urgent_q.symbol, urgent_q.symbol)
+                return f"{name} {urgent_q.change_pct:+.2f}% {d_str} 돌파 발생! 실시간 변동성 주의"
+            return "장중 주요 지표 ±3% 급변동 경보 발생"
+
+        if kind == "morning":
+            if nasdaq and nasdaq.change_pct is not None and usdkrw:
+                n_dir = "상승 훈풍" if nasdaq.change_pct >= 0 else "조정 약세"
+                fx_str = f"원/달러 {usdkrw.value:,.1f}원"
+                return f"미 기술주 {n_dir}(나스닥 {nasdaq.change_pct:+.2f}%) 속 국내 증시 출발 관망 · {fx_str}"
+            return "글로벌 증시 마감 흐름과 환율 추이를 주시하는 장전 모닝 시황"
+
+        if kospi and kospi.change_pct is not None and kosdaq and kosdaq.change_pct is not None:
+            k_dir = "상승" if kospi.change_pct >= 0 else "하락"
+            kq_dir = "상승" if kosdaq.change_pct >= 0 else "약세"
+            fx_info = f" · 환율 {usdkrw.value:,.1f}원" if usdkrw else ""
+            return f"코스피 {k_dir} 마감({kospi.change_pct:+.2f}%), 코스닥 {kq_dir}({kosdaq.change_pct:+.2f}%){fx_info}"
+
+        return "국내외 증시 및 주요 금융지표 일일 마감 시황"
 
     @staticmethod
     def _deterministic_headline(quotes: list[Quote], kind: str) -> str:

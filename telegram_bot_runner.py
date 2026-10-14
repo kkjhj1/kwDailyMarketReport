@@ -20,7 +20,7 @@ from market_brief.market_data import (
     NaverFinanceProvider,
     QuoteStore,
 )
-from market_brief.market_data.naver_provider import NewsItem
+from market_brief.market_data.naver_provider import NewsItem, fetch_naver_market_news
 from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
 from market_brief.report_server import create_report_handler
 
@@ -199,8 +199,18 @@ def main() -> int:
             print("[오류] 수신자 Chat ID를 찾을 수 없습니다. 텔레그램에서 봇에게 '/start'를 보낸 뒤 다시 실행하세요.")
             return 1
 
-    raw_news = json.loads((ROOT / "fixtures/market_news.json").read_text(encoding="utf-8"))
-    news = [NewsItem(**item) for item in raw_news]
+    news: list[NewsItem] = []
+    if args.live_naver:
+        try:
+            news = fetch_naver_market_news(5)
+            if news:
+                print(f"📰 네이버 증권 실시간 주요 시황 뉴스 {len(news)}건 수집 완료 (직링크 연결)")
+        except Exception as exc:
+            print(f"⚠️ 실시간 뉴스 수집 알림: {exc}")
+    if not news:
+        raw_news = json.loads((ROOT / "fixtures/market_news.json").read_text(encoding="utf-8"))
+        news = [NewsItem(**item) for item in raw_news]
+
     pipeline, tg_channel = build_pipeline(args.token, args.live_naver, args.report_url)
 
     # Handle --auto-schedule (used by GitHub Actions cron)

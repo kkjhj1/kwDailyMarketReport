@@ -51,8 +51,8 @@ class NaverFinanceProvider:
         "USDKRW": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode=FX_USDKRW",
         "KR3Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=KR3YT=RR",
         "KR10Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=KR10YT=RR",
-        "US10Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=US10YT=X",
-        "US2Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=US2YT=X",
+        "US10Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=US10YT=RR",
+        "US2Y": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=bond&reutersCode=US2YT=RR",
         "WTI": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=energy&reutersCode=CLcv1",
         "GOLD": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=metals&reutersCode=GCcv1",
     }
@@ -84,22 +84,20 @@ class NaverFinanceProvider:
             or body.get("calcPrice")
             or body.get("value")
         )
-        raw_prev = (
-            body.get("compareToPreviousClosePrice")
-            or body.get("prevClose")
-            or body.get("previousClose")
-        )
         value = self._clean_num(raw_price)
 
-        # If `previousClose` is explicitly given, use it; if `compareToPreviousClosePrice` (diff) is given, compute previous_close
-        if "previousClose" in body or "prevClose" in body:
+        # 1. Fluctuations field with sign (+ / -) in mobile marketIndex productDetail
+        if "fluctuations" in body and body.get("fluctuations") is not None:
+            diff = self._clean_num(body["fluctuations"])
+            prev_val = value - diff
+        # 2. Explicit previousClose
+        elif "previousClose" in body or "prevClose" in body:
             prev_val = self._clean_num(body.get("previousClose") or body.get("prevClose"))
+        # 3. compareToPreviousClosePrice with direction code
         elif "compareToPreviousClosePrice" in body and body.get("compareToPreviousClosePrice") is not None:
             diff = self._clean_num(body["compareToPreviousClosePrice"])
-            # Check direction sign if provided
             direction_info = body.get("compareToPreviousPrice") or {}
             code = str(direction_info.get("code", ""))
-            # Naver code '5' or '4' means down
             if code in {"4", "5"} and diff > 0:
                 diff = -diff
             prev_val = value - diff
@@ -154,7 +152,7 @@ class NaverFinanceProvider:
 
 
 class CompositeMarketDataProvider:
-    """Tries primary provider (e.g. NaverFinanceProvider), falls back cleanly on error."""
+    """Tries primary provider per symbol, falls back cleanly on error for isolated resilience."""
 
     def __init__(self, primary, fallback):
         self.primary = primary
@@ -162,11 +160,66 @@ class CompositeMarketDataProvider:
         self.last_used_source = "NONE"
 
     def fetch(self, symbols: list[str]) -> list[Quote]:
-        try:
-            result = self.primary.fetch(symbols)
-            self.last_used_source = "PRIMARY"
-            return result
-        except Exception:
-            result = self.fallback.fetch(symbols)
-            self.last_used_source = "FALLBACK"
-            return result
+        quotes_by_sym: dict[str, Quote] = {}
+        # Fetch each symbol from primary with per-symbol error isolation
+        for s in symbols:
+            try:
+                q_list = self.primary.fetch([s])
+                if q_list:
+                    quotes_by_sym[s] = q_list[0]
+            except Exception:
+                pass
+
+        # Fill any missing symbols from fallback
+        missing = [s for s in symbols if s not in quotes_by_sym]
+        if missing:
+            try:
+                fb_list = self.fallback.fetch(missing)
+                for q in fb_list:
+                    quotes_by_sym[q.symbol] = q
+            except Exception:
+                pass
+
+        self.last_used_source = "FALLBACK" if len(quotes_by_sym) == len(missing) else ("COMPOSITE" if missing else "PRIMARY")
+        return [quotes_by_sym[s] for s in symbols if s in quotes_by_sym]
+
+
+def fetch_naver_market_news(limit: int = 5, opener=None, timeout: int = 6) -> list[NewsItem]:
+    """Fetches live market headline news from Naver mobile stock API with direct article links."""
+    _opener = opener or urllib.request.urlopen
+    url = f"https://m.stock.naver.com/api/news/list?pageSize={limit}&page=1&category=mainnews"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+            "Accept": "application/json",
+        },
+    )
+    items: list[NewsItem] = []
+    try:
+        with _opener(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        if isinstance(data, list):
+            for raw in data:
+                oid = raw.get("oid", "")
+                aid = raw.get("aid", "")
+                tit = raw.get("tit", "").strip()
+                sub = raw.get("subcontent", "").strip()
+                src = raw.get("ohnm", "네이버금융").strip()
+                dt_str = raw.get("dt", "")
+                if not tit or not oid or not aid:
+                    continue
+                direct_url = f"https://n.news.naver.com/mnews/article/{oid}/{aid}"
+                items.append(
+                    NewsItem(
+                        title=tit,
+                        summary=sub,
+                        source=src,
+                        url=direct_url,
+                        published_at=dt_str,
+                        asset_class="KR_EQUITY",
+                    )
+                )
+    except Exception:
+        pass
+    return items

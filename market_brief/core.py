@@ -3,12 +3,19 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
+from decimal import Decimal
+
 @dataclass(frozen=True)
 class AssetSummary:
     label: str
     indicator: str
     change: str
     keyword: str
+    value: Decimal | None = None
+    diff: Decimal | None = None
+    unit: str = "INDEX"
+    trade_date: str = ""
+    category: str = "KR_EQUITY"
 
 @dataclass(frozen=True)
 class Briefing:
@@ -17,6 +24,9 @@ class Briefing:
     as_of: str
     assets: tuple[AssetSummary, ...]
     report_url: str
+    one_line_summary: str = ""
+    category_groups: dict | None = None
+    news: tuple = ()
 
 class DeliveryChannel(Protocol):
     def send(self, recipient: str, briefing: Briefing) -> str: ...

@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from market_brief.core import Briefing, format_briefing
+from market_brief.core import Briefing, format_briefing, AssetSummary
 
 
 def _is_public_button_url(url: str) -> bool:
@@ -21,7 +21,7 @@ def _is_public_button_url(url: str) -> bool:
 
 
 def format_telegram_html(briefing: Briefing) -> str:
-    """Formats a Briefing into a clean, mobile-optimized Telegram HTML message with emojis and hyperlinks."""
+    """Formats a Briefing into an intuitive, mobile-optimized 4-category Telegram HTML message."""
     kind_meta = {
         "morning": ("🌅", "07:30 장전 모닝 브리핑"),
         "closing": ("📊", "15:40 장마감 시황 브리핑"),
@@ -30,29 +30,87 @@ def format_telegram_html(briefing: Briefing) -> str:
 
     lines = [
         f"{kind_meta[0]} <b>[{html.escape(kind_meta[1])}]</b>",
-        f"<b>{html.escape(briefing.headline)}</b>",
-        f"🕒 기준: <code>{html.escape(briefing.as_of)}</code>",
-        "━━━━━━━━━━━━━━━━━━",
-        "<b>■ 5대 자산군 핵심 지표</b>",
+        f"🕒 기준: <code>{html.escape(briefing.as_of)}</code> (전 지표 종가 기준)",
     ]
 
-    for a in briefing.assets:
-        chg = a.change.strip()
-        if chg.startswith("+") and chg not in {"+0.00%", "+0.0bp", "+0%"}:
-            icon = "🔴"
-        elif chg.startswith("-") and chg not in {"-0.00%", "-0.0bp", "-0%"}:
-            icon = "🔵"
-        else:
-            icon = "⚪"
-        lines.append(
-            f"{icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} <code>{html.escape(chg)}</code>\n"
-            f"   └ <i>{html.escape(a.keyword)}</i>"
-        )
+    # 1. One-line executive summary
+    if briefing.one_line_summary:
+        lines.extend([
+            "",
+            "📌 <b>【오늘의 한 줄 요약】</b>",
+            f"<i>{html.escape(briefing.one_line_summary)}</i>",
+        ])
 
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
+    # 2. Group assets into 4 primary investor categories
+    kr_equities = [a for a in briefing.assets if a.category == "KR_EQUITY"]
+    us_equities = [a for a in briefing.assets if a.category == "US_EQUITY"]
+    bonds = [a for a in briefing.assets if a.category == "BOND"]
+    alternatives = [a for a in briefing.assets if a.category == "ALTERNATIVE"]
+
+    def _fmt_quote_line(a: AssetSummary) -> str:
+        chg = a.change.strip()
+        is_up = chg.startswith("+") and chg not in {"+0.00%", "+0.0bp"}
+        is_down = chg.startswith("-") and chg not in {"-0.00%", "-0.0bp"}
+        icon = "🔴" if is_up else ("🔵" if is_down else "⚪")
+
+        if a.unit == "PERCENT_YIELD":
+            val_txt = f": <code>{a.value:.3f}%</code> " if a.value is not None else ""
+            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+        elif a.unit == "FX":
+            val_txt = f": <code>{a.value:,.1f}원</code> " if a.value is not None else ""
+            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+        elif a.unit == "PRICE":
+            val_txt = f": <code>${a.value:,.2f}</code> " if a.value is not None else ""
+            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(chg)})"
+        else: # INDEX
+            val_txt = f": <code>{a.value:,.2f} pt</code> " if a.value is not None else ""
+            diff_txt = f"{a.diff:+,.2f}pt, " if a.diff is not None else ""
+            return f"  {icon} <b>{html.escape(a.label)}</b> · {html.escape(a.indicator)} {val_txt}({html.escape(diff_txt)}{html.escape(chg)})"
+
+    if kr_equities:
+        lines.append("<b>■ 🇰🇷 국내 증시 (종가)</b>")
+        for a in kr_equities:
+            lines.append(_fmt_quote_line(a))
+        lines.append("")
+
+    if us_equities:
+        lines.append("<b>■ 🇺🇸 글로벌 증시 (종가)</b>")
+        for a in us_equities:
+            lines.append(_fmt_quote_line(a))
+        lines.append("")
+
+    if bonds:
+        lines.append("<b>■ 🏦 금리 & 채권 (종가)</b>")
+        for a in bonds:
+            lines.append(_fmt_quote_line(a))
+        lines.append("")
+
+    if alternatives:
+        lines.append("<b>■ 💵 환율 & 원자재 (종가/고시)</b>")
+        for a in alternatives:
+            lines.append(_fmt_quote_line(a))
+
+    # 3. Live headlines with direct clickable article hyperlinks
+    if briefing.news:
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("📰 <b>[주요 시황 뉴스 & 변동 요인]</b>")
+        for idx, n in enumerate(briefing.news[:3], start=1):
+            title_escaped = html.escape(getattr(n, "title", str(n)))
+            src_escaped = html.escape(getattr(n, "source", "네이버금융"))
+            url = getattr(n, "url", "")
+            if url and url.startswith(("http://", "https://")):
+                safe_url = html.escape(url, quote=True)
+                lines.append(f"{idx}. <a href=\"{safe_url}\">{title_escaped}</a> ({src_escaped})")
+            else:
+                lines.append(f"{idx}. {title_escaped} ({src_escaped})")
+
+    # 4. Standalone Report Link
     lines.append("━━━━━━━━━━━━━━━━━━")
     if _is_public_button_url(briefing.report_url):
         safe_url = html.escape(briefing.report_url, quote=True)
-        lines.append(f"🔗 <b>상세 리포트:</b> <a href=\"{safe_url}\">📊 모바일·PC 상세 웹 리포트 열기 (클릭)</a>")
+        lines.append(f"🔗 <b>상세 리포트:</b> <a href=\"{safe_url}\">📊 모바일·PC 상세 대시보드 웹 리포트 열기 (클릭)</a>")
     else:
         lines.append("💡 <i>상세 리포트: GitHub Pages 연결 시 클릭 가능한 웹 링크 버튼이 활성화됩니다. (로컬 실행 시 아래 첨부된 HTML 파일을 눌러 바로 여세요)</i>")
 
