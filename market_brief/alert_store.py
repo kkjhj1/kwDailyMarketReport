@@ -46,6 +46,25 @@ class AlertStore:
             )
             return cursor.rowcount == 1
 
+    def reserve_regular_briefing(self, kind: str, trade_date: date) -> bool:
+        """Atomically reserves a regular briefing (morning/closing) for the given trading day.
+        Returns True if this is the first time today for this briefing kind, False if already sent.
+        """
+        key = f"REGULAR:{trade_date.isoformat()}:{kind}"
+        with sqlite3.connect(self.path) as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO alert_reservations (key, status, change_pct, symbol) VALUES (?, 'sent', 0.0, ?)",
+                (key, kind),
+            )
+            return cursor.rowcount == 1
+
+    def is_regular_briefing_sent(self, kind: str, trade_date: date) -> bool:
+        """Checks if a regular briefing (morning/closing) has already been recorded for today."""
+        key = f"REGULAR:{trade_date.isoformat()}:{kind}"
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT 1 FROM alert_reservations WHERE key = ?", (key,)).fetchone()
+            return row is not None
+
     def update_reservation_status(self, key: str, status: str) -> None:
         if status not in {"reserved", "sent", "failed_dead_letter"}:
             raise ValueError(f"Invalid status: {status}")

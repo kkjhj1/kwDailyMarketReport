@@ -215,11 +215,38 @@ def main() -> int:
 
     # Handle --auto-schedule (used by GitHub Actions cron)
     now_kst = datetime.now(KST)
+    today = now_kst.date()
+    cal = MarketCalendar()
+    is_kr_trading = cal.is_trading_day("KR", today)
+
     if args.auto_schedule:
-        if 6 <= now_kst.hour <= 8:
-            args.send_now = "morning"
-        elif 15 <= now_kst.hour <= 16:
-            args.send_now = "closing"
+        # 1) 평일 장마감 후 (15:30 ~ 23:59 KST):
+        # GitHub Actions 크론이 1~2시간 지연되어 17시, 18시에 늦게 돌더라도
+        # 오늘 마감 브리핑이 아직 발송되지 않았다면 무조건 closing 1회 발송 보장!
+        if is_kr_trading and (now_kst.hour > 15 or (now_kst.hour == 15 and now_kst.minute >= 30)):
+            if not pipeline.alert_store.is_regular_briefing_sent("closing", today):
+                print(f"⏰ [AutoSchedule] 금일({today}) 마감 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 마감 브리핑 즉시 발송 진행")
+                args.send_now = "closing"
+            else:
+                # 이미 마감 브리핑이 발송 완료된 경우, 미 야간장(22:30~)이면 긴급 감시 실행
+                if now_kst.hour >= 22 or now_kst.hour < 6:
+                    args.check_urgent = True
+                else:
+                    print(f"✅ [AutoSchedule] 금일({today}) 마감 브리핑 이미 발송 완료됨. (정규장 종료 상태)")
+                    return 0
+        # 2) 평일 아침 (06:00 ~ 10:00 KST):
+        # 07:30 크론이 지연되어 8~9시에 돌더라도 오늘 모닝 브리핑 미발송 상태면 무조건 발송!
+        elif is_kr_trading and (6 <= now_kst.hour <= 10):
+            if not pipeline.alert_store.is_regular_briefing_sent("morning", today):
+                print(f"⏰ [AutoSchedule] 금일({today}) 모닝 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 모닝 브리핑 즉시 발송 진행")
+                args.send_now = "morning"
+            else:
+                if now_kst.hour >= 9:
+                    args.check_urgent = True
+                else:
+                    print(f"✅ [AutoSchedule] 금일({today}) 모닝 브리핑 이미 발송 완료됨.")
+                    return 0
+        # 3) 장중 (09:00 ~ 15:30 KST) 또는 미 야간장 (22:30 ~ 06:00 KST):
         else:
             args.check_urgent = True
 
@@ -247,6 +274,7 @@ def main() -> int:
             now=now_kst,
             news=news,
         )
+        pipeline.alert_store.reserve_regular_briefing(args.send_now, today)
         print(f"✅ 텔레그램 메시지 발송 성공! (수신자 ID: {', '.join(recipients)})")
         print(f"📄 생성된 상세 HTML 리포트: {report_path}")
 
