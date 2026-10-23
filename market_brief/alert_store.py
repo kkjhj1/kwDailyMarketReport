@@ -1,4 +1,5 @@
 """Durable one-per-market-per-trading-day reservation and transactional outbox for alerts."""
+from contextlib import contextmanager
 import sqlite3
 from datetime import date, datetime, timezone
 from market_brief.core import alert_key, is_alert_threshold_met
@@ -9,7 +10,7 @@ class AlertStore:
 
     def __init__(self, path="alerts.sqlite3"):
         self.path = path
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(
                 """CREATE TABLE IF NOT EXISTS alert_reservations (
                     key TEXT PRIMARY KEY,
@@ -34,12 +35,21 @@ class AlertStore:
                 )"""
             )
 
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def reserve_if_threshold(self, market: str, market_trade_date: date, change_pct: float,
                              *, symbol: str | None = None) -> bool:
         if not is_alert_threshold_met(change_pct):
             return False
         key = alert_key(market, market_trade_date)
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             cursor = db.execute(
                 "INSERT OR IGNORE INTO alert_reservations (key, status, change_pct, symbol) VALUES (?, 'reserved', ?, ?)",
                 (key, float(change_pct), symbol),
@@ -51,7 +61,7 @@ class AlertStore:
         Returns True if this is the first time today for this briefing kind, False if already sent.
         """
         key = f"REGULAR:{trade_date.isoformat()}:{kind}"
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             cursor = db.execute(
                 "INSERT OR IGNORE INTO alert_reservations (key, status, change_pct, symbol) VALUES (?, 'sent', 0.0, ?)",
                 (key, kind),
@@ -61,21 +71,21 @@ class AlertStore:
     def is_regular_briefing_sent(self, kind: str, trade_date: date) -> bool:
         """Checks if a regular briefing (morning/closing) has already been recorded for today."""
         key = f"REGULAR:{trade_date.isoformat()}:{kind}"
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT 1 FROM alert_reservations WHERE key = ?", (key,)).fetchone()
             return row is not None
 
     def update_reservation_status(self, key: str, status: str) -> None:
         if status not in {"reserved", "sent", "failed_dead_letter"}:
             raise ValueError(f"Invalid status: {status}")
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(
                 "UPDATE alert_reservations SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?",
                 (status, key),
             )
 
     def get_reservation_status(self, key: str) -> str | None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT status FROM alert_reservations WHERE key = ?", (key,)).fetchone()
             return row[0] if row else None
 
@@ -83,7 +93,7 @@ class AlertStore:
                      *, provider_msg_id: str | None = None, attempts: int = 1,
                      error_detail: str | None = None) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(
                 """INSERT INTO delivery_audit_logs
                    (event_key, channel, recipient, status, provider_msg_id, attempts, error_detail, logged_at)
@@ -92,7 +102,7 @@ class AlertStore:
             )
 
     def list_delivery_logs(self, event_key: str | None = None) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.row_factory = sqlite3.Row
             if event_key:
                 rows = db.execute(

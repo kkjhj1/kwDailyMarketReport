@@ -219,25 +219,31 @@ class TelegramChannel:
         parts = []
         # chat_id field
         parts.append(
-            f"--{boundary}\\r\\n"
-            f'Content-Disposition: form-data; name="chat_id"\\r\\n\\r\\n'
-            f"{str(recipient).strip()}\\r\\n".encode("utf-8")
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                f"{str(recipient).strip()}\r\n"
+            ).encode("utf-8")
         )
         # caption field
         parts.append(
-            f"--{boundary}\\r\\n"
-            f'Content-Disposition: form-data; name="caption"\\r\\n\\r\\n'
-            f"{caption}\\r\\n".encode("utf-8")
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+                f"{caption}\r\n"
+            ).encode("utf-8")
         )
         # document field
         parts.append(
-            f"--{boundary}\\r\\n"
-            f'Content-Disposition: form-data; name="document"; filename="{path.name}"\\r\\n'
-            f"Content-Type: text/html; charset=utf-8\\r\\n\\r\\n".encode("utf-8")
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="document"; filename="{path.name}"\r\n'
+                f"Content-Type: text/html; charset=utf-8\r\n\r\n"
+            ).encode("utf-8")
             + file_bytes
-            + b"\\r\\n"
+            + b"\r\n"
         )
-        parts.append(f"--{boundary}--\\r\\n".encode("utf-8"))
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
         body = b"".join(parts)
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
@@ -247,8 +253,18 @@ class TelegramChannel:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        with self._opener(req, timeout=15) as response:
-            res = json.load(response)
+        try:
+            with self._opener(req, timeout=15) as response:
+                res = json.load(response)
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_json = json.loads(exc.read().decode("utf-8", errors="ignore"))
+                err_body = err_json.get("description", "")
+            except Exception:
+                err_body = str(exc)
+            raise RuntimeError(f"Telegram sendDocument HTTP {exc.code}: {err_body}") from exc
+
         if not res.get("ok"):
             raise RuntimeError("Telegram sendDocument failed")
         return str(res["result"]["message_id"])
