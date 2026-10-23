@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>KOSPI +0.30% 상승 · 원/달러 1,326.2원(하락) - 상세 시황 리포트</title>
+  <style>
+    :root {
+      --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --muted: #64748b; --border: #e2e8f0;
+    }
+    html, body {
+      width: 100%;
+      max-width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+      box-sizing: border-box;
+      touch-action: pan-y;
+      -webkit-text-size-adjust: 100%;
+    }
+    *, *::before, *::after {
+      box-sizing: inherit;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 12px 10px 36px;
+      word-break: keep-all;
+      overflow-wrap: break-word;
+    }
+    .container {
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+    .header-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #059669;
+      background: #d1fae5;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 4px;
+      color: #0f172a;
+      line-height: 1.35;
+    }
+    .as-of {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .summary-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #f1f5f9;
+      border-left: 3px solid #2563eb;
+      border-radius: 6px;
+    }
+    .summary-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: #1e40af;
+      margin-bottom: 2px;
+    }
+    .summary-text {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1e293b;
+      line-height: 1.45;
+    }
+    .section-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 16px 0 8px;
+      color: #1e293b;
+    }
+    .zones-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .zone-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .zone-header {
+      font-size: 13px;
+      font-weight: 700;
+      color: #334155;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #f1f5f9;
+      margin-bottom: 8px;
+    }
+    .zone-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .asset-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+    .row-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .symbol-name {
+      font-weight: 700;
+      color: #1e293b;
+      font-size: 14px;
+    }
+    .row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .price-val {
+      font-weight: 700;
+      font-size: 14px;
+      color: #0f172a;
+    }
+    .pill-chg {
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .news-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .news-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .news-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+      text-decoration: none;
+      display: block;
+      margin-bottom: 4px;
+      line-height: 1.4;
+    }
+    .news-title:hover {
+      text-decoration: underline;
+      color: #2563eb;
+    }
+    .news-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header-card">
+      <span class="badge">15:40 장마감 브리핑</span>
+      <h1>KOSPI +0.30% 상승 · 원/달러 1,326.2원(하락)</h1>
+      <div class="as-of">기준: 2026-10-23 17:15 KST (전 지표 종가 기준)</div>
+      
+            <div class="summary-box">
+              <div class="summary-label">📌 한 줄 요약</div>
+              <div class="summary-text">코스피 상승 마감(+0.30%), 코스닥 약세(-1.62%) · 환율 1,326.2원</div>
+            </div>
+            
+    </div>
+
+    <div class="section-title">5대 자산군 지표</div>
+    <div class="zones-grid">
+      
+                <div class="zone-card">
+                  <div class="zone-header">🇰🇷 국내 증시</div>
+                  <div class="zone-body">
+                    
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">KOSPI</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">5,550.30</span>
+                <span class="pill-chg" style="color:#dc2626;background:#fef2f2;">+0.30% (+16.53)</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">KOSDAQ</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">751.69</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-1.62% (-12.41)</span>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">🇺🇸 글로벌 증시</div>
+                  <div class="zone-body">
+                    
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">S&amp;P500</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">7,663.43</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-1.21% (-93.74)</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">NASDAQ</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">26,008.86</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-2.60% (-694.00)</span>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">🏦 국내 채권</div>
+                  <div class="zone-body">
+                    
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">국고3년</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">3.816%</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-2.4bp</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">국고10년</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">4.099%</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-4.5bp</span>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">🌐 해외 채권</div>
+                  <div class="zone-body">
+                    
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">미국채10년</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">4.980%</span>
+                <span class="pill-chg" style="color:#dc2626;background:#fef2f2;">+2.7bp</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">미국채2년</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">4.665%</span>
+                <span class="pill-chg" style="color:#dc2626;background:#fef2f2;">+3.0bp</span>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">💵 환율 &amp; 원자재</div>
+                  <div class="zone-body">
+                    
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">USD/KRW</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">1,326.2원</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-0.02% (-0.3)</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">WTI유가</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">$100.62</span>
+                <span class="pill-chg" style="color:#dc2626;background:#fef2f2;">+1.16%</span>
+              </div>
+            </div>
+            
+            <div class="asset-row">
+              <div class="row-left">
+                <span class="symbol-name">국제금</span>
+              </div>
+              <div class="row-right">
+                <span class="price-val">$4,025.50</span>
+                <span class="pill-chg" style="color:#2563eb;background:#eff6ff;">-0.86%</span>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+    </div>
+
+    <div class="section-title">주요 시황 뉴스</div>
+    <div class="news-list">
+      
+                <div class="news-item">
+                  <a href="https://n.news.naver.com/mnews/article/008/0005430876" target="_blank" rel="noopener" class="news-title">&#x27;2%대↓&#x27; 코스피… MS·삼전닉스 실적에 AI 수익성 우려 씻을까</a>
+                  <div class="news-meta">
+                    <span>머니투데이</span>
+                    <span>20261023165647</span>
+                  </div>
+                </div>
+                
+                <div class="news-item">
+                  <a href="https://n.news.naver.com/mnews/article/018/0006395066" target="_blank" rel="noopener" class="news-title">&quot;리츠 원조의 귀환&quot;…코람코, 창립 25주년 맞아 &#x27;왕좌 탈환&#x27;</a>
+                  <div class="news-meta">
+                    <span>이데일리</span>
+                    <span>20261023165615</span>
+                  </div>
+                </div>
+                
+                <div class="news-item">
+                  <a href="https://n.news.naver.com/mnews/article/016/0002713686" target="_blank" rel="noopener" class="news-title">장중 4% 폭락 딛고 ‘막판 대반전’…코스피 5550선 상승 마감 [투자360]</a>
+                  <div class="news-meta">
+                    <span>헤럴드경제</span>
+                    <span>20261023164511</span>
+                  </div>
+                </div>
+                
+    </div>
+  </div>
+</body>
+</html>
