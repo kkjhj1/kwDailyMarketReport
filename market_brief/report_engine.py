@@ -17,6 +17,7 @@ ASSET_LABELS = {
 DISPLAY_NAMES = {
     "KOSPI": "KOSPI",
     "KOSDAQ": "KOSDAQ",
+    "KOSPI200": "KOSPI 200",
     "KR3Y": "국고3년",
     "KR10Y": "국고10년",
     "SP500": "S&P500",
@@ -112,7 +113,7 @@ def verify_numeric_fidelity(narrative: str, quotes: list[Quote]) -> bool:
 class BriefingBuilder:
     """Builds channel-neutral Briefing and detailed commentary with deterministic fallback."""
 
-    PRIMARY_REPRESENTATIVES = ("KOSPI", "KOSDAQ", "SP500", "NASDAQ_COMPOSITE", "KR3Y", "KR10Y", "US10Y", "US2Y", "USDKRW", "WTI", "GOLD")
+    PRIMARY_REPRESENTATIVES = ("KOSPI", "KOSDAQ", "KOSPI200", "SP500", "NASDAQ_COMPOSITE", "KR3Y", "KR10Y", "US10Y", "US2Y", "USDKRW", "WTI", "GOLD")
 
     def build(
         self,
@@ -159,8 +160,9 @@ class BriefingBuilder:
                 )
             )
 
-        # Build catchy and informative one-line summary
+        # Build catchy and informative summaries
         one_line = self._build_one_line_summary(quotes, kind)
+        three_lines = self._build_three_line_summary(quotes, kind)
 
         # Determine headline deterministically unless verified AI headline is provided
         if ai_headline and verify_numeric_fidelity(ai_headline, quotes):
@@ -175,6 +177,7 @@ class BriefingBuilder:
             assets=tuple(summaries),
             report_url=report_url,
             one_line_summary=one_line,
+            three_line_summary=three_lines,
             news=tuple(news or []),
         )
 
@@ -212,6 +215,61 @@ class BriefingBuilder:
             return f"코스피 {k_dir} 마감({kospi.change_pct:+.2f}%), 코스닥 {kq_dir}({kosdaq.change_pct:+.2f}%){fx_info}"
 
         return "국내외 증시 및 주요 금융지표 일일 마감 시황"
+
+    @staticmethod
+    def _build_three_line_summary(quotes: list[Quote], kind: str) -> tuple[str, str, str]:
+        by_sym = {q.symbol: q for q in quotes}
+        kospi = by_sym.get("KOSPI")
+        kosdaq = by_sym.get("KOSDAQ")
+        nasdaq = by_sym.get("NASDAQ_COMPOSITE")
+        kr10y = by_sym.get("KR10Y")
+        kr3y = by_sym.get("KR3Y")
+        us10y = by_sym.get("US10Y")
+        usdkrw = by_sym.get("USDKRW")
+        wti = by_sym.get("WTI")
+        gold = by_sym.get("GOLD")
+
+        # 1. 주가 (국내 및 해외 주식)
+        stock_parts = []
+        if kospi and kospi.change_pct is not None:
+            k_dir = "상승" if kospi.change_pct >= 0 else "하락"
+            stock_parts.append(f"코스피 {k_dir}({kospi.change_pct:+.2f}%)")
+        if kosdaq and kosdaq.change_pct is not None:
+            kq_dir = "상승" if kosdaq.change_pct >= 0 else "약세"
+            stock_parts.append(f"코스닥 {kq_dir}({kosdaq.change_pct:+.2f}%)")
+        if nasdaq and nasdaq.change_pct is not None:
+            n_dir = "상승" if nasdaq.change_pct >= 0 else "숨고르기"
+            stock_parts.append(f"미 나스닥 {n_dir}({nasdaq.change_pct:+.2f}%)")
+        stock_line = ", ".join(stock_parts) if stock_parts else "국내외 증시 등락 혼조세"
+
+        # 2. 채권 (국내 및 해외 금리)
+        bond_parts = []
+        if kr10y and kr10y.value is not None:
+            chg = f"({kr10y.change_bp:+.1f}bp)" if kr10y.change_bp is not None else ""
+            bond_parts.append(f"국고10년 {kr10y.value:.3f}%{chg}")
+        if us10y and us10y.value is not None:
+            chg = f"({us10y.change_bp:+.1f}bp)" if us10y.change_bp is not None else ""
+            bond_parts.append(f"미10년 {us10y.value:.3f}%{chg}")
+        if us10y and kr10y and us10y.value is not None and kr10y.value is not None:
+            diff_bp = (us10y.value - kr10y.value) * 100
+            diff_str = "역전 지속" if diff_bp > 0 else "정상 스프레드"
+            bond_parts.append(f"한·미 10년물 금리차 {diff_bp:+.1f}bp {diff_str}")
+        bond_line = " · ".join(bond_parts) if bond_parts else "주요국 국채 금리 보합권"
+
+        # 3. 기타 (환율 및 원자재)
+        other_parts = []
+        if usdkrw and usdkrw.value is not None:
+            chg = f"({usdkrw.change_pct:+.2f}%)" if usdkrw.change_pct is not None else ""
+            other_parts.append(f"원/달러 {usdkrw.value:,.1f}원{chg}")
+        if wti and wti.value is not None:
+            chg = f"({wti.change_pct:+.2f}%)" if wti.change_pct is not None else ""
+            other_parts.append(f"WTI유가 ${wti.value:,.2f}{chg}")
+        if gold and gold.value is not None:
+            chg = f"({gold.change_pct:+.2f}%)" if gold.change_pct is not None else ""
+            other_parts.append(f"국제금 ${gold.value:,.2f}{chg}")
+        other_line = " · ".join(other_parts) if other_parts else "환율 및 주요 원자재 등락"
+
+        return (stock_line, bond_line, other_line)
 
     @staticmethod
     def _deterministic_headline(quotes: list[Quote], kind: str) -> str:

@@ -55,6 +55,12 @@ class ProductionV03Tests(unittest.TestCase):
                 "compareToPreviousPrice": {"code": "5"},
                 "localTradedAt": "2026-10-13T15:30:00+09:00",
             },
+            "KOSPI200": {
+                "closePrice": "405.20",
+                "compareToPreviousClosePrice": "2.80",
+                "compareToPreviousPrice": {"code": "5"},
+                "localTradedAt": "2026-10-13T15:30:00+09:00",
+            },
             "USDKRW": {
                 "result": {
                     "calcPrice": "1,350.00",
@@ -64,19 +70,25 @@ class ProductionV03Tests(unittest.TestCase):
             },
         }
         def fake_opener(req, timeout=8):
+            if "KPI200" in req.full_url:
+                return FakeHTTPResponse(json.dumps(payloads["KOSPI200"]).encode("utf-8"))
             if "KOSPI" in req.full_url:
                 return FakeHTTPResponse(json.dumps(payloads["KOSPI"]).encode("utf-8"))
             return FakeHTTPResponse(json.dumps(payloads["USDKRW"]).encode("utf-8"))
 
         provider = NaverFinanceProvider(opener=fake_opener)
-        quotes = provider.fetch(["KOSPI", "USDKRW"], now=datetime(2026, 10, 13, 15, 35, tzinfo=KST))
-        self.assertEqual(len(quotes), 2)
+        quotes = provider.fetch(["KOSPI", "KOSPI200", "USDKRW"], now=datetime(2026, 10, 13, 15, 35, tzinfo=KST))
+        self.assertEqual(len(quotes), 3)
         self.assertEqual(quotes[0].symbol, "KOSPI")
         self.assertEqual(quotes[0].value, Decimal("3025.50"))
         self.assertEqual(quotes[0].previous_close, Decimal("3050.00"))
         self.assertTrue(quotes[0].change_pct < 0)
-        self.assertEqual(quotes[1].symbol, "USDKRW")
-        self.assertEqual(quotes[1].value, Decimal("1350.00"))
+        self.assertEqual(quotes[1].symbol, "KOSPI200")
+        self.assertEqual(quotes[1].value, Decimal("405.20"))
+        self.assertEqual(quotes[1].previous_close, Decimal("408.00"))
+        self.assertTrue(quotes[1].change_pct < 0)
+        self.assertEqual(quotes[2].symbol, "USDKRW")
+        self.assertEqual(quotes[2].value, Decimal("1350.00"))
 
     def test_composite_provider_fallback_on_error(self):
         def broken_opener(req, timeout=8):
@@ -235,6 +247,50 @@ class ProductionV03Tests(unittest.TestCase):
         self.assertIn("🔵 KOSPI", rendered)
         self.assertIn("🔴 USD/KRW", rendered)
         self.assertIn('<a href="https://myuser.github.io/market-daily-briefing/reports/briefing_20261013_1540_closing.html?sig=abc">', rendered)
+
+    def test_three_line_summary_and_macro_radar_rendering(self):
+        from market_brief.report_engine import BriefingBuilder
+        from market_brief.web_report import HTMLReportRenderer
+        provider = FixtureProvider(str(ROOT / "fixtures/market_snapshot.json"))
+        from market_brief.pipeline import DEFAULT_SYMBOLS
+        quotes = provider.fetch(DEFAULT_SYMBOLS)
+
+        builder = BriefingBuilder()
+        briefing = builder.build(quotes, kind="closing", as_of_label="2026-10-13 15:40 KST")
+
+        # 1. Check three_line_summary generation
+        self.assertIsNotNone(briefing.three_line_summary)
+        stock_line, bond_line, other_line = briefing.three_line_summary
+        self.assertIn("코스피", stock_line)
+        self.assertIn("국고10년", bond_line)
+        self.assertIn("원/달러", other_line)
+
+        # 2. Check HTML rendering with all 12 assets, radar, and 3-point summary
+        renderer = HTMLReportRenderer()
+        html_out = renderer.render(briefing, quotes)
+        self.assertIn("📌 오늘의 3줄 핵심 요약", html_out)
+        self.assertIn("<b>주가:</b>", html_out)
+        self.assertIn("<b>채권:</b>", html_out)
+        self.assertIn("<b>기타:</b>", html_out)
+        self.assertIn("⚡ 매크로 금융 레이더", html_out)
+        self.assertIn("한·미 10년물 금리차", html_out)
+        self.assertIn("KOSPI 200", html_out)
+        self.assertIn("WTI유가", html_out)
+        self.assertIn("국제금", html_out)
+
+    def test_resilient_macro_radar_with_partial_quotes(self):
+        from market_brief.report_engine import BriefingBuilder
+        from market_brief.web_report import HTMLReportRenderer
+        provider = FixtureProvider(str(ROOT / "fixtures/market_snapshot.json"))
+        # Partial quotes: only KOSPI and US10Y (no KR10Y, no US2Y)
+        quotes = provider.fetch(["KOSPI", "US10Y"])
+        builder = BriefingBuilder()
+        briefing = builder.build(quotes, kind="closing")
+        renderer = HTMLReportRenderer()
+        html_out = renderer.render(briefing, quotes)
+        # Should render cleanly without throwing exception
+        self.assertIn("KOSPI", html_out)
+        self.assertNotIn("⚡ 매크로 금융 레이더", html_out)  # Gracefully omitted when missing pair
 
 
 if __name__ == "__main__":

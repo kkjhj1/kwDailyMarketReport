@@ -25,6 +25,7 @@ class Briefing:
     assets: tuple[AssetSummary, ...]
     report_url: str
     one_line_summary: str = ""
+    three_line_summary: tuple[str, str, str] | None = None
     category_groups: dict | None = None
     news: tuple = ()
 

@@ -19,7 +19,7 @@ from market_brief.web_report import HTMLReportRenderer, generate_signed_report_u
 KST = ZoneInfo("Asia/Seoul")
 
 DEFAULT_SYMBOLS = [
-    "KOSPI", "KOSDAQ", "KR3Y", "KR10Y",
+    "KOSPI", "KOSDAQ", "KOSPI200", "KR3Y", "KR10Y",
     "SP500", "NASDAQ_COMPOSITE", "US10Y", "US2Y",
     "USDKRW", "WTI", "GOLD",
 ]

@@ -32,6 +32,7 @@ class NaverFinanceProvider:
     SYMBOL_META = {
         "KOSPI": ("KR_EQUITY", "KR", "REGULAR", "INDEX", "NAVER:KOSPI"),
         "KOSDAQ": ("KR_EQUITY", "KR", "REGULAR", "INDEX", "NAVER:KOSDAQ"),
+        "KOSPI200": ("KR_EQUITY", "KR", "REGULAR", "INDEX", "NAVER:KOSPI200"),
         "KR3Y": ("KR_BOND", "KR", "REFERENCE", "PERCENT_YIELD", "NAVER:KR3Y"),
         "KR10Y": ("KR_BOND", "KR", "REFERENCE", "PERCENT_YIELD", "NAVER:KR10Y"),
         "SP500": ("US_EQUITY", "US", "REGULAR", "INDEX", "NAVER:SP500"),
@@ -46,6 +47,7 @@ class NaverFinanceProvider:
     API_ENDPOINTS = {
         "KOSPI": "https://m.stock.naver.com/api/index/KOSPI/basic",
         "KOSDAQ": "https://m.stock.naver.com/api/index/KOSDAQ/basic",
+        "KOSPI200": "https://m.stock.naver.com/api/index/KPI200/basic",
         "SP500": "https://api.stock.naver.com/index/.INX/basic",
         "NASDAQ_COMPOSITE": "https://api.stock.naver.com/index/.IXIC/basic",
         "USDKRW": "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode=FX_USDKRW",

@@ -1,6 +1,7 @@
 [
   {"symbol":"KOSPI","asset_class":"KR_EQUITY","market":"KR","session":"REGULAR","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3025.50","previous_close":"3050.00","unit":"INDEX","source":"FIXTURE:KR","is_final":true},
   {"symbol":"KOSDAQ","asset_class":"KR_EQUITY","market":"KR","session":"REGULAR","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"825.11","previous_close":"830.00","unit":"INDEX","source":"FIXTURE:KR","is_final":true},
+  {"symbol":"KOSPI200","asset_class":"KR_EQUITY","market":"KR","session":"REGULAR","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"405.20","previous_close":"408.00","unit":"INDEX","source":"FIXTURE:KR","is_final":true},
   {"symbol":"KR3Y","asset_class":"KR_BOND","market":"KR","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3.015","previous_close":"3.045","unit":"PERCENT_YIELD","source":"FIXTURE:KR","is_final":true},
   {"symbol":"KR10Y","asset_class":"KR_BOND","market":"KR","session":"REFERENCE","trade_date":"2026-10-13","as_of":"2026-10-13T15:30:00+09:00","value":"3.140","previous_close":"3.165","unit":"PERCENT_YIELD","source":"FIXTURE:KR","is_final":true},
   {"symbol":"SP500","asset_class":"US_EQUITY","market":"US","session":"REGULAR","trade_date":"2026-10-12","as_of":"2026-10-12T16:00:00-04:00","value":"5750.00","previous_close":"5730.00","unit":"INDEX","source":"FIXTURE:US","is_final":true},
