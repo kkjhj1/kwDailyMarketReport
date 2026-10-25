@@ -176,7 +176,7 @@ def main() -> int:
     parser.add_argument("--discover", action="store_true", help="Verify bot token and auto-discover Chat IDs from getUpdates")
     parser.add_argument("--send-now", choices=["morning", "closing", "urgent"], help="Send a briefing immediately")
     parser.add_argument("--check-urgent", action="store_true", help="Single-pass intraday ±3%% check (ideal for GitHub Actions cron)")
-    parser.add_argument("--auto-schedule", action="store_true", help="Auto-detect morning(07:30)/closing(15:40)/urgent based on current KST time (for GitHub Actions cron)")
+    parser.add_argument("--auto-schedule", action="store_true", help="Auto-detect morning(06:30)/closing(15:40)/urgent based on current KST time (for GitHub Actions cron)")
     parser.add_argument("--live-naver", action="store_true", help="Fetch live market quotes from Naver Finance (falls back to fixture on error)")
     parser.add_argument("--attach-html", action="store_true", help="Also send the standalone .html report file directly into Telegram chat")
     parser.add_argument("--daemon", action="store_true", help="Run 24/7 scheduler + built-in web report server (port 8080) + ±3%% watch")
@@ -258,9 +258,9 @@ def main() -> int:
                 else:
                     print(f"✅ [AutoSchedule] 금일({today}) 마감 브리핑 이미 발송 완료됨. (정규장 종료 상태)")
                     return 0
-        # 2) 평일 아침 (06:00 ~ 10:00 KST):
-        # 07:30 크론이 지연되어 8~9시에 돌더라도 오늘 모닝 브리핑 미발송 상태면 무조건 발송!
-        elif is_kr_trading and (6 <= now_kst.hour <= 10):
+        # 2) 평일 아침 (06:30 ~ 10:00 KST):
+        # 06:30 크론이 지연되어 7~8시에 돌더라도 오늘 모닝 브리핑 미발송 상태면 무조건 발송!
+        elif is_kr_trading and ((now_kst.hour == 6 and now_kst.minute >= 30) or (7 <= now_kst.hour <= 10)):
             if not pipeline.alert_store.is_regular_briefing_sent("morning", today):
                 print(f"⏰ [AutoSchedule] 금일({today}) 모닝 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 모닝 브리핑 즉시 발송 진행")
                 args.send_now = "morning"

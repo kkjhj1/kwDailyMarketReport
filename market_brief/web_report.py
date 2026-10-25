@@ -33,7 +33,7 @@ class HTMLReportRenderer:
     ) -> str:
         news = news or []
         kind_badge = {
-            "morning": ("07:30 장전 브리핑", "#2563eb", "#dbeafe"),
+            "morning": ("06:30 장전 브리핑", "#2563eb", "#dbeafe"),
             "closing": ("15:40 장마감 브리핑", "#059669", "#d1fae5"),
             "urgent": ("±3% 급변동 경보", "#dc2626", "#fee2e2"),
         }.get(briefing.kind, ("시황 리포트", "#475569", "#f1f5f9"))

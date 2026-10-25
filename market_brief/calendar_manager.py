@@ -111,12 +111,12 @@ class MarketCalendar:
         raise ValueError(f"Unsupported market: {market}")
 
     def should_run_regular_briefing(self, kind: str, now: datetime) -> bool:
-        """Checks if 07:30 morning or 15:40 closing briefing should run on KST business day."""
+        """Checks if 06:30 morning or 15:40 closing briefing should run on KST business day."""
         kst_now = now.astimezone(KST)
         if not self.is_trading_day("KR", kst_now.date()):
             return False
         if kind == "morning":
-            return time(7, 30) <= kst_now.time() < time(7, 45)
+            return time(6, 30) <= kst_now.time() < time(6, 45)
         if kind == "closing":
             return time(15, 40) <= kst_now.time() < time(15, 55)
         return False

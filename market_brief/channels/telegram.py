@@ -23,7 +23,7 @@ def _is_public_button_url(url: str) -> bool:
 def format_telegram_html(briefing: Briefing) -> str:
     """Formats a Briefing into an intuitive, mobile-optimized 4-category Telegram HTML message."""
     kind_meta = {
-        "morning": ("🌅", "07:30 장전 모닝 브리핑"),
+        "morning": ("🌅", "06:30 장전 모닝 브리핑"),
         "closing": ("📊", "15:40 장마감 시황 브리핑"),
         "urgent": ("🚨", "±3% 급변동 긴급 경보"),
     }.get(briefing.kind.lower(), ("📢", f"{briefing.kind.upper()} 시황 브리핑"))
