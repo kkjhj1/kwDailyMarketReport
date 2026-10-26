@@ -26,6 +26,11 @@ python3 ingest_demo.py
 
 # 3) End-to-End 브리핑 생성 + 상세 HTML 리포트 파일 생성 데모
 python3 demo.py
+
+# 4) 시황 발송 현황 관리자 콘솔 웹페이지 실행 (http://localhost:8002)
+python telegram_bot_runner.py --admin
+# 또는
+python admin_server.py
 ```
 
-`python3 demo.py`를 실행하면 `reports/` 폴더 안에 **스마트폰과 PC 브라우저에서 즉시 열어볼 수 있는 상세 시황 리포트(`.html`)**가 자동 생성됩니다.
+`python telegram_bot_runner.py --admin`을 실행하면 브라우저에서 **수신자 관리, 원클릭 즉시 발송, 중복 방지, 발송 이력 및 HTML 리포트 열람, 긴급 임계치 설정**이 가능한 관리자 콘솔(`http://localhost:8002`)이 열립니다. (다른 프로세스가 8002를 점유 중인 경우 자동으로 다음 빈 포트로 충돌 없이 전환됩니다.)

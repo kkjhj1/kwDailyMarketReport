@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>KOSPI -0.73% 약세 · 원/달러 1,321.6원(하락) - 상세 시황 리포트</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --card-border: #e2e8f0;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --text-sub: #334155;
+      --primary: #2563eb;
+      --primary-bg: #eff6ff;
+      --up-color: #dc2626;
+      --up-bg: #fef2f2;
+      --down-color: #2563eb;
+      --down-bg: #eff6ff;
+      --steady-color: #64748b;
+      --steady-bg: #f1f5f9;
+      --summary-border: #2563eb;
+      --summary-bg: #f1f5f9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.03);
+    }
+
+    [data-theme="dark"] {
+      --bg: #0b0f19;
+      --card-bg: #151d2f;
+      --card-border: #223049;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-sub: #cbd5e1;
+      --primary: #3b82f6;
+      --primary-bg: #1e293b;
+      --up-color: #f87171;
+      --up-bg: rgba(239, 68, 68, 0.15);
+      --down-color: #60a5fa;
+      --down-bg: rgba(59, 130, 246, 0.15);
+      --steady-color: #94a3b8;
+      --steady-bg: #1e293b;
+      --summary-border: #3b82f6;
+      --summary-bg: #152238;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      line-height: 1.5;
+      padding: 16px 12px 56px;
+      transition: background 0.2s ease, color 0.2s ease;
+      word-break: keep-all;
+    }
+    .container {
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .top-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding: 2px 2px;
+    }
+    .hist-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-sub);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+    .nav-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .curr-date {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-main);
+      padding: 0 4px;
+    }
+    .util-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .theme-toggle-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-sub);
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 15px;
+      transition: all 0.15s ease;
+    }
+    .theme-toggle-btn:hover {
+      border-color: var(--primary);
+    }
+
+    .header-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 18px 18px 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #2563eb;
+      background: #dbeafe;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 4px;
+      color: var(--text-main);
+      line-height: 1.35;
+    }
+    .as-of {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .summary-box {
+      padding: 12px 14px;
+      background: var(--summary-bg);
+      border-left: 3px solid var(--summary-border);
+      border-radius: 8px;
+    }
+    .summary-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .summary-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .summary-item {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-sub);
+      line-height: 1.5;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    .summary-item::before {
+      content: "•";
+      color: var(--primary);
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1;
+    }
+    .summary-item b {
+      font-weight: 700;
+      color: var(--text-main);
+      flex-shrink: 0;
+    }
+
+    .macro-section {
+      margin-bottom: 16px;
+    }
+    .macro-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 480px) {
+      .macro-grid { grid-template-columns: 1fr; }
+    }
+    .macro-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .macro-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .macro-val {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 4px;
+    }
+    .macro-desc {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      display: inline-block;
+    }
+    .macro-desc.alert {
+      color: #b91c1c;
+      background: #fee2e2;
+    }
+    [data-theme="dark"] .macro-desc.alert {
+      color: #f87171;
+      background: rgba(239, 68, 68, 0.2);
+    }
+    .macro-desc.ok {
+      color: #047857;
+      background: #d1fae5;
+    }
+    [data-theme="dark"] .macro-desc.ok {
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.2);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+      color: var(--text-sub);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .zones-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .zone-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+    }
+    .zone-header {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-sub);
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .zone-body {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .asset-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .asset-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .symbol-name {
+      font-weight: 700;
+      color: var(--text-main);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .price-val {
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-main);
+    }
+    .pill-chg {
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pill-chg.up { color: var(--up-color); background: var(--up-bg); }
+    .pill-chg.down { color: var(--down-color); background: var(--down-bg); }
+    .pill-chg.steady { color: var(--steady-color); background: var(--steady-bg); }
+
+    .news-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .news-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .news-card-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+      text-decoration: none;
+      display: block;
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+    .news-card-title:hover {
+      color: var(--primary);
+    }
+    .news-summary-txt {
+      font-size: 12px;
+      color: var(--text-sub);
+      line-height: 1.5;
+      margin-bottom: 8px;
+      background: var(--summary-bg);
+      padding: 8px 10px;
+      border-radius: 6px;
+    }
+    .news-meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .news-tags {
+      display: flex;
+      gap: 4px;
+    }
+    .tag-badge {
+      background: var(--primary-bg);
+      color: var(--primary);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 10px;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 36px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="top-nav">
+      <div class="hist-nav">
+        <span class="curr-date">📅 2026-10-26</span>
+      </div>
+      <div class="util-actions">
+        <button class="nav-btn" onclick="copySummary()" title="요약 복사">📋 요약 복사</button>
+        <button class="theme-toggle-btn" onclick="toggleTheme()" id="themeBtn" title="다크/라이트 모드">🌙</button>
+      </div>
+    </div>
+
+    <div class="header-card">
+      <span class="badge">06:30 장전 브리핑</span>
+      <h1>KOSPI -0.73% 약세 · 원/달러 1,321.6원(하락)</h1>
+      <div class="as-of">기준: 2026-10-26 13:15 KST (전 지표 종가 기준)</div>
+      
+            <div class="summary-box">
+              <div class="summary-label">📌 오늘의 3줄 핵심 요약</div>
+              <ul class="summary-list" id="summaryList">
+                <li class="summary-item"><b>주가:</b> 코스피 하락(-0.73%), 코스닥 약세(-1.69%), 미 나스닥 숨고르기(-0.21%)</li>
+                <li class="summary-item"><b>채권:</b> 국고10년 4.078%(-2.1bp) · 미10년 4.968%(-2.0bp) · 한·미 10년물 금리차 +89.0bp 역전 지속</li>
+                <li class="summary-item"><b>기타:</b> 원/달러 1,321.6원(-0.33%) · WTI유가 $100.95(-2.25%) · 국제금 $4,022.10(+0.35%)</li>
+              </ul>
+            </div>
+            
+    </div>
+
+    
+            <div class="macro-section">
+              <div class="section-title">⚡ 매크로 금융 레이더 (스프레드 분석)</div>
+              <div class="macro-grid">
+                
+            <div class="macro-card">
+              <div class="macro-title">
+                <span>한·미 10년물 금리차</span>
+                <span style="font-size:10px;">외환/외인수급</span>
+              </div>
+              <div class="macro-val">+89.0 bp</div>
+              <span class="macro-desc alert">⚠️ 한·미 금리 역전 지속 (외환 변동성 주의)</span>
+            </div>
+            
+            <div class="macro-card">
+              <div class="macro-title">
+                <span>미국 장단기 금리차 (10Y - 2Y)</span>
+                <span style="font-size:10px;">경기 선행 지표</span>
+              </div>
+              <div class="macro-val">+30.3 bp</div>
+              <span class="macro-desc ok">🟢 정상 수익률 곡선 (연착륙 시그널)</span>
+            </div>
+            
+              </div>
+            </div>
+            
+
+    <div class="section-title">📊 5대 자산군 전 지표 종합 (종가 기준)</div>
+    <div class="zones-grid">
+      
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🇰🇷 국내 증시 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSPI</span>
+                <div class="row-right">
+                  <span class="price-val">5,509.68 pt</span>
+                  <span class="pill-chg down">-0.73% (-40.62pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSDAQ</span>
+                <div class="row-right">
+                  <span class="price-val">739.02 pt</span>
+                  <span class="pill-chg down">-1.69% (-12.67pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSPI 200</span>
+                <div class="row-right">
+                  <span class="price-val">858.21 pt</span>
+                  <span class="pill-chg down">-0.53% (-4.56pt)</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🇺🇸 글로벌 증시 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 S&amp;P500</span>
+                <div class="row-right">
+                  <span class="price-val">7,623.68 pt</span>
+                  <span class="pill-chg down">-0.52% (-39.75pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 NASDAQ</span>
+                <div class="row-right">
+                  <span class="price-val">25,955.34 pt</span>
+                  <span class="pill-chg down">-0.21% (-53.52pt)</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🏦 금리 &amp; 채권 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 국고3년</span>
+                <div class="row-right">
+                  <span class="price-val">3.794%</span>
+                  <span class="pill-chg down">-2.2bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 국고10년</span>
+                <div class="row-right">
+                  <span class="price-val">4.078%</span>
+                  <span class="pill-chg down">-2.1bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 미국채10년</span>
+                <div class="row-right">
+                  <span class="price-val">4.968%</span>
+                  <span class="pill-chg down">-2.0bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 미국채2년</span>
+                <div class="row-right">
+                  <span class="price-val">4.665%</span>
+                  <span class="pill-chg down">-1.8bp</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 💵 환율 &amp; 원자재 (종가/고시)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 USD/KRW</span>
+                <div class="row-right">
+                  <span class="price-val">1,321.6원</span>
+                  <span class="pill-chg down">-0.33% (-4.4원)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 WTI유가</span>
+                <div class="row-right">
+                  <span class="price-val">$100.95</span>
+                  <span class="pill-chg down">-2.25%</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 국제금</span>
+                <div class="row-right">
+                  <span class="price-val">$4,022.10</span>
+                  <span class="pill-chg up">+0.35%</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+    </div>
+
+    <div class="section-title">📰 주요 시황 뉴스 & 변동 요인</div>
+    <div class="news-list">
+      
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/018/0006396287" target="_blank" rel="noopener" class="news-card-title">&quot;1시간 새 증시 11% 급락할 것&quot;…룰라 역전승에 시장 화들짝</a>
+                  <div class="news-summary-txt">루이스 이나시우 룰라 다시우바 브라질 대통령이 대선 결선투표에서 우파 플라비우 보우소나루 후보를 꺾고 승리하면서 브라질 금융시장이 매도 압력을 받을 전망이다. 투자자들이 보우소나루 당선을 전제로 구축해온 포지션을 한</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>이데일리 · 20261026124209</span>
+                  </div>
+                </div>
+                
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/243/0000104718" target="_blank" rel="noopener" class="news-card-title">시총 절반이 삼전닉스…코스피 살린 AI 반도체 &#x27;양날의 칼&#x27;</a>
+                  <div class="news-summary-txt">글로벌 AI(인공지능) 반도체 시장에 대한 기대와 우려가 국내 증시를 흔들고 있다. 세계 최고 반도체 기업인 삼성전자와 SK하이닉스의 시가총액 합이 국내 유가증권시장 상장사 전체 시총의 50%에 육박하는데, 두 종목</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>이코노미스트 · 20261026120107</span>
+                  </div>
+                </div>
+                
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/018/0006396257" target="_blank" rel="noopener" class="news-card-title">&quot;주식은 홀짝 도박 아니다&quot;...폭락장 속 ‘AI 반격의 조건’ [어쨌든 경제]</a>
+                  <div class="news-summary-txt">“지수 창만 열어보면 당장이라도 금융위기가 터질 것 같은 분위기입니다. 하지만 차분히 숫자를 뜯어보십시오. 시장이 AI 사이클의 조기 급랭 공포를 장부에 과도하게 당겨쓰고 있습니다.” 끝 모를 랠리를 펼치던 글로벌</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>이데일리 · 20261026115911</span>
+                  </div>
+                </div>
+                
+    </div>
+
+    <div class="footer">
+      © 2026 Daily Market Brief Bot · Automated Intelligence Pipeline
+    </div>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme');
+      const target = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', target);
+      document.getElementById('themeBtn').textContent = target === 'dark' ? '☀️' : '🌙';
+    }
+
+    function copySummary() {
+      const listEl = document.getElementById('summaryList');
+      if (listEl) {
+        const items = Array.from(listEl.querySelectorAll('.summary-item')).map(el => el.textContent.trim());
+        const txt = "📌 [오늘의 3줄 핵심 요약]\n" + items.map(i => "• " + i).join("\n");
+        navigator.clipboard.writeText(txt).then(() => {
+          alert('3줄 핵심 요약이 클립보드에 복사되었습니다! 팀 채널이나 카톡에 바로 붙여넣기 하세요.');
+        }).catch(() => {
+          alert('복사 실패');
+        });
+      }
+    }
+  </script>
+</body>
+</html>

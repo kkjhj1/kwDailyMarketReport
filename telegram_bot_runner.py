@@ -180,7 +180,8 @@ def main() -> int:
     parser.add_argument("--live-naver", action="store_true", help="Fetch live market quotes from Naver Finance (falls back to fixture on error)")
     parser.add_argument("--attach-html", action="store_true", help="Also send the standalone .html report file directly into Telegram chat")
     parser.add_argument("--daemon", action="store_true", help="Run 24/7 scheduler + built-in web report server (port 8080) + ±3%% watch")
-    parser.add_argument("--port", type=int, default=8080, help="Port for built-in detailed HTML report web server (default: 8080)")
+    parser.add_argument("--admin", action="store_true", help="Launch local FastAPI Admin Web Console (default port: 8002)")
+    parser.add_argument("--port", type=int, default=8002, help="Port for built-in web server / admin console (default: 8002)")
     parser.add_argument("--report-url", default=resolve_default_report_url(), help="Base URL for detailed HTML reports (auto-detects GitHub Pages in Actions)")
     args = parser.parse_args()
 
@@ -189,9 +190,21 @@ def main() -> int:
         args.token = token
         args.chat_id = chat_id
         args.report_url = resolve_default_report_url()
-        if not args.send_now and not args.daemon:
+        if not args.send_now and not args.daemon and not args.admin:
             args.send_now = "closing"
             args.live_naver = True
+
+    if args.admin:
+        from admin_server import create_admin_app, find_available_port
+        import uvicorn
+        target_port = args.port
+        port = find_available_port(target_port)
+        if port != target_port:
+            print(f"⚠️ [포트 충돌 방어] 포트 {target_port}번이 이미 사용 중이어서 빈 포트 {port}번으로 자동 전환했습니다.")
+        print(f"🚀 [Market Brief Admin Console] Starting server on http://localhost:{port}")
+        app = create_admin_app()
+        uvicorn.run(app, host="127.0.0.1", port=port)
+        return 0
 
     if not args.token:
         print("[안내] 봇 토큰이 설정되지 않았습니다. 아래 명령어로 대화형 설정을 시작하세요:")
