@@ -120,6 +120,14 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
                     configured = line.split("=", 1)[1].strip().strip('"').strip("'")
         return configured or "https://kkjhj1.github.io/kwDailyMarketReport"
 
+    def get_github_repo() -> str:
+        repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+        if not repo and env_file.exists():
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+                if line.startswith("GITHUB_REPOSITORY="):
+                    repo = line.split("=", 1)[1].strip().strip('"').strip("'")
+        return repo or "kkjhj1/kwDailyMarketReport"
+
     def get_github_token() -> str:
         token = os.environ.get("GITHUB_TOKEN", "").strip()
         if not token and env_file.exists():
@@ -128,11 +136,70 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
                     token = line.split("=", 1)[1].strip().strip('"').strip("'")
         return token
 
+    def get_github_variable(var_name: str) -> tuple[bool, str | None, str]:
+        gh_token = get_github_token()
+        if not gh_token:
+            return False, None, "GITHUB_TOKEN이 설정되지 않았습니다."
+        repo = get_github_repo()
+        url = f"https://api.github.com/repos/{repo}/actions/variables/{var_name}"
+        headers = {
+            "Authorization": f"Bearer {gh_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "MarketBriefAdmin",
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                if res.status == 200:
+                    data = json.loads(res.read().decode())
+                    return True, str(data.get("value", "")), "조회 성공"
+                return False, None, f"상태 코드: {res.status}"
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False, None, "변수 없음(404)"
+            err_body = e.read().decode(errors="replace")
+            return False, None, f"GitHub API 오류 ({e.code}): {err_body}"
+        except Exception as exc:
+            return False, None, f"연결 오류: {exc}"
+
+    def sync_github_variable(var_name: str, value: str) -> tuple[bool, str]:
+        gh_token = get_github_token()
+        if not gh_token:
+            return False, "GITHUB_TOKEN이 설정되지 않았습니다."
+        repo = get_github_repo()
+        headers = {
+            "Authorization": f"Bearer {gh_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "MarketBriefAdmin",
+            "Content-Type": "application/json",
+        }
+        exists, _, _ = get_github_variable(var_name)
+        if exists:
+            url = f"https://api.github.com/repos/{repo}/actions/variables/{var_name}"
+            payload = json.dumps({"name": var_name, "value": value}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
+        else:
+            url = f"https://api.github.com/repos/{repo}/actions/variables"
+            payload = json.dumps({"name": var_name, "value": value}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                if res.status in (201, 204):
+                    return True, "GitHub 크론 수신자 변수(TELEGRAM_CHAT_ID) 동기화 완료"
+                return False, f"GitHub 응답 코드: {res.status}"
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode(errors="replace")
+            return False, f"GitHub API 오류 ({e.code}): {err_body}"
+        except Exception as exc:
+            return False, f"연결 오류: {exc}"
+
     def dispatch_github_workflow(kind: str, recipients: list[str] | None = None) -> tuple[bool, str]:
         gh_token = get_github_token()
         if not gh_token:
             return False, "GITHUB_TOKEN이 설정되지 않았습니다."
-        url = "https://api.github.com/repos/kkjhj1/kwDailyMarketReport/actions/workflows/market_briefing_cron.yml/dispatches"
+        repo = get_github_repo()
+        url = f"https://api.github.com/repos/{repo}/actions/workflows/market_briefing_cron.yml/dispatches"
         headers = {
             "Authorization": f"Bearer {gh_token}",
             "Accept": "application/vnd.github.v3+json",
@@ -276,6 +343,71 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         token = get_bot_token()
         res = sync_telegram_updates(token, db)
         return res
+
+    @app.get("/api/recipients/github-sync-status")
+    def get_github_sync_status():
+        gh_token = get_github_token()
+        if not gh_token:
+            return {
+                "github_connected": False,
+                "is_synced": False,
+                "message": "GITHUB_TOKEN이 설정되지 않아 깃허브 크론 상태를 확인할 수 없습니다.",
+                "local_count": 0,
+                "github_count": 0,
+                "local_chat_ids": [],
+                "github_chat_ids": [],
+            }
+
+        active_recipients = db.get_active_recipients("FINANCE")
+        local_ids = sorted([r.chat_id for r in active_recipients])
+
+        exists, gh_val, msg = get_github_variable("TELEGRAM_CHAT_ID")
+        if not exists:
+            return {
+                "github_connected": True,
+                "is_synced": False,
+                "message": "GitHub에 TELEGRAM_CHAT_ID 변수가 아직 생성되지 않았습니다 (미동기화 상태).",
+                "local_count": len(local_ids),
+                "github_count": 0,
+                "local_chat_ids": local_ids,
+                "github_chat_ids": [],
+            }
+
+        gh_ids = sorted([x.strip() for x in (gh_val or "").split(",") if x.strip()])
+        is_synced = (local_ids == gh_ids)
+
+        return {
+            "github_connected": True,
+            "is_synced": is_synced,
+            "message": "GitHub 크론 수신자 목록과 100% 일치합니다." if is_synced else "관리자 설정과 GitHub 크론 수신자 목록이 불일치합니다. [동기화] 버튼을 눌러주세요.",
+            "local_count": len(local_ids),
+            "github_count": len(gh_ids),
+            "local_chat_ids": local_ids,
+            "github_chat_ids": gh_ids,
+        }
+
+    @app.post("/api/recipients/sync-github")
+    def sync_recipients_to_github():
+        gh_token = get_github_token()
+        if not gh_token:
+            raise HTTPException(status_code=400, detail="GITHUB_TOKEN이 설정되지 않았습니다.")
+
+        active_recipients = db.get_active_recipients("FINANCE")
+        local_ids = [r.chat_id for r in active_recipients]
+        if not local_ids:
+            raise HTTPException(status_code=400, detail="활성화된 수신자가 0명입니다. 최소 1명 이상 활성화해야 합니다.")
+
+        value_str = ",".join(local_ids)
+        ok, msg = sync_github_variable("TELEGRAM_CHAT_ID", value_str)
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"GitHub 동기화 실패: {msg}")
+
+        names_summary = ", ".join([f"{r.name}({r.chat_id})" for r in active_recipients])
+        return {
+            "success": True,
+            "message": f"✅ GitHub 크론 수신자(TELEGRAM_CHAT_ID) 동기화 완료! 총 {len(local_ids)}명 ({names_summary})",
+            "synced_chat_ids": local_ids,
+        }
 
     @app.get("/api/dispatch/preview")
     def preview_dispatch(kind: str = "morning"):
@@ -671,8 +803,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- TAB 2: RECIPIENTS -->
     <section id="tab-recipients" class="tab-content" style="display:none;">
       <div class="section-header">
-        <div class="section-title">수신자 마스터 목록</div>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <div class="section-title">수신자 마스터 목록</div>
+          <div id="ghSyncBadge" class="badge online" style="font-size:11px;">☁️ GitHub 동기화 확인 중...</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn btn-primary" style="background:#0284c7;" onclick="syncRecipientsToGithub()" title="현재 활성 수신자 목록을 GitHub 크론 환경(TELEGRAM_CHAT_ID)에 동기화합니다.">☁️ GitHub 크론 수신자 동기화</button>
           <button class="btn btn-secondary" onclick="discoverBotUsers()">🔍 봇 대화방 자동감지 (/start)</button>
           <button class="btn btn-primary" onclick="openAddRecipientModal()">+ 수신자 수동 등록</button>
         </div>
@@ -777,6 +913,28 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="preview-box" id="previewContent">시세 및 메시지를 생성 중...</div>
       <div style="display:flex; justify-content:flex-end; margin-top:16px;">
         <button class="btn btn-secondary" onclick="closeModals()">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="addRecipientModal" class="modal-overlay">
+    <div class="modal-box">
+      <h3 style="margin-bottom:14px;">👥 수신자 수동 등록</h3>
+      <div class="form-group">
+        <label class="form-label">텔레그램 Chat ID (숫자)</label>
+        <input type="text" id="newChatId" class="form-input" placeholder="예: 7820975792">
+      </div>
+      <div class="form-group">
+        <label class="form-label">수신자 이름 / 별명 (비워두면 봇 프로필명 자동 조회)</label>
+        <input type="text" id="newName" class="form-input" placeholder="예: 김환진 대표">
+      </div>
+      <div class="form-group">
+        <label class="form-label">그룹 태그</label>
+        <input type="text" id="newGroup" class="form-input" value="GENERAL">
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+        <button class="btn btn-secondary" onclick="closeModals()">취소</button>
+        <button class="btn btn-primary" onclick="submitAddRecipient()">등록</button>
       </div>
     </div>
   </div>
@@ -927,8 +1085,85 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </td>
           </tr>
         `).join('');
+        loadGithubSyncStatus();
       } catch (e) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:red;">수신자 목록 조회 실패</td></tr>';
+      }
+    }
+
+    async function loadGithubSyncStatus() {
+      const badge = document.getElementById('ghSyncBadge');
+      if (!badge) return;
+      try {
+        const res = await fetch('/api/recipients/github-sync-status');
+        const d = await res.json();
+        if (!d.github_connected) {
+          badge.className = 'badge offline';
+          badge.textContent = '⚠️ GitHub 토큰 미연결 (크론 수동 관리)';
+        } else if (d.is_synced) {
+          badge.className = 'badge online';
+          badge.style.background = '#d1fae5';
+          badge.style.color = '#065f46';
+          badge.textContent = `☁️ GitHub 크론 동기화 일치 (${d.local_count}명)`;
+        } else {
+          badge.className = 'badge';
+          badge.style.background = '#fef3c7';
+          badge.style.color = '#92400e';
+          badge.textContent = `⚠️ GitHub 크론 수신자 불일치 (로컬 ${d.local_count}명 vs 깃허브 ${d.github_count}명)`;
+        }
+      } catch (e) {
+        badge.className = 'badge offline';
+        badge.textContent = '☁️ 동기화 상태 확인 실패';
+      }
+    }
+
+    async function syncRecipientsToGithub() {
+      if (!confirm('현재 활성화된 수신자 목록을 GitHub Actions 크론 환경(TELEGRAM_CHAT_ID)에 즉시 동기화하시겠습니까?\n\n동기화 후 매일 15:42 장마감 / 06:30 모닝 크론 실행 시 관리자 설정과 동일한 인원에게 자동 발송됩니다.')) return;
+      try {
+        const res = await fetch('/api/recipients/sync-github', {method: 'POST'});
+        const d = await res.json();
+        if (res.ok) {
+          alert(d.message);
+          loadGithubSyncStatus();
+        } else {
+          alert('동기화 실패: ' + (d.detail || '오류 발생'));
+        }
+      } catch (e) {
+        alert('동기화 요청 에러: ' + e);
+      }
+    }
+
+    function openAddRecipientModal() {
+      document.getElementById('newChatId').value = '';
+      document.getElementById('newName').value = '';
+      document.getElementById('newGroup').value = 'GENERAL';
+      document.getElementById('addRecipientModal').style.display = 'flex';
+    }
+
+    async function submitAddRecipient() {
+      const chatId = document.getElementById('newChatId').value.trim();
+      const name = document.getElementById('newName').value.trim();
+      const groupTag = document.getElementById('newGroup').value.trim() || 'GENERAL';
+      if (!chatId) {
+        alert('Chat ID를 입력해주세요.');
+        return;
+      }
+      closeModals();
+      try {
+        const res = await fetch('/api/recipients', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({chat_id: chatId, name: name || '수신자', group_tag: groupTag, subscribed_topics: 'FINANCE'})
+        });
+        const d = await res.json();
+        if (res.ok) {
+          alert(`✅ 수신자 등록 완료: ${d.name} (${chatId})`);
+          loadRecipients();
+        } else {
+          alert('등록 실패: ' + (d.detail || '오류'));
+        }
+      } catch (e) {
+        alert('등록 에러: ' + e);
       }
     }
 
@@ -977,6 +1212,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       await fetch(`/api/recipients/${chatId}/toggle`, {method: 'POST'});
       loadRecipients();
       loadStatus();
+      loadGithubSyncStatus();
     }
 
     async function discoverBotUsers() {
@@ -986,9 +1222,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         alert('최근 봇에게 말을 건 신규 사용자가 없습니다. 텔레그램에서 봇에게 /start를 보낸 뒤 다시 시도하세요.');
         return;
       }
-      let msg = '📋 감지된 대화방 목록:\\n';
+      let msg = '📋 감지된 대화방 목록:\n';
       d.candidates.forEach(c => {
-        msg += `- [${c.chat_id}] ${c.title} (${c.is_registered ? '이미 등록됨' : '신규 감지'})\\n`;
+        msg += `- [${c.chat_id}] ${c.title} (${c.is_registered ? '이미 등록됨' : '신규 감지'})\n`;
       });
       alert(msg);
       loadRecipients();

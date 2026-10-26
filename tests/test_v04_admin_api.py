@@ -89,6 +89,18 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("telegram_html", data)
         self.assertIn("06:30 장전 모닝 브리핑", data["telegram_html"])
 
+    def test_github_sync_endpoints_without_token(self):
+        # 1. Sync status without token should be graceful
+        res = self.client.get("/api/recipients/github-sync-status")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertFalse(data["github_connected"])
+        self.assertFalse(data["is_synced"])
+
+        # 2. Triggering sync without token should return 400
+        res_sync = self.client.post("/api/recipients/sync-github")
+        self.assertEqual(res_sync.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
       REPORT_BASE_URL: ${{ secrets.REPORT_BASE_URL }}
     steps:
       - name: 1. 저장소 코드 체크아웃
@@ -72,13 +72,13 @@ jobs:
       - name: 4. 상세 HTML 리포트 먼저 생성 및 GitHub Pages 배포 준비
         run: |
           mkdir -p reports
-          # 1) 발송 대상 Chat ID 결정: 관리자 화면에서 지정된 수신자가 넘어오면 Secrets를 오버라이드
-          TARGET_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          # 1) 발송 대상 Chat ID 결정: 관리자 선택(inputs) 우선, 없을 경우 GitHub Variables -> Secrets 순서로 폴백
+          TARGET_CHAT_ID="${{ vars.TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}"
           if [ -n "${{ github.event.inputs.recipients }}" ]; then
             TARGET_CHAT_ID="${{ github.event.inputs.recipients }}"
             echo "🎯 [관리자 선택 발송 모드] 지정된 수신자에게만 발송: $TARGET_CHAT_ID"
           else
-            echo "👥 [기본 전체 발송 모드] 기본 설정 수신자 대상 발송"
+            echo "👥 [크론/기본 동기화 발송 모드] 동기화된 수신자 대상 발송: $TARGET_CHAT_ID"
           fi
 
           # 2) 수동 실행(workflow_dispatch) 또는 정기 크론(schedule) 실행
@@ -90,7 +90,7 @@ jobs:
               python telegram_bot_runner.py --send-now "$MODE" --live-naver --chat-id "$TARGET_CHAT_ID"
             fi
           else
-            python telegram_bot_runner.py --auto-schedule --live-naver
+            python telegram_bot_runner.py --auto-schedule --live-naver --chat-id "$TARGET_CHAT_ID"
           fi
 
       - name: 5. GitHub Pages 아티팩트 업로드 (상세 HTML 리포트 웹 호스팅)
