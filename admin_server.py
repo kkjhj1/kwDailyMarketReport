@@ -6,6 +6,8 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+import urllib.request
+import urllib.error
 from zoneinfo import ZoneInfo
 
 if sys.platform == "win32":
@@ -49,8 +51,40 @@ class RecipientRequest(BaseModel):
     subscribed_topics: str = "FINANCE"
 
 
+class RecipientNameUpdateRequest(BaseModel):
+    name: str
+
+
 class ThresholdRequest(BaseModel):
     thresholds: dict
+
+
+def fetch_telegram_profile_name(token: str, chat_id: str) -> str:
+    if not token or not chat_id:
+        return f"수신자_{chat_id[-4:]}" if chat_id else "수신자"
+    url = f"https://api.telegram.org/bot{token}/getChat?chat_id={chat_id}"
+    req = urllib.request.Request(url, headers={"User-Agent": "MarketBriefAdmin"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as res:
+            data = json.loads(res.read().decode())
+            r = data.get("result", {})
+            first = r.get("first_name", "").strip()
+            last = r.get("last_name", "").strip()
+            title = r.get("title", "").strip()
+            username = r.get("username", "").strip()
+            if title:
+                return title
+            if last and first:
+                if any('\uac00' <= c <= '\ud7a3' for c in last + first):
+                    return f"{last}{first}"
+                return f"{first} {last}"
+            if first:
+                return first
+            if username:
+                return f"@{username}"
+            return f"수신자_{chat_id[-4:]}"
+    except Exception:
+        return f"수신자_{chat_id[-4:]}"
 
 
 def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = None) -> FastAPI:
@@ -86,6 +120,45 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
                     configured = line.split("=", 1)[1].strip().strip('"').strip("'")
         return configured or "https://kkjhj1.github.io/kwDailyMarketReport"
 
+    def get_github_token() -> str:
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if not token and env_file.exists():
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+                if line.startswith("GITHUB_TOKEN="):
+                    token = line.split("=", 1)[1].strip().strip('"').strip("'")
+        return token
+
+    def dispatch_github_workflow(kind: str, recipients: list[str] | None = None) -> tuple[bool, str]:
+        gh_token = get_github_token()
+        if not gh_token:
+            return False, "GITHUB_TOKEN이 설정되지 않았습니다."
+        url = "https://api.github.com/repos/kkjhj1/kwDailyMarketReport/actions/workflows/market_briefing_cron.yml/dispatches"
+        headers = {
+            "Authorization": f"Bearer {gh_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "MarketBriefAdmin",
+            "Content-Type": "application/json",
+        }
+        recipients_str = ",".join(recipients) if recipients else ""
+        payload = json.dumps({
+            "ref": "main",
+            "inputs": {
+                "mode": kind,
+                "recipients": recipients_str,
+            }
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                if res.status in (200, 204):
+                    return True, "GitHub Actions 워크플로우 원격 실행 요청 성공 (HTTP 204)"
+                return False, f"GitHub 응답 코드: {res.status}"
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode(errors="replace")
+            return False, f"GitHub API 오류 ({e.code}): {err_body}"
+        except Exception as exc:
+            return False, f"연결 오류: {exc}"
+
     # -------------------------------------------------------------------------
     # API Routes
     # -------------------------------------------------------------------------
@@ -119,6 +192,7 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             "closing_status": "COMPLETED" if closing_sent else "NOT_SENT",
             "active_recipients_count": len(active_recipients),
             "report_base_url": get_report_base_url(),
+            "github_connected": bool(get_github_token()),
         }
 
     @app.get("/api/recipients")
@@ -127,14 +201,36 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
 
     @app.post("/api/recipients")
     def save_recipient(req: RecipientRequest):
+        token = get_bot_token()
+        name = req.name.strip()
+        if not name or name.startswith("수신자_"):
+            name = fetch_telegram_profile_name(token, req.chat_id)
         success = db.add_recipient(
             chat_id=req.chat_id,
-            name=req.name,
+            name=name,
             channel=req.channel,
             group_tag=req.group_tag,
             subscribed_topics=req.subscribed_topics,
         )
-        return {"success": success}
+        return {"success": success, "name": name}
+
+    @app.post("/api/recipients/{chat_id}/name")
+    @app.put("/api/recipients/{chat_id}/name")
+    def update_recipient_name(chat_id: str, req: RecipientNameUpdateRequest):
+        new_name = req.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="이름을 공백으로 설정할 수 없습니다.")
+        success = db.update_recipient_name(chat_id, new_name)
+        if not success:
+            raise HTTPException(status_code=404, detail="수신자를 찾을 수 없습니다.")
+        return {"success": True, "chat_id": chat_id, "name": new_name}
+
+    @app.post("/api/recipients/{chat_id}/reset-name")
+    def reset_recipient_name_from_bot(chat_id: str):
+        token = get_bot_token()
+        bot_name = fetch_telegram_profile_name(token, chat_id)
+        db.update_recipient_name(chat_id, bot_name)
+        return {"success": True, "chat_id": chat_id, "name": bot_name}
 
     @app.post("/api/recipients/{chat_id}/toggle")
     def toggle_recipient(chat_id: str):
@@ -160,12 +256,18 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             raise HTTPException(status_code=400, detail="TELEGRAM_BOT_TOKEN이 설정되지 않았습니다.")
         tg = TelegramChannel(token)
         discovered = tg.discover_chat_ids()
-        existing = {r.chat_id for r in db.get_all_recipients()}
+        existing = {r.chat_id: r for r in db.get_all_recipients()}
         results = []
         for d in discovered:
+            cid = d["chat_id"]
+            bot_profile_name = fetch_telegram_profile_name(token, cid)
+            name_to_use = bot_profile_name or d.get("title") or f"수신자_{cid[-4:]}"
+            if cid not in existing:
+                db.add_recipient(cid, name=name_to_use)
             results.append({
                 **d,
-                "is_registered": d["chat_id"] in existing,
+                "title": name_to_use,
+                "is_registered": cid in existing,
             })
         return {"candidates": results}
 
@@ -235,15 +337,45 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
                 )
             raise HTTPException(status_code=423, detail=f"작업 잠금 획득 실패: {reason}")
 
-        # 2. Get active recipients for this topic
+        # 2. Check if GitHub Actions remote dispatch is enabled
+        gh_token = get_github_token()
         recipients = db.get_active_recipients(topic=req.topic.upper())
         if not recipients:
-            db.fail_job(job.job_id, "수신자가 0명입니다.")
-            raise HTTPException(status_code=400, detail="해당 토픽을 구독하는 활성 수신자가 없습니다.")
+            db.fail_job(job.job_id, "활성 수신자가 0명입니다.")
+            raise HTTPException(status_code=400, detail="해당 토픽을 구독하는 활성 수신자가 없습니다. 관리자 화면에서 최소 1명 이상 활성화하세요.")
 
+        active_chat_ids = [r.chat_id for r in recipients]
+
+        if gh_token:
+            ok, msg = dispatch_github_workflow(kind=req.kind, recipients=active_chat_ids)
+            if not ok:
+                db.fail_job(job.job_id, f"GitHub Actions 트리거 실패: {msg}")
+                raise HTTPException(status_code=502, detail=f"GitHub 원격 트리거 실패: {msg}")
+
+            db.snapshot_job_recipients(job.job_id, recipients)
+            db.complete_job(
+                job.job_id,
+                status=JobFinalStatus.SENT,
+                total=len(recipients),
+                success=len(recipients),
+                fail=0,
+                unknown=0,
+                report_path="reports/latest.html",
+            )
+            names_summary = ", ".join([f"{r.name}({r.chat_id})" for r in recipients])
+            return {
+                "success": True,
+                "mode": "GITHUB_ACTIONS_REMOTE",
+                "job_id": job.job_id,
+                "target_recipients": active_chat_ids,
+                "message": f"🚀 [선택 발송] 활성 수신자 {len(recipients)}명({names_summary})에게만 {req.kind} 브리핑 배포 & 텔레그램 발송이 시작되었습니다! (비활성자 100% 제외)",
+                "actions_url": "https://github.com/kkjhj1/kwDailyMarketReport/actions",
+            }
+
+        # 3. Fallback to Local Dispatch (if no GITHUB_TOKEN)
         db.snapshot_job_recipients(job.job_id, recipients)
 
-        # 3. Build & Dispatch Briefing
+        # Build & Dispatch Briefing locally
         fixture_p = FixtureProvider(str(ROOT / "fixtures/market_snapshot.json"))
         prov = CompositeMarketDataProvider(NaverFinanceProvider(), fixture_p)
         quotes = prov.fetch(DEFAULT_SYMBOLS)
@@ -483,6 +615,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   <header class="header">
     <div class="brand">📈 <span>Daily Market Brief</span> Console</div>
     <div class="header-right">
+      <div id="ghBadge" class="badge online">☁️ GitHub 확인 중...</div>
       <div id="botBadge" class="badge online">● 봇 연결 확인 중...</div>
       <span id="liveClock" style="font-size:12px; color:var(--text-muted); font-weight:600;"></span>
       <button class="btn btn-secondary" onclick="toggleTheme()" id="themeBtn">🌙</button>
@@ -687,6 +820,17 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           badge.textContent = '⚠️ 봇 토큰 미연결';
         }
 
+        const ghBadge = document.getElementById('ghBadge');
+        if (ghBadge) {
+          if (d.github_connected) {
+            ghBadge.className = 'badge online';
+            ghBadge.textContent = '☁️ GitHub 원격 연동됨 (방법 A)';
+          } else {
+            ghBadge.className = 'badge offline';
+            ghBadge.textContent = '⚠️ GitHub 토큰 미연결';
+          }
+        }
+
         document.getElementById('morningStatusText').textContent = d.morning_status === 'COMPLETED' ? '발송 완료 ✅' : '미발송 (대기 중)';
         document.getElementById('closingStatusText').textContent = d.closing_status === 'COMPLETED' ? '발송 완료 ✅' : '미발송 (대기 중)';
         document.getElementById('activeRecipientsCount').textContent = `${d.active_recipients_count} 명`;
@@ -696,7 +840,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function triggerDispatch(kind, isForced = false, forceReason = null) {
-      if (!confirm(`[${kind.toUpperCase()}] 브리핑 발송을 진행하시겠습니까?`)) return;
+      const modeLabel = 'GitHub Actions 원격 자동 배포 & 텔레그램 발송';
+      if (!confirm(`[${kind.toUpperCase()}] ${modeLabel}을 진행하시겠습니까?`)) return;
       try {
         const res = await fetch('/api/dispatch/send', {
           method: 'POST',
@@ -705,7 +850,14 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         });
         const d = await res.json();
         if (res.ok) {
-          alert(`✅ 발송 완료! (성공: ${d.success_count}명, 실패: ${d.fail_count}명, 불명확: ${d.unknown_count}명)`);
+          if (d.mode === 'GITHUB_ACTIONS_REMOTE') {
+            alert(`🚀 [원격 발송 성공!]\n\n${d.message}\n\nGitHub 서버에서 리포트 배포와 텔레그램 발송이 한 번에 완료되므로 404가 발생하지 않습니다.`);
+            if (d.actions_url && confirm('GitHub Actions 진행 상황 화면을 새 탭에서 열어보시겠습니까?')) {
+              window.open(d.actions_url, '_blank');
+            }
+          } else {
+            alert(`✅ 발송 완료! (성공: ${d.success_count}명, 실패: ${d.fail_count}명, 불명확: ${d.unknown_count}명)`);
+          }
           loadStatus();
         } else {
           alert(`⚠️ 발송 중단: ${d.detail || '오류 발생'}`);
@@ -754,7 +906,13 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         }
         tbody.innerHTML = list.map(r => `
           <tr>
-            <td><strong>${r.name}</strong></td>
+            <td>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-weight:700;">${r.name}</span>
+                <button class="btn btn-secondary" style="padding:2px 6px; font-size:11px;" title="관리자 이름 수정" onclick="editRecipientName('${r.chat_id}', '${r.name.replace(/'/g, "\\'")}')">✏️</button>
+                <button class="btn btn-secondary" style="padding:2px 6px; font-size:11px;" title="텔레그램 봇 이름으로 다시 동기화" onclick="resetRecipientName('${r.chat_id}')">🔄</button>
+              </div>
+            </td>
             <td><code>${r.chat_id}</code></td>
             <td>${r.channel}</td>
             <td><span class="badge" style="background:rgba(0,0,0,0.05);">${r.group_tag}</span></td>
@@ -771,6 +929,47 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         `).join('');
       } catch (e) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:red;">수신자 목록 조회 실패</td></tr>';
+      }
+    }
+
+    async function editRecipientName(chatId, currentName) {
+      const newName = prompt(`[Chat ID: ${chatId}] 수신자의 이름을 수정하세요:`, currentName);
+      if (newName === null) return;
+      const trimmed = newName.trim();
+      if (!trimmed) {
+        alert('이름은 비워둘 수 없습니다.');
+        return;
+      }
+      try {
+        const res = await fetch(`/api/recipients/${chatId}/name`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: trimmed})
+        });
+        const d = await res.json();
+        if (res.ok) {
+          loadRecipients();
+        } else {
+          alert('이름 수정 실패: ' + (d.detail || '오류'));
+        }
+      } catch (e) {
+        alert('이름 수정 에러: ' + e);
+      }
+    }
+
+    async function resetRecipientName(chatId) {
+      if (!confirm('텔레그램 봇에서 최신 프로필 이름을 다시 조회하여 디폴트 이름으로 재설정하시겠습니까?')) return;
+      try {
+        const res = await fetch(`/api/recipients/${chatId}/reset-name`, {method: 'POST'});
+        const d = await res.json();
+        if (res.ok) {
+          alert(`✅ 봇 프로필 이름으로 복원되었습니다: ${d.name}`);
+          loadRecipients();
+        } else {
+          alert('초기화 실패: ' + (d.detail || '오류'));
+        }
+      } catch (e) {
+        alert('초기화 에러: ' + e);
       }
     }
 

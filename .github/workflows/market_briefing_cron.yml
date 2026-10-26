@@ -14,6 +14,10 @@ on:
           - morning
           - urgent
           - check-urgent
+      recipients:
+        description: "발송 대상 Chat ID 목록 (콤마 구분, 비어있으면 기본 Secret 전체 사용)"
+        required: false
+        default: ""
 
   # 2. 24시간 365일 무중단 정기 시황 & 장중 ±3% 수시 감시 크론 (혼잡 분을 피한 오프피크 스케줄)
   schedule:
@@ -68,13 +72,22 @@ jobs:
       - name: 4. 상세 HTML 리포트 먼저 생성 및 GitHub Pages 배포 준비
         run: |
           mkdir -p reports
-          # 수동 실행(workflow_dispatch)인 경우 선택한 모드로 실행, 스케줄(cron)인 경우 시각에 맞춰 자동 실행
+          # 1) 발송 대상 Chat ID 결정: 관리자 화면에서 지정된 수신자가 넘어오면 Secrets를 오버라이드
+          TARGET_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          if [ -n "${{ github.event.inputs.recipients }}" ]; then
+            TARGET_CHAT_ID="${{ github.event.inputs.recipients }}"
+            echo "🎯 [관리자 선택 발송 모드] 지정된 수신자에게만 발송: $TARGET_CHAT_ID"
+          else
+            echo "👥 [기본 전체 발송 모드] 기본 설정 수신자 대상 발송"
+          fi
+
+          # 2) 수동 실행(workflow_dispatch) 또는 정기 크론(schedule) 실행
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             MODE="${{ github.event.inputs.mode }}"
             if [ "$MODE" = "check-urgent" ]; then
-              python telegram_bot_runner.py --check-urgent --live-naver
+              python telegram_bot_runner.py --check-urgent --live-naver --chat-id "$TARGET_CHAT_ID"
             else
-              python telegram_bot_runner.py --send-now "$MODE" --live-naver
+              python telegram_bot_runner.py --send-now "$MODE" --live-naver --chat-id "$TARGET_CHAT_ID"
             fi
           else
             python telegram_bot_runner.py --auto-schedule --live-naver

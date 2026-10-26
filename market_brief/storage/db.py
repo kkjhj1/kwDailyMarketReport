@@ -434,6 +434,14 @@ class MarketBriefDatabase:
             )
             return cursor.rowcount > 0
 
+    def update_recipient_name(self, chat_id: str, new_name: str) -> bool:
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE recipients SET name = ? WHERE chat_id = ?",
+                (new_name.strip(), str(chat_id).strip()),
+            )
+            return cursor.rowcount > 0
+
     def deactivate_recipient(self, chat_id: str, reason: str = "MANUAL_STOP") -> bool:
         with self._connect() as db:
             cursor = db.execute(
