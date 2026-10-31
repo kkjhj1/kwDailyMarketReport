@@ -1369,11 +1369,16 @@ def find_available_port(preferred_port: int = 8002, max_attempts: int = 20) -> i
 
 
 if __name__ == "__main__":
-    configured_port = int(os.environ.get("ADMIN_PORT", 8002))
+    is_cloud = bool(os.environ.get("PORT") or os.environ.get("RENDER"))
+    if is_cloud:
+        port = int(os.environ.get("PORT", "8002"))
+    else:
+        configured_port = int(os.environ.get("ADMIN_PORT", 8002))
+        port = find_available_port(configured_port)
+        if port != configured_port:
+            print(f"⚠️ [PORT FALLBACK: {configured_port} -> {port}] 포트 {configured_port}번 충돌로 인해 가용 포트 {port}번으로 안전 전환되었습니다.")
+
     host = os.environ.get("ADMIN_HOST", "0.0.0.0")
-    port = find_available_port(configured_port)
-    if port != configured_port:
-        print(f"⚠️ [PORT FALLBACK: {configured_port} -> {port}] 포트 {configured_port}번 충돌로 인해 가용 포트 {port}번으로 안전 전환되었습니다.")
     print(f"🚀 [Multi-Bot Subscription Admin Console] Local: http://127.0.0.1:{port} | Mobile/Network: http://{host}:{port}")
     app = create_admin_app(enable_bot_workers=True)
     uvicorn.run(app, host=host, port=port)

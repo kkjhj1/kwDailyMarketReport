@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-bot-subscription-admin
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python admin_server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ADMIN_PORT
+        value: 8002
