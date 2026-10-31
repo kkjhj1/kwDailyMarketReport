@@ -10,3 +10,4 @@ services:
         value: 3.11.9
       - key: ADMIN_PORT
         value: 8002
+
