@@ -1,0 +1,292 @@
+[
+  {
+    "code": "FUK",
+    "name": "후쿠오카",
+    "country": "일본",
+    "region": "동아시아",
+    "flight_time_hours": 1.3,
+    "visa_info": "무비자 90일 (비짓재팬웹 등록 권장, 여권 유효기간 잔여 필수)",
+    "best_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "caution_months": [
+      7,
+      8
+    ],
+    "caution_note": "7~8월 고온다습 혹서기 및 장마",
+    "flight_baseline_krw": 220000,
+    "flight_deal_threshold_krw": 160000,
+    "hotel_night_avg_krw": 85000,
+    "daily_meal_transit_krw": 55000,
+    "currency": "JPY",
+    "tips": "지하철 1일권(640엔), 하카타 라멘, 유후인 온천 당일치기 추천"
+  },
+  {
+    "code": "NRT",
+    "name": "도쿄",
+    "country": "일본",
+    "region": "동아시아",
+    "flight_time_hours": 2.2,
+    "visa_info": "무비자 90일 (비짓재팬웹 등록 권장)",
+    "best_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "caution_months": [
+      7,
+      8
+    ],
+    "caution_note": "7~8월 도심 열섬 현상 및 태풍 시즌",
+    "flight_baseline_krw": 340000,
+    "flight_deal_threshold_krw": 220000,
+    "hotel_night_avg_krw": 130000,
+    "daily_meal_transit_krw": 65000,
+    "currency": "JPY",
+    "tips": "스이카/파스모 교통카드 필수, 나리타 익스프레스 왕복권 할인 이용"
+  },
+  {
+    "code": "KIX",
+    "name": "오사카",
+    "country": "일본",
+    "region": "동아시아",
+    "flight_time_hours": 1.7,
+    "visa_info": "무비자 90일 (비짓재팬웹 등록 권장)",
+    "best_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "caution_months": [
+      7,
+      8
+    ],
+    "caution_note": "여름철 혹서기 및 장마",
+    "flight_baseline_krw": 290000,
+    "flight_deal_threshold_krw": 190000,
+    "hotel_night_avg_krw": 110000,
+    "daily_meal_transit_krw": 60000,
+    "currency": "JPY",
+    "tips": "라피트 특급 열차 사전 예매, 교토 당일치기 한큐 패스 추천"
+  },
+  {
+    "code": "DAD",
+    "name": "다낭",
+    "country": "베트남",
+    "region": "동남아",
+    "flight_time_hours": 4.5,
+    "visa_info": "무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참)",
+    "best_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "caution_months": [
+      9,
+      10,
+      11
+    ],
+    "caution_note": "9~11월 우기 집중 호우 및 태풍 주의",
+    "flight_baseline_krw": 320000,
+    "flight_deal_threshold_krw": 230000,
+    "hotel_night_avg_krw": 60000,
+    "daily_meal_transit_krw": 35000,
+    "currency": "VND",
+    "tips": "그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천"
+  },
+  {
+    "code": "CXR",
+    "name": "나트랑",
+    "country": "베트남",
+    "region": "동남아",
+    "flight_time_hours": 5.0,
+    "visa_info": "무비자 45일 (여권 유효기간 6개월 이상 필수)",
+    "best_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "caution_months": [
+      10,
+      11
+    ],
+    "caution_note": "10~11월 집중 우기",
+    "flight_baseline_krw": 330000,
+    "flight_deal_threshold_krw": 240000,
+    "hotel_night_avg_krw": 65000,
+    "daily_meal_transit_krw": 35000,
+    "currency": "VND",
+    "tips": "가성비 오션뷰 리조트 특화, 해산물 거리 야시장 추천"
+  },
+  {
+    "code": "BKK",
+    "name": "방콕",
+    "country": "태국",
+    "region": "동남아",
+    "flight_time_hours": 5.5,
+    "visa_info": "무비자 90일 (여권 유효기간 6개월 이상 필수)",
+    "best_months": [
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "caution_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "caution_note": "우기 스콜성 폭우 및 무더위 시즌",
+    "flight_baseline_krw": 380000,
+    "flight_deal_threshold_krw": 270000,
+    "hotel_night_avg_krw": 85000,
+    "daily_meal_transit_krw": 40000,
+    "currency": "THB",
+    "tips": "GLN(모바일 해외결제) 사용 편리, 루프탑 바 및 야시장 문화 특화"
+  },
+  {
+    "code": "TPE",
+    "name": "타이베이",
+    "country": "대만",
+    "region": "동아시아",
+    "flight_time_hours": 2.5,
+    "visa_info": "무비자 90일 (여권 유효기간 6개월 이상 권장)",
+    "best_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "caution_months": [
+      6,
+      7,
+      8
+    ],
+    "caution_note": "여름철 태풍 빈번 및 습한 더위",
+    "flight_baseline_krw": 280000,
+    "flight_deal_threshold_krw": 200000,
+    "hotel_night_avg_krw": 95000,
+    "daily_meal_transit_krw": 45000,
+    "currency": "TWD",
+    "tips": "이지카드(교통카드) 필수, 스펀 풍등 & 지우펀 일일투어 추천"
+  },
+  {
+    "code": "GUM",
+    "name": "괌",
+    "country": "미국",
+    "region": "태평양",
+    "flight_time_hours": 4.5,
+    "visa_info": "무비자 45일 (ESTA 비자 신청 시 입국 심사 패스트트랙 가능)",
+    "best_months": [
+      12,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "caution_months": [
+      7,
+      8,
+      9,
+      10
+    ],
+    "caution_note": "우기 스콜 및 열대성 저기압 주의",
+    "flight_baseline_krw": 450000,
+    "flight_deal_threshold_krw": 330000,
+    "hotel_night_avg_krw": 240000,
+    "daily_meal_transit_krw": 90000,
+    "currency": "USD",
+    "tips": "렌터카 필수(한국 운전면허증으로 운전 가능), 쇼핑 면세 혜택"
+  },
+  {
+    "code": "DPS",
+    "name": "발리",
+    "country": "인도네시아",
+    "region": "동남아",
+    "flight_time_hours": 7.0,
+    "visa_info": "도착비자(VOA) 500,000 IDR (약 4.3만원) 필수 + 관광세 150,000 IDR",
+    "best_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "caution_months": [
+      12,
+      1,
+      2
+    ],
+    "caution_note": "12~2월 몬순 우기",
+    "flight_baseline_krw": 620000,
+    "flight_deal_threshold_krw": 450000,
+    "hotel_night_avg_krw": 120000,
+    "daily_meal_transit_krw": 45000,
+    "currency": "IDR",
+    "tips": "전자도착비자(e-VOA) 사전 신청 권장, 우붓 힐링 + 꾸따 서핑 분할 숙박"
+  },
+  {
+    "code": "SIN",
+    "name": "싱가포르",
+    "country": "싱가포르",
+    "region": "동남아",
+    "flight_time_hours": 6.5,
+    "visa_info": "무비자 90일 (SG Arrival Card 입국 3일 전 모바일 작성 필수)",
+    "best_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "caution_months": [
+      11,
+      12
+    ],
+    "caution_note": "연말 몬순 우기 스콜",
+    "flight_baseline_krw": 480000,
+    "flight_deal_threshold_krw": 350000,
+    "hotel_night_avg_krw": 210000,
+    "daily_meal_transit_krw": 70000,
+    "currency": "SGD",
+    "tips": "치안 최상, 해외결제 신용카드로 대중교통 태그 승차 가능"
+  }
+]

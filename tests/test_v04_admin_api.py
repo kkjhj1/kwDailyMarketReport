@@ -101,6 +101,37 @@ class AdminApiTests(unittest.TestCase):
         res_sync = self.client.post("/api/recipients/sync-github")
         self.assertEqual(res_sync.status_code, 400)
 
+    def test_travel_api_endpoints(self):
+        # 1. Travel status
+        res_st = self.client.get("/api/travel/status")
+        self.assertEqual(res_st.status_code, 200)
+        data_st = res_st.json()
+        self.assertEqual(data_st["status"], "ONLINE")
+        self.assertEqual(data_st["bot_topic"], "TRAVEL")
+        self.assertEqual(data_st["destinations_count"], 10)
+
+        # 2. Destinations list
+        res_dest = self.client.get("/api/travel/destinations")
+        self.assertEqual(res_dest.status_code, 200)
+        dest_list = res_dest.json()
+        self.assertEqual(len(dest_list), 10)
+        codes = [d["code"] for d in dest_list]
+        self.assertIn("FUK", codes)
+        self.assertIn("DAD", codes)
+
+        # 3. Preview travel briefing
+        res_prev = self.client.get("/api/travel/preview")
+        self.assertEqual(res_prev.status_code, 200)
+        prev_data = res_prev.json()
+        self.assertGreater(prev_data["recommendations_count"], 0)
+        self.assertIn("formatted_message", prev_data)
+        self.assertIn("주말 해외여행", prev_data["formatted_message"])
+
+        # 4. Dispatch dry-run
+        res_disp = self.client.post("/api/travel/dispatch", json={"dry_run": True})
+        self.assertEqual(res_disp.status_code, 200)
+        self.assertTrue(res_disp.json()["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

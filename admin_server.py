@@ -1,6 +1,7 @@
-"""FastAPI Local Admin Console for Market Brief Delivery Management."""
+"""FastAPI Admin Console for Multi-Bot Subscription Platform & Daily Market Brief v2.0."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import os
 import sys
@@ -24,16 +25,50 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
+from market_brief.admin_ui import ADMIN_DASHBOARD_HTML
 from market_brief.channels.telegram import TelegramChannel
 from market_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter, sync_telegram_updates
 from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider
 from market_brief.market_data.naver_provider import fetch_naver_market_news
+from market_brief.multi_bot_manager import DynamicBotManager, MultiBotInteractionRouter, TelegramBotTransport
 from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
-from market_brief.storage.db import MarketBriefDatabase
+from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
+from market_brief.subscription_engine import SubscriptionEngine
+
+try:
+    from travel_brief.flight_engine import FlightEngine
+    from travel_brief.budget_calculator import BudgetCalculator
+    from travel_bot_runner import run_briefing as run_travel_briefing, format_telegram_briefing
+    _HAS_TRAVEL_MODULE = True
+except ImportError:
+    _HAS_TRAVEL_MODULE = False
+
+try:
+    from admission_brief.models import (
+        AdmissionBriefing,
+        AdmissionEvent,
+        BriefingType,
+        ParentUserProfile,
+        TargetGrade,
+        TargetRegion,
+    )
+    from admission_brief.storage.db import AdmissionDatabase
+    from admission_brief.ai_curator import AICurator
+    from admission_brief.collector import AdmissionCollector
+    from admission_brief.channels.telegram import TelegramChannel as AdmissionTelegramChannel, format_admission_html
+    from admission_brief.channels.telegram_limiter import SafeTelegramDispatcher as AdmissionSafeDispatcher
+    _HAS_ADMISSION_MODULE = True
+except ImportError:
+    _HAS_ADMISSION_MODULE = False
 
 ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
+
+
+# =========================================================================
+# Request Schemas (Legacy + Travel + Multi-Bot Platform v2.0)
+# =========================================================================
 
 
 class DispatchRequest(BaseModel):
@@ -55,8 +90,119 @@ class RecipientNameUpdateRequest(BaseModel):
     name: str
 
 
+class TravelDispatchRequest(BaseModel):
+    dry_run: bool = False
+    dest_code: str | None = None
+    max_budget: int | None = None
+    recipients: list[str] | None = None
+
+
+class AdmissionEventCreateRequest(BaseModel):
+    title: str
+    organizer: str
+    target_grade: str = "MIDDLE"
+    target_region: str = "ALL"
+    is_online_live: bool = False
+    event_type: str = "TICKETING_ALERT"
+    event_date_str: str
+    booking_url: str | None = None
+    is_first_come: bool = False
+    summary_3lines: list[str] = []
+    so_what: str = ""
+    action_todos: list[str] = []
+
+
+class AdmissionDispatchRequest(BaseModel):
+    event_id: str | None = None
+    target_grade: str = "MIDDLE"
+    target_region: str = "ALL"
+    dry_run: bool = False
+    silent: bool | None = None
+
+
 class ThresholdRequest(BaseModel):
     thresholds: dict
+
+
+class BotUpsertRequest(BaseModel):
+    bot_id: str
+    name: str
+    bot_type: str = "INFO"  # 'MENU' | 'INFO'
+    telegram_username: str = ""
+    token: str | None = None
+    clear_token: bool = False
+    category: str = "일반"
+    icon_emoji: str = "🤖"
+    description: str = ""
+    topic_code: str = "GENERAL"
+    is_active: bool = True
+    sort_order: int = 10
+
+
+class PlatformUserCreateRequest(BaseModel):
+    telegram_user_id: str
+    full_name: str
+    username: str = ""
+    tier: str = "WHITE"
+    tier_expires_at: str | None = None
+    status: str = "ACTIVE"
+    memo: str = ""
+
+
+class PlatformUserUpdateRequest(BaseModel):
+    full_name: str | None = None
+    username: str | None = None
+    status: str | None = None
+    memo: str | None = None
+
+
+class PlatformTierUpdateRequest(BaseModel):
+    tier: str
+    tier_expires_at: str | None = None
+    downgrade_mode: str = "GRACE"  # 'GRACE' | 'KEEP_RECENT' | 'KEEP_SELECTED' | 'CANCEL_ALL'
+    keep_bot_ids: list[str] | None = None
+    memo: str | None = None
+
+
+class SubscriptionActionRequest(BaseModel):
+    telegram_user_id: str
+    bot_id: str
+    bypass_quota: bool = False
+
+
+class SubscriptionSwapRequest(BaseModel):
+    telegram_user_id: str
+    cancel_bot_id: str
+    new_bot_id: str
+
+
+class SimulateInteractionRequest(BaseModel):
+    bot_id: str
+    telegram_user_id: str
+    full_name: str = ""
+    username: str = ""
+    text: str | None = None
+    callback_data: str | None = None
+
+
+class BotBroadcastRequest(BaseModel):
+    bot_id: str
+    message_html: str
+
+
+class BriefingPreviewRequest(BaseModel):
+    preset: str | None = None
+
+
+class BriefingTestDispatchRequest(BaseModel):
+    content_html: str
+    inline_keyboard: list[list[dict[str, str]]] | None = None
+    target_chat_id: str | None = None
+
+
+class BriefingSubscriberDispatchRequest(BaseModel):
+    content_html: str
+    inline_keyboard: list[list[dict[str, str]]] | None = None
 
 
 def fetch_telegram_profile_name(token: str, chat_id: str) -> str:
@@ -75,7 +221,7 @@ def fetch_telegram_profile_name(token: str, chat_id: str) -> str:
             if title:
                 return title
             if last and first:
-                if any('\uac00' <= c <= '\ud7a3' for c in last + first):
+                if any("\uac00" <= c <= "\ud7a3" for c in last + first):
                     return f"{last}{first}"
                 return f"{first} {last}"
             if first:
@@ -87,8 +233,28 @@ def fetch_telegram_profile_name(token: str, chat_id: str) -> str:
         return f"수신자_{chat_id[-4:]}"
 
 
-def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = None) -> FastAPI:
-    app = FastAPI(title="Market Brief Admin Console", version="0.4.0")
+def create_admin_app(
+    db_path: str = "alerts.sqlite3",
+    env_path: Path | None = None,
+    enable_bot_workers: bool = False,
+) -> FastAPI:
+    env_file = env_path or (ROOT / ".env")
+    db = MarketBriefDatabase(db_path=db_path, env_path=env_file)
+    sub_engine = SubscriptionEngine(db)
+    router = MultiBotInteractionRouter(sub_engine)
+    bot_manager = DynamicBotManager(sub_engine, router)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if enable_bot_workers:
+            await bot_manager.start()
+        try:
+            yield
+        finally:
+            if enable_bot_workers:
+                await bot_manager.stop()
+
+    app = FastAPI(title="Multi-Bot Subscription & Market Brief Admin Console", version="2.0.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -101,11 +267,16 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
     reports_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/reports", StaticFiles(directory=str(reports_dir)), name="reports")
 
-    env_file = env_path or (ROOT / ".env")
-    db = MarketBriefDatabase(db_path=db_path, env_path=env_file)
+    app.state.db = db
+    app.state.engine = sub_engine
+    app.state.router = router
+    app.state.bot_manager = bot_manager
 
     def get_bot_token() -> str:
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        brief_bot = sub_engine.get_bot("brief_bot")
+        if brief_bot and brief_bot.token and brief_bot.token.strip():
+            return brief_bot.token.strip()
+        token = ("" if env_path else os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
         if not token and env_file.exists():
             for line in env_file.read_text(encoding="utf-8-sig").splitlines():
                 if line.startswith("TELEGRAM_BOT_TOKEN="):
@@ -129,7 +300,7 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         return repo or "kkjhj1/kwDailyMarketReport"
 
     def get_github_token() -> str:
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        token = ("" if env_path else os.environ.get("GITHUB_TOKEN", "")).strip()
         if not token and env_file.exists():
             for line in env_file.read_text(encoding="utf-8-sig").splitlines():
                 if line.startswith("GITHUB_TOKEN="):
@@ -207,13 +378,15 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             "Content-Type": "application/json",
         }
         recipients_str = ",".join(recipients) if recipients else ""
-        payload = json.dumps({
-            "ref": "main",
-            "inputs": {
-                "mode": kind,
-                "recipients": recipients_str,
+        payload = json.dumps(
+            {
+                "ref": "main",
+                "inputs": {
+                    "mode": kind,
+                    "recipients": recipients_str,
+                },
             }
-        }).encode("utf-8")
+        ).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10) as res:
@@ -226,9 +399,319 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         except Exception as exc:
             return False, f"연결 오류: {exc}"
 
-    # -------------------------------------------------------------------------
-    # API Routes
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # Multi-Bot Platform API Routes (`/api/platform/*`)
+    # =========================================================================
+
+    @app.get("/api/platform/overview")
+    def get_platform_overview():
+        metrics = sub_engine.get_overview_metrics()
+        worker_statuses = bot_manager.get_worker_statuses()
+        metrics["active_workers"] = [bid for bid, st in worker_statuses.items() if st.get("worker_running")]
+        return metrics
+
+    @app.get("/api/platform/tiers")
+    def get_platform_tiers():
+        return {"tiers": sub_engine.get_tiers()}
+
+    @app.get("/api/platform/bots")
+    def list_platform_bots():
+        bots = sub_engine.list_bots(include_raw_token=False)
+        worker_statuses = bot_manager.get_worker_statuses()
+        for b in bots:
+            b["worker_running"] = bool(worker_statuses.get(b["bot_id"], {}).get("worker_running"))
+        return {"bots": bots}
+
+    @app.post("/api/platform/bots")
+    async def upsert_platform_bot(req: BotUpsertRequest):
+        username = req.telegram_username.strip().lstrip("@")
+        if req.token and req.token.strip() and req.token.strip() != "__KEEP__" and not username:
+            try:
+                me = TelegramBotTransport(req.token.strip()).get_me()
+                username = me.get("username") or ""
+            except Exception:
+                pass
+
+        try:
+            saved = sub_engine.upsert_bot(
+                bot_id=req.bot_id,
+                name=req.name,
+                bot_type=req.bot_type,
+                telegram_username=username,
+                token=req.token,
+                clear_token=req.clear_token,
+                category=req.category,
+                icon_emoji=req.icon_emoji,
+                description=req.description,
+                topic_code=req.topic_code,
+                is_active=req.is_active,
+                sort_order=req.sort_order,
+            )
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
+        await bot_manager.reload_bots()
+        return {"success": True, "bot": saved}
+
+    @app.post("/api/platform/bots/{bot_id}/toggle")
+    async def toggle_platform_bot(bot_id: str):
+        try:
+            res = sub_engine.toggle_bot(bot_id)
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=str(err))
+        await bot_manager.reload_bots()
+        return {"success": True, **res}
+
+    @app.post("/api/platform/bots/{bot_id}/test")
+    def test_platform_bot(bot_id: str):
+        bot = sub_engine.get_bot(bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="봇을 찾을 수 없습니다.")
+        if not bot.token or not bot.token.strip():
+            raise HTTPException(status_code=400, detail="해당 봇에 등록된 토큰이 없습니다. 먼저 토큰을 입력해 주세요.")
+        try:
+            me = TelegramBotTransport(bot.token).get_me()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"텔레그램 getMe 실패: {exc}")
+
+        resolved_uname = (me.get("username") or "").strip()
+        if resolved_uname and resolved_uname != (bot.telegram_username or "").lstrip("@"):
+            sub_engine.upsert_bot(
+                bot_id=bot.bot_id,
+                name=bot.name,
+                bot_type=bot.bot_type,
+                telegram_username=resolved_uname,
+                token="__KEEP__",
+                category=bot.category,
+                icon_emoji=bot.icon_emoji,
+                description=bot.description,
+                topic_code=bot.topic_code,
+                is_active=bot.is_active,
+                sort_order=bot.sort_order,
+            )
+        return {"success": True, "bot_profile": me}
+
+    @app.post("/api/platform/bots/sync-all")
+    def sync_all_platform_bots():
+        bots = sub_engine.list_bots(include_raw_token=True)
+        total_processed = 0
+        details = []
+        for b in bots:
+            if b["is_active"] and b.get("token") and b["token"].strip():
+                try:
+                    r = bot_manager.sync_bot_updates_once(b["bot_id"])
+                    total_processed += r.get("processed", 0)
+                    details.append(r)
+                except Exception as exc:
+                    details.append({"bot_id": b["bot_id"], "error": str(exc)})
+        return {"success": True, "total_processed": total_processed, "details": details}
+
+    @app.post("/api/platform/bots/{bot_id}/sync")
+    def sync_single_platform_bot(bot_id: str):
+        bot = sub_engine.get_bot(bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="봇을 찾을 수 없습니다.")
+        if not bot.token or not bot.token.strip():
+            raise HTTPException(status_code=400, detail="토큰이 등록되지 않은 봇입니다.")
+        try:
+            return bot_manager.sync_bot_updates_once(bot_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"텔레그램 업데이트 동기화 실패: {exc}")
+
+    @app.delete("/api/platform/bots/{bot_id}")
+    async def delete_platform_bot(bot_id: str):
+        try:
+            deleted = sub_engine.delete_bot(bot_id)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+        await bot_manager.reload_bots()
+        return {"success": deleted}
+
+    @app.get("/api/platform/users")
+    def list_platform_users(q: str = "", tier: str = "", status: str = ""):
+        return {"users": sub_engine.list_users_with_subscriptions(q=q, tier_filter=tier, status_filter=status)}
+
+    @app.post("/api/platform/users")
+    def create_platform_user(req: PlatformUserCreateRequest):
+        try:
+            user = sub_engine.upsert_user(
+                telegram_user_id=req.telegram_user_id,
+                full_name=req.full_name,
+                username=req.username,
+                tier=req.tier,
+                tier_expires_at=req.tier_expires_at,
+                status=req.status,
+                memo=req.memo,
+                actor="ADMIN",
+            )
+            return {"success": True, "user": user}
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
+    @app.put("/api/platform/users/{user_id}")
+    def update_platform_user(user_id: str, req: PlatformUserUpdateRequest):
+        try:
+            user = sub_engine.update_user_details(
+                telegram_user_id=user_id,
+                full_name=req.full_name,
+                username=req.username,
+                status=req.status,
+                memo=req.memo,
+            )
+            return {"success": True, "user": user}
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=str(err))
+
+    @app.put("/api/platform/users/{user_id}/tier")
+    def change_platform_user_tier(user_id: str, req: PlatformTierUpdateRequest):
+        try:
+            user = sub_engine.update_user_tier(
+                telegram_user_id=user_id,
+                new_tier=req.tier,
+                tier_expires_at=req.tier_expires_at,
+                downgrade_mode=req.downgrade_mode,
+                keep_bot_ids=req.keep_bot_ids,
+                memo=req.memo,
+                actor="ADMIN",
+            )
+            return {"success": True, "user": user}
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=str(err))
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
+    @app.delete("/api/platform/users/{user_id}")
+    def remove_platform_user(user_id: str):
+        return {"success": sub_engine.delete_user(user_id)}
+
+    @app.post("/api/platform/subscriptions/subscribe")
+    def platform_subscribe(req: SubscriptionActionRequest):
+        return sub_engine.attempt_subscribe(
+            telegram_user_id=req.telegram_user_id,
+            bot_id=req.bot_id,
+            actor="ADMIN",
+            bypass_quota=req.bypass_quota,
+        )
+
+    @app.post("/api/platform/subscriptions/unsubscribe")
+    def platform_unsubscribe(req: SubscriptionActionRequest):
+        return sub_engine.unsubscribe_bot(
+            telegram_user_id=req.telegram_user_id,
+            bot_id=req.bot_id,
+            actor="ADMIN",
+            reason="ADMIN_UNSUBSCRIBE",
+        )
+
+    @app.post("/api/platform/subscriptions/swap")
+    def platform_swap(req: SubscriptionSwapRequest):
+        try:
+            return sub_engine.atomic_swap_subscription(
+                telegram_user_id=req.telegram_user_id,
+                cancel_bot_id=req.cancel_bot_id,
+                new_bot_id=req.new_bot_id,
+                actor="ADMIN",
+            )
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
+    @app.get("/api/platform/matrix")
+    def get_platform_matrix():
+        return sub_engine.get_subscription_matrix()
+
+    @app.post("/api/platform/simulate")
+    def simulate_platform_bot_interaction(req: SimulateInteractionRequest):
+        return router.handle_interaction(
+            bot_id=req.bot_id,
+            telegram_user_id=req.telegram_user_id,
+            full_name=req.full_name,
+            username=req.username,
+            text=req.text,
+            callback_data=req.callback_data,
+        )
+
+    @app.post("/api/platform/broadcast")
+    def broadcast_to_bot_subscribers(req: BotBroadcastRequest):
+        bot = sub_engine.get_bot(req.bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="봇을 찾을 수 없습니다.")
+        if not bot.token or not bot.token.strip():
+            raise HTTPException(status_code=400, detail=f"[{bot.name}]에 텔레그램 토큰이 등록되어 있지 않습니다.")
+
+        subscribers = sub_engine.get_bot_active_recipients(req.bot_id)
+        if not subscribers:
+            raise HTTPException(status_code=400, detail=f"[{bot.name}]을 현재 구독 중인 활성 유저가 없습니다.")
+
+        transport = TelegramBotTransport(bot.token)
+        limiter = TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=0.5)
+        sent = 0
+        failed = 0
+        errors = []
+
+        for r in subscribers:
+            limiter.wait_before_send(r.chat_id)
+            try:
+                transport.send_html(r.chat_id, req.message_html)
+                sent += 1
+            except Exception as exc:
+                failed += 1
+                err_str = str(exc)
+                errors.append({"chat_id": r.chat_id, "error": err_str})
+                if "403" in err_str and "blocked" in err_str.lower():
+                    sub_engine.unsubscribe_bot(r.chat_id, req.bot_id, actor="SYSTEM", reason="USER_BLOCKED_BOT")
+
+        return {
+            "success": True,
+            "bot_id": req.bot_id,
+            "total": len(subscribers),
+            "sent": sent,
+            "failed": failed,
+            "errors": errors[:10],
+        }
+
+    # =========================================================================
+    # Real-Time Domain Briefing Center Routes (Engine Integration)
+    # =========================================================================
+
+    @app.get("/api/platform/bots/{bot_id}/presets")
+    def get_platform_bot_presets(bot_id: str):
+        from market_brief.briefing_service import get_bot_presets
+        return {"bot_id": bot_id, "presets": get_bot_presets(bot_id)}
+
+    @app.post("/api/platform/bots/{bot_id}/preview")
+    def preview_platform_bot_briefing(bot_id: str, req: BriefingPreviewRequest):
+        from market_brief.briefing_service import generate_bot_briefing
+        return generate_bot_briefing(bot_id=bot_id, preset=req.preset, db=sub_engine)
+
+    @app.post("/api/platform/bots/{bot_id}/dispatch-test")
+    def dispatch_test_briefing(bot_id: str, req: BriefingTestDispatchRequest):
+        from market_brief.briefing_service import send_bot_test_message
+        res = send_bot_test_message(
+            bot_id=bot_id,
+            content_html=req.content_html,
+            inline_keyboard=req.inline_keyboard,
+            target_chat_id=req.target_chat_id,
+            db=sub_engine,
+        )
+        if not res.get("success"):
+            raise HTTPException(status_code=400, detail=res.get("error", "테스트 발송 실패"))
+        return res
+
+    @app.post("/api/platform/bots/{bot_id}/dispatch-subscribers")
+    def dispatch_subscribers_briefing(bot_id: str, req: BriefingSubscriberDispatchRequest):
+        from market_brief.briefing_service import send_bot_broadcast_message
+        res = send_bot_broadcast_message(
+            bot_id=bot_id,
+            content_html=req.content_html,
+            inline_keyboard=req.inline_keyboard,
+            db=sub_engine,
+        )
+        if not res.get("success"):
+            raise HTTPException(status_code=400, detail=res.get("error", "구독자 발송 실패"))
+        return res
+
+    # =========================================================================
+    # Legacy Zero-Breaking API Routes (100% Backward Compatible)
+    # =========================================================================
 
     @app.get("/api/status")
     def get_system_status():
@@ -331,11 +814,13 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             name_to_use = bot_profile_name or d.get("title") or f"수신자_{cid[-4:]}"
             if cid not in existing:
                 db.add_recipient(cid, name=name_to_use)
-            results.append({
-                **d,
-                "title": name_to_use,
-                "is_registered": cid in existing,
-            })
+            results.append(
+                {
+                    **d,
+                    "title": name_to_use,
+                    "is_registered": cid in existing,
+                }
+            )
         return {"candidates": results}
 
     @app.post("/api/recipients/sync-updates")
@@ -361,7 +846,7 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         active_recipients = db.get_active_recipients("FINANCE")
         local_ids = sorted([r.chat_id for r in active_recipients])
 
-        exists, gh_val, msg = get_github_variable("TELEGRAM_CHAT_ID")
+        exists, gh_val, _ = get_github_variable("TELEGRAM_CHAT_ID")
         if not exists:
             return {
                 "github_connected": True,
@@ -374,12 +859,14 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             }
 
         gh_ids = sorted([x.strip() for x in (gh_val or "").split(",") if x.strip()])
-        is_synced = (local_ids == gh_ids)
+        is_synced = local_ids == gh_ids
 
         return {
             "github_connected": True,
             "is_synced": is_synced,
-            "message": "GitHub 크론 수신자 목록과 100% 일치합니다." if is_synced else "관리자 설정과 GitHub 크론 수신자 목록이 불일치합니다. [동기화] 버튼을 눌러주세요.",
+            "message": "GitHub 크론 수신자 목록과 100% 일치합니다."
+            if is_synced
+            else "관리자 설정과 GitHub 크론 수신자 목록이 불일치합니다. [동기화] 버튼을 눌러주세요.",
             "local_count": len(local_ids),
             "github_count": len(gh_ids),
             "local_chat_ids": local_ids,
@@ -423,6 +910,7 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
 
         from market_brief.report_engine import BriefingBuilder
         from market_brief.channels.telegram import format_telegram_html
+
         builder = BriefingBuilder()
         briefing = builder.build(
             quotes,
@@ -450,7 +938,6 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         today_str = now_kst.date().isoformat()
         batch_key = f"{req.topic.upper()}:{today_str}:{req.kind}"
 
-        # 1. Atomic Lease Lock Acquisition
         acquired, reason, job = db.acquire_batch_lease(
             batch_key=batch_key,
             topic=req.topic.upper(),
@@ -465,11 +952,10 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             if reason == "ALREADY_COMPLETED":
                 raise HTTPException(
                     status_code=409,
-                    detail=f"금일({today_str}) {req.kind} 브리핑은 이미 발송이 완료되었습니다. 재발송이 필요한 경우 '강제 재발송'을 체크하고 사유를 입력하세요."
+                    detail=f"금일({today_str}) {req.kind} 브리핑은 이미 발송이 완료되었습니다. 재발송이 필요한 경우 '강제 재발송'을 체크하고 사유를 입력하세요.",
                 )
             raise HTTPException(status_code=423, detail=f"작업 잠금 획득 실패: {reason}")
 
-        # 2. Check if GitHub Actions remote dispatch is enabled
         gh_token = get_github_token()
         recipients = db.get_active_recipients(topic=req.topic.upper())
         if not recipients:
@@ -504,10 +990,8 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
                 "actions_url": "https://github.com/kkjhj1/kwDailyMarketReport/actions",
             }
 
-        # 3. Fallback to Local Dispatch (if no GITHUB_TOKEN)
         db.snapshot_job_recipients(job.job_id, recipients)
 
-        # Build & Dispatch Briefing locally
         fixture_p = FixtureProvider(str(ROOT / "fixtures/market_snapshot.json"))
         prov = CompositeMarketDataProvider(NaverFinanceProvider(), fixture_p)
         quotes = prov.fetch(DEFAULT_SYMBOLS)
@@ -520,6 +1004,7 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
 
         from market_brief.report_engine import BriefingBuilder
         from market_brief.web_report import HTMLReportRenderer, generate_signed_report_url
+
         builder = BriefingBuilder()
         report_id = f"briefing_{now_kst.strftime('%Y%m%d_%H%M')}_{req.kind}"
         report_url = generate_signed_report_url(get_report_base_url(), report_id, "market-brief-secret-2026")
@@ -533,14 +1018,12 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
             news=news,
         )
 
-        # Render HTML Report file
         report_dir = ROOT / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"{report_id}.html"
         renderer = HTMLReportRenderer()
         renderer.render(briefing, quotes, news, output_path=report_path)
 
-        # 4. Dispatch with Telegram Limiter & Error Isolation
         tg = TelegramChannel(token, include_inline_button=True, use_html=True)
         dispatcher = SafeTelegramDispatcher(rate_limiter=TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=0.5))
 
@@ -605,9 +1088,196 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
         db.set_setting("thresholds", json.dumps(req.thresholds, ensure_ascii=False), updated_by="ADMIN_WEB")
         return {"success": True}
 
-    # -------------------------------------------------------------------------
-    # Embedded HTML Admin Dashboard UI (Modern, Glassmorphism, Dark Mode)
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # Travel Brief Bot APIs (Multi-Bot Integration)
+    # =========================================================================
+
+    if _HAS_TRAVEL_MODULE:
+        @app.get("/api/travel/status")
+        def get_travel_status():
+            f_engine = FlightEngine()
+            recipients = db.get_active_recipients(topic="TRAVEL")
+            travel_report_latest = reports_dir / "travel_latest.html"
+            return {
+                "status": "ONLINE",
+                "bot_topic": "TRAVEL",
+                "destinations_count": len(f_engine.destinations),
+                "subscribers_total": len(recipients),
+                "reports_available": travel_report_latest.exists(),
+                "report_url": f"{get_report_base_url()}/reports/travel_latest.html",
+            }
+
+        @app.get("/api/travel/destinations")
+        def list_travel_destinations():
+            f_engine = FlightEngine()
+            return [
+                {
+                    "code": d.code,
+                    "name": d.name,
+                    "country": d.country,
+                    "region": d.region,
+                    "flight_time_hours": d.flight_time_hours,
+                    "visa_info": d.visa_info,
+                    "best_months": d.best_months,
+                    "caution_months": d.caution_months,
+                    "flight_baseline_krw": d.flight_baseline_krw,
+                    "flight_deal_threshold_krw": d.flight_deal_threshold_krw,
+                    "hotel_night_avg_krw": d.hotel_night_avg_krw,
+                    "currency": d.currency,
+                    "tips": d.tips,
+                }
+                for d in f_engine.list_destinations()
+            ]
+
+        @app.get("/api/travel/preview")
+        def preview_travel_briefing(dest_code: str | None = None, max_budget: int | None = None):
+            f_engine = FlightEngine()
+            all_deals = f_engine.search_deals(dest_code=dest_code, months_ahead=6)
+            recommendations = BudgetCalculator.rank_recommendations(
+                destinations=f_engine.destinations,
+                deals=all_deals,
+                max_budget_per_person=max_budget,
+                top_n=5,
+            )
+            report_url = f"{get_report_base_url()}/reports/travel_latest.html"
+            text = format_telegram_briefing(recommendations, web_report_url=report_url)
+            return {
+                "recommendations_count": len(recommendations),
+                "top_recommendations": [
+                    {
+                        "destination": r.destination.name,
+                        "code": r.destination.code,
+                        "price_krw": r.best_deal.price_krw,
+                        "total_per_person_krw": r.budget.total_per_person_krw,
+                        "departure": r.best_deal.departure_date,
+                        "season_status": r.season_status,
+                    }
+                    for r in recommendations[:3]
+                ],
+                "formatted_message": text,
+            }
+
+        @app.post("/api/travel/dispatch")
+        def dispatch_travel_briefing(req: TravelDispatchRequest):
+            recipients_override = req.recipients if req.recipients else None
+            res = run_travel_briefing(
+                dest_code=req.dest_code,
+                max_budget=req.max_budget,
+                dry_run=req.dry_run,
+                recipients_override=recipients_override,
+                web_report_url=f"{get_report_base_url()}/reports/travel_latest.html",
+                db_path=db_path,
+            )
+            return {"success": res, "dry_run": req.dry_run}
+
+    if _HAS_ADMISSION_MODULE:
+        adm_db = AdmissionDatabase(db_path=ROOT / "data/admission_brief.db")
+        adm_curator = AICurator()
+
+        @app.get("/api/admission/status")
+        def get_admission_status():
+            subscribers = adm_db.list_subscribers(active_only=True)
+            events = adm_db.list_all_events()
+            token = os.environ.get("ADMISSION_TELEGRAM_BOT_TOKEN") or get_bot_token()
+            return {
+                "status": "ONLINE",
+                "subscribers_total": len(subscribers),
+                "events_total": len(events),
+                "has_token": bool(token),
+                "grade_breakdown": {
+                    "MIDDLE": len([s for s in subscribers if s.target_grade == TargetGrade.MIDDLE]),
+                    "HIGH_1_2": len([s for s in subscribers if s.target_grade == TargetGrade.HIGH_1_2]),
+                    "HIGH_3_N": len([s for s in subscribers if s.target_grade == TargetGrade.HIGH_3_N]),
+                    "ALL": len([s for s in subscribers if s.target_grade == TargetGrade.ALL]),
+                },
+                "region_breakdown": {
+                    "ONLINE": len([s for s in subscribers if s.target_region == TargetRegion.ONLINE]),
+                    "SEOUL": len([s for s in subscribers if s.target_region == TargetRegion.SEOUL]),
+                    "GYEONGGI": len([s for s in subscribers if s.target_region == TargetRegion.GYEONGGI]),
+                    "LOCAL": len([s for s in subscribers if s.target_region == TargetRegion.LOCAL]),
+                    "ALL": len([s for s in subscribers if s.target_region == TargetRegion.ALL]),
+                },
+            }
+
+        @app.get("/api/admission/subscribers")
+        def list_admission_subscribers():
+            return {"subscribers": [s.to_dict() for s in adm_db.list_subscribers(active_only=False)]}
+
+        @app.get("/api/admission/events")
+        def list_admission_events():
+            return {"events": [e.to_dict() for e in adm_db.list_all_events()]}
+
+        @app.post("/api/admission/events")
+        def create_admission_event(req: AdmissionEventCreateRequest):
+            event = AdmissionEvent(
+                event_id=f"evt_adm_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                title=req.title,
+                organizer=req.organizer,
+                target_grade=TargetGrade(req.target_grade),
+                target_region=TargetRegion(req.target_region),
+                is_online_live=req.is_online_live,
+                event_type=BriefingType(req.event_type),
+                event_date_str=req.event_date_str,
+                booking_url=req.booking_url,
+                is_first_come=req.is_first_come,
+                summary_3lines=req.summary_3lines or ["설명회 핵심 요약", "전형 변화 팩트체크", "방학 로드맵"],
+                so_what=req.so_what or "학생부 세특 및 심화 학습 준비가 필수적입니다.",
+                action_todos=req.action_todos or ["설명회 사전 예약 신청", "학생부 점검"],
+            )
+            adm_db.save_event(event)
+            return {"success": True, "event": event.to_dict()}
+
+        @app.post("/api/admission/collect")
+        def collect_admission_events():
+            collector = AdmissionCollector(db=adm_db, curator=adm_curator)
+            results = collector.run_collection()
+            return {"success": True, **results}
+
+        @app.post("/api/admission/dispatch")
+        def dispatch_admission_briefing(req: AdmissionDispatchRequest):
+            target_grade = TargetGrade(req.target_grade)
+            target_region = TargetRegion(req.target_region)
+            if req.event_id:
+                evt = adm_db.get_event(req.event_id)
+                if not evt:
+                    raise HTTPException(status_code=404, detail="입시 이벤트를 찾을 수 없습니다.")
+                briefing = adm_curator.curate_event_briefing(evt)
+            else:
+                briefing = adm_curator.generate_weekly_todo_briefing(target_grade)
+
+            briefing.target_region = target_region
+            if req.silent is not None:
+                briefing.silent = req.silent
+
+            if req.dry_run:
+                subs = adm_db.list_subscribers(
+                    grade=target_grade,
+                    region=target_region,
+                    is_online_live=briefing.is_online_live,
+                    active_only=True,
+                )
+                return {
+                    "success": True,
+                    "dry_run": True,
+                    "target_subscribers_count": len(subs),
+                    "formatted_html": format_admission_html(briefing),
+                    "briefing": {
+                        "headline": briefing.headline,
+                        "grade": briefing.target_grade.value,
+                        "region": briefing.target_region.value,
+                        "silent": briefing.silent,
+                    },
+                }
+
+            token = os.environ.get("ADMISSION_TELEGRAM_BOT_TOKEN") or get_bot_token()
+            if not token:
+                raise HTTPException(status_code=400, detail="ADMISSION_TELEGRAM_BOT_TOKEN이 설정되지 않았습니다.")
+
+            channel = AdmissionTelegramChannel(bot_token=token)
+            dispatcher = AdmissionSafeDispatcher()
+            stats = dispatcher.dispatch(channel=channel, briefing=briefing, db=adm_db)
+            return {"success": True, "dry_run": False, "stats": stats}
+
     @app.get("/", response_class=HTMLResponse)
     def render_admin_dashboard():
         return HTMLResponse(content=ADMIN_DASHBOARD_HTML)
@@ -615,695 +1285,10 @@ def create_admin_app(db_path: str = "alerts.sqlite3", env_path: Path | None = No
     return app
 
 
-ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Market Brief - 통합 발송 관리자 콘솔</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
-  <style>
-    :root {
-      --bg: #f8fafc;
-      --card-bg: #ffffff;
-      --card-border: #e2e8f0;
-      --text-main: #0f172a;
-      --text-muted: #64748b;
-      --text-sub: #334155;
-      --primary: #2563eb;
-      --primary-hover: #1d4ed8;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -2px rgba(0,0,0,0.05);
-      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
-    }
-    [data-theme="dark"] {
-      --bg: #0b0f19;
-      --card-bg: #151d2f;
-      --card-border: #232f48;
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-sub: #cbd5e1;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --shadow: 0 4px 6px -1px rgba(0,0,0,0.4);
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: var(--bg);
-      color: var(--text-main);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
-    .header {
-      background: var(--card-bg);
-      border-bottom: 1px solid var(--card-border);
-      padding: 14px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      position: sticky;
-      top: 0;
-      z-index: 50;
-    }
-    .brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 800; color: var(--primary); }
-    .brand span { color: var(--text-main); }
-    .header-right { display: flex; align-items: center; gap: 14px; }
-    .badge { padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-    .badge.online { background: #d1fae5; color: #065f46; }
-    .badge.offline { background: #fee2e2; color: #991b1b; }
-    .nav-tabs {
-      background: var(--card-bg);
-      border-bottom: 1px solid var(--card-border);
-      display: flex;
-      padding: 0 24px;
-      gap: 8px;
-    }
-    .nav-tab {
-      padding: 12px 18px;
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text-muted);
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
-    }
-    .nav-tab:hover { color: var(--text-main); }
-    .nav-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
-    .container { max-width: 1200px; width: 100%; margin: 24px auto; padding: 0 20px; flex: 1; }
-    .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); }
-    .card-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .card-value { font-size: 26px; font-weight: 800; margin-bottom: 4px; }
-    .card-sub { font-size: 12px; color: var(--text-muted); }
-    .btn {
-      padding: 9px 16px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      border: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.15s;
-    }
-    .btn-primary { background: var(--primary); color: #fff; }
-    .btn-primary:hover { background: var(--primary-hover); }
-    .btn-secondary { background: var(--card-border); color: var(--text-main); }
-    .btn-danger { background: var(--danger); color: #fff; }
-    .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-    .section-title { font-size: 16px; font-weight: 700; color: var(--text-main); }
-    .table-container { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-    th { background: rgba(0,0,0,0.02); padding: 12px 16px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--card-border); }
-    td { padding: 14px 16px; border-bottom: 1px solid var(--card-border); color: var(--text-main); }
-    tr:last-child td { border-bottom: none; }
-    .modal-overlay {
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.6); display: none; justify-content: center; align-items: center; z-index: 100;
-    }
-    .modal-box {
-      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px;
-      max-width: 650px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 24px; box-shadow: var(--shadow-lg);
-    }
-    .form-group { margin-bottom: 14px; }
-    .form-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; color: var(--text-sub); }
-    .form-input {
-      width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--card-border);
-      background: var(--card-bg); color: var(--text-main); font-size: 13px; outline: none;
-    }
-    .preview-box {
-      background: rgba(0,0,0,0.03); border: 1px dashed var(--card-border); border-radius: 8px;
-      padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 220px; overflow-y: auto; margin-top: 10px;
-    }
-  </style>
-</head>
-<body>
-  <header class="header">
-    <div class="brand">📈 <span>Daily Market Brief</span> Console</div>
-    <div class="header-right">
-      <div id="ghBadge" class="badge online">☁️ GitHub 확인 중...</div>
-      <div id="botBadge" class="badge online">● 봇 연결 확인 중...</div>
-      <span id="liveClock" style="font-size:12px; color:var(--text-muted); font-weight:600;"></span>
-      <button class="btn btn-secondary" onclick="toggleTheme()" id="themeBtn">🌙</button>
-    </div>
-  </header>
-
-  <nav class="nav-tabs">
-    <div class="nav-tab active" onclick="switchTab('tab-overview')">📊 종합 현황</div>
-    <div class="nav-tab" onclick="switchTab('tab-recipients')">👥 수신자 관리</div>
-    <div class="nav-tab" onclick="switchTab('tab-history')">📋 발송 이력 및 리포트</div>
-    <div class="nav-tab" onclick="switchTab('tab-settings')">⚙️ 임계치 설정</div>
-  </nav>
-
-  <main class="container">
-    <!-- TAB 1: OVERVIEW -->
-    <section id="tab-overview" class="tab-content">
-      <div class="grid-cards">
-        <div class="card">
-          <div class="card-title">🌅 06:30 장전 모닝 브리핑</div>
-          <div class="card-value" id="morningStatusText">-</div>
-          <div class="card-sub" id="morningStatusSub">한국시간 평일 오전 6:30 자동 크론</div>
-        </div>
-        <div class="card">
-          <div class="card-title">📊 15:40 장마감 시황 브리핑</div>
-          <div class="card-value" id="closingStatusText">-</div>
-          <div class="card-sub" id="closingStatusSub">한국시간 평일 오후 3:40 자동 크론</div>
-        </div>
-        <div class="card">
-          <div class="card-title">👥 활성 발송 대상자</div>
-          <div class="card-value" id="activeRecipientsCount">-</div>
-          <div class="card-sub">텔레그램 수신 동의 계정</div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-bottom: 24px;">
-        <div class="section-header">
-          <div class="section-title">🚀 원클릭 즉시 발송 센터</div>
-          <button class="btn btn-secondary" onclick="openPreviewModal()">👁️ 발송 미리보기</button>
-        </div>
-        <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
-          버튼을 누르면 현재 실시간 시세를 수집·검증하여 즉시 상세 HTML 리포트를 배포하고 텔레그램 메시지를 발송합니다.
-          (이미 발송 완료된 경우 중복 발송 방지 가드가 작동합니다.)
-        </p>
-        <div style="display:flex; gap:12px; flex-wrap:wrap;">
-          <button class="btn btn-primary" onclick="triggerDispatch('morning', false)">🌅 06:30 아침 장전 브리핑 즉시 발송</button>
-          <button class="btn btn-primary" style="background:#059669;" onclick="triggerDispatch('closing', false)">📊 15:40 장마감 브리핑 즉시 발송</button>
-          <button class="btn btn-danger" onclick="triggerDispatch('urgent', false)">🚨 ±3% 긴급 변동 감시 실행</button>
-          <button class="btn btn-secondary" onclick="openForceModal()">⚠️ 강제 재발송 (사유입력)</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 2: RECIPIENTS -->
-    <section id="tab-recipients" class="tab-content" style="display:none;">
-      <div class="section-header">
-        <div style="display:flex; align-items:center; gap:12px;">
-          <div class="section-title">수신자 마스터 목록</div>
-          <div id="ghSyncBadge" class="badge online" style="font-size:11px;">☁️ GitHub 동기화 확인 중...</div>
-        </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <button class="btn btn-primary" style="background:#0284c7;" onclick="syncRecipientsToGithub()" title="현재 활성 수신자 목록을 GitHub 크론 환경(TELEGRAM_CHAT_ID)에 동기화합니다.">☁️ GitHub 크론 수신자 동기화</button>
-          <button class="btn btn-secondary" onclick="discoverBotUsers()">🔍 봇 대화방 자동감지 (/start)</button>
-          <button class="btn btn-primary" onclick="openAddRecipientModal()">+ 수신자 수동 등록</button>
-        </div>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>이름</th>
-              <th>Chat ID</th>
-              <th>채널</th>
-              <th>그룹</th>
-              <th>구독 토픽</th>
-              <th>상태</th>
-              <th>관리</th>
-            </tr>
-          </thead>
-          <tbody id="recipientsTableBody">
-            <tr><td colspan="7" style="text-align:center;">수신자 정보를 불러오는 중...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- TAB 3: HISTORY -->
-    <section id="tab-history" class="tab-content" style="display:none;">
-      <div class="section-header">
-        <div class="section-title">최근 발송 이력 (감사 로그)</div>
-        <button class="btn btn-secondary" onclick="loadHistory()">🔄 새로고침</button>
-      </div>
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>시작 일시 (KST)</th>
-              <th>토픽/종류</th>
-              <th>최종 상태</th>
-              <th>대상</th>
-              <th>성공</th>
-              <th>실패</th>
-              <th>불명확(UNKNOWN)</th>
-              <th>리포트</th>
-              <th>상세</th>
-            </tr>
-          </thead>
-          <tbody id="historyTableBody">
-            <tr><td colspan="9" style="text-align:center;">이력을 불러오는 중...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- TAB 4: SETTINGS -->
-    <section id="tab-settings" class="tab-content" style="display:none;">
-      <div class="card">
-        <div class="section-header">
-          <div class="section-title">자산별 긴급 알림 변동률 임계치 & 쿨다운 설정</div>
-          <button class="btn btn-primary" onclick="saveSettings()">💾 설정 저장</button>
-        </div>
-        <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
-          장중 시세가 설정된 임계치를 돌파하면 긴급 알림이 발송됩니다. 과도한 스팸을 방지하기 위해 쿨다운 및 회복 조건을 설정합니다.
-        </p>
-        <div id="thresholdsEditor" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px;">
-          <!-- Dynamically populated -->
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <!-- MODALS -->
-  <div id="forceModal" class="modal-overlay">
-    <div class="modal-box">
-      <h3 style="margin-bottom:14px; color:var(--danger);">⚠️ 강제 재발송 (중복 방지 오버라이드)</h3>
-      <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px;">
-        금일 이미 발송 완료된 브리핑을 강제로 다시 전송합니다. 감사 로그에 재발송 사유가 영구 기록됩니다.
-      </p>
-      <div class="form-group">
-        <label class="form-label">발송 종류 선택</label>
-        <select id="forceKind" class="form-input">
-          <option value="morning">🌅 아침 장전 브리핑</option>
-          <option value="closing">📊 장마감 시황 브리핑</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">강제 재발송 사유 (필수 입력)</label>
-        <input type="text" id="forceReason" class="form-input" placeholder="예: 시세 데이터 수정으로 인한 재발송">
-      </div>
-      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
-        <button class="btn btn-secondary" onclick="closeModals()">취소</button>
-        <button class="btn btn-danger" onclick="executeForceDispatch()">강제 재발송 실행</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="previewModal" class="modal-overlay">
-    <div class="modal-box">
-      <h3 style="margin-bottom:10px;">👁️ 실시간 발송 메시지 미리보기</h3>
-      <div style="display:flex; gap:8px; margin-bottom:10px;">
-        <button class="btn btn-secondary" onclick="loadPreview('morning')">아침 브리핑</button>
-        <button class="btn btn-secondary" onclick="loadPreview('closing')">장마감 브리핑</button>
-      </div>
-      <div class="preview-box" id="previewContent">시세 및 메시지를 생성 중...</div>
-      <div style="display:flex; justify-content:flex-end; margin-top:16px;">
-        <button class="btn btn-secondary" onclick="closeModals()">닫기</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="addRecipientModal" class="modal-overlay">
-    <div class="modal-box">
-      <h3 style="margin-bottom:14px;">👥 수신자 수동 등록</h3>
-      <div class="form-group">
-        <label class="form-label">텔레그램 Chat ID (숫자)</label>
-        <input type="text" id="newChatId" class="form-input" placeholder="예: 7820975792">
-      </div>
-      <div class="form-group">
-        <label class="form-label">수신자 이름 / 별명 (비워두면 봇 프로필명 자동 조회)</label>
-        <input type="text" id="newName" class="form-input" placeholder="예: 김환진 대표">
-      </div>
-      <div class="form-group">
-        <label class="form-label">그룹 태그</label>
-        <input type="text" id="newGroup" class="form-input" value="GENERAL">
-      </div>
-      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
-        <button class="btn btn-secondary" onclick="closeModals()">취소</button>
-        <button class="btn btn-primary" onclick="submitAddRecipient()">등록</button>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    function updateClock() {
-      const now = new Date();
-      document.getElementById('liveClock').textContent = now.toLocaleTimeString('ko-KR') + ' KST';
-    }
-    setInterval(updateClock, 1000);
-    updateClock();
-
-    function toggleTheme() {
-      const cur = document.documentElement.getAttribute('data-theme');
-      const target = cur === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', target);
-      document.getElementById('themeBtn').textContent = target === 'dark' ? '☀️' : '🌙';
-    }
-
-    function switchTab(tabId) {
-      document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
-      document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
-      document.getElementById(tabId).style.display = 'block';
-      event.target.classList.add('active');
-
-      if (tabId === 'tab-recipients') loadRecipients();
-      if (tabId === 'tab-history') loadHistory();
-      if (tabId === 'tab-settings') loadSettings();
-    }
-
-    async function loadStatus() {
-      try {
-        const res = await fetch('/api/status');
-        const d = await res.json();
-        const badge = document.getElementById('botBadge');
-        if (d.bot_online) {
-          badge.className = 'badge online';
-          badge.textContent = `● 봇 연결됨 (@${d.bot_username || 'market_bot'})`;
-        } else {
-          badge.className = 'badge offline';
-          badge.textContent = '⚠️ 봇 토큰 미연결';
-        }
-
-        const ghBadge = document.getElementById('ghBadge');
-        if (ghBadge) {
-          if (d.github_connected) {
-            ghBadge.className = 'badge online';
-            ghBadge.textContent = '☁️ GitHub 원격 연동됨 (방법 A)';
-          } else {
-            ghBadge.className = 'badge offline';
-            ghBadge.textContent = '⚠️ GitHub 토큰 미연결';
-          }
-        }
-
-        document.getElementById('morningStatusText').textContent = d.morning_status === 'COMPLETED' ? '발송 완료 ✅' : '미발송 (대기 중)';
-        document.getElementById('closingStatusText').textContent = d.closing_status === 'COMPLETED' ? '발송 완료 ✅' : '미발송 (대기 중)';
-        document.getElementById('activeRecipientsCount').textContent = `${d.active_recipients_count} 명`;
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    async function triggerDispatch(kind, isForced = false, forceReason = null) {
-      const modeLabel = 'GitHub Actions 원격 자동 배포 & 텔레그램 발송';
-      if (!confirm(`[${kind.toUpperCase()}] ${modeLabel}을 진행하시겠습니까?`)) return;
-      try {
-        const res = await fetch('/api/dispatch/send', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({topic: 'FINANCE', kind, is_forced: isForced, force_reason: forceReason})
-        });
-        const d = await res.json();
-        if (res.ok) {
-          if (d.mode === 'GITHUB_ACTIONS_REMOTE') {
-            alert(`🚀 [원격 발송 성공!]\n\n${d.message}\n\nGitHub 서버에서 리포트 배포와 텔레그램 발송이 한 번에 완료되므로 404가 발생하지 않습니다.`);
-            if (d.actions_url && confirm('GitHub Actions 진행 상황 화면을 새 탭에서 열어보시겠습니까?')) {
-              window.open(d.actions_url, '_blank');
-            }
-          } else {
-            alert(`✅ 발송 완료! (성공: ${d.success_count}명, 실패: ${d.fail_count}명, 불명확: ${d.unknown_count}명)`);
-          }
-          loadStatus();
-        } else {
-          alert(`⚠️ 발송 중단: ${d.detail || '오류 발생'}`);
-        }
-      } catch (e) {
-        alert('발송 요청 에러: ' + e);
-      }
-    }
-
-    function openForceModal() { document.getElementById('forceModal').style.display = 'flex'; }
-    function closeModals() { document.querySelectorAll('.modal-overlay').forEach(el => el.style.display = 'none'); }
-
-    function executeForceDispatch() {
-      const kind = document.getElementById('forceKind').value;
-      const reason = document.getElementById('forceReason').value.trim();
-      if (!reason) { alert('재발송 사유를 반드시 입력해야 합니다.'); return; }
-      closeModals();
-      triggerDispatch(kind, true, reason);
-    }
-
-    async function openPreviewModal() {
-      document.getElementById('previewModal').style.display = 'flex';
-      loadPreview('morning');
-    }
-
-    async function loadPreview(kind) {
-      const el = document.getElementById('previewContent');
-      el.textContent = '실시간 시세 수집 및 미리보기 렌더링 중...';
-      try {
-        const res = await fetch(`/api/dispatch/preview?kind=${kind}`);
-        const d = await res.json();
-        el.textContent = d.telegram_html;
-      } catch (e) {
-        el.textContent = '미리보기 실패: ' + e;
-      }
-    }
-
-    async function loadRecipients() {
-      const tbody = document.getElementById('recipientsTableBody');
-      try {
-        const res = await fetch('/api/recipients');
-        const list = await res.json();
-        if (list.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">등록된 수신자가 없습니다.</td></tr>';
-          return;
-        }
-        tbody.innerHTML = list.map(r => `
-          <tr>
-            <td>
-              <div style="display:flex; align-items:center; gap:6px;">
-                <span style="font-weight:700;">${r.name}</span>
-                <button class="btn btn-secondary" style="padding:2px 6px; font-size:11px;" title="관리자 이름 수정" onclick="editRecipientName('${r.chat_id}', '${r.name.replace(/'/g, "\\'")}')">✏️</button>
-                <button class="btn btn-secondary" style="padding:2px 6px; font-size:11px;" title="텔레그램 봇 이름으로 다시 동기화" onclick="resetRecipientName('${r.chat_id}')">🔄</button>
-              </div>
-            </td>
-            <td><code>${r.chat_id}</code></td>
-            <td>${r.channel}</td>
-            <td><span class="badge" style="background:rgba(0,0,0,0.05);">${r.group_tag}</span></td>
-            <td>${r.subscribed_topics.join(', ')}</td>
-            <td>
-              <span class="badge ${r.is_active ? 'online' : 'offline'}">${r.is_active ? '수신 중' : '해지됨'}</span>
-            </td>
-            <td>
-              <button class="btn btn-secondary" style="padding:4px 8px; font-size:11px;" onclick="toggleRecipient('${r.chat_id}')">
-                ${r.is_active ? '비활성화' : '활성화'}
-              </button>
-            </td>
-          </tr>
-        `).join('');
-        loadGithubSyncStatus();
-      } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:red;">수신자 목록 조회 실패</td></tr>';
-      }
-    }
-
-    async function loadGithubSyncStatus() {
-      const badge = document.getElementById('ghSyncBadge');
-      if (!badge) return;
-      try {
-        const res = await fetch('/api/recipients/github-sync-status');
-        const d = await res.json();
-        if (!d.github_connected) {
-          badge.className = 'badge offline';
-          badge.textContent = '⚠️ GitHub 토큰 미연결 (크론 수동 관리)';
-        } else if (d.is_synced) {
-          badge.className = 'badge online';
-          badge.style.background = '#d1fae5';
-          badge.style.color = '#065f46';
-          badge.textContent = `☁️ GitHub 크론 동기화 일치 (${d.local_count}명)`;
-        } else {
-          badge.className = 'badge';
-          badge.style.background = '#fef3c7';
-          badge.style.color = '#92400e';
-          badge.textContent = `⚠️ GitHub 크론 수신자 불일치 (로컬 ${d.local_count}명 vs 깃허브 ${d.github_count}명)`;
-        }
-      } catch (e) {
-        badge.className = 'badge offline';
-        badge.textContent = '☁️ 동기화 상태 확인 실패';
-      }
-    }
-
-    async function syncRecipientsToGithub() {
-      if (!confirm('현재 활성화된 수신자 목록을 GitHub Actions 크론 환경(TELEGRAM_CHAT_ID)에 즉시 동기화하시겠습니까?\n\n동기화 후 매일 15:42 장마감 / 06:30 모닝 크론 실행 시 관리자 설정과 동일한 인원에게 자동 발송됩니다.')) return;
-      try {
-        const res = await fetch('/api/recipients/sync-github', {method: 'POST'});
-        const d = await res.json();
-        if (res.ok) {
-          alert(d.message);
-          loadGithubSyncStatus();
-        } else {
-          alert('동기화 실패: ' + (d.detail || '오류 발생'));
-        }
-      } catch (e) {
-        alert('동기화 요청 에러: ' + e);
-      }
-    }
-
-    function openAddRecipientModal() {
-      document.getElementById('newChatId').value = '';
-      document.getElementById('newName').value = '';
-      document.getElementById('newGroup').value = 'GENERAL';
-      document.getElementById('addRecipientModal').style.display = 'flex';
-    }
-
-    async function submitAddRecipient() {
-      const chatId = document.getElementById('newChatId').value.trim();
-      const name = document.getElementById('newName').value.trim();
-      const groupTag = document.getElementById('newGroup').value.trim() || 'GENERAL';
-      if (!chatId) {
-        alert('Chat ID를 입력해주세요.');
-        return;
-      }
-      closeModals();
-      try {
-        const res = await fetch('/api/recipients', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({chat_id: chatId, name: name || '수신자', group_tag: groupTag, subscribed_topics: 'FINANCE'})
-        });
-        const d = await res.json();
-        if (res.ok) {
-          alert(`✅ 수신자 등록 완료: ${d.name} (${chatId})`);
-          loadRecipients();
-        } else {
-          alert('등록 실패: ' + (d.detail || '오류'));
-        }
-      } catch (e) {
-        alert('등록 에러: ' + e);
-      }
-    }
-
-    async function editRecipientName(chatId, currentName) {
-      const newName = prompt(`[Chat ID: ${chatId}] 수신자의 이름을 수정하세요:`, currentName);
-      if (newName === null) return;
-      const trimmed = newName.trim();
-      if (!trimmed) {
-        alert('이름은 비워둘 수 없습니다.');
-        return;
-      }
-      try {
-        const res = await fetch(`/api/recipients/${chatId}/name`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: trimmed})
-        });
-        const d = await res.json();
-        if (res.ok) {
-          loadRecipients();
-        } else {
-          alert('이름 수정 실패: ' + (d.detail || '오류'));
-        }
-      } catch (e) {
-        alert('이름 수정 에러: ' + e);
-      }
-    }
-
-    async function resetRecipientName(chatId) {
-      if (!confirm('텔레그램 봇에서 최신 프로필 이름을 다시 조회하여 디폴트 이름으로 재설정하시겠습니까?')) return;
-      try {
-        const res = await fetch(`/api/recipients/${chatId}/reset-name`, {method: 'POST'});
-        const d = await res.json();
-        if (res.ok) {
-          alert(`✅ 봇 프로필 이름으로 복원되었습니다: ${d.name}`);
-          loadRecipients();
-        } else {
-          alert('초기화 실패: ' + (d.detail || '오류'));
-        }
-      } catch (e) {
-        alert('초기화 에러: ' + e);
-      }
-    }
-
-    async function toggleRecipient(chatId) {
-      await fetch(`/api/recipients/${chatId}/toggle`, {method: 'POST'});
-      loadRecipients();
-      loadStatus();
-      loadGithubSyncStatus();
-    }
-
-    async function discoverBotUsers() {
-      const res = await fetch('/api/recipients/discover', {method: 'POST'});
-      const d = await res.json();
-      if (!d.candidates || d.candidates.length === 0) {
-        alert('최근 봇에게 말을 건 신규 사용자가 없습니다. 텔레그램에서 봇에게 /start를 보낸 뒤 다시 시도하세요.');
-        return;
-      }
-      let msg = '📋 감지된 대화방 목록:\n';
-      d.candidates.forEach(c => {
-        msg += `- [${c.chat_id}] ${c.title} (${c.is_registered ? '이미 등록됨' : '신규 감지'})\n`;
-      });
-      alert(msg);
-      loadRecipients();
-    }
-
-    async function loadHistory() {
-      const tbody = document.getElementById('historyTableBody');
-      try {
-        const res = await fetch('/api/history');
-        const list = await res.json();
-        if (list.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;">발송 이력이 없습니다.</td></tr>';
-          return;
-        }
-        tbody.innerHTML = list.map(j => `
-          <tr>
-            <td>${j.started_at}</td>
-            <td><strong>${j.topic}</strong> (${j.kind}) ${j.is_forced ? '<span style="color:red;">[강제]</span>' : ''}</td>
-            <td><span class="badge ${j.status === 'SENT' ? 'online' : 'offline'}">${j.status}</span></td>
-            <td>${j.total_targets}명</td>
-            <td style="color:#10b981; font-weight:700;">${j.success_count}</td>
-            <td style="color:#ef4444; font-weight:700;">${j.fail_count}</td>
-            <td style="color:#f59e0b; font-weight:700;">${j.unknown_count}</td>
-            <td>${j.report_path ? `<a href="/reports/${j.report_path.split(/[\\\\/]/).pop()}" target="_blank" style="color:var(--primary); font-weight:600;">HTML 리포트</a>` : '-'}</td>
-            <td><code>${j.job_id.substring(0,8)}</code></td>
-          </tr>
-        `).join('');
-      } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:red;">이력 조회 실패</td></tr>';
-      }
-    }
-
-    let globalThresholds = {};
-    async function loadSettings() {
-      const container = document.getElementById('thresholdsEditor');
-      try {
-        const res = await fetch('/api/settings');
-        const d = await res.json();
-        globalThresholds = d.thresholds;
-        container.innerHTML = Object.entries(globalThresholds).map(([sym, cfg]) => `
-          <div style="border:1px solid var(--card-border); border-radius:8px; padding:12px;">
-            <div style="font-weight:700; margin-bottom:8px;">${sym} (${cfg.unit})</div>
-            <div class="form-group">
-              <label class="form-label">임계치 (${cfg.unit === 'PERCENT' ? '±%' : '±bp'})</label>
-              <input type="number" step="0.1" class="form-input" value="${cfg.threshold}" onchange="updateThreshold('${sym}', 'threshold', parseFloat(this.value))">
-            </div>
-            <div class="form-group">
-              <label class="form-label">쿨다운 (분)</label>
-              <input type="number" class="form-input" value="${cfg.cooldown_minutes || 120}" onchange="updateThreshold('${sym}', 'cooldown_minutes', parseInt(this.value))">
-            </div>
-          </div>
-        `).join('');
-      } catch (e) {
-        container.innerHTML = '설정 로드 실패';
-      }
-    }
-
-    function updateThreshold(sym, key, val) {
-      if (globalThresholds[sym]) globalThresholds[sym][key] = val;
-    }
-
-    async function saveSettings() {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({thresholds: globalThresholds})
-      });
-      alert('✅ 임계치 설정이 안전하게 저장되었습니다!');
-    }
-
-    loadStatus();
-  </script>
-</body>
-</html>
-"""
-
 def find_available_port(preferred_port: int = 8002, max_attempts: int = 20) -> int:
     """Checks if preferred_port is available; if occupied, finds the next free port automatically."""
     import socket
+
     for port_candidate in range(preferred_port, preferred_port + max_attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -1318,7 +1303,7 @@ if __name__ == "__main__":
     configured_port = int(os.environ.get("ADMIN_PORT", 8002))
     port = find_available_port(configured_port)
     if port != configured_port:
-        print(f"⚠️ [포트 충돌 방어] 포트 {configured_port}번이 이미 사용 중이어서 빈 포트 {port}번으로 자동 전환했습니다.")
-    print(f"🚀 [Market Brief Admin Console] Starting server on http://localhost:{port}")
-    app = create_admin_app()
+        print(f"⚠️ [PORT FALLBACK: {configured_port} -> {port}] 포트 {configured_port}번 충돌로 인해 가용 포트 {port}번으로 안전 전환되었습니다.")
+    print(f"🚀 [Multi-Bot Subscription Admin Console] URL: http://127.0.0.1:{port}")
+    app = create_admin_app(enable_bot_workers=True)
     uvicorn.run(app, host="127.0.0.1", port=port)

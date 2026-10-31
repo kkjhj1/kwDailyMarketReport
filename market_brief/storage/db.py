@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import date, datetime, timezone, timedelta
 import json
+import os
 from pathlib import Path
 import sqlite3
 import uuid
@@ -12,12 +13,20 @@ from typing import Any
 from market_brief.storage.models import (
     AttemptStatus,
     BatchStatus,
+    BotRecord,
+    BotType,
     DeliveryBatch,
     DeliveryJob,
     DeliveryJobRecipient,
     JobFinalStatus,
+    PlatformUser,
     Recipient,
+    Subscription,
+    SubscriptionStatus,
     SystemConfig,
+    TIER_DEFAULT_SPECS,
+    TierPolicy,
+    UserTier,
 )
 
 
@@ -174,6 +183,73 @@ class MarketBriefDatabase:
             )
             db.execute("INSERT OR IGNORE INTO telegram_sync_state (id, last_update_id) VALUES (1, 0)")
 
+            # 8. Multi-Bot Subscription Platform Schema (v2.0)
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS tier_policies (
+                    tier_code TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    max_bots INTEGER NOT NULL,
+                    badge_color TEXT NOT NULL DEFAULT '#64748b',
+                    description TEXT DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 1
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS bots (
+                    bot_id TEXT PRIMARY KEY,
+                    bot_type TEXT NOT NULL DEFAULT 'INFO',
+                    name TEXT NOT NULL,
+                    telegram_username TEXT DEFAULT '',
+                    token TEXT DEFAULT '',
+                    category TEXT DEFAULT '일반',
+                    icon_emoji TEXT DEFAULT '🤖',
+                    description TEXT DEFAULT '',
+                    topic_code TEXT DEFAULT 'GENERAL',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 10,
+                    last_offset INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS users (
+                    telegram_user_id TEXT PRIMARY KEY,
+                    username TEXT DEFAULT '',
+                    full_name TEXT NOT NULL,
+                    tier TEXT NOT NULL DEFAULT 'WHITE',
+                    tier_expires_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    memo TEXT DEFAULT '',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id TEXT NOT NULL,
+                    bot_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    subscribed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    cancelled_at TEXT,
+                    UNIQUE(telegram_user_id, bot_id),
+                    FOREIGN KEY(telegram_user_id) REFERENCES users(telegram_user_id),
+                    FOREIGN KEY(bot_id) REFERENCES bots(bot_id)
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS subscription_audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id TEXT NOT NULL,
+                    bot_id TEXT,
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL DEFAULT 'USER',
+                    detail TEXT,
+                    logged_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+
     def _seed_initial_data(self) -> None:
         with self._connect() as db:
             # Seed system settings
@@ -188,25 +264,187 @@ class MarketBriefDatabase:
                 (json.dumps({"morning": "06:30", "closing": "15:40"}),),
             )
 
-            # Seed recipients from .env if table is empty
-            row_count = db.execute("SELECT COUNT(*) FROM recipients").fetchone()[0]
-            if row_count == 0 and self.env_path and self.env_path.exists():
+            # Seed recipients and tokens from .env
+            env_brief_token = ""
+            env_menu_token = ""
+            env_travel_token = ""
+            env_edu_token = ""
+            env_p = Path(self.env_path) if self.env_path else None
+            if env_p and env_p.exists():
                 try:
-                    for line in self.env_path.read_text(encoding="utf-8-sig").splitlines():
+                    env_lines = env_p.read_text(encoding="utf-8-sig").splitlines()
+                    for line in env_lines:
                         line = line.strip()
-                        if line.startswith("TELEGRAM_CHAT_ID="):
-                            raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            for cid in raw.split(","):
-                                cid = cid.strip()
-                                if cid:
-                                    db.execute(
-                                        """INSERT OR IGNORE INTO recipients
-                                           (chat_id, name, channel, group_tag, subscribed_topics, is_active)
-                                           VALUES (?, ?, 'TELEGRAM', 'DEFAULT', 'FINANCE', 1)""",
-                                        (cid, f"수신자_{cid[-4:]}"),
-                                    )
+                        if line.startswith("TELEGRAM_BOT_TOKEN="):
+                            env_brief_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("MENU_BOT_TOKEN=") or line.startswith("MENU_TELEGRAM_BOT_TOKEN="):
+                            env_menu_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("TRAVEL_TELEGRAM_BOT_TOKEN=") or line.startswith("TRAVEL_BOT_TOKEN="):
+                            env_travel_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("EDU_TELEGRAM_BOT_TOKEN=") or line.startswith("EDU_BOT_TOKEN="):
+                            env_edu_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    row_count = db.execute("SELECT COUNT(*) FROM recipients").fetchone()[0]
+                    if row_count == 0:
+                        for line in env_lines:
+                            line = line.strip()
+                            if line.startswith("TELEGRAM_CHAT_ID="):
+                                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                for cid in raw.split(","):
+                                    cid = cid.strip()
+                                    if cid:
+                                        db.execute(
+                                            """INSERT OR IGNORE INTO recipients
+                                               (chat_id, name, channel, group_tag, subscribed_topics, is_active)
+                                               VALUES (?, ?, 'TELEGRAM', 'DEFAULT', 'FINANCE', 1)""",
+                                            (cid, f"수신자_{cid[-4:]}"),
+                                        )
                 except Exception:
                     pass
+
+            # Seed 4 Tier Policies (WHITE=1, GREEN=3, RED=5, BLACK=Unlimited)
+            for spec in TIER_DEFAULT_SPECS.values():
+                db.execute(
+                    """INSERT OR IGNORE INTO tier_policies
+                       (tier_code, name, max_bots, badge_color, description, sort_order)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        spec["tier_code"],
+                        spec["name"],
+                        spec["max_bots"],
+                        spec["badge_color"],
+                        spec["description"],
+                        spec["sort_order"],
+                    ),
+                )
+
+            # Seed Default Multi-Bot Catalog (1 Menu Portal + 3 Real Info Bots: 시황, 여행, 입시)
+            default_bots = [
+                (
+                    "menu_bot",
+                    BotType.MENU.value,
+                    "통합 안내 메뉴봇",
+                    "",
+                    env_menu_token,
+                    "가입·포털",
+                    "🧭",
+                    "전체 정보봇 타이틀 안내, 내 등급·슬롯 확인 및 구독할 정보봇을 선택하는 공식 메뉴봇입니다.",
+                    "PORTAL",
+                    1,
+                    0,
+                ),
+                (
+                    "brief_bot",
+                    BotType.INFO.value,
+                    "시황 브리핑봇",
+                    "",
+                    env_brief_token,
+                    "금융·시황",
+                    "📈",
+                    "장전 06:30 모닝 시황, 15:40 장마감 브리핑 및 ±3% 급변동 긴급 알림을 발송합니다.",
+                    "FINANCE",
+                    1,
+                    1,
+                ),
+                (
+                    "travel_bot",
+                    BotType.INFO.value,
+                    "여행 특가봇",
+                    "",
+                    env_travel_token,
+                    "여행·라이프",
+                    "✈️",
+                    "전 세계 특가 항공권·숙소 핫딜 알림과 AI 기반 맞춤 여행지 가이드를 제공합니다.",
+                    "TRAVEL",
+                    1,
+                    2,
+                ),
+                (
+                    "admission_bot",
+                    BotType.INFO.value,
+                    "입시 교육봇",
+                    "",
+                    env_edu_token,
+                    "입시·교육",
+                    "🎓",
+                    "학년별 주간 대입·고입 큐레이션 및 학부모 설명회 티켓팅 오픈 알림을 제공합니다.",
+                    "EDUCATION",
+                    1,
+                    3,
+                ),
+            ]
+
+            bot_count = db.execute("SELECT COUNT(*) FROM bots").fetchone()[0]
+            if bot_count == 0:
+                for b in default_bots:
+                    db.execute(
+                        """INSERT OR IGNORE INTO bots
+                           (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description, topic_code, is_active, sort_order)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        b,
+                    )
+            else:
+                # Migration: Clean up unimplemented bots if no subscriptions
+                for legacy_bot_id in ("trend_bot", "music_bot"):
+                    sub_count = db.execute(
+                        "SELECT COUNT(*) FROM subscriptions WHERE bot_id = ?", (legacy_bot_id,)
+                    ).fetchone()[0]
+                    if sub_count == 0:
+                        db.execute("DELETE FROM bots WHERE bot_id = ?", (legacy_bot_id,))
+
+                # Migration: Ensure admission_bot is registered
+                adm_exists = db.execute(
+                    "SELECT COUNT(*) FROM bots WHERE bot_id = 'admission_bot'"
+                ).fetchone()[0]
+                if adm_exists == 0:
+                    db.execute(
+                        """INSERT INTO bots
+                           (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description, topic_code, is_active, sort_order)
+                           VALUES ('admission_bot', 'INFO', '입시 교육봇', '', ?, '입시·교육', '🎓',
+                                   '학년별 주간 대입·고입 큐레이션 및 학부모 설명회 티켓팅 오픈 알림을 제공합니다.', 'EDUCATION', 1, 3)""",
+                        (env_edu_token,),
+                    )
+
+                # Backfill tokens from .env
+                if env_brief_token:
+                    db.execute(
+                        "UPDATE bots SET token = ? WHERE bot_id = 'brief_bot' AND (token IS NULL OR token = '')",
+                        (env_brief_token,),
+                    )
+                if env_travel_token:
+                    db.execute(
+                        "UPDATE bots SET token = ? WHERE bot_id = 'travel_bot' AND (token IS NULL OR token = '')",
+                        (env_travel_token,),
+                    )
+                if env_edu_token:
+                    db.execute(
+                        "UPDATE bots SET token = ? WHERE bot_id = 'admission_bot' AND (token IS NULL OR token = '')",
+                        (env_edu_token,),
+                    )
+                if env_menu_token:
+                    db.execute(
+                        "UPDATE bots SET token = ? WHERE bot_id = 'menu_bot' AND (token IS NULL OR token = '')",
+                        (env_menu_token,),
+                    )
+
+            # Migrate existing legacy `recipients` seamlessly into `users` and `brief_bot` subscriptions
+            legacy_rows = db.execute("SELECT * FROM recipients").fetchall()
+            for r in legacy_rows:
+                cid = str(r["chat_id"]).strip()
+                if not cid:
+                    continue
+                initial_tier = UserTier.BLACK.value if (r["group_tag"] or "").upper() == "VIP" else UserTier.WHITE.value
+                db.execute(
+                    """INSERT OR IGNORE INTO users (telegram_user_id, full_name, tier, status)
+                       VALUES (?, ?, ?, 'ACTIVE')""",
+                    (cid, r["name"] or f"유저_{cid[-4:]}", initial_tier),
+                )
+                topics = [t.strip().upper() for t in (r["subscribed_topics"] or "").split(",") if t.strip()]
+                if r["is_active"] and ("FINANCE" in topics or "ALL" in topics):
+                    db.execute(
+                        """INSERT OR IGNORE INTO subscriptions (telegram_user_id, bot_id, status)
+                           VALUES (?, 'brief_bot', 'ACTIVE')""",
+                        (cid,),
+                    )
 
     # =========================================================================
     # Atomic Idempotency & Lease Locking
@@ -425,34 +663,72 @@ class MarketBriefDatabase:
         group_tag: str = "GENERAL",
         subscribed_topics: str = "FINANCE",
     ) -> bool:
+        cid = str(chat_id).strip()
+        clean_name = name.strip()
         with self._connect() as db:
             cursor = db.execute(
                 """INSERT OR REPLACE INTO recipients
                    (chat_id, name, channel, group_tag, subscribed_topics, is_active, inactivation_reason)
                    VALUES (?, ?, ?, ?, ?, 1, NULL)""",
-                (str(chat_id).strip(), name.strip(), channel, group_tag, subscribed_topics),
+                (cid, clean_name, channel, group_tag, subscribed_topics),
             )
+            # LegacyRecipientAdapter: sync into Platform Users & brief_bot subscription
+            db.execute(
+                """INSERT INTO users (telegram_user_id, full_name, tier, status)
+                   VALUES (?, ?, 'WHITE', 'ACTIVE')
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET full_name = excluded.full_name, updated_at = CURRENT_TIMESTAMP""",
+                (cid, clean_name),
+            )
+            topics = [t.strip().upper() for t in (subscribed_topics or "").split(",") if t.strip()]
+            if "FINANCE" in topics or "ALL" in topics:
+                db.execute(
+                    """INSERT INTO subscriptions (telegram_user_id, bot_id, status, subscribed_at, cancelled_at)
+                       VALUES (?, 'brief_bot', 'ACTIVE', CURRENT_TIMESTAMP, NULL)
+                       ON CONFLICT(telegram_user_id, bot_id) DO UPDATE SET
+                         status = 'ACTIVE', subscribed_at = CURRENT_TIMESTAMP, cancelled_at = NULL""",
+                    (cid,),
+                )
             return cursor.rowcount > 0
 
     def update_recipient_name(self, chat_id: str, new_name: str) -> bool:
+        cid = str(chat_id).strip()
+        clean_name = new_name.strip()
         with self._connect() as db:
             cursor = db.execute(
                 "UPDATE recipients SET name = ? WHERE chat_id = ?",
-                (new_name.strip(), str(chat_id).strip()),
+                (clean_name, cid),
+            )
+            db.execute(
+                "UPDATE users SET full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_user_id = ?",
+                (clean_name, cid),
             )
             return cursor.rowcount > 0
 
     def deactivate_recipient(self, chat_id: str, reason: str = "MANUAL_STOP") -> bool:
+        cid = str(chat_id).strip()
         with self._connect() as db:
             cursor = db.execute(
                 "UPDATE recipients SET is_active = 0, inactivation_reason = ? WHERE chat_id = ?",
-                (reason, str(chat_id).strip()),
+                (reason, cid),
+            )
+            db.execute(
+                """UPDATE subscriptions
+                   SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP
+                   WHERE telegram_user_id = ? AND bot_id = 'brief_bot' AND status = 'ACTIVE'""",
+                (cid,),
             )
             return cursor.rowcount > 0
 
     def delete_recipient(self, chat_id: str) -> bool:
+        cid = str(chat_id).strip()
         with self._connect() as db:
-            cursor = db.execute("DELETE FROM recipients WHERE chat_id = ?", (str(chat_id).strip(),))
+            cursor = db.execute("DELETE FROM recipients WHERE chat_id = ?", (cid,))
+            db.execute(
+                """UPDATE subscriptions
+                   SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP
+                   WHERE telegram_user_id = ? AND bot_id = 'brief_bot'""",
+                (cid,),
+            )
             return cursor.rowcount > 0
 
     # =========================================================================

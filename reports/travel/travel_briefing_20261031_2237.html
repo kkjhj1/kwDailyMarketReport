@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-gradient: linear-gradient(135deg, #0b0f19 0%, #111827 50%, #0d1527 100%);
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --card-hover: rgba(51, 65, 85, 0.85);
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+      --accent-cyan: #38bdf8;
+      --accent-emerald: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-rose: #f43f5e;
+      --accent-violet: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-main);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+      padding: 2rem;
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 20px;
+      border: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 0.75rem;
+    }
+    .badge-deal { background: rgba(52, 211, 153, 0.15); color: var(--accent-emerald); border: 1px solid rgba(52, 211, 153, 0.3); }
+    .badge-best { background: rgba(251, 191, 36, 0.15); color: var(--accent-amber); border: 1px solid rgba(251, 191, 36, 0.3); }
+    .badge-caution { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); border: 1px solid rgba(244, 63, 94, 0.3); }
+    .badge-normal { background: rgba(56, 189, 248, 0.15); color: var(--accent-cyan); border: 1px solid rgba(56, 189, 248, 0.3); }
+
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, #ffffff 0%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      color: var(--text-sub);
+      font-size: 1rem;
+    }
+    .meta-bar {
+      margin-top: 1rem;
+      font-size: 0.85rem;
+      color: #64748b;
+    }
+
+    h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 2rem 0 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* TOP 3 Cards Grid */
+    .top-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+    .top-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(10px);
+      transition: all 0.25s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+    .top-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-emerald));
+    }
+    .top-card:hover {
+      transform: translateY(-4px);
+      background: var(--card-hover);
+      border-color: rgba(56, 189, 248, 0.4);
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 1rem;
+    }
+    .dest-title {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #fff;
+    }
+    .dest-country {
+      font-size: 0.85rem;
+      color: var(--text-sub);
+    }
+    .card-metric {
+      text-align: right;
+    }
+    .flight-price {
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: var(--accent-emerald);
+    }
+    .flight-discount {
+      font-size: 0.8rem;
+      color: var(--accent-emerald);
+    }
+    .card-dates {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 10px;
+      padding: 0.75rem;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+    .card-dates .date-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 0.25rem;
+    }
+    .budget-box {
+      border-top: 1px solid var(--card-border);
+      padding-top: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .budget-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      margin-bottom: 0.25rem;
+      color: var(--text-sub);
+    }
+    .budget-row.total {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px dashed rgba(255, 255, 255, 0.1);
+    }
+    .tip-box {
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      background: rgba(56, 189, 248, 0.08);
+      border-left: 3px solid var(--accent-cyan);
+      padding: 0.5rem 0.75rem;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+    }
+    .card-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .btn {
+      flex: 1;
+      text-align: center;
+      padding: 0.6rem 0.8rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+    }
+    .btn-primary {
+      background: #0284c7;
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    /* 6-Month Heatmap Table */
+    .table-container {
+      overflow-x: auto;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1rem;
+      margin-bottom: 3rem;
+      backdrop-filter: blur(10px);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+    th, td {
+      padding: 0.85rem 0.5rem;
+      border-bottom: 1px solid var(--card-border);
+    }
+    th {
+      color: var(--text-sub);
+      font-weight: 600;
+      background: rgba(15, 23, 42, 0.4);
+    }
+    td.dest-col {
+      text-align: left;
+      font-weight: 700;
+      color: #fff;
+      padding-left: 1rem;
+      min-width: 140px;
+    }
+    .matrix-deal {
+      padding: 0.4rem 0.6rem;
+      border-radius: 8px;
+      display: inline-block;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .deal-super {
+      background: rgba(52, 211, 153, 0.15);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+    }
+    .deal-best-season {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--accent-amber);
+      border: 1px solid rgba(251, 191, 36, 0.3);
+    }
+    .deal-caution {
+      background: rgba(244, 63, 94, 0.15);
+      color: var(--accent-rose);
+      border: 1px solid rgba(244, 63, 94, 0.3);
+    }
+    .deal-normal {
+      background: rgba(255, 255, 255, 0.05);
+      color: #cbd5e1;
+    }
+
+    /* All 10 Destinations Grid */
+    .all-dest-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .dest-card-compact {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+    .dest-card-compact h3 {
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+      display: flex;
+      justify-content: space-between;
+    }
+    .dest-detail-line {
+      font-size: 0.8rem;
+      color: var(--text-sub);
+      margin-bottom: 0.35rem;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 3rem;
+      color: #64748b;
+      font-size: 0.85rem;
+    }
+
+    /* Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(5px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: #1e293b;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 16px;
+      max-width: 650px;
+      width: 100%;
+      padding: 1.75rem;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    .modal-header h3 { font-size: 1.25rem; color: #fff; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text-sub);
+      font-size: 1.5rem;
+      cursor: pointer;
+    }
+    .modal-body textarea {
+      width: 100%;
+      height: 220px;
+      background: #0f172a;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 0.75rem;
+      font-family: monospace;
+      font-size: 0.85rem;
+      resize: vertical;
+      margin-bottom: 1rem;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge badge-normal">Weekend Escape Engine</div>
+      <h1>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑</h1>
+      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 맞춤 실속 주말 일정</p>
+      <div class="meta-bar">
+        <span>기준 일시: 2026-10-31 22:37</span> &nbsp;|&nbsp;
+        <span>분석 대상: 인기 10대 근거리 해외 여행지</span>
+      </div>
+    </header>
+
+    <h2>🔥 이번 주 베스트 TOP 3 추천 (초특가 & 여행 최적기)</h2>
+    <div class="top-cards-grid">
+      
+      <div class="top-card">
+        <div>
+          <div class="card-header">
+            <div>
+              <div class="dest-country">베트남 · 직항 4.5시간</div>
+              <div class="dest-title">다낭 (DAD)</div>
+            </div>
+            <div class="card-metric">
+              <div class="flight-price">223,000원</div>
+              <div class="flight-discount">LCC특가 왕복</div>
+            </div>
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <span class="badge badge-deal">🔥 초특가 +30%</span> <span class="badge badge-normal">🌤️ 무난한 시즌</span>
+          </div>
+          <div class="card-dates">
+            <div class="date-row">
+              <span style="color: var(--text-sub);">출발</span>
+              <span><strong>2026-12-18 (금)</strong></span>
+            </div>
+            <div class="date-row">
+              <span style="color: var(--text-sub);">도착</span>
+              <span><strong>2026-12-21 (월)</strong> [3박 4일]</span>
+            </div>
+          </div>
+          <div class="budget-box">
+            <div class="budget-row">
+              <span>숙박 (3박 평균)</span>
+              <span>180,000원</span>
+            </div>
+            <div class="budget-row">
+              <span>식비/교통 (4일)</span>
+              <span>140,000원</span>
+            </div>
+            <div class="budget-row total">
+              <span>1인 총 예상 경비</span>
+              <span>약 54만 원</span>
+            </div>
+            <div class="budget-row" style="font-size: 0.75rem; color: #64748b;">
+              <span>(2인 기준 총합: 약 90만 원)</span>
+            </div>
+          </div>
+          <div class="tip-box">
+            <strong>비자/팁:</strong> 무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참) · 그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천
+          </div>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-secondary" onclick="openPromptModal('DAD')">📋 프롬프트 보기</button>
+          <a class="btn btn-primary" href="https://chatgpt.com/?q=%5B%EC%97%AC%ED%96%89%20%EA%B3%84%ED%9A%8D%20%EC%9A%94%EC%B2%AD%3A%20%EB%8B%A4%EB%82%AD%203%EB%B0%95%204%EC%9D%BC%20%EC%B5%9C%EC%A0%81%20%EC%9D%BC%EC%A0%95%5D%0A%0A1.%20%EC%97%AC%ED%96%89%20%EA%B8%B0%EB%B3%B8%20%EC%A0%95%EB%B3%B4%3A%0A-%20%EB%AA%A9%EC%A0%81%EC%A7%80%3A%20%EB%B2%A0%ED%8A%B8%EB%82%A8%20%EB%8B%A4%EB%82%AD%20%28DAD%29%0A-%20%EB%B9%84%ED%96%89%20%EC%8B%9C%EA%B0%84%3A%20%EC%95%BD%204.5%EC%8B%9C%EA%B0%84%0A-%20%EC%97%AC%ED%96%89%20%EC%9D%BC%EC%A0%95%3A%202026-12-18%28%EA%B8%88%29%20~%202026-12-21%28%EC%9B%94%29%20%283%EB%B0%95%204%EC%9D%BC%20%EC%A3%BC%EB%A7%90%20%EC%9D%BC%EC%A0%95%29%0A-%20%ED%95%AD%EA%B3%B5%20%EC%A0%95%EB%B3%B4%3A%20ICN%20%E2%86%94%20DAD%20%28LCC%ED%8A%B9%EA%B0%80%2C%20%EC%99%95%EB%B3%B5%20%EC%95%BD%20223%2C000%EC%9B%90%29%0A-%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%3A%201%EC%9D%B8%20%EC%B4%9D%20543%2C000%EC%9B%90%20%28%ED%95%AD%EA%B3%B5%20223%2C000%EC%9B%90%20/%20%EC%88%99%EC%86%8C%20180%2C000%EC%9B%90%20/%20%EC%8B%9D%EB%B9%84%C2%B7%EA%B5%90%ED%86%B5%20140%2C000%EC%9B%90%29%0A-%202%EC%9D%B8%20%EA%B8%B0%EC%A4%80%20%EC%98%88%EC%83%81%3A%20%EC%95%BD%20906%2C000%EC%9B%90%20%28%EC%88%99%EC%86%8C%201%EC%8B%A4%20%EC%89%90%EC%96%B4%29%0A-%20%EB%B9%84%EC%9E%90/%EC%9E%85%EA%B5%AD%20%EC%A0%95%EB%B3%B4%3A%20%EB%AC%B4%EB%B9%84%EC%9E%90%2045%EC%9D%BC%20%28%EC%97%AC%EA%B6%8C%20%EC%9C%A0%ED%9A%A8%EA%B8%B0%EA%B0%84%206%EA%B0%9C%EC%9B%94%20%EC%9D%B4%EC%83%81%20%ED%95%84%EC%88%98%2C%20%EA%B7%80%EA%B5%AD%ED%8E%B8%20%ED%8B%B0%EC%BC%93%20%EC%A7%80%EC%B0%B8%29%0A-%20%EC%97%AC%ED%96%89%20%ED%8C%81/%EC%A3%BC%EC%9D%98%EC%82%AC%ED%95%AD%3A%20%EA%B7%B8%EB%9E%A9%28Grab%29%20%EC%95%B1%20%ED%95%84%EC%88%98%2C%20%ED%98%B8%EC%9D%B4%EC%95%88%20%EC%95%BC%EC%8B%9C%EC%9E%A5%20%EC%BD%94%EC%BD%94%EB%84%9B%20%EB%B0%B0%20%EC%B2%B4%ED%97%98%20%EC%B6%94%EC%B2%9C%20%28%EC%A3%BC%EC%9D%98%3A%209~11%EC%9B%94%20%EC%9A%B0%EA%B8%B0%20%EC%A7%91%EC%A4%91%20%ED%98%B8%EC%9A%B0%20%EB%B0%8F%20%ED%83%9C%ED%92%8D%20%EC%A3%BC%EC%9D%98%29%0A-%20%EC%84%A0%ED%98%B8%20%EC%8A%A4%ED%83%80%EC%9D%BC%3A%20%EA%B0%80%EC%84%B1%EB%B9%84%20%26%20%EB%A1%9C%EC%BB%AC%20%ED%9E%90%EB%A7%81/%EB%A7%9B%EC%A7%91%20%ED%83%90%EB%B0%A9%0A%0A2.%20%EC%9A%94%EC%B2%AD%20%EC%82%AC%ED%95%AD%3A%0A%E2%91%A0%20%EC%9C%84%203%EB%B0%95%204%EC%9D%BC%20%EC%9D%BC%EC%A0%95%EC%97%90%20%EB%A7%9E%EC%B6%98%20%27%EB%AC%B4%EB%A6%AC%20%EC%97%86%EB%8A%94%20%EC%8B%9C%EA%B0%84%EB%8C%80%EB%B3%84%20%EB%8F%99%EC%84%A0%28%EC%98%A4%EC%A0%84/%EC%98%A4%ED%9B%84/%EC%A0%80%EB%85%81%29%27%EC%9D%84%20%EC%83%81%EC%84%B8%ED%9E%88%20%EC%A7%9C%EC%A4%98.%0A%E2%91%A1%20%ED%98%84%EC%A7%80%EC%9D%B8%20%EC%B6%94%EC%B2%9C%20%EA%B0%80%EC%84%B1%EB%B9%84%20%EB%A1%9C%EC%BB%AC%20%EB%A7%9B%EC%A7%91%EA%B3%BC%20%EC%B9%B4%ED%8E%98%EB%A5%BC%20%EA%B0%81%20%EC%9D%BC%EC%9E%90%EB%B3%84%EB%A1%9C%202%EA%B3%B3%EC%94%A9%20%EC%B6%94%EC%B2%9C%ED%95%B4%EC%A4%98.%0A%E2%91%A2%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%2854%EB%A7%8C%20%EC%9B%90%EB%8C%80%29%20%EC%95%88%EC%97%90%EC%84%9C%20%EC%95%8C%EB%9C%B0%ED%95%98%EA%B2%8C%20%EC%A6%90%EA%B8%B8%20%EC%88%98%20%EC%9E%88%EB%8A%94%20%ED%8C%A8%EC%8A%A4%EA%B6%8C%28%EA%B5%90%ED%86%B5%EA%B6%8C%29%EC%9D%B4%EB%82%98%20%EA%B2%B0%EC%A0%9C%20%EA%BF%80%ED%8C%81%EC%9D%84%20%EC%95%8C%EB%A0%A4%EC%A4%98.%0A%E2%91%A3%202026-12%EC%9B%94%20%ED%98%84%EC%A7%80%20%EB%82%A0%EC%94%A8%EC%97%90%20%EB%A7%9E%EB%8A%94%20%EC%98%B7%EC%B0%A8%EB%A6%BC%EA%B3%BC%20%EA%BC%AD%20%EC%B1%99%EA%B2%A8%EC%95%BC%20%ED%95%A0%20%EC%A4%80%EB%B9%84%EB%AC%BC%20%EB%AA%A9%EB%A1%9D%EC%9D%84%20%EC%A0%95%EB%A6%AC%ED%95%B4%EC%A4%98." target="_blank">🤖 ChatGPT 일정 짜기</a>
+        </div>
+      </div>
+
+
+      <div class="top-card">
+        <div>
+          <div class="card-header">
+            <div>
+              <div class="dest-country">베트남 · 직항 4.5시간</div>
+              <div class="dest-title">다낭 (DAD)</div>
+            </div>
+            <div class="card-metric">
+              <div class="flight-price">230,000원</div>
+              <div class="flight-discount">LCC특가 왕복</div>
+            </div>
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+            <span class="badge badge-deal">🔥 초특가 +28%</span> <span class="badge badge-normal">🌤️ 무난한 시즌</span>
+          </div>
+          <div class="card-dates">
+            <div class="date-row">
+              <span style="color: var(--text-sub);">출발</span>
+              <span><strong>2026-12-24 (목)</strong></span>
+            </div>
+            <div class="date-row">
+              <span style="color: var(--text-sub);">도착</span>
+              <span><strong>2026-12-27 (일)</strong> [3박 4일]</span>
+            </div>
+          </div>
+          <div class="budget-box">
+            <div class="budget-row">
+              <span>숙박 (3박 평균)</span>
+              <span>180,000원</span>
+            </div>
+            <div class="budget-row">
+              <span>식비/교통 (4일)</span>
+              <span>140,000원</span>
+            </div>
+            <div class="budget-row total">
+              <span>1인 총 예상 경비</span>
+              <span>약 55만 원</span>
+            </div>
+            <div class="budget-row" style="font-size: 0.75rem; color: #64748b;">
+              <span>(2인 기준 총합: 약 92만 원)</span>
+            </div>
+          </div>
+          <div class="tip-box">
+            <strong>비자/팁:</strong> 무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참) · 그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천
+          </div>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-secondary" onclick="openPromptModal('DAD')">📋 프롬프트 보기</button>
+          <a class="btn btn-primary" href="https://chatgpt.com/?q=%5B%EC%97%AC%ED%96%89%20%EA%B3%84%ED%9A%8D%20%EC%9A%94%EC%B2%AD%3A%20%EB%8B%A4%EB%82%AD%203%EB%B0%95%204%EC%9D%BC%20%EC%B5%9C%EC%A0%81%20%EC%9D%BC%EC%A0%95%5D%0A%0A1.%20%EC%97%AC%ED%96%89%20%EA%B8%B0%EB%B3%B8%20%EC%A0%95%EB%B3%B4%3A%0A-%20%EB%AA%A9%EC%A0%81%EC%A7%80%3A%20%EB%B2%A0%ED%8A%B8%EB%82%A8%20%EB%8B%A4%EB%82%AD%20%28DAD%29%0A-%20%EB%B9%84%ED%96%89%20%EC%8B%9C%EA%B0%84%3A%20%EC%95%BD%204.5%EC%8B%9C%EA%B0%84%0A-%20%EC%97%AC%ED%96%89%20%EC%9D%BC%EC%A0%95%3A%202026-12-24%28%EB%AA%A9%29%20~%202026-12-27%28%EC%9D%BC%29%20%283%EB%B0%95%204%EC%9D%BC%20%EC%A3%BC%EB%A7%90%20%EC%9D%BC%EC%A0%95%29%0A-%20%ED%95%AD%EA%B3%B5%20%EC%A0%95%EB%B3%B4%3A%20ICN%20%E2%86%94%20DAD%20%28LCC%ED%8A%B9%EA%B0%80%2C%20%EC%99%95%EB%B3%B5%20%EC%95%BD%20230%2C000%EC%9B%90%29%0A-%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%3A%201%EC%9D%B8%20%EC%B4%9D%20550%2C000%EC%9B%90%20%28%ED%95%AD%EA%B3%B5%20230%2C000%EC%9B%90%20/%20%EC%88%99%EC%86%8C%20180%2C000%EC%9B%90%20/%20%EC%8B%9D%EB%B9%84%C2%B7%EA%B5%90%ED%86%B5%20140%2C000%EC%9B%90%29%0A-%202%EC%9D%B8%20%EA%B8%B0%EC%A4%80%20%EC%98%88%EC%83%81%3A%20%EC%95%BD%20920%2C000%EC%9B%90%20%28%EC%88%99%EC%86%8C%201%EC%8B%A4%20%EC%89%90%EC%96%B4%29%0A-%20%EB%B9%84%EC%9E%90/%EC%9E%85%EA%B5%AD%20%EC%A0%95%EB%B3%B4%3A%20%EB%AC%B4%EB%B9%84%EC%9E%90%2045%EC%9D%BC%20%28%EC%97%AC%EA%B6%8C%20%EC%9C%A0%ED%9A%A8%EA%B8%B0%EA%B0%84%206%EA%B0%9C%EC%9B%94%20%EC%9D%B4%EC%83%81%20%ED%95%84%EC%88%98%2C%20%EA%B7%80%EA%B5%AD%ED%8E%B8%20%ED%8B%B0%EC%BC%93%20%EC%A7%80%EC%B0%B8%29%0A-%20%EC%97%AC%ED%96%89%20%ED%8C%81/%EC%A3%BC%EC%9D%98%EC%82%AC%ED%95%AD%3A%20%EA%B7%B8%EB%9E%A9%28Grab%29%20%EC%95%B1%20%ED%95%84%EC%88%98%2C%20%ED%98%B8%EC%9D%B4%EC%95%88%20%EC%95%BC%EC%8B%9C%EC%9E%A5%20%EC%BD%94%EC%BD%94%EB%84%9B%20%EB%B0%B0%20%EC%B2%B4%ED%97%98%20%EC%B6%94%EC%B2%9C%20%28%EC%A3%BC%EC%9D%98%3A%209~11%EC%9B%94%20%EC%9A%B0%EA%B8%B0%20%EC%A7%91%EC%A4%91%20%ED%98%B8%EC%9A%B0%20%EB%B0%8F%20%ED%83%9C%ED%92%8D%20%EC%A3%BC%EC%9D%98%29%0A-%20%EC%84%A0%ED%98%B8%20%EC%8A%A4%ED%83%80%EC%9D%BC%3A%20%EA%B0%80%EC%84%B1%EB%B9%84%20%26%20%EB%A1%9C%EC%BB%AC%20%ED%9E%90%EB%A7%81/%EB%A7%9B%EC%A7%91%20%ED%83%90%EB%B0%A9%0A%0A2.%20%EC%9A%94%EC%B2%AD%20%EC%82%AC%ED%95%AD%3A%0A%E2%91%A0%20%EC%9C%84%203%EB%B0%95%204%EC%9D%BC%20%EC%9D%BC%EC%A0%95%EC%97%90%20%EB%A7%9E%EC%B6%98%20%27%EB%AC%B4%EB%A6%AC%20%EC%97%86%EB%8A%94%20%EC%8B%9C%EA%B0%84%EB%8C%80%EB%B3%84%20%EB%8F%99%EC%84%A0%28%EC%98%A4%EC%A0%84/%EC%98%A4%ED%9B%84/%EC%A0%80%EB%85%81%29%27%EC%9D%84%20%EC%83%81%EC%84%B8%ED%9E%88%20%EC%A7%9C%EC%A4%98.%0A%E2%91%A1%20%ED%98%84%EC%A7%80%EC%9D%B8%20%EC%B6%94%EC%B2%9C%20%EA%B0%80%EC%84%B1%EB%B9%84%20%EB%A1%9C%EC%BB%AC%20%EB%A7%9B%EC%A7%91%EA%B3%BC%20%EC%B9%B4%ED%8E%98%EB%A5%BC%20%EA%B0%81%20%EC%9D%BC%EC%9E%90%EB%B3%84%EB%A1%9C%202%EA%B3%B3%EC%94%A9%20%EC%B6%94%EC%B2%9C%ED%95%B4%EC%A4%98.%0A%E2%91%A2%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%2855%EB%A7%8C%20%EC%9B%90%EB%8C%80%29%20%EC%95%88%EC%97%90%EC%84%9C%20%EC%95%8C%EB%9C%B0%ED%95%98%EA%B2%8C%20%EC%A6%90%EA%B8%B8%20%EC%88%98%20%EC%9E%88%EB%8A%94%20%ED%8C%A8%EC%8A%A4%EA%B6%8C%28%EA%B5%90%ED%86%B5%EA%B6%8C%29%EC%9D%B4%EB%82%98%20%EA%B2%B0%EC%A0%9C%20%EA%BF%80%ED%8C%81%EC%9D%84%20%EC%95%8C%EB%A0%A4%EC%A4%98.%0A%E2%91%A3%202026-12%EC%9B%94%20%ED%98%84%EC%A7%80%20%EB%82%A0%EC%94%A8%EC%97%90%20%EB%A7%9E%EB%8A%94%20%EC%98%B7%EC%B0%A8%EB%A6%BC%EA%B3%BC%20%EA%BC%AD%20%EC%B1%99%EA%B2%A8%EC%95%BC%20%ED%95%A0%20%EC%A4%80%EB%B9%84%EB%AC%BC%20%EB%AA%A9%EB%A1%9D%EC%9D%84%20%EC%A0%95%EB%A6%AC%ED%95%B4%EC%A4%98." target="_blank">🤖 ChatGPT 일정 짜기</a>
+        </div>
+      </div>
+
+
+      <div class="top-card">
+        <div>
+          <div class="card-header">
+            <div>
+              <div class="dest-country">베트남 · 직항 4.5시간</div>
+              <div class="dest-title">다낭 (DAD)</div>
+            </div>
+            <div class="card-metric">
+              <div class="flight-price">237,000원</div>
+              <div class="flight-discount">LCC특가 왕복</div>
+            </div>
+          </div>
+          <div style="margin-bottom: 0.75rem;">
+             <span class="badge badge-normal">🌤️ 무난한 시즌</span>
+          </div>
+          <div class="card-dates">
+            <div class="date-row">
+              <span style="color: var(--text-sub);">출발</span>
+              <span><strong>2026-12-17 (목)</strong></span>
+            </div>
+            <div class="date-row">
+              <span style="color: var(--text-sub);">도착</span>
+              <span><strong>2026-12-20 (일)</strong> [3박 4일]</span>
+            </div>
+          </div>
+          <div class="budget-box">
+            <div class="budget-row">
+              <span>숙박 (3박 평균)</span>
+              <span>180,000원</span>
+            </div>
+            <div class="budget-row">
+              <span>식비/교통 (4일)</span>
+              <span>140,000원</span>
+            </div>
+            <div class="budget-row total">
+              <span>1인 총 예상 경비</span>
+              <span>약 55만 원</span>
+            </div>
+            <div class="budget-row" style="font-size: 0.75rem; color: #64748b;">
+              <span>(2인 기준 총합: 약 93만 원)</span>
+            </div>
+          </div>
+          <div class="tip-box">
+            <strong>비자/팁:</strong> 무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참) · 그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천
+          </div>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-secondary" onclick="openPromptModal('DAD')">📋 프롬프트 보기</button>
+          <a class="btn btn-primary" href="https://chatgpt.com/?q=%5B%EC%97%AC%ED%96%89%20%EA%B3%84%ED%9A%8D%20%EC%9A%94%EC%B2%AD%3A%20%EB%8B%A4%EB%82%AD%203%EB%B0%95%204%EC%9D%BC%20%EC%B5%9C%EC%A0%81%20%EC%9D%BC%EC%A0%95%5D%0A%0A1.%20%EC%97%AC%ED%96%89%20%EA%B8%B0%EB%B3%B8%20%EC%A0%95%EB%B3%B4%3A%0A-%20%EB%AA%A9%EC%A0%81%EC%A7%80%3A%20%EB%B2%A0%ED%8A%B8%EB%82%A8%20%EB%8B%A4%EB%82%AD%20%28DAD%29%0A-%20%EB%B9%84%ED%96%89%20%EC%8B%9C%EA%B0%84%3A%20%EC%95%BD%204.5%EC%8B%9C%EA%B0%84%0A-%20%EC%97%AC%ED%96%89%20%EC%9D%BC%EC%A0%95%3A%202026-12-17%28%EB%AA%A9%29%20~%202026-12-20%28%EC%9D%BC%29%20%283%EB%B0%95%204%EC%9D%BC%20%EC%A3%BC%EB%A7%90%20%EC%9D%BC%EC%A0%95%29%0A-%20%ED%95%AD%EA%B3%B5%20%EC%A0%95%EB%B3%B4%3A%20ICN%20%E2%86%94%20DAD%20%28LCC%ED%8A%B9%EA%B0%80%2C%20%EC%99%95%EB%B3%B5%20%EC%95%BD%20237%2C000%EC%9B%90%29%0A-%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%3A%201%EC%9D%B8%20%EC%B4%9D%20557%2C000%EC%9B%90%20%28%ED%95%AD%EA%B3%B5%20237%2C000%EC%9B%90%20/%20%EC%88%99%EC%86%8C%20180%2C000%EC%9B%90%20/%20%EC%8B%9D%EB%B9%84%C2%B7%EA%B5%90%ED%86%B5%20140%2C000%EC%9B%90%29%0A-%202%EC%9D%B8%20%EA%B8%B0%EC%A4%80%20%EC%98%88%EC%83%81%3A%20%EC%95%BD%20934%2C000%EC%9B%90%20%28%EC%88%99%EC%86%8C%201%EC%8B%A4%20%EC%89%90%EC%96%B4%29%0A-%20%EB%B9%84%EC%9E%90/%EC%9E%85%EA%B5%AD%20%EC%A0%95%EB%B3%B4%3A%20%EB%AC%B4%EB%B9%84%EC%9E%90%2045%EC%9D%BC%20%28%EC%97%AC%EA%B6%8C%20%EC%9C%A0%ED%9A%A8%EA%B8%B0%EA%B0%84%206%EA%B0%9C%EC%9B%94%20%EC%9D%B4%EC%83%81%20%ED%95%84%EC%88%98%2C%20%EA%B7%80%EA%B5%AD%ED%8E%B8%20%ED%8B%B0%EC%BC%93%20%EC%A7%80%EC%B0%B8%29%0A-%20%EC%97%AC%ED%96%89%20%ED%8C%81/%EC%A3%BC%EC%9D%98%EC%82%AC%ED%95%AD%3A%20%EA%B7%B8%EB%9E%A9%28Grab%29%20%EC%95%B1%20%ED%95%84%EC%88%98%2C%20%ED%98%B8%EC%9D%B4%EC%95%88%20%EC%95%BC%EC%8B%9C%EC%9E%A5%20%EC%BD%94%EC%BD%94%EB%84%9B%20%EB%B0%B0%20%EC%B2%B4%ED%97%98%20%EC%B6%94%EC%B2%9C%20%28%EC%A3%BC%EC%9D%98%3A%209~11%EC%9B%94%20%EC%9A%B0%EA%B8%B0%20%EC%A7%91%EC%A4%91%20%ED%98%B8%EC%9A%B0%20%EB%B0%8F%20%ED%83%9C%ED%92%8D%20%EC%A3%BC%EC%9D%98%29%0A-%20%EC%84%A0%ED%98%B8%20%EC%8A%A4%ED%83%80%EC%9D%BC%3A%20%EA%B0%80%EC%84%B1%EB%B9%84%20%26%20%EB%A1%9C%EC%BB%AC%20%ED%9E%90%EB%A7%81/%EB%A7%9B%EC%A7%91%20%ED%83%90%EB%B0%A9%0A%0A2.%20%EC%9A%94%EC%B2%AD%20%EC%82%AC%ED%95%AD%3A%0A%E2%91%A0%20%EC%9C%84%203%EB%B0%95%204%EC%9D%BC%20%EC%9D%BC%EC%A0%95%EC%97%90%20%EB%A7%9E%EC%B6%98%20%27%EB%AC%B4%EB%A6%AC%20%EC%97%86%EB%8A%94%20%EC%8B%9C%EA%B0%84%EB%8C%80%EB%B3%84%20%EB%8F%99%EC%84%A0%28%EC%98%A4%EC%A0%84/%EC%98%A4%ED%9B%84/%EC%A0%80%EB%85%81%29%27%EC%9D%84%20%EC%83%81%EC%84%B8%ED%9E%88%20%EC%A7%9C%EC%A4%98.%0A%E2%91%A1%20%ED%98%84%EC%A7%80%EC%9D%B8%20%EC%B6%94%EC%B2%9C%20%EA%B0%80%EC%84%B1%EB%B9%84%20%EB%A1%9C%EC%BB%AC%20%EB%A7%9B%EC%A7%91%EA%B3%BC%20%EC%B9%B4%ED%8E%98%EB%A5%BC%20%EA%B0%81%20%EC%9D%BC%EC%9E%90%EB%B3%84%EB%A1%9C%202%EA%B3%B3%EC%94%A9%20%EC%B6%94%EC%B2%9C%ED%95%B4%EC%A4%98.%0A%E2%91%A2%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%2855%EB%A7%8C%20%EC%9B%90%EB%8C%80%29%20%EC%95%88%EC%97%90%EC%84%9C%20%EC%95%8C%EB%9C%B0%ED%95%98%EA%B2%8C%20%EC%A6%90%EA%B8%B8%20%EC%88%98%20%EC%9E%88%EB%8A%94%20%ED%8C%A8%EC%8A%A4%EA%B6%8C%28%EA%B5%90%ED%86%B5%EA%B6%8C%29%EC%9D%B4%EB%82%98%20%EA%B2%B0%EC%A0%9C%20%EA%BF%80%ED%8C%81%EC%9D%84%20%EC%95%8C%EB%A0%A4%EC%A4%98.%0A%E2%91%A3%202026-12%EC%9B%94%20%ED%98%84%EC%A7%80%20%EB%82%A0%EC%94%A8%EC%97%90%20%EB%A7%9E%EB%8A%94%20%EC%98%B7%EC%B0%A8%EB%A6%BC%EA%B3%BC%20%EA%BC%AD%20%EC%B1%99%EA%B2%A8%EC%95%BC%20%ED%95%A0%20%EC%A4%80%EB%B9%84%EB%AC%BC%20%EB%AA%A9%EB%A1%9D%EC%9D%84%20%EC%A0%95%EB%A6%AC%ED%95%B4%EC%A4%98." target="_blank">🤖 ChatGPT 일정 짜기</a>
+        </div>
+      </div>
+
+    </div>
+
+    <h2>📊 6개월 주말 왕복 항공권 최저가 히트맵</h2>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="text-align: left; padding-left: 1rem;">도시명</th>
+            <th>2026-11</th><th>2026-12</th><th>2027-01</th><th>2027-02</th><th>2027-03</th><th>2027-04</th>
+          </tr>
+        </thead>
+        <tbody>
+          
+          <tr>
+            <td class="dest-col">후쿠오카 <span style="font-size: 0.75rem; color: var(--text-sub);">(FUK)</span></td>
+            <td><span class="matrix-deal deal-best-season">21만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-26</small></span></td><td><span class="matrix-deal deal-best-season">16만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">21만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-07</small></span></td><td><span class="matrix-deal deal-best-season">18만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">18만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">21만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-15</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">도쿄 <span style="font-size: 0.75rem; color: var(--text-sub);">(NRT)</span></td>
+            <td><span class="matrix-deal deal-best-season">34만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-19</small></span></td><td><span class="matrix-deal deal-best-season">27만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">30만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-14</small></span></td><td><span class="matrix-deal deal-best-season">30만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">30만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">35만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-08</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">오사카 <span style="font-size: 0.75rem; color: var(--text-sub);">(KIX)</span></td>
+            <td><span class="matrix-deal deal-best-season">29만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-26</small></span></td><td><span class="matrix-deal deal-best-season">22만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">27만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-14</small></span></td><td><span class="matrix-deal deal-best-season">26만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">25만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">28만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-15</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">다낭 <span style="font-size: 0.75rem; color: var(--text-sub);">(DAD)</span></td>
+            <td><span class="matrix-deal deal-super">21만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-19</small></span></td><td><span class="matrix-deal deal-super">22만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-18</small></span></td><td><span class="matrix-deal deal-best-season">28만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-14</small></span></td><td><span class="matrix-deal deal-best-season">29만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">30만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-12</small></span></td><td><span class="matrix-deal deal-best-season">31만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-01</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">나트랑 <span style="font-size: 0.75rem; color: var(--text-sub);">(CXR)</span></td>
+            <td><span class="matrix-deal deal-super">22만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-19</small></span></td><td><span class="matrix-deal deal-super">23만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">31만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-07</small></span></td><td><span class="matrix-deal deal-best-season">29만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">28만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">32만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-29</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">방콕 <span style="font-size: 0.75rem; color: var(--text-sub);">(BKK)</span></td>
+            <td><span class="matrix-deal deal-best-season">38만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-19</small></span></td><td><span class="matrix-deal deal-best-season">29만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">35만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-14</small></span></td><td><span class="matrix-deal deal-best-season">32만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">32만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-normal">31만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-01</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">타이베이 <span style="font-size: 0.75rem; color: var(--text-sub);">(TPE)</span></td>
+            <td><span class="matrix-deal deal-best-season">27만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-26</small></span></td><td><span class="matrix-deal deal-best-season">23만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">25만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-07</small></span></td><td><span class="matrix-deal deal-best-season">25만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-12</small></span></td><td><span class="matrix-deal deal-best-season">23만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">28만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-01</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">괌 <span style="font-size: 0.75rem; color: var(--text-sub);">(GUM)</span></td>
+            <td><span class="matrix-deal deal-normal">40만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-20</small></span></td><td><span class="matrix-deal deal-best-season">37만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">42만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-07</small></span></td><td><span class="matrix-deal deal-best-season">40만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-best-season">42만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">45만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-08</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">발리 <span style="font-size: 0.75rem; color: var(--text-sub);">(DPS)</span></td>
+            <td><span class="matrix-deal deal-normal">52만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-26</small></span></td><td><span class="matrix-deal deal-super">37만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-17</small></span></td><td><span class="matrix-deal deal-super">41만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-14</small></span></td><td><span class="matrix-deal deal-super">35만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-18</small></span></td><td><span class="matrix-deal deal-normal">50만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">62만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-01</small></span></td>
+          </tr>
+
+
+          <tr>
+            <td class="dest-col">싱가포르 <span style="font-size: 0.75rem; color: var(--text-sub);">(SIN)</span></td>
+            <td><span class="matrix-deal deal-super">32만<br><small style="font-size: 0.7rem; opacity: 0.8;">11-26</small></span></td><td><span class="matrix-deal deal-super">29만<br><small style="font-size: 0.7rem; opacity: 0.8;">12-24</small></span></td><td><span class="matrix-deal deal-best-season">43만<br><small style="font-size: 0.7rem; opacity: 0.8;">01-07</small></span></td><td><span class="matrix-deal deal-best-season">43만<br><small style="font-size: 0.7rem; opacity: 0.8;">02-12</small></span></td><td><span class="matrix-deal deal-best-season">40만<br><small style="font-size: 0.7rem; opacity: 0.8;">03-18</small></span></td><td><span class="matrix-deal deal-best-season">48만<br><small style="font-size: 0.7rem; opacity: 0.8;">04-22</small></span></td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <h2>🌍 10대 추천 여행지별 비자 규정 및 핵심 여행 팁</h2>
+    <div class="all-dest-grid">
+      
+        <div class="dest-card-compact">
+          <h3>
+            <span>후쿠오카 (FUK)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">일본</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (비짓재팬웹 등록 권장, 여권 유효기간 잔여 필수)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 10월, 11월, 12월, 1월, 2월, 3월, 4월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 7월, 8월 (7~8월 고온다습 혹서기 및 장마)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 8만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 5만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 지하철 1일권(640엔), 하카타 라멘, 유후인 온천 당일치기 추천</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>도쿄 (NRT)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">일본</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (비짓재팬웹 등록 권장)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 10월, 11월, 12월, 1월, 2월, 3월, 4월, 5월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 7월, 8월 (7~8월 도심 열섬 현상 및 태풍 시즌)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 13만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 6만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 스이카/파스모 교통카드 필수, 나리타 익스프레스 왕복권 할인 이용</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>오사카 (KIX)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">일본</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (비짓재팬웹 등록 권장)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 10월, 11월, 12월, 1월, 2월, 3월, 4월, 5월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 7월, 8월 (여름철 혹서기 및 장마)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 11만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 6만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 라피트 특급 열차 사전 예매, 교토 당일치기 한큐 패스 추천</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>다낭 (DAD)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">베트남</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 1월, 2월, 3월, 4월, 5월, 6월, 7월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 9월, 10월, 11월 (9~11월 우기 집중 호우 및 태풍 주의)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 6만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 3만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>나트랑 (CXR)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">베트남</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 45일 (여권 유효기간 6개월 이상 필수)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 1월, 2월, 3월, 4월, 5월, 6월, 7월, 8월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 10월, 11월 (10~11월 집중 우기)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 6만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 3만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 가성비 오션뷰 리조트 특화, 해산물 거리 야시장 추천</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>방콕 (BKK)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">태국</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (여권 유효기간 6개월 이상 필수)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 11월, 12월, 1월, 2월, 3월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 5월, 6월, 7월, 8월, 9월 (우기 스콜성 폭우 및 무더위 시즌)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 8만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 4만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 GLN(모바일 해외결제) 사용 편리, 루프탑 바 및 야시장 문화 특화</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>타이베이 (TPE)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">대만</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (여권 유효기간 6개월 이상 권장)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 10월, 11월, 12월, 1월, 2월, 3월, 4월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 6월, 7월, 8월 (여름철 태풍 빈번 및 습한 더위)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 9만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 4만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 이지카드(교통카드) 필수, 스펀 풍등 &amp; 지우펀 일일투어 추천</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>괌 (GUM)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">미국</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 45일 (ESTA 비자 신청 시 입국 심사 패스트트랙 가능)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 12월, 1월, 2월, 3월, 4월, 5월, 6월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 7월, 8월, 9월, 10월 (우기 스콜 및 열대성 저기압 주의)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 24만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 9만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 렌터카 필수(한국 운전면허증으로 운전 가능), 쇼핑 면세 혜택</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>발리 (DPS)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">인도네시아</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 도착비자(VOA) 500,000 IDR (약 4.3만원) 필수 + 관광세 150,000 IDR</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 4월, 5월, 6월, 7월, 8월, 9월, 10월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 12월, 1월, 2월 (12~2월 몬순 우기)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 12만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 4만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 전자도착비자(e-VOA) 사전 신청 권장, 우붓 힐링 + 꾸따 서핑 분할 숙박</div>
+        </div>
+
+
+        <div class="dest-card-compact">
+          <h3>
+            <span>싱가포르 (SIN)</span>
+            <span style="font-size: 0.85rem; color: var(--accent-cyan);">싱가포르</span>
+          </h3>
+          <div class="dest-detail-line"><strong>비자:</strong> 무비자 90일 (SG Arrival Card 입국 3일 전 모바일 작성 필수)</div>
+          <div class="dest-detail-line"><strong>최적 시즌:</strong> 1월, 2월, 3월, 4월, 5월, 6월, 7월, 8월</div>
+          <div class="dest-detail-line"><strong>주의 시기:</strong> 11월, 12월 (연말 몬순 우기 스콜)</div>
+          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 21만 원</div>
+          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 7만 원</div>
+          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 치안 최상, 해외결제 신용카드로 대중교통 태그 승차 가능</div>
+        </div>
+
+    </div>
+
+    <footer>
+      <p>본 리포트는 자동화된 주말 항공권 트렌드 분석 엔진에 의해 생성되었습니다.</p>
+      <p>© 2026 kwTravelBrief · SafeTelegramDispatcher Enabled · Zero Phantom Fares</p>
+    </footer>
+  </div>
+
+  <!-- Prompt Modal -->
+  <div class="modal" id="promptModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modalTitle">🤖 AI 여행 계획 프롬프트</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.85rem; color: var(--text-sub); margin-bottom: 0.5rem;">
+          복사하여 ChatGPT나 Gemini에 붙여넣으면 3박 4일 맞춤 일정과 로컬 맛집을 바로 짜줍니다:
+        </p>
+        <textarea id="promptText" readonly></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal()">닫기</button>
+        <button class="btn btn-primary" onclick="copyPrompt()">📋 프롬프트 복사</button>
+        <a class="btn btn-primary" id="modalChatGptBtn" target="_blank" style="background: #10a37f;">ChatGPT 바로 열기</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const promptsData = {"DAD": {"dest_name": "다낭", "prompt": "[여행 계획 요청: 다낭 3박 4일 최적 일정]\n\n1. 여행 기본 정보:\n- 목적지: 베트남 다낭 (DAD)\n- 비행 시간: 약 4.5시간\n- 여행 일정: 2026-12-17(목) ~ 2026-12-20(일) (3박 4일 주말 일정)\n- 항공 정보: ICN ↔ DAD (LCC특가, 왕복 약 237,000원)\n- 예상 예산: 1인 총 557,000원 (항공 237,000원 / 숙소 180,000원 / 식비·교통 140,000원)\n- 2인 기준 예상: 약 934,000원 (숙소 1실 쉐어)\n- 비자/입국 정보: 무비자 45일 (여권 유효기간 6개월 이상 필수, 귀국편 티켓 지참)\n- 여행 팁/주의사항: 그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천 (주의: 9~11월 우기 집중 호우 및 태풍 주의)\n- 선호 스타일: 가성비 & 로컬 힐링/맛집 탐방\n\n2. 요청 사항:\n① 위 3박 4일 일정에 맞춘 '무리 없는 시간대별 동선(오전/오후/저녁)'을 상세히 짜줘.\n② 현지인 추천 가성비 로컬 맛집과 카페를 각 일자별로 2곳씩 추천해줘.\n③ 예상 예산(55만 원대) 안에서 알뜰하게 즐길 수 있는 패스권(교통권)이나 결제 꿀팁을 알려줘.\n④ 2026-12월 현지 날씨에 맞는 옷차림과 꼭 챙겨야 할 준비물 목록을 정리해줘.", "chatgpt_link": "https://chatgpt.com/?q=%5B%EC%97%AC%ED%96%89%20%EA%B3%84%ED%9A%8D%20%EC%9A%94%EC%B2%AD%3A%20%EB%8B%A4%EB%82%AD%203%EB%B0%95%204%EC%9D%BC%20%EC%B5%9C%EC%A0%81%20%EC%9D%BC%EC%A0%95%5D%0A%0A1.%20%EC%97%AC%ED%96%89%20%EA%B8%B0%EB%B3%B8%20%EC%A0%95%EB%B3%B4%3A%0A-%20%EB%AA%A9%EC%A0%81%EC%A7%80%3A%20%EB%B2%A0%ED%8A%B8%EB%82%A8%20%EB%8B%A4%EB%82%AD%20%28DAD%29%0A-%20%EB%B9%84%ED%96%89%20%EC%8B%9C%EA%B0%84%3A%20%EC%95%BD%204.5%EC%8B%9C%EA%B0%84%0A-%20%EC%97%AC%ED%96%89%20%EC%9D%BC%EC%A0%95%3A%202026-12-17%28%EB%AA%A9%29%20~%202026-12-20%28%EC%9D%BC%29%20%283%EB%B0%95%204%EC%9D%BC%20%EC%A3%BC%EB%A7%90%20%EC%9D%BC%EC%A0%95%29%0A-%20%ED%95%AD%EA%B3%B5%20%EC%A0%95%EB%B3%B4%3A%20ICN%20%E2%86%94%20DAD%20%28LCC%ED%8A%B9%EA%B0%80%2C%20%EC%99%95%EB%B3%B5%20%EC%95%BD%20237%2C000%EC%9B%90%29%0A-%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%3A%201%EC%9D%B8%20%EC%B4%9D%20557%2C000%EC%9B%90%20%28%ED%95%AD%EA%B3%B5%20237%2C000%EC%9B%90%20/%20%EC%88%99%EC%86%8C%20180%2C000%EC%9B%90%20/%20%EC%8B%9D%EB%B9%84%C2%B7%EA%B5%90%ED%86%B5%20140%2C000%EC%9B%90%29%0A-%202%EC%9D%B8%20%EA%B8%B0%EC%A4%80%20%EC%98%88%EC%83%81%3A%20%EC%95%BD%20934%2C000%EC%9B%90%20%28%EC%88%99%EC%86%8C%201%EC%8B%A4%20%EC%89%90%EC%96%B4%29%0A-%20%EB%B9%84%EC%9E%90/%EC%9E%85%EA%B5%AD%20%EC%A0%95%EB%B3%B4%3A%20%EB%AC%B4%EB%B9%84%EC%9E%90%2045%EC%9D%BC%20%28%EC%97%AC%EA%B6%8C%20%EC%9C%A0%ED%9A%A8%EA%B8%B0%EA%B0%84%206%EA%B0%9C%EC%9B%94%20%EC%9D%B4%EC%83%81%20%ED%95%84%EC%88%98%2C%20%EA%B7%80%EA%B5%AD%ED%8E%B8%20%ED%8B%B0%EC%BC%93%20%EC%A7%80%EC%B0%B8%29%0A-%20%EC%97%AC%ED%96%89%20%ED%8C%81/%EC%A3%BC%EC%9D%98%EC%82%AC%ED%95%AD%3A%20%EA%B7%B8%EB%9E%A9%28Grab%29%20%EC%95%B1%20%ED%95%84%EC%88%98%2C%20%ED%98%B8%EC%9D%B4%EC%95%88%20%EC%95%BC%EC%8B%9C%EC%9E%A5%20%EC%BD%94%EC%BD%94%EB%84%9B%20%EB%B0%B0%20%EC%B2%B4%ED%97%98%20%EC%B6%94%EC%B2%9C%20%28%EC%A3%BC%EC%9D%98%3A%209~11%EC%9B%94%20%EC%9A%B0%EA%B8%B0%20%EC%A7%91%EC%A4%91%20%ED%98%B8%EC%9A%B0%20%EB%B0%8F%20%ED%83%9C%ED%92%8D%20%EC%A3%BC%EC%9D%98%29%0A-%20%EC%84%A0%ED%98%B8%20%EC%8A%A4%ED%83%80%EC%9D%BC%3A%20%EA%B0%80%EC%84%B1%EB%B9%84%20%26%20%EB%A1%9C%EC%BB%AC%20%ED%9E%90%EB%A7%81/%EB%A7%9B%EC%A7%91%20%ED%83%90%EB%B0%A9%0A%0A2.%20%EC%9A%94%EC%B2%AD%20%EC%82%AC%ED%95%AD%3A%0A%E2%91%A0%20%EC%9C%84%203%EB%B0%95%204%EC%9D%BC%20%EC%9D%BC%EC%A0%95%EC%97%90%20%EB%A7%9E%EC%B6%98%20%27%EB%AC%B4%EB%A6%AC%20%EC%97%86%EB%8A%94%20%EC%8B%9C%EA%B0%84%EB%8C%80%EB%B3%84%20%EB%8F%99%EC%84%A0%28%EC%98%A4%EC%A0%84/%EC%98%A4%ED%9B%84/%EC%A0%80%EB%85%81%29%27%EC%9D%84%20%EC%83%81%EC%84%B8%ED%9E%88%20%EC%A7%9C%EC%A4%98.%0A%E2%91%A1%20%ED%98%84%EC%A7%80%EC%9D%B8%20%EC%B6%94%EC%B2%9C%20%EA%B0%80%EC%84%B1%EB%B9%84%20%EB%A1%9C%EC%BB%AC%20%EB%A7%9B%EC%A7%91%EA%B3%BC%20%EC%B9%B4%ED%8E%98%EB%A5%BC%20%EA%B0%81%20%EC%9D%BC%EC%9E%90%EB%B3%84%EB%A1%9C%202%EA%B3%B3%EC%94%A9%20%EC%B6%94%EC%B2%9C%ED%95%B4%EC%A4%98.%0A%E2%91%A2%20%EC%98%88%EC%83%81%20%EC%98%88%EC%82%B0%2855%EB%A7%8C%20%EC%9B%90%EB%8C%80%29%20%EC%95%88%EC%97%90%EC%84%9C%20%EC%95%8C%EB%9C%B0%ED%95%98%EA%B2%8C%20%EC%A6%90%EA%B8%B8%20%EC%88%98%20%EC%9E%88%EB%8A%94%20%ED%8C%A8%EC%8A%A4%EA%B6%8C%28%EA%B5%90%ED%86%B5%EA%B6%8C%29%EC%9D%B4%EB%82%98%20%EA%B2%B0%EC%A0%9C%20%EA%BF%80%ED%8C%81%EC%9D%84%20%EC%95%8C%EB%A0%A4%EC%A4%98.%0A%E2%91%A3%202026-12%EC%9B%94%20%ED%98%84%EC%A7%80%20%EB%82%A0%EC%94%A8%EC%97%90%20%EB%A7%9E%EB%8A%94%20%EC%98%B7%EC%B0%A8%EB%A6%BC%EA%B3%BC%20%EA%BC%AD%20%EC%B1%99%EA%B2%A8%EC%95%BC%20%ED%95%A0%20%EC%A4%80%EB%B9%84%EB%AC%BC%20%EB%AA%A9%EB%A1%9D%EC%9D%84%20%EC%A0%95%EB%A6%AC%ED%95%B4%EC%A4%98."}};
+
+    function openPromptModal(code) {
+      const data = promptsData[code];
+      if (!data) return;
+      document.getElementById('modalTitle').innerText = '🤖 ' + data.dest_name + ' AI 여행 계획 프롬프트';
+      document.getElementById('promptText').value = data.prompt;
+      document.getElementById('modalChatGptBtn').href = data.chatgpt_link;
+      document.getElementById('promptModal').classList.add('active');
+    }
+
+    function closeModal() {
+      document.getElementById('promptModal').classList.remove('active');
+    }
+
+    function copyPrompt() {
+      const textarea = document.getElementById('promptText');
+      textarea.select();
+      navigator.clipboard.writeText(textarea.value).then(() => {
+        alert('프롬프트가 클립보드에 복사되었습니다! ChatGPT나 Gemini에 붙여넣으세요.');
+      });
+    }
+
+    window.onclick = function(event) {
+      const modal = document.getElementById('promptModal');
+      if (event.target === modal) {
+        closeModal();
+      }
+    };
+  </script>
+</body>
+</html>
