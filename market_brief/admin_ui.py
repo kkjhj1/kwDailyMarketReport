@@ -11,7 +11,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>텔레그램 봇 구독 서비스 관리자</title>
   <style>
     :root {
@@ -441,6 +444,183 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       font-weight: 600;
       box-shadow: 0 4px 12px rgba(0,0,0,0.18);
     }
+    /* Mobile Bottom Navigation Bar (App Style) */
+    .bottom-nav {
+      display: none;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: #ffffff;
+      border-top: 1px solid var(--border);
+      height: 60px;
+      z-index: 180;
+      justify-content: space-around;
+      align-items: center;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+    }
+    .bnav-btn {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      gap: 3px;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .bnav-btn.active {
+      color: var(--primary);
+    }
+    .bnav-icon {
+      font-size: 19px;
+      line-height: 1;
+    }
+    .bnav-label {
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    /* Mobile Responsive Overrides */
+    @media (max-width: 768px) {
+      .header {
+        padding: 10px 14px;
+      }
+      .header-title {
+        font-size: 14px;
+      }
+      .header-sub {
+        display: none;
+      }
+      .header-actions {
+        gap: 6px;
+      }
+      .pill {
+        padding: 3px 8px;
+        font-size: 11px;
+      }
+
+      /* Hide Desktop Top Tab Bar on Mobile */
+      .tab-bar {
+        display: none;
+      }
+
+      /* Show Mobile App Bottom Navigation Bar */
+      .bottom-nav {
+        display: flex;
+      }
+
+      /* Container spacing for bottom nav */
+      .container {
+        margin: 12px auto;
+        padding: 0 12px 76px;
+      }
+
+      /* Floating sim button hidden (integrated in bottom nav) */
+      .float-sim-btn {
+        display: none !important;
+      }
+
+      /* Cards on mobile */
+      .card {
+        padding: 14px;
+        border-radius: 12px;
+        margin-bottom: 14px;
+      }
+      .card-header {
+        margin-bottom: 12px;
+      }
+      .card-title {
+        font-size: 14.5px;
+      }
+      .card-desc {
+        font-size: 12px;
+      }
+
+      /* User Table -> Mobile Card View Transformation */
+      table.table,
+      table.table thead,
+      table.table tbody,
+      table.table th,
+      table.table td,
+      table.table tr {
+        display: block;
+      }
+      table.table thead {
+        display: none;
+      }
+      table.table tr {
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        margin-bottom: 12px;
+        padding: 12px 14px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      }
+      table.table td {
+        padding: 5px 0;
+        border: none;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 13px;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      table.table td::before {
+        content: attr(data-label);
+        font-weight: 700;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      table.table td:last-child {
+        border-top: 1px dashed var(--border);
+        padding-top: 8px;
+        margin-top: 6px;
+        justify-content: flex-end;
+      }
+
+      /* Bot Grid 1-column on mobile */
+      .bot-grid {
+        grid-template-columns: 1fr;
+      }
+
+      /* Bottom Sheet Modal on Mobile */
+      .modal-backdrop {
+        align-items: flex-end;
+        padding: 0;
+      }
+      .modal-box {
+        border-radius: 20px 20px 0 0;
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: 86vh;
+        overflow-y: auto;
+        animation: slideUpModal 0.22s ease-out;
+        padding: 18px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+      }
+      @keyframes slideUpModal {
+        from { transform: translateY(100%); }
+        to { transform: translateY(0); }
+      }
+
+      /* Form controls iOS Zoom Prevention */
+      .form-input, .form-select, .form-textarea {
+        font-size: 16px;
+      }
+
+      /* Tier Specs on Mobile */
+      #tierSpecGrid {
+        grid-template-columns: 1fr 1fr !important;
+        gap: 8px !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -471,6 +651,26 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </button>
     <button class="tab-btn" data-tab="dashboard" onclick="switchTab('dashboard')">
       📊 3. 운영 현황
+    </button>
+  </nav>
+
+  <!-- Mobile Bottom Navigation Bar (App Navigation) -->
+  <nav class="bottom-nav">
+    <button class="bnav-btn active" data-bnav="users" onclick="switchTab('users')">
+      <span class="bnav-icon">👥</span>
+      <span class="bnav-label">유저 관리</span>
+    </button>
+    <button class="bnav-btn" data-bnav="bots" onclick="switchTab('bots')">
+      <span class="bnav-icon">🤖</span>
+      <span class="bnav-label">봇 &amp; 발송</span>
+    </button>
+    <button class="bnav-btn" data-bnav="dashboard" onclick="switchTab('dashboard')">
+      <span class="bnav-icon">📊</span>
+      <span class="bnav-label">운영 현황</span>
+    </button>
+    <button class="bnav-btn" onclick="openSimModal()">
+      <span class="bnav-icon">🧪</span>
+      <span class="bnav-label">시뮬레이터</span>
     </button>
   </nav>
 
@@ -873,6 +1073,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     function switchTab(tab) {
       S.activeTab = tab;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      document.querySelectorAll('.bnav-btn').forEach(b => b.classList.toggle('active', b.dataset.bnav === tab));
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `pane-${tab}`));
       if (tab === 'users') loadUsers();
       if (tab === 'bots') loadBots();
@@ -949,11 +1150,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
           return `
             <tr>
-              <td>
+              <td data-label="회원 정보">
                 <div style="font-weight:800;">${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px;">[차단]</span>' : ''}</div>
                 <div style="font-size:12px; color:var(--text-muted);">ID: <code>${esc(u.telegram_user_id)}</code> ${u.username ? `· @${esc(u.username)}` : ''}</div>
               </td>
-              <td>
+              <td data-label="회원 등급">
                 <select class="form-select" style="width:165px; font-weight:700; padding:6px 9px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
                   <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1개)</option>
                   <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3개)</option>
@@ -961,21 +1162,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                   <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
                 </select>
               </td>
-              <td>
+              <td data-label="슬롯 사용">
                 <div style="font-weight:800; font-size:12.5px;">${slotTxt}</div>
                 <div class="slot-bar"><div class="slot-bar-fill" style="width:${pct}%; background:${barColor};"></div></div>
               </td>
-              <td>
+              <td data-label="구독 중인 봇">
                 <div style="display:flex; flex-wrap:wrap; align-items:center; gap:2px;">
                   ${botChips || '<span style="color:var(--text-muted); font-size:12px;">구독 없음</span>'}
                   ${suspChips}
                   <button class="btn btn-sm" style="padding:2px 7px; margin-left:3px;" onclick="openAddSubModal('${esc(u.telegram_user_id)}')">+ 추가</button>
                 </div>
               </td>
-              <td style="font-size:12px;">
+              <td data-label="등급 만료일" style="font-size:12px;">
                 ${u.tier_expires_at ? `<code>${esc(u.tier_expires_at.slice(0,10))}</code>` : '<span style="color:var(--text-muted);">무기한</span>'}
               </td>
-              <td>
+              <td data-label="관리">
                 <div style="display:flex; gap:4px;">
                   <button class="btn btn-sm" onclick="openEditUserModal('${esc(u.telegram_user_id)}')">수정</button>
                   <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.telegram_user_id)}')">삭제</button>

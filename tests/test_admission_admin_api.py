@@ -74,6 +74,19 @@ class AdmissionAdminApiTests(unittest.TestCase):
         self.assertIn("formatted_html", data)
         self.assertTrue(data["briefing"]["silent"])
 
+    def test_github_sync_status_all(self):
+        res = self.client.get("/api/recipients/github-sync-status-all")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        if data.get("github_connected"):
+            self.assertIn("bots", data)
+            self.assertIn("finance", data["bots"])
+            self.assertIn("travel", data["bots"])
+            self.assertIn("admission", data["bots"])
+            self.assertEqual(data["bots"]["admission"]["var_name"], "EDU_TELEGRAM_CHAT_ID")
+            self.assertEqual(data["bots"]["travel"]["var_name"], "TRAVEL_TELEGRAM_CHAT_ID")
+            self.assertEqual(data["bots"]["finance"]["var_name"], "TELEGRAM_CHAT_ID")
+
 
 if __name__ == "__main__":
     unittest.main()

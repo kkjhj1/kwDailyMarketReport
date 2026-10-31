@@ -272,6 +272,11 @@ def create_admin_app(
     app.state.router = router
     app.state.bot_manager = bot_manager
 
+    adm_db = AdmissionDatabase(db_path=ROOT / "data/admission_brief.db") if _HAS_ADMISSION_MODULE else None
+    adm_curator = AICurator() if _HAS_ADMISSION_MODULE else None
+    if adm_db:
+        app.state.adm_db = adm_db
+
     def get_bot_token() -> str:
         brief_bot = sub_engine.get_bot("brief_bot")
         if brief_bot and brief_bot.token and brief_bot.token.strip():
@@ -896,6 +901,73 @@ def create_admin_app(
             "synced_chat_ids": local_ids,
         }
 
+    @app.get("/api/recipients/github-sync-status-all")
+    def get_github_sync_status_all():
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"github_connected": False, "message": "GITHUB_TOKEN 미설정"}
+
+        def _check_bot(var_name: str, local_ids: list[str]) -> dict:
+            exists, gh_val, _ = get_github_variable(var_name)
+            gh_ids = sorted([x.strip() for x in (gh_val or "").split(",") if x.strip()])
+            return {
+                "var_name": var_name,
+                "exists": exists,
+                "local_count": len(local_ids),
+                "github_count": len(gh_ids),
+                "is_synced": sorted(local_ids) == gh_ids,
+            }
+
+        finance_ids = [r.chat_id for r in db.get_active_recipients("FINANCE")]
+        travel_ids = [r.chat_id for r in db.get_active_recipients("TRAVEL")]
+        edu_ids = [s.chat_id for s in adm_db.list_subscribers(active_only=True)] if _HAS_ADMISSION_MODULE else []
+
+        bots_status = {
+            "finance": _check_bot("TELEGRAM_CHAT_ID", finance_ids),
+            "travel": _check_bot("TRAVEL_TELEGRAM_CHAT_ID", travel_ids),
+            "admission": _check_bot("EDU_TELEGRAM_CHAT_ID", edu_ids),
+        }
+        all_synced = all(b["is_synced"] for b in bots_status.values())
+
+        return {
+            "github_connected": True,
+            "all_synced": all_synced,
+            "bots": bots_status,
+        }
+
+    @app.post("/api/recipients/sync-github-all")
+    def sync_all_recipients_to_github():
+        gh_token = get_github_token()
+        if not gh_token:
+            raise HTTPException(status_code=400, detail="GITHUB_TOKEN이 설정되지 않았습니다.")
+
+        results = {}
+        # 1. Finance (시황)
+        finance_ids = [r.chat_id for r in db.get_active_recipients("FINANCE")]
+        if finance_ids:
+            ok, msg = sync_github_variable("TELEGRAM_CHAT_ID", ",".join(finance_ids))
+            results["finance"] = {"success": ok, "count": len(finance_ids), "message": msg}
+
+        # 2. Travel (여행)
+        travel_ids = [r.chat_id for r in db.get_active_recipients("TRAVEL")]
+        if travel_ids:
+            ok, msg = sync_github_variable("TRAVEL_TELEGRAM_CHAT_ID", ",".join(travel_ids))
+            results["travel"] = {"success": ok, "count": len(travel_ids), "message": msg}
+
+        # 3. Admission (입시)
+        if _HAS_ADMISSION_MODULE:
+            adm_subs = adm_db.list_subscribers(active_only=True)
+            edu_ids = [s.chat_id for s in adm_subs]
+            if edu_ids:
+                ok, msg = sync_github_variable("EDU_TELEGRAM_CHAT_ID", ",".join(edu_ids))
+                results["admission"] = {"success": ok, "count": len(edu_ids), "message": msg}
+
+        return {
+            "success": True,
+            "message": "✅ 시황, 여행, 입시봇 전체 깃허브 Actions 수신자 변수 동기화 완료!",
+            "details": results,
+        }
+
     @app.get("/api/dispatch/preview")
     def preview_dispatch(kind: str = "morning"):
         now_kst = datetime.now(KST)
@@ -1170,10 +1242,7 @@ def create_admin_app(
             )
             return {"success": res, "dry_run": req.dry_run}
 
-    if _HAS_ADMISSION_MODULE:
-        adm_db = AdmissionDatabase(db_path=ROOT / "data/admission_brief.db")
-        adm_curator = AICurator()
-
+    if _HAS_ADMISSION_MODULE and adm_db and adm_curator:
         @app.get("/api/admission/status")
         def get_admission_status():
             subscribers = adm_db.list_subscribers(active_only=True)
@@ -1301,9 +1370,10 @@ def find_available_port(preferred_port: int = 8002, max_attempts: int = 20) -> i
 
 if __name__ == "__main__":
     configured_port = int(os.environ.get("ADMIN_PORT", 8002))
+    host = os.environ.get("ADMIN_HOST", "0.0.0.0")
     port = find_available_port(configured_port)
     if port != configured_port:
         print(f"⚠️ [PORT FALLBACK: {configured_port} -> {port}] 포트 {configured_port}번 충돌로 인해 가용 포트 {port}번으로 안전 전환되었습니다.")
-    print(f"🚀 [Multi-Bot Subscription Admin Console] URL: http://127.0.0.1:{port}")
+    print(f"🚀 [Multi-Bot Subscription Admin Console] Local: http://127.0.0.1:{port} | Mobile/Network: http://{host}:{port}")
     app = create_admin_app(enable_bot_workers=True)
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host=host, port=port)

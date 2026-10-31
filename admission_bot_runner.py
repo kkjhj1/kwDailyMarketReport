@@ -214,13 +214,18 @@ def main() -> None:
             print("❌ Error: ADMISSION_TELEGRAM_BOT_TOKEN is not configured.")
             sys.exit(1)
 
-        default_chat_id = get_admission_chat_id()
-        subscribers = db.list_subscribers(grade=target_grade, active_only=True)
-        recipients = [s.chat_id for s in subscribers]
+        env_chat_ids_str = get_admission_chat_id()
+        env_recipients = [x.strip() for x in env_chat_ids_str.split(",") if x.strip()]
 
-        # If DB is empty, use default env chat_id if available
-        if not recipients and default_chat_id:
-            recipients = [default_chat_id]
+        subscribers = db.list_subscribers(grade=target_grade, active_only=True)
+        db_recipients = [s.chat_id for s in subscribers]
+
+        # If explicit GitHub Actions variable (EDU_TELEGRAM_CHAT_ID) is provided, prioritize it; else use DB
+        if env_recipients:
+            recipients = env_recipients
+            print(f"📡 Using {len(recipients)} recipient(s) from GitHub Actions environment variable.")
+        else:
+            recipients = db_recipients
 
         if not recipients:
             print(f"⚠️ No active subscribers found for {target_grade.label}.")
