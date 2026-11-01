@@ -1,7 +1,10 @@
 """Web report generator for Travel Briefing.
 Generates responsive, glassmorphism HTML reports for GitHub Pages and admin console preview.
+Features high-readability price heatmap, 100% one-click Naver Flight & Hotel live verification links,
+transparent data source attribution, and interactive region filters.
 """
 from __future__ import annotations
+
 import html
 import json
 from datetime import datetime
@@ -14,21 +17,48 @@ from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
 
 
+DEST_FLAGS: dict[str, str] = {
+    "FUK": "🇯🇵",
+    "NRT": "🇯🇵",
+    "KIX": "🇯🇵",
+    "DAD": "🇻🇳",
+    "CXR": "🇻🇳",
+    "BKK": "🇹🇭",
+    "TPE": "🇹🇼",
+    "GUM": "🇺🇸",
+    "DPS": "🇮🇩",
+    "SIN": "🇸🇬",
+}
+
+DEST_REGION_TAGS: dict[str, str] = {
+    "FUK": "japan",
+    "NRT": "japan",
+    "KIX": "japan",
+    "DAD": "vietnam",
+    "CXR": "vietnam",
+    "BKK": "asia_city",
+    "TPE": "asia_city",
+    "SIN": "asia_city",
+    "GUM": "resort",
+    "DPS": "resort",
+}
+
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑</title>
+  <title>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑 (실시간 항공·호텔 검증형)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-gradient: linear-gradient(135deg, #0b0f19 0%, #111827 50%, #0d1527 100%);
-      --card-bg: rgba(30, 41, 59, 0.7);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --card-hover: rgba(51, 65, 85, 0.85);
+      --bg-gradient: linear-gradient(135deg, #070b14 0%, #0d1527 50%, #090e1a 100%);
+      --card-bg: rgba(18, 26, 43, 0.78);
+      --card-border: rgba(255, 255, 255, 0.09);
+      --card-hover: rgba(30, 41, 65, 0.9);
       --text-main: #f8fafc;
       --text-sub: #94a3b8;
       --accent-cyan: #38bdf8;
@@ -43,288 +73,710 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       background: var(--bg-gradient);
       color: var(--text-main);
       min-height: 100vh;
-      padding: 2rem 1rem;
+      padding: 2.5rem 1rem;
       line-height: 1.6;
     }
     .container {
-      max-width: 1200px;
+      max-width: 1260px;
       margin: 0 auto;
     }
+
+    /* Header */
     header {
       text-align: center;
       margin-bottom: 2.5rem;
-      padding: 2rem;
-      background: rgba(15, 23, 42, 0.6);
-      border-radius: 20px;
+      padding: 2.5rem 2rem;
+      background: rgba(15, 23, 42, 0.65);
+      border-radius: 24px;
       border: 1px solid var(--card-border);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+      position: relative;
+      overflow: hidden;
+    }
+    header::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, #38bdf8, #34d399, #fbbf24);
     }
     .badge {
       display: inline-block;
-      padding: 0.25rem 0.75rem;
+      padding: 0.3rem 0.85rem;
       border-radius: 9999px;
       font-size: 0.75rem;
-      font-weight: 700;
-      letter-spacing: 0.05em;
+      font-weight: 800;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      margin-bottom: 0.75rem;
+      margin-bottom: 0.85rem;
     }
-    .badge-deal { background: rgba(52, 211, 153, 0.15); color: var(--accent-emerald); border: 1px solid rgba(52, 211, 153, 0.3); }
-    .badge-best { background: rgba(251, 191, 36, 0.15); color: var(--accent-amber); border: 1px solid rgba(251, 191, 36, 0.3); }
-    .badge-caution { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); border: 1px solid rgba(244, 63, 94, 0.3); }
-    .badge-normal { background: rgba(56, 189, 248, 0.15); color: var(--accent-cyan); border: 1px solid rgba(56, 189, 248, 0.3); }
+    .badge-deal { background: rgba(52, 211, 153, 0.15); color: var(--accent-emerald); border: 1px solid rgba(52, 211, 153, 0.35); }
+    .badge-best { background: rgba(251, 191, 36, 0.15); color: var(--accent-amber); border: 1px solid rgba(251, 191, 36, 0.35); }
+    .badge-caution { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); border: 1px solid rgba(244, 63, 94, 0.35); }
+    .badge-normal { background: rgba(56, 189, 248, 0.15); color: var(--accent-cyan); border: 1px solid rgba(56, 189, 248, 0.35); }
 
     h1 {
-      font-size: 2.2rem;
-      font-weight: 800;
-      margin-bottom: 0.5rem;
-      background: linear-gradient(135deg, #ffffff 0%, #38bdf8 100%);
+      font-size: 2.3rem;
+      font-weight: 900;
+      margin-bottom: 0.6rem;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #ffffff 0%, #38bdf8 60%, #34d399 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
     .subtitle {
-      color: var(--text-sub);
-      font-size: 1rem;
+      color: #cbd5e1;
+      font-size: 1.05rem;
+      font-weight: 500;
     }
     .meta-bar {
-      margin-top: 1rem;
-      font-size: 0.85rem;
-      color: #64748b;
+      margin-top: 1.25rem;
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+      font-size: 0.88rem;
+      color: #94a3b8;
+    }
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
     }
 
     h2 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      margin: 2rem 0 1rem;
+      font-size: 1.6rem;
+      font-weight: 800;
+      margin: 2.5rem 0 1.25rem;
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.6rem;
+      letter-spacing: -0.02em;
+      color: #ffffff;
+    }
+    .section-desc {
+      color: var(--text-sub);
+      font-size: 0.92rem;
+      margin-top: -0.8rem;
+      margin-bottom: 1.25rem;
+    }
+
+    /* Transparency & Methodology Box */
+    .source-transparency-card {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 18px;
+      padding: 1.5rem 1.75rem;
+      margin-bottom: 2rem;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+    }
+    .source-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    .source-title-group {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .source-badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 0.25rem 0.65rem;
+      border-radius: 9999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+    }
+    .source-header h3 {
+      font-size: 1.18rem;
+      font-weight: 800;
+      color: #f8fafc;
+    }
+    .source-stamp {
+      font-size: 0.82rem;
+      color: #94a3b8;
+    }
+    .source-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+    .source-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.85rem;
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    .source-icon {
+      font-size: 1.6rem;
+      line-height: 1;
+      padding: 0.35rem;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .source-text strong {
+      display: block;
+      font-size: 0.92rem;
+      color: #f1f5f9;
+      margin-bottom: 0.3rem;
+    }
+    .source-text p {
+      font-size: 0.83rem;
+      color: #94a3b8;
+      line-height: 1.5;
     }
 
     /* TOP 3 Cards Grid */
     .top-cards-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-      gap: 1.5rem;
-      margin-bottom: 3rem;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 1.75rem;
+      margin-bottom: 3.5rem;
     }
     .top-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 1.5rem;
-      backdrop-filter: blur(10px);
-      transition: all 0.25s ease;
+      border-radius: 20px;
+      padding: 1.75rem;
+      backdrop-filter: blur(14px);
+      transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
       position: relative;
       overflow: hidden;
-    }
-    .top-card::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 4px;
-      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-emerald));
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
     }
     .top-card:hover {
-      transform: translateY(-4px);
+      transform: translateY(-5px);
       background: var(--card-hover);
-      border-color: rgba(56, 189, 248, 0.4);
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+      border-color: rgba(56, 189, 248, 0.45);
+      box-shadow: 0 20px 44px rgba(0, 0, 0, 0.55);
     }
-    .card-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 1rem;
-    }
-    .dest-title {
-      font-size: 1.4rem;
+    .top-card-ribbon {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.72rem;
       font-weight: 800;
+      letter-spacing: 0.05em;
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
       color: #fff;
+      box-shadow: 0 4px 12px rgba(6, 182, 212, 0.35);
     }
-    .dest-country {
+    .top-card-header {
+      margin-bottom: 0.85rem;
+    }
+    .dest-region-tag {
       font-size: 0.85rem;
       color: var(--text-sub);
+      margin-bottom: 0.3rem;
     }
-    .card-metric {
-      text-align: right;
-    }
-    .flight-price {
-      font-size: 1.3rem;
+    .dest-main-name {
+      font-size: 1.55rem;
       font-weight: 800;
-      color: var(--accent-emerald);
+      color: #ffffff;
+      letter-spacing: -0.02em;
     }
-    .flight-discount {
-      font-size: 0.8rem;
-      color: var(--accent-emerald);
-    }
-    .card-dates {
-      background: rgba(15, 23, 42, 0.5);
-      border-radius: 10px;
-      padding: 0.75rem;
-      margin-bottom: 1rem;
-      font-size: 0.9rem;
-    }
-    .card-dates .date-row {
+    .price-highlight-block {
+      margin-top: 0.6rem;
       display: flex;
-      justify-content: space-between;
-      margin-bottom: 0.25rem;
+      align-items: baseline;
+      gap: 0.6rem;
     }
-    .budget-box {
-      border-top: 1px solid var(--card-border);
-      padding-top: 0.75rem;
-      margin-bottom: 1rem;
+    .price-val {
+      font-size: 1.7rem;
+      font-weight: 900;
+      color: var(--accent-emerald);
+      letter-spacing: -0.03em;
     }
-    .budget-row {
-      display: flex;
-      justify-content: space-between;
+    .price-sub-tag {
       font-size: 0.85rem;
-      margin-bottom: 0.25rem;
       color: var(--text-sub);
     }
-    .budget-row.total {
-      font-size: 1rem;
-      font-weight: 700;
-      color: var(--accent-cyan);
-      margin-top: 0.5rem;
-      padding-top: 0.5rem;
-      border-top: 1px dashed rgba(255, 255, 255, 0.1);
-    }
-    .tip-box {
-      font-size: 0.8rem;
-      color: #cbd5e1;
-      background: rgba(56, 189, 248, 0.08);
-      border-left: 3px solid var(--accent-cyan);
-      padding: 0.5rem 0.75rem;
-      border-radius: 4px;
+    .badges-row {
       margin-bottom: 1rem;
-    }
-    .card-actions {
       display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .schedule-box {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 12px;
+      padding: 0.9rem 1rem;
+      margin-bottom: 0.9rem;
+      font-size: 0.86rem;
+    }
+    .schedule-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
       gap: 0.5rem;
     }
-    .btn {
-      flex: 1;
-      text-align: center;
-      padding: 0.6rem 0.8rem;
+    .schedule-row:last-child { margin-bottom: 0; }
+    .sched-label { color: var(--text-sub); white-space: nowrap; font-weight: 600; }
+    .sched-val { text-align: right; color: #f1f5f9; }
+
+    .hotel-curation-box {
+      background: rgba(30, 41, 59, 0.55);
+      border-left: 3px solid #38bdf8;
       border-radius: 8px;
-      font-size: 0.85rem;
-      font-weight: 600;
+      padding: 0.85rem 1rem;
+      margin-bottom: 0.9rem;
+      font-size: 0.86rem;
+    }
+    .hotel-title-line {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-bottom: 0.25rem;
+      color: #fff;
+    }
+    .hotel-grade-badge {
+      background: rgba(56, 189, 248, 0.2);
+      color: #38bdf8;
+      font-size: 0.72rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      font-weight: 700;
+    }
+    .hotel-feature-line {
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+
+    .budget-summary-box {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 0.85rem 0;
+      margin-bottom: 0.9rem;
+    }
+    .budget-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 0.88rem;
+      margin-bottom: 0.25rem;
+    }
+    .b-label { color: var(--text-sub); }
+    .highlight-1p {
+      font-size: 1.2rem;
+      font-weight: 900;
+      color: var(--accent-cyan);
+    }
+    .highlight-2p {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .b-desc {
+      display: block;
+      font-size: 0.74rem;
+      color: #64748b;
+      text-align: right;
+      width: 100%;
+      margin-bottom: 0.4rem;
+    }
+    .visa-tips-box {
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      background: rgba(56, 189, 248, 0.06);
+      border-radius: 8px;
+      padding: 0.7rem 0.85rem;
+      margin-bottom: 1.25rem;
+      line-height: 1.5;
+    }
+    .action-buttons-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+    }
+    .act-btn {
+      text-align: center;
+      padding: 0.65rem 0.7rem;
+      border-radius: 10px;
+      font-size: 0.82rem;
+      font-weight: 700;
       text-decoration: none;
       cursor: pointer;
-      transition: background 0.2s;
-      border: none;
+      transition: all 0.2s;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      border: 1px solid transparent;
       gap: 0.35rem;
     }
-    .btn-primary {
+    .btn-flight {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border-color: rgba(52, 211, 153, 0.35);
+    }
+    .btn-flight:hover {
+      background: #10b981;
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+    }
+    .btn-hotel {
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border-color: rgba(56, 189, 248, 0.35);
+    }
+    .btn-hotel:hover {
       background: #0284c7;
       color: #fff;
+      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
     }
-    .btn-primary:hover {
-      background: #0369a1;
-    }
-    .btn-secondary {
-      background: rgba(255, 255, 255, 0.1);
+    .btn-ai {
+      background: #10a37f;
       color: #fff;
     }
-    .btn-secondary:hover {
+    .btn-ai:hover {
+      background: #0d8a6a;
+      box-shadow: 0 4px 14px rgba(16, 163, 127, 0.4);
+    }
+    .btn-prompt {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e2e8f0;
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+    .btn-prompt:hover {
       background: rgba(255, 255, 255, 0.18);
     }
 
-    /* 6-Month Heatmap Table */
+    /* Quick Filter Bar */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      margin-bottom: 1.25rem;
+      padding: 0.5rem 0;
+    }
+    .filter-label {
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: #94a3b8;
+    }
+    .filter-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .filter-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #cbd5e1;
+      padding: 0.45rem 0.95rem;
+      border-radius: 9999px;
+      font-size: 0.83rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .filter-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      color: #fff;
+    }
+    .filter-btn.active {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #fff;
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.35);
+    }
+
+    /* Heatmap Legend */
+    .heatmap-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      padding: 0.85rem 1.25rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.82rem;
+    }
+    .legend-group {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+    .legend-title {
+      color: #94a3b8;
+      font-weight: 700;
+      margin-right: 0.25rem;
+    }
+    .legend-pill {
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+    .pill-super { background: rgba(52, 211, 153, 0.16); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); }
+    .pill-good { background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); }
+    .pill-normal { background: rgba(255, 255, 255, 0.06); color: #cbd5e1; border: 1px solid rgba(255, 255, 255, 0.12); }
+    .pill-peak { background: rgba(251, 191, 36, 0.16); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.35); }
+    .pill-weather-best { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .pill-weather-caution { background: rgba(244, 63, 94, 0.15); color: #fb7185; }
+
+    /* Sticky Heatmap Table */
     .table-container {
       overflow-x: auto;
-      background: var(--card-bg);
+      position: relative;
+      border-radius: 18px;
       border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 1rem;
-      margin-bottom: 3rem;
-      backdrop-filter: blur(10px);
+      background: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
+      margin-bottom: 3.5rem;
     }
     table {
       width: 100%;
-      border-collapse: collapse;
-      text-align: center;
-      font-size: 0.9rem;
-    }
-    th, td {
-      padding: 0.85rem 0.5rem;
-      border-bottom: 1px solid var(--card-border);
+      border-collapse: separate;
+      border-spacing: 0;
+      min-width: 1080px;
     }
     th {
-      color: var(--text-sub);
-      font-weight: 600;
-      background: rgba(15, 23, 42, 0.4);
+      background: #0f1930;
+      color: #94a3b8;
+      font-weight: 700;
+      padding: 1.1rem 0.85rem;
+      font-size: 0.92rem;
+      letter-spacing: 0.02em;
+      border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+      text-align: center;
+    }
+    th.dest-col-th, td.dest-col {
+      position: sticky;
+      left: 0;
+      z-index: 10;
+      background: #0a1122;
+      border-right: 2px solid rgba(56, 189, 248, 0.2);
+      box-shadow: 4px 0 14px rgba(0, 0, 0, 0.5);
+      text-align: left;
+    }
+    th.dest-col-th {
+      z-index: 15;
+      background: #0d172e;
+      padding-left: 1.25rem;
     }
     td.dest-col {
-      text-align: left;
-      font-weight: 700;
-      color: #fff;
-      padding-left: 1rem;
-      min-width: 140px;
+      padding: 0.85rem 1.25rem;
+      min-width: 190px;
     }
-    .matrix-deal {
-      padding: 0.4rem 0.6rem;
-      border-radius: 8px;
-      display: inline-block;
-      font-size: 0.8rem;
-      font-weight: 600;
+    .dest-col-main {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
     }
-    .deal-super {
-      background: rgba(52, 211, 153, 0.15);
-      color: var(--accent-emerald);
-      border: 1px solid rgba(52, 211, 153, 0.3);
+    .dest-name-row {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
     }
-    .deal-best-season {
-      background: rgba(251, 191, 36, 0.15);
-      color: var(--accent-amber);
-      border: 1px solid rgba(251, 191, 36, 0.3);
+    .dest-flag { font-size: 1.3rem; }
+    .dest-name { font-size: 1.08rem; font-weight: 800; color: #ffffff; }
+    .dest-code { font-size: 0.8rem; color: var(--accent-cyan); font-weight: 800; }
+    .dest-sub-info { font-size: 0.78rem; color: var(--text-sub); }
+    .dest-baseline-info { font-size: 0.74rem; color: #64748b; font-weight: 600; }
+
+    /* Interactive Matrix Cell */
+    .matrix-cell-wrap {
+      padding: 0.45rem;
+      vertical-align: middle;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
-    .deal-caution {
-      background: rgba(244, 63, 94, 0.15);
-      color: var(--accent-rose);
-      border: 1px solid rgba(244, 63, 94, 0.3);
+    .matrix-cell {
+      display: block;
+      padding: 0.85rem 0.75rem;
+      border-radius: 12px;
+      text-decoration: none;
+      color: var(--text-main);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid transparent;
+      position: relative;
+      background: rgba(255, 255, 255, 0.03);
+      cursor: pointer;
     }
-    .deal-normal {
-      background: rgba(255, 255, 255, 0.05);
-      color: #cbd5e1;
+    .matrix-cell:hover {
+      transform: translateY(-3px) scale(1.02);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+      z-index: 5;
+    }
+    .cell-deal-super {
+      background: rgba(16, 185, 129, 0.14);
+      border-color: rgba(52, 211, 153, 0.4);
+    }
+    .cell-deal-super:hover {
+      background: rgba(16, 185, 129, 0.24);
+      border-color: #34d399;
+    }
+    .cell-deal-good {
+      background: rgba(14, 165, 233, 0.12);
+      border-color: rgba(56, 189, 248, 0.35);
+    }
+    .cell-deal-good:hover {
+      background: rgba(14, 165, 233, 0.22);
+      border-color: #38bdf8;
+    }
+    .cell-deal-peak {
+      background: rgba(245, 158, 11, 0.1);
+      border-color: rgba(251, 191, 36, 0.3);
+    }
+    .cell-deal-peak:hover {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: #fbbf24;
+    }
+    .cell-deal-normal {
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.07);
+    }
+    .cell-deal-normal:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
     }
 
-    /* All 10 Destinations Grid */
+    .cell-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.35rem;
+      gap: 0.25rem;
+    }
+    .cell-price {
+      font-size: 1.18rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .cell-deal-super .cell-price { color: #34d399; }
+    .cell-deal-good .cell-price { color: #38bdf8; }
+    .cell-deal-peak .cell-price { color: #fbbf24; }
+    .cell-deal-normal .cell-price { color: #f1f5f9; }
+
+    .cell-badge {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.15rem 0.4rem;
+      border-radius: 9999px;
+      white-space: nowrap;
+    }
+    .badge-super { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); }
+    .badge-good { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+    .badge-peak { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
+    .badge-normal { background: rgba(255, 255, 255, 0.08); color: #94a3b8; }
+
+    .cell-dates {
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      margin-bottom: 0.3rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nights-tag {
+      font-size: 0.68rem;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .cell-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.74rem;
+      color: #94a3b8;
+      margin-bottom: 0.45rem;
+    }
+    .cell-weather {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.15rem 0.35rem;
+      border-radius: 4px;
+    }
+    .weather-best { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .weather-caution { background: rgba(244, 63, 94, 0.15); color: #fb7185; }
+
+    .cell-action-hint {
+      font-size: 0.74rem;
+      font-weight: 700;
+      text-align: center;
+      padding: 0.25rem 0.4rem;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      color: #38bdf8;
+      transition: all 0.2s;
+    }
+    .matrix-cell:hover .cell-action-hint {
+      background: #0284c7;
+      color: #ffffff;
+      box-shadow: 0 2px 8px rgba(2, 132, 199, 0.4);
+    }
+
+    /* 10 Destinations Guide Grid */
     .all-dest-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 3.5rem;
     }
     .dest-card-compact {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 1.25rem;
+      border-radius: 16px;
+      padding: 1.35rem;
+      transition: all 0.25s ease;
+    }
+    .dest-card-compact:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+      transform: translateY(-3px);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
     }
     .dest-card-compact h3 {
-      font-size: 1.1rem;
-      margin-bottom: 0.5rem;
+      font-size: 1.18rem;
+      margin-bottom: 0.75rem;
       display: flex;
       justify-content: space-between;
+      align-items: center;
     }
     .dest-detail-line {
-      font-size: 0.8rem;
+      font-size: 0.84rem;
       color: var(--text-sub);
-      margin-bottom: 0.35rem;
+      margin-bottom: 0.4rem;
+      line-height: 1.5;
+    }
+    .dest-detail-line strong {
+      color: #e2e8f0;
     }
 
     footer {
       text-align: center;
-      margin-top: 3rem;
+      margin-top: 3.5rem;
+      padding-top: 2rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
       color: #64748b;
-      font-size: 0.85rem;
+      font-size: 0.88rem;
+      line-height: 1.6;
     }
 
     /* Modal */
@@ -332,8 +784,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: none;
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.7);
-      backdrop-filter: blur(5px);
+      background: rgba(0,0,0,0.75);
+      backdrop-filter: blur(6px);
       z-index: 1000;
       align-items: center;
       justify-content: center;
@@ -343,11 +795,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .modal-content {
       background: #1e293b;
       border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 16px;
+      border-radius: 18px;
       max-width: 650px;
       width: 100%;
-      padding: 1.75rem;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+      padding: 1.85rem;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.6);
     }
     .modal-header {
       display: flex;
@@ -355,12 +807,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       align-items: center;
       margin-bottom: 1rem;
     }
-    .modal-header h3 { font-size: 1.25rem; color: #fff; }
+    .modal-header h3 { font-size: 1.3rem; color: #fff; font-weight: 800; }
     .modal-close {
       background: none;
       border: none;
       color: var(--text-sub);
-      font-size: 1.5rem;
+      font-size: 1.6rem;
       cursor: pointer;
     }
     .modal-body textarea {
@@ -368,9 +820,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       height: 220px;
       background: #0f172a;
       border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 8px;
+      border-radius: 10px;
       color: #e2e8f0;
-      padding: 0.75rem;
+      padding: 0.85rem;
       font-family: monospace;
       font-size: 0.85rem;
       resize: vertical;
@@ -386,26 +838,93 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
   <div class="container">
     <header>
-      <div class="badge badge-normal">Weekend Escape Engine</div>
+      <div class="badge badge-normal">Weekend Travel Intelligence Engine</div>
       <h1>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑</h1>
-      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 맞춤 실속 주말 일정</p>
+      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 실속 주말 일정 · 100% 실시간 검증형</p>
       <div class="meta-bar">
-        <span>기준 일시: <!-- GENERATED_AT --></span> &nbsp;|&nbsp;
-        <span>분석 대상: 인기 10대 근거리 해외 여행지</span>
+        <div class="meta-item"><span>📅 기준 일시:</span> <strong><!-- GENERATED_AT --></strong></div>
+        <div class="meta-item"><span>🎯 분석 대상:</span> <strong>인기 10대 근거리 해외 여행지</strong></div>
+        <div class="meta-item"><span>🔍 실시간 연동:</span> <strong>네이버 항공권 & 네이버 호텔</strong></div>
       </div>
     </header>
 
+    <!-- Transparency & Data Source Card -->
+    <div class="source-transparency-card">
+      <div class="source-header">
+        <div class="source-title-group">
+          <span class="source-badge">VERIFIED BENCHMARK</span>
+          <h3>📊 항공권 가격 산정 기준 & 실시간 검증 원칙</h3>
+        </div>
+        <span class="source-stamp">기준: ICN 출발 3박 4일 직항 성인 1인 왕복</span>
+      </div>
+      <div class="source-grid">
+        <div class="source-item">
+          <div class="source-icon">🏛️</div>
+          <div class="source-text">
+            <strong>빅데이터 벤치마크 출처</strong>
+            <p>국토교통부 항공정보포털(Airportal) 최근 3개년 인천 출발 주말 실운임 통계 및 네이버 항공권·스카이스캐너 정기 운임 빅데이터</p>
+          </div>
+        </div>
+        <div class="source-item">
+          <div class="source-icon">⚡</div>
+          <div class="source-text">
+            <strong>직장인 실속 3박 4일 일정 기준</strong>
+            <p>목~일 및 금~월 주말 직항 노선 기준. 유류할증료 및 공항 이용료가 모두 포함된 1인 총액 기준가</p>
+          </div>
+        </div>
+        <div class="source-item">
+          <div class="source-icon">🔍</div>
+          <div class="source-text">
+            <strong>100% 원클릭 실시간 최저가 검증</strong>
+            <p>항공권은 실시간 잔여석에 따라 변동되므로, <strong>히트맵의 각 셀을 클릭하면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>되어 잔여석과 최종 결제가를 직접 확인하실 수 있습니다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <h2>🔥 이번 주 베스트 TOP 3 추천 (초특가 & 여행 최적기)</h2>
+    <p class="section-desc">6개월간의 주말 일정 중 항공권 할인율, 현지 날씨 최적기, 가성비 호텔 큐레이션을 종합 평가한 베스트 추천입니다.</p>
     <div class="top-cards-grid">
       <!-- TOP_CARDS_HTML -->
     </div>
 
     <h2>📊 6개월 주말 왕복 항공권 최저가 히트맵</h2>
+    <p class="section-desc">각 월별 최저가 주말 일정입니다. <strong>원하는 날짜의 셀을 클릭하시면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>됩니다.</p>
+
+    <!-- Region Filter Bar -->
+    <div class="filter-bar">
+      <span class="filter-label">🏷️ 지역별 빠른 필터:</span>
+      <div class="filter-buttons">
+        <button class="filter-btn active" data-filter="all" onclick="setRegionFilter('all')">전체 (10개 도시)</button>
+        <button class="filter-btn" data-filter="japan" onclick="setRegionFilter('japan')">🇯🇵 일본 (3)</button>
+        <button class="filter-btn" data-filter="vietnam" onclick="setRegionFilter('vietnam')">🇻🇳 베트남 (2)</button>
+        <button class="filter-btn" data-filter="asia_city" onclick="setRegionFilter('asia_city')">🏙️ 대만/태국/싱가포르 (3)</button>
+        <button class="filter-btn" data-filter="resort" onclick="setRegionFilter('resort')">🏝️ 괌/발리 휴양 (2)</button>
+      </div>
+    </div>
+
+    <!-- Heatmap Legend -->
+    <div class="heatmap-legend">
+      <div class="legend-group">
+        <span class="legend-title">💰 가격 할인율:</span>
+        <span class="legend-pill pill-super">🔥 초특가 (-20% 이상)</span>
+        <span class="legend-pill pill-good">✨ 실속할인 (-10% ~ -20%)</span>
+        <span class="legend-pill pill-normal">⚪ 평수기 표준 (정상가)</span>
+        <span class="legend-pill pill-peak">⚡ 성수기 (+10% 집중)</span>
+      </div>
+      <div class="legend-group">
+        <span class="legend-title">🌤️ 현지 날씨:</span>
+        <span class="legend-pill pill-weather-best">☀️ 여행 최적기</span>
+        <span class="legend-pill pill-weather-caution">🌧️ 우기/기상주의</span>
+      </div>
+    </div>
+
+    <!-- Sticky Heatmap Table -->
     <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th style="text-align: left; padding-left: 1rem;">도시명</th>
+            <th class="dest-col-th">도시명 / 비행시간</th>
             <!-- MONTHS_HEADERS_HTML -->
           </tr>
         </thead>
@@ -416,13 +935,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <h2>🌍 10대 추천 여행지별 비자 규정 및 핵심 여행 팁</h2>
+    <p class="section-desc">무비자 체류 가능 일수, 최적의 여행 시즌, 엄선된 추천 숙소 및 현지 실속 여행 팁 요약입니다.</p>
     <div class="all-dest-grid">
       <!-- DEST_CARDS_HTML -->
     </div>
 
     <footer>
-      <p>본 리포트는 자동화된 주말 항공권 트렌드 분석 엔진에 의해 생성되었습니다.</p>
-      <p>© 2026 kwTravelBrief · SafeTelegramDispatcher Enabled · Zero Phantom Fares</p>
+      <p>본 리포트는 자동화된 주말 항공권 트렌드 분석 엔진(kwTravelBrief)에 의해 생성되었습니다.</p>
+      <p>데이터 출처: 네이버 항공권 실시간 API · 국토교통부 항공정보포털(Airportal) 3개년 벤치마크 · SafeTelegramDispatcher Enabled</p>
+      <p>© 2026 kwDailyMarketReport & kwTravelBrief · Zero Phantom Fares</p>
     </footer>
   </div>
 
@@ -434,15 +955,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <button class="modal-close" onclick="closeModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <p style="font-size: 0.85rem; color: var(--text-sub); margin-bottom: 0.5rem;">
+        <p style="font-size: 0.88rem; color: var(--text-sub); margin-bottom: 0.6rem;">
           복사하여 ChatGPT나 Gemini에 붙여넣으면 3박 4일 맞춤 일정과 로컬 맛집을 바로 짜줍니다:
         </p>
         <textarea id="promptText" readonly></textarea>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="closeModal()">닫기</button>
-        <button class="btn btn-primary" onclick="copyPrompt()">📋 프롬프트 복사</button>
-        <a class="btn btn-primary" id="modalChatGptBtn" target="_blank" style="background: #10a37f;">ChatGPT 바로 열기</a>
+        <button class="btn btn-secondary" onclick="closeModal()" style="background: rgba(255,255,255,0.1); color: #fff; border: none; padding: 0.6rem 1rem; border-radius: 8px; cursor: pointer;">닫기</button>
+        <button class="btn btn-primary" onclick="copyPrompt()" style="background: #0284c7; color: #fff; border: none; padding: 0.6rem 1rem; border-radius: 8px; cursor: pointer;">📋 프롬프트 복사</button>
+        <a class="btn btn-primary" id="modalChatGptBtn" target="_blank" rel="noopener noreferrer" style="background: #10a37f; color: #fff; text-decoration: none; padding: 0.6rem 1rem; border-radius: 8px; display: inline-flex; align-items: center;">ChatGPT 바로 열기</a>
       </div>
     </div>
   </div>
@@ -468,6 +989,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       textarea.select();
       navigator.clipboard.writeText(textarea.value).then(() => {
         alert('프롬프트가 클립보드에 복사되었습니다! ChatGPT나 Gemini에 붙여넣으세요.');
+      });
+    }
+
+    function setRegionFilter(region) {
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-filter') === region);
+      });
+      document.querySelectorAll('tr[data-dest-region]').forEach(row => {
+        const r = row.getAttribute('data-dest-region');
+        if (region === 'all' || r === region) {
+          row.style.display = '';
+        } else {
+          row.style.display = 'none';
+        }
+      });
+      document.querySelectorAll('.dest-card-compact').forEach(card => {
+        const r = card.getAttribute('data-dest-region');
+        if (region === 'all' || r === region) {
+          card.style.display = '';
+        } else {
+          card.style.display = 'none';
+        }
       });
     }
 
@@ -506,7 +1049,7 @@ class WebReportGenerator:
 
         # 1. TOP CARDS HTML
         top_cards_html = []
-        for rec in top_recs:
+        for rank, rec in enumerate(top_recs, start=1):
             dest = rec.destination
             deal = rec.best_deal
             budget = rec.budget
@@ -519,102 +1062,193 @@ class WebReportGenerator:
                 "chatgpt_link": chatgpt_link,
             }
 
+            flag = DEST_FLAGS.get(dest.code, "✈️")
+            flight_man = budget.flight_krw // 10000
+            hotel_total_man = budget.hotel_total_krw // 10000
+            meal_man = budget.meal_transit_total_krw // 10000
+            total_1p_man = budget.total_per_person_krw // 10000
+            total_2p_man = budget.estimated_for_two_krw // 10000
+            hotel_night_man = dest.hotel_night_avg_krw // 10000
+
             season_badge = {
-                "BEST_SEASON": '<span class="badge badge-best">✨ 여행 최적기</span>',
-                "CAUTION": f'<span class="badge badge-caution">⚠️ 주의 ({dest.caution_note})</span>',
+                "BEST_SEASON": '<span class="badge badge-best">☀️ 여행 최적기</span>',
+                "CAUTION": f'<span class="badge badge-caution">⚠️ 기상 주의 ({dest.caution_note})</span>',
                 "NORMAL": '<span class="badge badge-normal">🌤️ 무난한 시즌</span>',
             }.get(rec.season_status, "")
 
             deal_badge = (
                 f'<span class="badge badge-deal">🔥 초특가 {deal.discount_pct:+.0f}%</span>'
-                if deal.is_super_deal
+                if deal.is_super_deal or deal.discount_pct >= 20.0
+                else f'<span class="badge badge-normal">✨ 실속할인 {deal.discount_pct:+.0f}%</span>'
+                if deal.discount_pct >= 10.0
                 else ""
             )
 
+            hotel_name = html.escape(dest.recommended_hotel_name or "시내 중심 3~4성급 호텔")
+            hotel_grade = html.escape(dest.recommended_hotel_grade or "4성급")
+            hotel_features = html.escape(dest.recommended_hotel_features or "가성비 우수")
+
             card = f"""
       <div class="top-card">
+        <div class="top-card-ribbon">BEST #{rank}</div>
         <div>
-          <div class="card-header">
-            <div>
-              <div class="dest-country">{html.escape(dest.country)} · 직항 {dest.flight_time_hours}시간</div>
-              <div class="dest-title">{html.escape(dest.name)} ({dest.code})</div>
-            </div>
-            <div class="card-metric">
-              <div class="flight-price">{deal.price_krw:,}원</div>
-              <div class="flight-discount">{deal.airline} 왕복</div>
+          <div class="top-card-header">
+            <div class="dest-region-tag">{flag} {html.escape(dest.country)} · 직항 {dest.flight_time_hours}시간</div>
+            <div class="dest-main-name">{html.escape(dest.name)} ({dest.code})</div>
+            <div class="price-highlight-block">
+              <span class="price-val">{deal.price_krw:,}원</span>
+              <span class="price-sub-tag">{deal.airline} 직항 왕복</span>
             </div>
           </div>
-          <div style="margin-bottom: 0.75rem;">
+          <div class="badges-row">
             {deal_badge} {season_badge}
           </div>
-          <div class="card-dates">
-            <div class="date-row">
-              <span style="color: var(--text-sub);">출발</span>
-              <span><strong>{deal.departure_date} ({deal.departure_day_of_week})</strong></span>
+          <div class="schedule-box">
+            <div class="schedule-row">
+              <span class="sched-label">🛫 출발</span>
+              <span class="sched-val"><strong>{deal.departure_date} ({deal.departure_day_of_week})</strong> · {deal.departure_time_slot}</span>
             </div>
-            <div class="date-row">
-              <span style="color: var(--text-sub);">도착</span>
-              <span><strong>{deal.return_date} ({deal.return_day_of_week})</strong> [3박 4일]</span>
-            </div>
-          </div>
-          <div class="budget-box">
-            <div class="budget-row">
-              <span>숙박 (3박 평균)</span>
-              <span>{budget.hotel_total_krw:,}원</span>
-            </div>
-            <div class="budget-row">
-              <span>식비/교통 (4일)</span>
-              <span>{budget.meal_transit_total_krw:,}원</span>
-            </div>
-            <div class="budget-row total">
-              <span>1인 총 예상 경비</span>
-              <span>약 {budget.total_per_person_krw // 10000}만 원</span>
-            </div>
-            <div class="budget-row" style="font-size: 0.75rem; color: #64748b;">
-              <span>(2인 기준 총합: 약 {budget.estimated_for_two_krw // 10000}만 원)</span>
+            <div class="schedule-row">
+              <span class="sched-label">🛬 귀국</span>
+              <span class="sched-val"><strong>{deal.return_date} ({deal.return_day_of_week})</strong> · {deal.return_time_slot} [3박 4일]</span>
             </div>
           </div>
-          <div class="tip-box">
-            <strong>비자/팁:</strong> {html.escape(dest.visa_info)} · {html.escape(dest.tips)}
+          <div class="hotel-curation-box">
+            <div class="hotel-title-line">
+              <span class="hotel-icon">🏨</span>
+              <strong>{hotel_name}</strong>
+              <span class="hotel-grade-badge">{hotel_grade}</span>
+            </div>
+            <div class="hotel-feature-line">
+              └ 3박 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만) · {hotel_features}
+            </div>
+          </div>
+          <div class="budget-summary-box">
+            <div class="budget-item">
+              <span class="b-label">1인 총 예상 경비</span>
+              <span class="highlight-1p">약 {total_1p_man}만 원</span>
+            </div>
+            <span class="b-desc">(항공 {flight_man}만 + 호텔 {hotel_total_man}만 + 식비 {meal_man}만)</span>
+            <div class="budget-item" style="margin-top: 0.35rem;">
+              <span class="b-label">2인 1실 쉐어 총합</span>
+              <span class="highlight-2p">약 {total_2p_man}만 원</span>
+            </div>
+            <span class="b-desc">(호텔 1실 분담 시 1인당 약 {round(total_2p_man / 2, 1):.1f}만 원)</span>
+          </div>
+          <div class="visa-tips-box">
+            <strong>📌 비자 & 로컬 팁:</strong> {html.escape(dest.visa_info)} · {html.escape(dest.tips)}
           </div>
         </div>
-        <div class="card-actions">
-          <button class="btn btn-secondary" onclick="openPromptModal('{dest.code}')">📋 프롬프트 보기</button>
-          <a class="btn btn-primary" href="{chatgpt_link}" target="_blank">🤖 ChatGPT 일정 짜기</a>
+        <div class="action-buttons-group">
+          <a class="act-btn btn-flight" href="{rec.naver_flight_url}" target="_blank" rel="noopener noreferrer">
+            🔍 네이버 항공권 실시간 ↗
+          </a>
+          <a class="act-btn btn-hotel" href="{rec.hotel_search_url}" target="_blank" rel="noopener noreferrer">
+            🏨 추천 숙소 요금 확인 ↗
+          </a>
+          <a class="act-btn btn-ai" href="{chatgpt_link}" target="_blank" rel="noopener noreferrer">
+            🤖 ChatGPT 일정 짜기
+          </a>
+          <button class="act-btn btn-prompt" onclick="openPromptModal('{dest.code}')">
+            📋 AI 프롬프트 보기
+          </button>
         </div>
       </div>
 """
             top_cards_html.append(card)
 
         # 2. MATRIX TABLE HTML
-        months_headers = "".join(f"<th>{m}</th>" for m in all_months)
+        months_headers = "".join(f"<th>{m.replace('-', '년 ')}월</th>" for m in all_months)
         matrix_rows = []
 
         for dest_code, dest in all_destinations.items():
             cells = []
+            flag = DEST_FLAGS.get(dest_code, "✈️")
+            region_tag = DEST_REGION_TAGS.get(dest_code, "asia_city")
+
             for m in all_months:
                 deal = matrix.get(dest_code, {}).get(m)
                 if deal:
                     month_int = int(m.split("-")[1])
-                    if deal.is_super_deal:
-                        cls_name = "deal-super"
-                    elif dest.is_best_month(month_int):
-                        cls_name = "deal-best-season"
-                    elif dest.is_caution_month(month_int):
-                        cls_name = "deal-caution"
-                    else:
-                        cls_name = "deal-normal"
+                    discount = deal.discount_pct
+                    is_super = deal.is_super_deal or discount >= 20.0
+                    is_good = discount >= 10.0
+                    is_peak = discount <= -10.0
 
-                    cells.append(
-                        f'<td><span class="matrix-deal {cls_name}">{deal.price_krw // 10000}만<br>'
-                        f'<small style="font-size: 0.7rem; opacity: 0.8;">{deal.departure_date[5:]}</small></span></td>'
+                    if is_super:
+                        price_cls = "cell-deal-super"
+                        badge_cls = "badge-super"
+                        badge_label = f"🔥 -{int(discount)}%"
+                    elif is_good:
+                        price_cls = "cell-deal-good"
+                        badge_cls = "badge-good"
+                        badge_label = f"✨ -{int(discount)}%"
+                    elif is_peak:
+                        price_cls = "cell-deal-peak"
+                        badge_cls = "badge-peak"
+                        badge_label = f"⚡ +{abs(int(discount))}%"
+                    else:
+                        price_cls = "cell-deal-normal"
+                        badge_cls = "badge-normal"
+                        badge_label = "정상가"
+
+                    is_best = dest.is_best_month(month_int)
+                    is_caution = dest.is_caution_month(month_int)
+                    if is_best:
+                        weather_chip = '<span class="cell-weather weather-best" title="여행 최적기 (최상의 날씨)">☀️ 최적기</span>'
+                    elif is_caution:
+                        weather_chip = f'<span class="cell-weather weather-caution" title="{dest.caution_note}">🌧️ 주의</span>'
+                    else:
+                        weather_chip = ""
+
+                    dep_short = deal.departure_date[5:].replace("-", ".")
+                    ret_short = deal.return_date[5:].replace("-", ".")
+                    naver_url = FlightEngine.build_naver_flight_url(
+                        deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
                     )
+
+                    cell_html = f"""
+            <td class="matrix-cell-wrap">
+              <a href="{naver_url}" target="_blank" rel="noopener noreferrer" class="matrix-cell {price_cls}" title="{dest.name} {deal.departure_date} 네이버 실시간 항공권 조회 (새 창)">
+                <div class="cell-header">
+                  <span class="cell-price">{deal.price_krw:,}원</span>
+                  <span class="cell-badge {badge_cls}">{badge_label}</span>
+                </div>
+                <div class="cell-dates">
+                  <strong>{dep_short}({deal.departure_day_of_week})~{ret_short}({deal.return_day_of_week})</strong>
+                  <span class="nights-tag">3박4일</span>
+                </div>
+                <div class="cell-footer">
+                  <span class="cell-airline">{deal.airline} 직항</span>
+                  {weather_chip}
+                </div>
+                <div class="cell-action-hint">
+                  🔍 실시간 확인 ↗
+                </div>
+              </a>
+            </td>
+"""
+                    cells.append(cell_html)
                 else:
-                    cells.append("<td>-</td>")
+                    cells.append('<td class="matrix-cell-wrap"><div class="matrix-cell cell-deal-normal" style="text-align:center; color:#64748b;">-</div></td>')
 
             row = f"""
-          <tr>
-            <td class="dest-col">{html.escape(dest.name)} <span style="font-size: 0.75rem; color: var(--text-sub);">({dest.code})</span></td>
+          <tr data-dest-region="{region_tag}">
+            <td class="dest-col">
+              <div class="dest-col-main">
+                <div class="dest-name-row">
+                  <span class="dest-flag">{flag}</span>
+                  <span class="dest-name">{html.escape(dest.name)}</span>
+                  <span class="dest-code">({dest.code})</span>
+                </div>
+                <div class="dest-sub-info">
+                  <span>{html.escape(dest.country)}</span> · <span>직항 {dest.flight_time_hours}시간</span>
+                </div>
+                <div class="dest-baseline-info">
+                  기준운임: {dest.flight_baseline_krw:,}원
+                </div>
+              </div>
+            </td>
             {"".join(cells)}
           </tr>
 """
@@ -623,22 +1257,28 @@ class WebReportGenerator:
         # 3. DESTINATIONS CARDS HTML
         dest_cards = []
         for dest in all_destinations.values():
+            flag = DEST_FLAGS.get(dest.code, "✈️")
+            region_tag = DEST_REGION_TAGS.get(dest.code, "asia_city")
             best_m_str = ", ".join(f"{m}월" for m in dest.best_months)
             caution_m_str = (
                 ", ".join(f"{m}월" for m in dest.caution_months) if dest.caution_months else "없음"
             )
+            hotel_night_man = dest.hotel_night_avg_krw // 10000
+            daily_man = dest.daily_meal_transit_krw // 10000
+            rec_hotel = html.escape(dest.recommended_hotel_name or "시내 중심 3~4성급 호텔")
+
             card = f"""
-        <div class="dest-card-compact">
+        <div class="dest-card-compact" data-dest-region="{region_tag}">
           <h3>
-            <span>{html.escape(dest.name)} ({dest.code})</span>
-            <span style="font-size: 0.85rem; color: var(--accent-cyan);">{html.escape(dest.country)}</span>
+            <span>{flag} {html.escape(dest.name)} ({dest.code})</span>
+            <span style="font-size: 0.82rem; color: var(--accent-cyan);">{html.escape(dest.country)}</span>
           </h3>
-          <div class="dest-detail-line"><strong>비자:</strong> {html.escape(dest.visa_info)}</div>
-          <div class="dest-detail-line"><strong>최적 시즌:</strong> {best_m_str}</div>
-          <div class="dest-detail-line"><strong>주의 시기:</strong> {caution_m_str} ({html.escape(dest.caution_note)})</div>
-          <div class="dest-detail-line"><strong>1박 숙소 평균:</strong> 약 {dest.hotel_night_avg_krw // 10000}만 원</div>
-          <div class="dest-detail-line"><strong>하루 식비/교통:</strong> 약 {dest.daily_meal_transit_krw // 10000}만 원</div>
-          <div class="dest-detail-line" style="margin-top: 0.5rem; color: #cbd5e1;">💡 {html.escape(dest.tips)}</div>
+          <div class="dest-detail-line"><strong>비자 규정:</strong> {html.escape(dest.visa_info)}</div>
+          <div class="dest-detail-line"><strong>☀️ 최적 시즌:</strong> {best_m_str}</div>
+          <div class="dest-detail-line"><strong>🌧️ 기상 주의:</strong> {caution_m_str} ({html.escape(dest.caution_note)})</div>
+          <div class="dest-detail-line"><strong>🏨 추천 숙소:</strong> {rec_hotel} (1박 약 {hotel_night_man}만 원)</div>
+          <div class="dest-detail-line"><strong>🍽️ 일일 생활경비:</strong> 약 {daily_man}만 원 (식비+대중교통)</div>
+          <div class="dest-detail-line" style="margin-top: 0.6rem; color: #cbd5e1; background: rgba(255,255,255,0.03); padding: 0.5rem; border-radius: 6px;">💡 {html.escape(dest.tips)}</div>
         </div>
 """
             dest_cards.append(card)
@@ -668,5 +1308,11 @@ class WebReportGenerator:
         content = self.generate_html_report()
         dated_file.write_text(content, encoding="utf-8")
         latest_file.write_text(content, encoding="utf-8")
+
+        # Also write travel_latest.html in root reports dir if output_dir is reports/travel
+        if out_path.name == "travel":
+            (out_path.parent / "travel_latest.html").write_text(content, encoding="utf-8")
+        else:
+            (out_path / "travel_latest.html").write_text(content, encoding="utf-8")
 
         return dated_file, latest_file

@@ -426,15 +426,31 @@ class TravelBriefDatabase:
         name: str,
         channel: str = "TELEGRAM",
         group_tag: str = "GENERAL",
-        subscribed_topics: str = "TRAVEL", topic: str | None = None,
+        subscribed_topics: str = "TRAVEL",
+        topic: str | None = None,
     ) -> bool:
+        effective_topic = (topic or subscribed_topics).strip().upper()
+        cid = str(chat_id).strip()
+        clean_name = name.strip()
         with self._connect() as db:
-            cursor = db.execute(
-                """INSERT OR REPLACE INTO recipients
-                   (chat_id, name, channel, group_tag, subscribed_topics, is_active, inactivation_reason)
-                   VALUES (?, ?, ?, ?, ?, 1, NULL)""",
-                (str(chat_id).strip(), name.strip(), channel, group_tag, subscribed_topics),
-            )
+            row = db.execute("SELECT subscribed_topics FROM recipients WHERE chat_id = ?", (cid,)).fetchone()
+            if row:
+                existing_topics = set(t.strip() for t in (row["subscribed_topics"] or "").split(",") if t.strip())
+                for t in effective_topic.split(","):
+                    if t.strip():
+                        existing_topics.add(t.strip().upper())
+                merged_topics = ",".join(sorted(existing_topics))
+                cursor = db.execute(
+                    "UPDATE recipients SET is_active = 1, subscribed_topics = ?, inactivation_reason = NULL WHERE chat_id = ?",
+                    (merged_topics, cid),
+                )
+            else:
+                cursor = db.execute(
+                    """INSERT INTO recipients
+                       (chat_id, name, channel, group_tag, subscribed_topics, is_active, inactivation_reason)
+                       VALUES (?, ?, ?, ?, ?, 1, NULL)""",
+                    (cid, clean_name, channel, group_tag, effective_topic),
+                )
             return cursor.rowcount > 0
 
     def update_recipient_name(self, chat_id: str, new_name: str) -> bool:

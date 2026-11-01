@@ -41,3 +41,14 @@ def test_collector_drops_low_credibility_spam():
     }
     event = collector._process_raw_post(spam_post)
     assert event is None  # Dropped because score < 60
+
+
+def test_collector_megastudy_post_title_accurate():
+    db = AdmissionDatabase(db_path=":memory:")
+    curator = AICurator()
+    collector = AdmissionCollector(db=db, curator=curator)
+
+    academy_events = collector.collect_major_academy_seminars()
+    mega_event = next(e for e in academy_events if e.organizer == "메가스터디")
+    assert "수능 가채점 분석 및 2027 정시 합격 전략" in mega_event.title
+    assert "수시 최종 지원" not in mega_event.title

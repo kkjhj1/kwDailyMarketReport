@@ -58,17 +58,17 @@ def format_telegram_html(briefing: Briefing) -> str:
         ind_name = html.escape(a.indicator)
 
         if a.unit == "PERCENT_YIELD":
-            val_txt = f"<code>{a.value:.3f}%</code>" if a.value is not None else "-"
+            val_txt = f"<b>{a.value:.3f}%</b>" if a.value is not None else "-"
             return f"  {icon} {ind_name} : {val_txt} ({html.escape(chg)})"
         elif a.unit == "FX":
-            val_txt = f"<code>{a.value:,.1f}원</code>" if a.value is not None else "-"
+            val_txt = f"<b>{a.value:,.1f}원</b>" if a.value is not None else "-"
             diff_txt = f"{a.diff:+,.1f}원, " if a.diff is not None else ""
             return f"  {icon} {ind_name} : {val_txt} ({html.escape(diff_txt)}{html.escape(chg)})"
         elif a.unit == "PRICE":
-            val_txt = f"<code>${a.value:,.2f}</code>" if a.value is not None else "-"
+            val_txt = f"<b>${a.value:,.2f}</b>" if a.value is not None else "-"
             return f"  {icon} {ind_name} : {val_txt} ({html.escape(chg)})"
         else: # INDEX
-            val_txt = f"<code>{a.value:,.2f} pt</code>" if a.value is not None else "-"
+            val_txt = f"<b>{a.value:,.2f}</b>" if a.value is not None else "-"
             diff_txt = f"{a.diff:+,.2f}pt, " if a.diff is not None else ""
             return f"  {icon} {ind_name} : {val_txt} ({html.escape(diff_txt)}{html.escape(chg)})"
 
@@ -113,7 +113,7 @@ def format_telegram_html(briefing: Briefing) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━")
     if _is_public_button_url(briefing.report_url):
         safe_url = html.escape(briefing.report_url, quote=True)
-        lines.append(f"🔗 <b>상세 리포트:</b> <a href=\"{safe_url}\">📊 모바일·PC 상세 대시보드 웹 리포트 열기 (클릭)</a>")
+        lines.append(f"👉 <a href=\"{safe_url}\">[📊 일일 상세 웹 리포트 보기]</a>")
     else:
         lines.append("💡 <i>상세 리포트: GitHub Pages 연결 시 클릭 가능한 웹 링크 버튼이 활성화됩니다. (로컬 실행 시 아래 첨부된 HTML 파일을 눌러 바로 여세요)</i>")
 

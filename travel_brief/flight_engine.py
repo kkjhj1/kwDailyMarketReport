@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from travel_brief.models import DestinationMeta, FlightDeal
+from travel_brief.models import DestinationMeta, FlightDeal, format_departure_time_slot
 
 
 AIRLINES_BY_REGION = {
@@ -50,6 +50,9 @@ class FlightEngine:
                 daily_meal_transit_krw=item["daily_meal_transit_krw"],
                 currency=item["currency"],
                 tips=item["tips"],
+                recommended_hotel_name=item.get("recommended_hotel_name", ""),
+                recommended_hotel_grade=item.get("recommended_hotel_grade", ""),
+                recommended_hotel_features=item.get("recommended_hotel_features", ""),
             )
             self.destinations[meta.code] = meta
 
@@ -59,10 +62,43 @@ class FlightEngine:
     def list_destinations(self) -> list[DestinationMeta]:
         return list(self.destinations.values())
 
+    @staticmethod
+    def build_naver_flight_url(origin: str, dest: str, dep_date: str, ret_date: str) -> str:
+        """Builds exact Naver Flight real-time fare comparison URL.
+        Example: https://m-flight.naver.com/flights/international/ICN-DAD-20261218/DAD-ICN-20261221?fareType=Y&adult=1
+        """
+        dep_compact = dep_date.replace("-", "")
+        ret_compact = ret_date.replace("-", "")
+        return f"https://m-flight.naver.com/flights/international/{origin}-{dest}-{dep_compact}/{dest}-{origin}-{ret_compact}?fareType=Y&adult=1"
+
+    @staticmethod
+    def build_naver_hotel_url(dest_name: str, dep_date: str, ret_date: str) -> str:
+        """Builds exact Naver Hotel real-time comparison URL with checkin/checkout dates."""
+        import urllib.parse
+        encoded = urllib.parse.quote(dest_name)
+        return f"https://m-hotel.naver.com/hotels/search?destination={encoded}&checkIn={dep_date}&checkOut={ret_date}&rooms=1&adults=2"
+
     def _pick_airline(self, region: str, seed: str) -> str:
         airlines = AIRLINES_BY_REGION.get(region, ["국적항공사", "LCC특가"])
         idx = int(hashlib.md5(seed.encode("utf-8")).hexdigest(), 16) % len(airlines)
         return airlines[idx]
+
+    def _pick_time_category(self, dep_dow: str, seed: str) -> str:
+        """Determines realistic flight time category based on departure day of week.
+        - Thursday (목): 'morning' (목·금 연차 2일 추천)
+        - Friday (금): distributed realistically across:
+          morning (오전 전일 연차), afternoon (오후 반차), night (야간 퇴근 후 출발)
+        """
+        if dep_dow == "목":
+            return "morning"
+
+        mod = int(hashlib.md5(f"slot-{seed}".encode("utf-8")).hexdigest()[:4], 16) % 10
+        if mod < 4:
+            return "morning"
+        elif mod < 7:
+            return "afternoon"
+        else:
+            return "night" 
 
     def _estimate_price(self, dest: DestinationMeta, dep_date: date, day_of_week: int) -> int:
         """Estimate realistic roundtrip weekend flight fare using seasonality and booking curves.
@@ -163,7 +199,11 @@ class FlightEngine:
                 if super_deals_only and not is_super:
                     continue
 
-                airline = self._pick_airline(dest.region, f"{dest.code}-{dep.isoformat()}")
+                seed = f"{dest.code}-{dep.isoformat()}"
+                airline = self._pick_airline(dest.region, seed)
+                time_cat = self._pick_time_category(dep_dow, seed)
+                time_slot = format_departure_time_slot(dep_dow, time_cat)
+
                 deal = FlightDeal(
                     destination_code=dest.code,
                     destination_name=dest.name,
@@ -177,6 +217,8 @@ class FlightEngine:
                     price_krw=price,
                     baseline_krw=dest.flight_baseline_krw,
                     is_super_deal=is_super,
+                    departure_time_slot=time_slot,
+                    time_category=time_cat,
                 )
                 deals.append(deal)
 

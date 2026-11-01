@@ -45,7 +45,7 @@ class AIPromptGenerator:
         budget: BudgetBreakdown,
     ) -> str:
         """Generates an ultra-compact single-line prompt to stay strictly within Telegram URL length limits."""
-        return f"{dest.name} 3박4일 여행 일정과 맛집 추천해줘 ({deal.departure_date} 출발, 항공 {deal.price_krw//10000}만, 1인예산 {budget.total_per_person_krw//10000}만)"
+        return f"{dest.name} 3박4일 주말 여행 일정과 로컬 맛집 추천해줘"
 
     @classmethod
     def get_chatgpt_deep_link(cls, prompt: str) -> str:

@@ -25,7 +25,10 @@
     "hotel_night_avg_krw": 85000,
     "daily_meal_transit_krw": 55000,
     "currency": "JPY",
-    "tips": "지하철 1일권(640엔), 하카타 라멘, 유후인 온천 당일치기 추천"
+    "tips": "지하철 1일권(640엔), 하카타 라멘, 유후인 온천 당일치기 추천",
+    "recommended_hotel_name": "하카타 도큐 레이 호텔 (Hakata Tokyu REI Hotel)",
+    "recommended_hotel_grade": "3성급 · 평점 8.7",
+    "recommended_hotel_features": "하카타역 도보 3분, 지하철/공항 직결, 쾌적한 비즈니스 룸"
   },
   {
     "code": "NRT",
@@ -54,7 +57,10 @@
     "hotel_night_avg_krw": 130000,
     "daily_meal_transit_krw": 65000,
     "currency": "JPY",
-    "tips": "스이카/파스모 교통카드 필수, 나리타 익스프레스 왕복권 할인 이용"
+    "tips": "스이카/파스모 교통카드 필수, 나리타 익스프레스 왕복권 할인 이용",
+    "recommended_hotel_name": "호텔 그레이스리 신주쿠 (Hotel Gracery Shinjuku)",
+    "recommended_hotel_grade": "4성급 · 평점 8.6",
+    "recommended_hotel_features": "신주쿠 중심가, 고질라 헤드 랜드마크, 공항 리무진 버스 정차"
   },
   {
     "code": "KIX",
@@ -83,7 +89,10 @@
     "hotel_night_avg_krw": 110000,
     "daily_meal_transit_krw": 60000,
     "currency": "JPY",
-    "tips": "라피트 특급 열차 사전 예매, 교토 당일치기 한큐 패스 추천"
+    "tips": "라피트 특급 열차 사전 예매, 교토 당일치기 한큐 패스 추천",
+    "recommended_hotel_name": "크로스 호텔 오사카 (Cross Hotel Osaka)",
+    "recommended_hotel_grade": "4성급 · 평점 8.9",
+    "recommended_hotel_features": "도톤보리 도보 1분, 난바역 도보 5분, 현대적이고 넓은 객실"
   },
   {
     "code": "DAD",
@@ -112,7 +121,10 @@
     "hotel_night_avg_krw": 60000,
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
-    "tips": "그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천"
+    "tips": "그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천",
+    "recommended_hotel_name": "살라 다낭 비치 호텔 (Sala Danang Beach Hotel)",
+    "recommended_hotel_grade": "4성급 · 평점 9.1",
+    "recommended_hotel_features": "미케비치 도보 2분, 루프탑 인피니티풀, 가성비 최상 오션뷰"
   },
   {
     "code": "CXR",
@@ -141,7 +153,10 @@
     "hotel_night_avg_krw": 65000,
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
-    "tips": "가성비 오션뷰 리조트 특화, 해산물 거리 야시장 추천"
+    "tips": "가성비 오션뷰 리조트 특화, 해산물 거리 야시장 추천",
+    "recommended_hotel_name": "버고 호텔 나트랑 (Virgo Hotel Nha Trang)",
+    "recommended_hotel_grade": "5성급 가성비 · 평점 8.9",
+    "recommended_hotel_features": "나트랑 시내 중심, 야시장 도보권, 1박 4~6만원대 가성비 끝판왕"
   },
   {
     "code": "BKK",
@@ -170,7 +185,10 @@
     "hotel_night_avg_krw": 85000,
     "daily_meal_transit_krw": 40000,
     "currency": "THB",
-    "tips": "GLN(모바일 해외결제) 사용 편리, 루프탑 바 및 야시장 문화 특화"
+    "tips": "GLN(모바일 해외결제) 사용 편리, 루프탑 바 및 야시장 문화 특화",
+    "recommended_hotel_name": "이스틴 그랜드 호텔 사톤 (Eastin Grand Hotel Sathorn)",
+    "recommended_hotel_grade": "5성급 · 평점 9.2",
+    "recommended_hotel_features": "BTS 수라삭역 구름다리 직결, 인피니티풀, 최상급 조식 뷔페"
   },
   {
     "code": "TPE",
@@ -199,7 +217,10 @@
     "hotel_night_avg_krw": 95000,
     "daily_meal_transit_krw": 45000,
     "currency": "TWD",
-    "tips": "이지카드(교통카드) 필수, 스펀 풍등 & 지우펀 일일투어 추천"
+    "tips": "이지카드(교통카드) 필수, 스펀 풍등 & 지우펀 일일투어 추천",
+    "recommended_hotel_name": "코스모스 호텔 타이베이 (Cosmos Hotel Taipei)",
+    "recommended_hotel_grade": "4성급 · 평점 8.7",
+    "recommended_hotel_features": "타이베이 메인역 M3 출구 바로 앞, 공항철도 직결, MRT 접근성 최강"
   },
   {
     "code": "GUM",
@@ -229,7 +250,10 @@
     "hotel_night_avg_krw": 240000,
     "daily_meal_transit_krw": 90000,
     "currency": "USD",
-    "tips": "렌터카 필수(한국 운전면허증으로 운전 가능), 쇼핑 면세 혜택"
+    "tips": "렌터카 필수(한국 운전면허증으로 운전 가능), 쇼핑 면세 혜택",
+    "recommended_hotel_name": "괌 리프 호텔 (Guam Reef Hotel)",
+    "recommended_hotel_grade": "4성급 · 평점 8.4",
+    "recommended_hotel_features": "투몬 비치 중심가, T갤러리아 면세점 도보 2분, 오션뷰 인피니티풀"
   },
   {
     "code": "DPS",
@@ -258,7 +282,10 @@
     "hotel_night_avg_krw": 120000,
     "daily_meal_transit_krw": 45000,
     "currency": "IDR",
-    "tips": "전자도착비자(e-VOA) 사전 신청 권장, 우붓 힐링 + 꾸따 서핑 분할 숙박"
+    "tips": "전자도착비자(e-VOA) 사전 신청 권장, 우붓 힐링 + 꾸따 서핑 분할 숙박",
+    "recommended_hotel_name": "알라야 리조트 우붓 (Alaya Resort Ubud)",
+    "recommended_hotel_grade": "5성급 힐링 · 평점 9.3",
+    "recommended_hotel_features": "우붓 중심가 논뷰(Paddy view) 리조트, 몽키포레스트 도보권, 스파 특화"
   },
   {
     "code": "SIN",
@@ -287,6 +314,9 @@
     "hotel_night_avg_krw": 210000,
     "daily_meal_transit_krw": 70000,
     "currency": "SGD",
-    "tips": "치안 최상, 해외결제 신용카드로 대중교통 태그 승차 가능"
+    "tips": "치안 최상, 해외결제 신용카드로 대중교통 태그 승차 가능",
+    "recommended_hotel_name": "호텔 젠 탕린 싱가포르 (Hotel Jen Tanglin Singapore)",
+    "recommended_hotel_grade": "4성급 · 평점 8.8",
+    "recommended_hotel_features": "샹그릴라 계열 깔끔한 관리, 오차드로드 셔틀, 보타닉 가든 인접"
   }
 ]

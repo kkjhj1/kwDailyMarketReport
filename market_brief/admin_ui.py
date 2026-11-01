@@ -11,7 +11,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -290,7 +290,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .slot-bar-fill { height: 100%; border-radius: 999px; }
 
-    /* Filter Chips */
+    /* Filter & Search Bar */
+    .user-filter-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .user-search-wrap { width: 260px; }
     .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .filter-btn {
       padding: 6px 13px;
@@ -305,6 +314,76 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .filter-btn:hover { background: var(--surface-sub); color: var(--text); }
     .filter-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+    /* KPI Grid & Dashboard 2-Col */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .dash-grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    /* Modal Form Grids */
+    .form-grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .form-grid-bot-meta {
+      display: grid;
+      grid-template-columns: 80px 1fr 120px;
+      gap: 10px;
+    }
+    .dispatch-actions-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .sim-actions-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* Bot Card Actions */
+    .bot-card-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+    .bot-card-sub-actions {
+      display: flex;
+      gap: 4px;
+    }
+
+    /* Menu Bot Box */
+    .menu-bot-box {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 6px 0;
+    }
+    .menu-bot-info {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .menu-bot-btns {
+      display: flex;
+      gap: 8px;
+    }
 
     /* Bot Cards Grid */
     .bot-grid {
@@ -490,20 +569,40 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     /* Mobile Responsive Overrides */
     @media (max-width: 768px) {
       .header {
-        padding: 10px 14px;
+        padding: 8px 12px;
+        flex-wrap: nowrap;
+        gap: 8px;
+      }
+      .header-logo {
+        width: 32px;
+        height: 32px;
+        font-size: 18px;
+        border-radius: 8px;
       }
       .header-title {
         font-size: 14px;
+        white-space: nowrap;
       }
       .header-sub {
         display: none;
       }
       .header-actions {
-        gap: 6px;
+        gap: 5px;
+        margin-left: auto;
+        flex-shrink: 0;
+        flex-wrap: nowrap;
       }
       .pill {
-        padding: 3px 8px;
+        padding: 3px 6px;
         font-size: 11px;
+      }
+      .header-actions .btn {
+        padding: 6px 9px;
+        min-height: 32px;
+        font-size: 12px;
+      }
+      .header-actions .btn .btn-text {
+        display: none;
       }
 
       /* Hide Desktop Top Tab Bar on Mobile */
@@ -516,10 +615,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         display: flex;
       }
 
-      /* Container spacing for bottom nav */
+      /* Container spacing for bottom nav & safe-area */
       .container {
-        margin: 12px auto;
-        padding: 0 12px 76px;
+        margin: 10px auto;
+        padding: 0 10px calc(80px + env(safe-area-inset-bottom, 0px));
       }
 
       /* Floating sim button hidden (integrated in bottom nav) */
@@ -531,64 +630,206 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       .card {
         padding: 14px;
         border-radius: 12px;
-        margin-bottom: 14px;
+        margin-bottom: 12px;
       }
       .card-header {
         margin-bottom: 12px;
       }
       .card-title {
-        font-size: 14.5px;
+        font-size: 15px;
       }
       .card-desc {
         font-size: 12px;
       }
 
-      /* User Table -> Mobile Card View Transformation */
-      table.table,
-      table.table thead,
-      table.table tbody,
-      table.table th,
-      table.table td,
-      table.table tr {
-        display: block;
+      /* User Filter Bar on Mobile */
+      .user-filter-bar {
+        flex-direction: column-reverse;
+        align-items: stretch;
+        gap: 10px;
+        margin-bottom: 14px;
       }
-      table.table thead {
+      .user-search-wrap {
+        width: 100%;
+      }
+      .filter-chips {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 4px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        gap: 6px;
+      }
+      .filter-chips::-webkit-scrollbar {
         display: none;
       }
-      table.table tr {
+      .filter-btn {
+        white-space: nowrap;
+        flex-shrink: 0;
+        padding: 7px 12px;
+        font-size: 12.5px;
+      }
+
+      /* User Table -> Mobile Card View Transformation */
+      .table-wrap {
+        border: none;
+        background: transparent;
+        border-radius: 0;
+        overflow: visible;
+      }
+      .user-table,
+      .user-table thead,
+      .user-table tbody,
+      .user-table th,
+      .user-table td,
+      .user-table tr {
+        display: block;
+      }
+      .user-table thead {
+        display: none;
+      }
+      .user-table tr {
         background: #ffffff;
         border: 1px solid var(--border);
-        border-radius: 12px;
+        border-radius: 14px;
         margin-bottom: 12px;
-        padding: 12px 14px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        padding: 14px 16px;
+        box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
       }
-      table.table td {
-        padding: 5px 0;
+      .user-table td {
+        padding: 8px 0;
         border: none;
+        border-bottom: 1px dashed #f1f5f9;
         display: flex;
         justify-content: space-between;
         align-items: center;
-        font-size: 13px;
+        font-size: 13.5px;
         flex-wrap: wrap;
-        gap: 6px;
+        gap: 8px;
       }
-      table.table td::before {
+      .user-table td::before {
         content: attr(data-label);
         font-weight: 700;
         color: var(--text-muted);
         font-size: 12px;
+        flex-shrink: 0;
       }
-      table.table td:last-child {
-        border-top: 1px dashed var(--border);
-        padding-top: 8px;
-        margin-top: 6px;
+      .user-table td[data-label="회원 정보"] {
+        padding-top: 0;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border);
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .user-table td[data-label="회원 정보"]::before {
+        display: none;
+      }
+      .user-table td[data-label="회원 등급"] select {
+        width: 155px;
+        font-size: 13px;
+        padding: 6px 8px;
+      }
+      .user-table td[data-label="구독 중인 봇"] {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .user-table td[data-label="구독 중인 봇"] > div {
+        width: 100%;
+        margin-top: 4px;
+      }
+      .user-table td[data-label="관리"] {
+        border-bottom: none;
+        border-top: 1px solid #f1f5f9;
+        padding-top: 10px;
+        padding-bottom: 0;
+        margin-top: 4px;
         justify-content: flex-end;
+      }
+      .user-table td[data-label="관리"]::before {
+        display: none;
+      }
+      .user-table td[data-label="관리"] .btn {
+        min-height: 36px;
+        padding: 6px 16px;
+        font-size: 13px;
+      }
+      .user-table td.empty-cell {
+        display: block !important;
+        width: 100% !important;
+        border: none !important;
+        text-align: center !important;
+      }
+      .bot-chip {
+        padding: 4px 10px;
+        font-size: 12.5px;
+      }
+      .bot-chip-del {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 22px;
+        min-height: 22px;
+        font-size: 14px;
+        margin-left: 5px;
+        border-radius: 50%;
+        touch-action: manipulation;
+        cursor: pointer;
       }
 
       /* Bot Grid 1-column on mobile */
       .bot-grid {
         grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .bot-card-actions {
+        flex-direction: column;
+        gap: 8px;
+        align-items: stretch;
+      }
+      .btn-dispatch-center {
+        width: 100%;
+        padding: 10px 14px;
+        font-size: 13.5px;
+        min-height: 40px;
+      }
+      .bot-card-sub-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        width: 100%;
+      }
+      .bot-card-sub-actions .btn {
+        min-height: 36px;
+        font-size: 13px;
+      }
+
+      /* Menu Bot Mobile */
+      .menu-bot-box {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+      }
+      .menu-bot-btns {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        width: 100%;
+      }
+      .menu-bot-btns .btn {
+        min-height: 36px;
+        font-size: 12.5px;
+      }
+
+      /* Dashboard & Grids on Mobile */
+      .kpi-grid {
+        grid-template-columns: 1fr !important;
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+      }
+      .dash-grid-2col {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+        margin-bottom: 12px !important;
       }
 
       /* Bottom Sheet Modal on Mobile */
@@ -600,7 +841,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         border-radius: 20px 20px 0 0;
         width: 100% !important;
         max-width: 100% !important;
-        max-height: 86vh;
+        max-height: 88vh;
         overflow-y: auto;
         animation: slideUpModal 0.22s ease-out;
         padding: 18px 16px calc(24px + env(safe-area-inset-bottom, 0px));
@@ -608,6 +849,45 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       @keyframes slideUpModal {
         from { transform: translateY(100%); }
         to { transform: translateY(0); }
+      }
+
+      /* Form Grids on Mobile */
+      .form-grid-2col {
+        grid-template-columns: 1fr !important;
+        gap: 0 !important;
+      }
+      .form-grid-bot-meta {
+        grid-template-columns: 70px 1fr !important;
+        gap: 8px !important;
+      }
+      .form-grid-bot-meta .form-bot-category {
+        grid-column: 1 / -1;
+      }
+      .dispatch-actions-grid {
+        grid-template-columns: 1fr !important;
+        gap: 10px !important;
+      }
+      .dispatch-actions-grid .btn {
+        width: 100%;
+        padding: 12px 14px !important;
+        font-size: 13.5px;
+        min-height: 44px;
+      }
+      .sim-actions-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .sim-actions-row button:last-child {
+        grid-column: 1 / -1;
+      }
+      .sim-actions-row .btn {
+        min-height: 38px;
+        font-size: 13px;
+      }
+      .sim-chat-box {
+        min-height: 200px;
+        max-height: 280px;
       }
 
       /* Form controls iOS Zoom Prevention */
@@ -636,8 +916,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span class="pill"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
-      <button class="btn btn-sm btn-dark" onclick="syncAllBots()">🔄 대화 즉시 수신</button>
-      <button class="btn btn-sm btn-primary" onclick="refreshCurrentTab()">새로고침</button>
+      <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="전체 봇 대화 즉시 수신">
+        <span>🔄</span> <span class="btn-text">대화 즉시 수신</span>
+      </button>
+      <button class="btn btn-sm btn-primary" onclick="refreshCurrentTab()" title="새로고침">
+        <span>🔃</span> <span class="btn-text">새로고침</span>
+      </button>
     </div>
   </header>
 
@@ -690,21 +974,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
 
         <!-- Search & Filter Bar -->
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
+        <div class="user-filter-bar">
           <div class="filter-chips">
             <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체 보기</button>
-            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트 (1개)</button>
-            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린 (3개)</button>
-            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드 (5개)</button>
-            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙 (무제한)</button>
+            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트 (1)</button>
+            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린 (3)</button>
+            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드 (5)</button>
+            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙 (∞)</button>
           </div>
-          <div style="width:260px;">
-            <input type="text" id="userSearch" class="form-input" placeholder="이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />
+          <div class="user-search-wrap">
+            <input type="text" id="userSearch" class="form-input" placeholder="🔍 이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />
           </div>
         </div>
 
         <div class="table-wrap">
-          <table>
+          <table class="user-table">
             <thead>
               <tr>
                 <th>유저 이름 / 텔레그램 ID</th>
@@ -750,7 +1034,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- =================================================================== -->
     <section id="pane-dashboard" class="tab-pane">
       <!-- 3 Clean KPI Cards -->
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-bottom:20px;">
+      <div class="kpi-grid">
         <div class="card" style="margin-bottom:0;">
           <div style="font-size:12px; font-weight:700; color:var(--text-muted);">전체 회원 수</div>
           <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiUsers">0명</div>
@@ -769,7 +1053,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Tier Distribution Bar & Bot Popularity -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px;">
+      <div class="dash-grid-2col">
         <div class="card" style="margin-bottom:0;">
           <h3 class="card-title" style="margin-bottom:12px;">👑 회원 등급별 현황</h3>
           <div id="tierDistList"></div>
@@ -824,7 +1108,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <button class="btn btn-sm" onclick="closeModal('simModal')">닫기 ✕</button>
       </div>
 
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
+      <div class="form-grid-2col" style="margin-bottom:10px;">
         <div>
           <label class="form-label">테스트 유저</label>
           <select id="simUserSel" class="form-select"></select>
@@ -835,7 +1119,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div style="display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap;">
+      <div class="sim-actions-row">
         <button class="btn btn-sm btn-primary" onclick="runSim('/start')">/start (진입·구독검증)</button>
         <button class="btn btn-sm btn-danger" onclick="runSim('/stop')">/stop (탈퇴·슬롯반환)</button>
         <button class="btn btn-sm" onclick="clearSim()">대화창 비우기</button>
@@ -885,7 +1169,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div style="font-size:12px; font-weight:800; color:var(--text-muted); margin-bottom:8px;">
           3단계: 안전 발송 실행
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+        <div class="dispatch-actions-grid">
           <button class="btn btn-dark" onclick="dispatchBriefingTest()" style="padding:10px;">
             📱 관리자 나에게만 테스트 발송 (1건)
           </button>
@@ -917,7 +1201,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="modal-backdrop" id="botModal">
     <div class="modal-box">
       <h3 style="margin:0 0 16px; font-size:17px;" id="botModalTitle">⚙️ 봇 설정</h3>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+      <div class="form-grid-2col">
         <div class="form-group">
           <label class="form-label">봇 고유 ID</label>
           <input type="text" id="bmId" class="form-input" />
@@ -930,7 +1214,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           </select>
         </div>
       </div>
-      <div style="display:grid; grid-template-columns:80px 1fr 120px; gap:10px;">
+      <div class="form-grid-bot-meta">
         <div class="form-group">
           <label class="form-label">아이콘</label>
           <input type="text" id="bmEmoji" class="form-input" value="🤖" />
@@ -939,7 +1223,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           <label class="form-label">봇 이름</label>
           <input type="text" id="bmName" class="form-input" />
         </div>
-        <div class="form-group">
+        <div class="form-group form-bot-category">
           <label class="form-label">카테고리</label>
           <input type="text" id="bmCategory" class="form-input" value="일반" />
         </div>
@@ -975,7 +1259,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="modal-backdrop" id="userModal">
     <div class="modal-box">
       <h3 style="margin:0 0 16px; font-size:17px;" id="userModalTitle">👤 유저 상세 관리</h3>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+      <div class="form-grid-2col">
         <div class="form-group">
           <label class="form-label">텔레그램 User ID</label>
           <input type="text" id="umId" class="form-input" />
@@ -985,7 +1269,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           <input type="text" id="umName" class="form-input" />
         </div>
       </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+      <div class="form-grid-2col">
         <div class="form-group">
           <label class="form-label">회원 등급</label>
           <select id="umTier" class="form-select">
@@ -1125,7 +1409,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
         const tbody = document.getElementById('userTableBody');
         if (S.users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:28px; color:var(--text-muted);">해당 조건의 유저가 없습니다.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">해당 조건의 유저가 없습니다.</td></tr>';
           return;
         }
 
@@ -1151,11 +1435,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           return `
             <tr>
               <td data-label="회원 정보">
-                <div style="font-weight:800;">${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px;">[차단]</span>' : ''}</div>
+                <div style="font-weight:800; font-size:14.5px;">${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px;">[차단]</span>' : ''}</div>
                 <div style="font-size:12px; color:var(--text-muted);">ID: <code>${esc(u.telegram_user_id)}</code> ${u.username ? `· @${esc(u.username)}` : ''}</div>
               </td>
               <td data-label="회원 등급">
-                <select class="form-select" style="width:165px; font-weight:700; padding:6px 9px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
+                <select class="form-select user-tier-select" style="width:160px; font-weight:700; padding:6px 9px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
                   <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1개)</option>
                   <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3개)</option>
                   <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5개)</option>
@@ -1167,17 +1451,17 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="slot-bar"><div class="slot-bar-fill" style="width:${pct}%; background:${barColor};"></div></div>
               </td>
               <td data-label="구독 중인 봇">
-                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:2px;">
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:4px;">
                   ${botChips || '<span style="color:var(--text-muted); font-size:12px;">구독 없음</span>'}
                   ${suspChips}
-                  <button class="btn btn-sm" style="padding:2px 7px; margin-left:3px;" onclick="openAddSubModal('${esc(u.telegram_user_id)}')">+ 추가</button>
+                  <button class="btn btn-sm" style="padding:3px 9px; margin-left:3px;" onclick="openAddSubModal('${esc(u.telegram_user_id)}')">+ 추가</button>
                 </div>
               </td>
               <td data-label="등급 만료일" style="font-size:12px;">
                 ${u.tier_expires_at ? `<code>${esc(u.tier_expires_at.slice(0,10))}</code>` : '<span style="color:var(--text-muted);">무기한</span>'}
               </td>
               <td data-label="관리">
-                <div style="display:flex; gap:4px;">
+                <div style="display:flex; gap:6px;">
                   <button class="btn btn-sm" onclick="openEditUserModal('${esc(u.telegram_user_id)}')">수정</button>
                   <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.telegram_user_id)}')">삭제</button>
                 </div>
@@ -1364,20 +1648,20 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             ? `<span style="color:var(--success); font-weight:700;">🟢 토큰 등록됨</span>`
             : `<span style="color:var(--warning); font-weight:700;">🟠 토큰 필요</span>`;
           mBox.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px; padding:6px 0;">
-              <div style="display:flex; align-items:center; gap:14px;">
-                <span style="font-size:36px;">${esc(menuBot.icon_emoji)}</span>
+            <div class="menu-bot-box">
+              <div class="menu-bot-info">
+                <span style="font-size:36px; flex-shrink:0;">${esc(menuBot.icon_emoji)}</span>
                 <div>
-                  <div style="display:flex; align-items:center; gap:8px;">
+                  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                     <strong style="font-size:16px;">${esc(menuBot.name)}</strong>
                     <span style="font-size:12px; color:var(--primary); font-weight:700;">${uname}</span>
                     <span style="font-size:12px;">${tokenBadge}</span>
-                    <span class="badge" style="background:#dbeafe; color:#1e40af;">가입·안내 포털 (쿼터 미차감)</span>
+                    <span class="badge" style="background:#dbeafe; color:#1e40af; font-size:11.5px; padding:2px 7px; border-radius:4px; font-weight:700;">가입·안내 포털 (쿼터 미차감)</span>
                   </div>
                   <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${esc(menuBot.description)}</div>
                 </div>
               </div>
-              <div style="display:flex; gap:8px;">
+              <div class="menu-bot-btns">
                 <button class="btn btn-sm btn-dark" onclick="openSimModal('${esc(menuBot.bot_id)}')">👁️ 유저 시점 미리보기</button>
                 <button class="btn btn-sm btn-primary" onclick="openEditBotModal('${esc(menuBot.bot_id)}')">⚙️ 설정·토큰 수정</button>
               </div>
@@ -1402,19 +1686,19 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                       <div style="font-size:12px; color:var(--text-muted);">${esc(b.category)} · ${tokenBadge}</div>
                     </div>
                   </div>
-                  <span style="font-size:12px; font-weight:800; background:#dbeafe; color:#1e40af; padding:3px 8px; border-radius:6px;">
+                  <span style="font-size:12px; font-weight:800; background:#dbeafe; color:#1e40af; padding:3px 8px; border-radius:6px; flex-shrink:0;">
                     👥 ${b.active_subscribers}명 구독중
                   </span>
                 </div>
                 <div style="font-size:12.5px; color:#475569; margin:8px 0;">${esc(b.description || '설명 없음')}</div>
               </div>
-              <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; border-top:1px solid var(--border); padding-top:12px;">
-                <button class="btn btn-sm btn-primary" onclick="openBriefingModal('${esc(b.bot_id)}')">
+              <div class="bot-card-actions">
+                <button class="btn btn-sm btn-primary btn-dispatch-center" onclick="openBriefingModal('${esc(b.bot_id)}')">
                   🚀 정규 브리핑 발송 센터
                 </button>
-                <div style="display:flex; gap:4px;">
-                  <button class="btn btn-sm" onclick="openEditBotModal('${esc(b.bot_id)}')">설정</button>
-                  <button class="btn btn-sm" onclick="openSimModal('${esc(b.bot_id)}')">시뮬</button>
+                <div class="bot-card-sub-actions">
+                  <button class="btn btn-sm" onclick="openEditBotModal('${esc(b.bot_id)}')">⚙️ 설정</button>
+                  <button class="btn btn-sm" onclick="openSimModal('${esc(b.bot_id)}')">🧪 시뮬</button>
                 </div>
               </div>
             </div>
@@ -1649,9 +1933,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
         // Audit Logs
         document.getElementById('auditLogList').innerHTML = (ov.recent_audit_logs || []).map(l => `
-          <div style="padding:7px 0; border-bottom:1px solid var(--border); font-size:12.5px; display:flex; justify-content:space-between;">
-            <div><b>${esc(l.action)}</b> · ${esc(l.user_name)} ${l.bot_name ? `→ <span style="color:var(--primary);">${esc(l.bot_name)}</span>` : ''}</div>
-            <span style="color:var(--text-muted); font-size:11.5px;">${esc((l.logged_at || '').slice(5, 16))}</span>
+          <div style="padding:8px 0; border-bottom:1px solid var(--border); font-size:12.5px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:4px;">
+            <div><b>${esc(l.action)}</b> · ${esc(l.user_name)} ${l.bot_name ? `→ <span style="color:var(--primary); font-weight:700;">${esc(l.bot_name)}</span>` : ''}</div>
+            <span style="color:var(--text-muted); font-size:11.5px; flex-shrink:0;">${esc((l.logged_at || '').slice(5, 16))}</span>
           </div>
         `).join('') || '<div style="color:var(--text-muted);">이력 없음</div>';
 

@@ -66,6 +66,16 @@ class BudgetCalculator:
 
         summary_reason = " · ".join(reasons)
 
+        dep_c = flight.departure_date.replace("-", "")
+        ret_c = flight.return_date.replace("-", "")
+        naver_flight_url = f"https://m-flight.naver.com/flights/international/{flight.origin_code}-{flight.destination_code}-{dep_c}/{flight.destination_code}-{flight.origin_code}-{ret_c}?fareType=Y&adult=1"
+
+        import urllib.parse
+        short_hotel = dest.recommended_hotel_name.split()[0] if dest.recommended_hotel_name else dest.name
+        hotel_query = f"{dest.name} {short_hotel}"
+        encoded_hotel = urllib.parse.quote(hotel_query)
+        hotel_search_url = f"https://m-hotel.naver.com/hotels/search?destination={encoded_hotel}&checkIn={flight.departure_date}&checkOut={flight.return_date}&rooms=1&adults=2"
+
         return TravelRecommendation(
             destination=dest,
             best_deal=flight,
@@ -73,6 +83,8 @@ class BudgetCalculator:
             season_status=season_status,
             recommendation_score=total_score,
             summary_reason=summary_reason,
+            naver_flight_url=naver_flight_url,
+            hotel_search_url=hotel_search_url,
         )
 
     @classmethod

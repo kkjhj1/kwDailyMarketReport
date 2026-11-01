@@ -4,6 +4,7 @@ to provide real-time briefing previews, admin test dispatch, and batch subscribe
 """
 from __future__ import annotations
 
+import html
 import os
 import sys
 import json
@@ -11,10 +12,12 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("briefing_service")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+KST = ZoneInfo("Asia/Seoul")
 
 
 def _get_env_val(key: str, default: str = "") -> str:
@@ -31,6 +34,44 @@ def _get_env_val(key: str, default: str = "") -> str:
         except Exception:
             pass
     return default
+
+
+def get_bot_username(bot_id: str, db=None) -> str:
+    """Resolves Telegram @username for bot_id using DB, .env, or known live defaults."""
+    # 1. Try DB first
+    if db is not None:
+        try:
+            bot = db.get_bot(bot_id)
+            if bot and getattr(bot, "telegram_username", None):
+                un = str(bot.telegram_username).strip().lstrip("@")
+                if un:
+                    return un
+        except Exception:
+            pass
+
+    # 2. Try .env specific variables
+    env_keys = {
+        "brief_bot": ["BRIEF_TELEGRAM_BOT_USERNAME", "TELEGRAM_BOT_USERNAME", "BRIEF_BOT_USERNAME"],
+        "travel_bot": ["TRAVEL_TELEGRAM_BOT_USERNAME", "TRAVEL_BOT_USERNAME"],
+        "admission_bot": ["EDU_TELEGRAM_BOT_USERNAME", "ADMISSION_TELEGRAM_BOT_USERNAME", "EDU_BOT_USERNAME"],
+        "edu_bot": ["EDU_TELEGRAM_BOT_USERNAME", "ADMISSION_TELEGRAM_BOT_USERNAME", "EDU_BOT_USERNAME"],
+        "menu_bot": ["PORTAL_TELEGRAM_BOT_USERNAME", "MENU_TELEGRAM_BOT_USERNAME", "MENU_BOT_USERNAME", "PORTAL_BOT_USERNAME"],
+    }.get(bot_id, [f"{bot_id.upper()}_USERNAME"])
+
+    for k in env_keys:
+        val = _get_env_val(k).strip().lstrip("@")
+        if val:
+            return val
+
+    # 3. Known fallback defaults for the 4 verified platform bots
+    defaults = {
+        "brief_bot": "KwDailyMarketInfo_bot",
+        "travel_bot": "KwTravelLowPrice_bot",
+        "admission_bot": "KwEduInfo_bot",
+        "edu_bot": "KwEduInfo_bot",
+        "menu_bot": "KwMenu_bot",
+    }
+    return defaults.get(bot_id, "")
 
 
 def get_bot_token_and_chat(bot_id: str, db=None) -> Tuple[str, str]:
@@ -58,8 +99,8 @@ def get_bot_token_and_chat(bot_id: str, db=None) -> Tuple[str, str]:
         token = token or _get_env_val("EDU_TELEGRAM_BOT_TOKEN") or _get_env_val("TELEGRAM_BOT_TOKEN")
         admin_chat = _get_env_val("EDU_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
     elif bot_id == "menu_bot":
-        token = token or _get_env_val("MENU_TELEGRAM_BOT_TOKEN") or _get_env_val("MENU_BOT_TOKEN") or _get_env_val("TELEGRAM_BOT_TOKEN")
-        admin_chat = _get_env_val("TELEGRAM_CHAT_ID")
+        token = token or _get_env_val("PORTAL_TELEGRAM_BOT_TOKEN") or _get_env_val("MENU_TELEGRAM_BOT_TOKEN") or _get_env_val("MENU_BOT_TOKEN") or _get_env_val("TELEGRAM_BOT_TOKEN")
+        admin_chat = _get_env_val("PORTAL_TELEGRAM_CHAT_ID") or _get_env_val("MENU_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
     else:
         token = token or _get_env_val("TELEGRAM_BOT_TOKEN")
         admin_chat = _get_env_val("TELEGRAM_CHAT_ID")
@@ -77,11 +118,11 @@ def get_bot_presets(bot_id: str) -> List[Dict[str, str]]:
         return [
             {"id": "morning", "label": "🌅 06:30 모닝 시황"},
             {"id": "closing", "label": "📊 15:40 마감 시황"},
-            {"id": "urgent", "label": "⚡ 변동성 긴급 알림 (샘플)"},
+            {"id": "urgent", "label": "⚡ 변동성 긴급 알림"},
         ]
     elif bot_id == "travel_bot":
         return [
-            {"id": "deals", "label": "✈️ 실시간 특가 항공권"},
+            {"id": "deals", "label": "✈️ 실시간 특가 항공권 TOP 3"},
             {"id": "ai_recommendation", "label": "🌴 AI 시즌 추천지 가이드"},
         ]
     elif bot_id == "admission_bot" or bot_id == "edu_bot":
@@ -99,8 +140,9 @@ def get_bot_presets(bot_id: str) -> List[Dict[str, str]]:
 
 
 def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) -> Dict[str, Any]:
-    """Generates real-time domain briefing content and rich HTML."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    """Generates real-time domain briefing content and rich HTML directly from domain engines."""
+    now_kst = datetime.now(KST)
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M")
     presets = get_bot_presets(bot_id)
     preset_id = preset or (presets[0]["id"] if presets else "default")
 
@@ -108,121 +150,179 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
     content_html = ""
     inline_keyboard: List[List[Dict[str, str]]] = []
 
-    # 1. BRIEF BOT (금융 / 시황)
+    # =========================================================================
+    # 1. BRIEF BOT (금융 / 시장 시황) -> NaverFinanceProvider / BriefingBuilder
+    # =========================================================================
     if bot_id == "brief_bot":
         report_url = _get_env_val("REPORT_BASE_URL", "https://kkjhj1.github.io/kwDailyMarketReport/")
-        if preset_id == "morning":
-            title = f"🌅 [모닝 시황 브리핑] {now_str}"
-            content_html = (
-                f"<b>🌅 [장전 모닝 시황 브리핑]</b>\n"
-                f"📅 <i>{now_str} KST 기준</i>\n\n"
-                f"<b>[글로벌 및 국내 지표 현황]</b>\n"
-                f"• 코스피 (KOSPI): <b>2,610.45</b> (+0.62% ▲)\n"
-                f"• 코스닥 (KOSDAQ): <b>758.12</b> (+0.38% ▲)\n"
-                f"• 원/달러 환율: <b>1,382.50원</b> (-3.20원 ▼)\n"
-                f"• 나스닥 종합: <b>18,650.20</b> (+1.15% ▲)\n\n"
-                f"<b>[핵심 시황 요약]</b>\n"
-                f"• 미 빅테크 호실적 지속으로 글로벌 위험자산 선호 심리 회복\n"
-                f"• 외국인 전기전자 업종 중심 순매수 전환 기대감\n"
-                f"• 환율 1,380원대 초반 안정세 및 장전 주요 공시 확인 권장"
-            )
-            inline_keyboard = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
-        elif preset_id == "closing":
-            title = f"📊 [마감 시황 브리핑] {now_str}"
-            content_html = (
-                f"<b>📊 [장마감 시황 총괄 브리핑]</b>\n"
-                f"📅 <i>{now_str} KST 마감</i>\n\n"
-                f"<b>[주요 지수 마감 결과]</b>\n"
-                f"• 코스피: <b>2,618.30</b> (+0.92% ▲ 23.85p 상승 마감)\n"
-                f"• 코스닥: <b>762.40</b> (+0.95% ▲ 7.18p 상승 마감)\n"
-                f"• 원/달러: <b>1,380.10원</b> (-5.60원 ▼)\n\n"
-                f"<b>[수급 및 섹터 하이라이트]</b>\n"
-                f"• 외국인 +3,850억, 기관 +2,100억 양매수 유입\n"
-                f"• AI 반도체 및 방산·조선 강세, 2차전지 반등 성공\n"
-                f"• 야간 미국장 고용지표 발표 및 주요 FOMC 발언 예정"
-            )
-            inline_keyboard = [[{"text": "📈 일일 마감 리포트 보러가기", "url": report_url}]]
-        else:  # urgent
-            title = f"⚡ [긴급 변동성 알림] {now_str}"
-            content_html = (
-                f"<b>⚡ [장중 급변동 긴급 브리핑]</b>\n"
-                f"📅 <i>{now_str} KST 감지</i>\n\n"
-                f"<b>[임계치 초과 종목 감지]</b>\n"
-                f"🚨 <b>코스닥 급변동: +3.25% 급등</b> (임계치 ±3.0% 초과)\n"
-                f"• 현재가: 772.30p (+24.38p)\n"
-                f"• 원인: 주요 테마 대형주 외인 순매수 급증에 따른 프로그램 매수 호가 발동"
-            )
-            inline_keyboard = [[{"text": "⚡ 실시간 호가 및 차트 확인", "url": report_url}]]
+        try:
+            from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider
+            from market_brief.market_data.naver_provider import NewsItem, fetch_naver_market_news
+            from market_brief.pipeline import DEFAULT_SYMBOLS
+            from market_brief.report_engine import BriefingBuilder
+            from market_brief.channels.telegram import format_telegram_html
 
-    # 2. TRAVEL BOT (여행 특가 & AI 가이드)
+            fixture_prov = FixtureProvider(str(ROOT_DIR / "fixtures/market_snapshot.json"))
+            prov = CompositeMarketDataProvider(NaverFinanceProvider(), fixture_prov)
+            quotes = prov.fetch(DEFAULT_SYMBOLS)
+
+            news: List[NewsItem] = []
+            try:
+                news = fetch_naver_market_news(5)
+            except Exception as e:
+                logger.debug(f"Live naver news fetch skipped: {e}")
+            if not news:
+                try:
+                    raw_news = json.loads((ROOT_DIR / "fixtures/market_news.json").read_text(encoding="utf-8"))
+                    news = [NewsItem(**item) for item in raw_news]
+                except Exception:
+                    news = []
+
+            as_of_label = f"{now_kst.strftime('%Y-%m-%d %H:%M')} KST"
+            builder = BriefingBuilder()
+            briefing = builder.build(
+                quotes,
+                kind=preset_id if preset_id in ("morning", "closing", "urgent") else "morning",
+                as_of_label=as_of_label,
+                report_url=report_url,
+                news=news,
+            )
+            content_html = format_telegram_html(briefing)
+            kind_kr = {"morning": "모닝 시황", "closing": "마감 시황", "urgent": "긴급 변동성"}.get(briefing.kind, briefing.kind.upper())
+            title = f"[{kind_kr}] {briefing.headline} ({as_of_label})"
+            inline_keyboard = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
+        except Exception as e:
+            logger.error(f"Error generating brief_bot briefing: {e}", exc_info=True)
+            title = f"📊 [시황 브리핑] {now_str}"
+            content_html = f"<b>📊 [시황 브리핑]</b>\n<i>{now_str} KST</i>\n\n데이터 수집 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": "📊 웹 리포트 보러가기", "url": report_url}]]
+
+    # =========================================================================
+    # 2. TRAVEL BOT (여행 특가 & AI 추천) -> FlightEngine / BudgetCalculator
+    # =========================================================================
     elif bot_id == "travel_bot":
         travel_report_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
-        if preset_id == "deals":
-            title = f"✈️ [실시간 특가 항공권 핫딜] {now_str}"
-            content_html = (
-                f"<b>✈️ [트래블브리프] 주말 깜짝 특가 항공권 TOP 3</b>\n"
-                f"📅 <i>{now_str} 실시간 수집</i>\n\n"
-                f"1️⃣ <b>🇻🇳 다낭 (DAD)</b>: <b>248,000원~</b> (왕복특가! 정상가 대비 38% 할인)\n"
-                f"• 비엣젯/제주항공 / 11월 중순 출발 슬롯 잔여 4석\n\n"
-                f"2️⃣ <b>🇯🇵 후쿠오카 (FUK)</b>: <b>142,000원~</b> (초단거리 온천 여행 최저가)\n"
-                f"• 티웨이항공 / 금-일 주말 슬롯 가능\n\n"
-                f"3️⃣ <b>🇹🇭 방콕 (BKK)</b>: <b>310,000원~</b> (에어아시아 핫딜)\n"
-                f"• 건기 여행 최적기! 12월 연말 얼리버드 슬롯"
-            )
-            inline_keyboard = [[{"text": "🏖️ 특가 항공권 & 호텔 패키지 확인", "url": travel_report_url}]]
-        else:  # ai_recommendation
-            title = f"🌴 [AI 시즌 추천 여행지] {now_str}"
-            content_html = (
-                f"<b>🌴 [AI 여행 큐레이션] 이번 달 가성비 1등 여행지</b>\n"
-                f"📅 <i>{now_str} 기준</i>\n\n"
-                f"<b>추천지: 🇯🇵 오사카·교토 단풍 가을 코스</b>\n"
-                f"• 총 예상 예산: <b>1인 68만원~</b> (항공 21만 + 숙박 3박 27만 + 경비 20만)\n"
-                f"• 꿀팁: 교토 아라시야마 단풍 절정 시즌 사전 예약 패스 추천\n"
-                f"• 날씨: 평균 16°C로 야외 도보 산책에 최적의 청명한 날씨"
-            )
-            inline_keyboard = [[{"text": "🗺️ 3박 4일 최적 동선 및 예산표 보기", "url": travel_report_url}]]
+        try:
+            from travel_brief.flight_engine import FlightEngine
+            from travel_brief.budget_calculator import BudgetCalculator
+            from travel_brief.ai_prompts import AIPromptGenerator
+            from travel_bot_runner import format_telegram_briefing, resolve_travel_report_url
 
-    # 3. ADMISSION BOT (입시 & 교육 큐레이션)
+            engine = FlightEngine()
+            all_deals = engine.search_deals(months_ahead=6)
+            recommendations = BudgetCalculator.rank_recommendations(
+                destinations=engine.destinations,
+                deals=all_deals,
+                top_n=3,
+            )
+            travel_report_url = resolve_travel_report_url()
+
+            if preset_id == "ai_recommendation" and recommendations:
+                top_rec = recommendations[0]
+                dest = top_rec.destination
+                deal = top_rec.best_deal
+                budget = top_rec.budget
+                chatgpt_link = AIPromptGenerator.get_chatgpt_deep_link(
+                    AIPromptGenerator.build_compact_prompt(dest, deal, budget)
+                )
+                naver_flight = top_rec.naver_flight_url or FlightEngine.build_naver_flight_url(
+                    deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
+                )
+                season_label = "✨ 최고시즌" if top_rec.season_status == "BEST_SEASON" else "🌤️ 여행적기"
+                hotel_name_str = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else f"{dest.name} 추천 호텔"
+
+                title = f"🌴 [AI 시즌 추천 여행지] {dest.name} ({dest.code})"
+                content_html = (
+                    f"🌴 <b>[AI 여행 큐레이션] 이번 달 가성비 1등 추천 여행지</b>\n"
+                    f"📅 <i>{now_str} KST 실시간 분석</i>\n\n"
+                    f"<b>추천지: {dest.name} ({dest.code})</b> {season_label}\n"
+                    f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)\n"
+                    f"  • 시간대: <b>{deal.departure_time_slot}</b>\n"
+                    f"  • 예상 항공: <b>{deal.price_krw:,}원</b> ({deal.airline} 직항)\n"
+                    f"  • 추천 숙소: <b>{hotel_name_str}</b> (3박 약 {budget.hotel_total_krw // 10000}만 원)\n"
+                    f"  • 1인 총예산: <b>약 {budget.total_per_person_krw // 10000}만 원</b> (항공 + 숙박 + 식비·교통)\n"
+                    f"  • 2인 총예산: 약 {budget.estimated_for_two_krw // 10000}만 원 (1실 쉐어)\n"
+                    f"  • 비자/팁: {dest.visa_info} ({dest.tips})\n\n"
+                    f"💡 <i>ChatGPT 맞춤 코스 생성을 통해 최적 3박 4일 동선을 3초 만에 확인하세요.</i>"
+                )
+                inline_keyboard = [
+                    [{"text": "🤖 ChatGPT 3박4일 일정 짜기", "url": chatgpt_link}],
+                    [{"text": "🔍 네이버 항공권 실시간 확인", "url": naver_flight}],
+                    [{"text": "📊 6개월 최저가 히트맵 전체보기", "url": travel_report_url}],
+                ]
+            else:
+                title = f"✈️ [주말 해외여행 6개월 특가 TOP 3] {now_str}"
+                content_html = format_telegram_briefing(recommendations, web_report_url=travel_report_url)
+                inline_keyboard = [
+                    [{"text": "📊 6개월 최저가 히트맵 전체보기", "url": travel_report_url}]
+                ]
+        except Exception as e:
+            logger.error(f"Error generating travel_bot briefing: {e}", exc_info=True)
+            title = f"✈️ [여행 특가 브리핑] {now_str}"
+            content_html = f"<b>✈️ [여행 특가 브리핑]</b>\n<i>{now_str}</i>\n\n여행 데이터 생성 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": "🏖️ 트래블 리포트 확인", "url": travel_report_url}]]
+
+    # =========================================================================
+    # 3. ADMISSION BOT (입시 & 교육 큐레이션) -> AdmissionDatabase / AICurator
+    # =========================================================================
     elif bot_id == "admission_bot" or bot_id == "edu_bot":
-        admission_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/admission_latest.html"
-        if preset_id == "ticketing":
-            title = f"🎫 [설명회 티켓팅 오픈 D-day] {now_str}"
-            content_html = (
-                f"<b>🎫 [에듀브리프] 주요 학부모 대입 설명회 예약 안내</b>\n"
-                f"📅 <i>{now_str} 업데이트</i>\n\n"
-                f"🚨 <b>D-1 메가스터디 2026 수능 파이널 전략 설명회</b>\n"
-                f"• 예약 오픈: <b>내일 오전 10:00 KST (선착순 마감)</b>\n"
-                f"• 대상: 고3 및 N수생 학부모 (코엑스 오디토리움)\n"
-                f"• 핵심 테마: 킬러문항 배제 기조 하 실전 지원 라인 분석"
-            )
-            inline_keyboard = [[{"text": "🎫 설명회 예약 페이지 바로가기", "url": admission_url}]]
-        else:  # weekly
-            title = f"🎓 [학년별 주간 입시 핵심 요약] {now_str}"
-            content_html = (
-                f"<b>🎓 [에듀브리프] 고1~고3 이번 주 필수 학사·입시 체크리스트</b>\n"
-                f"📅 <i>{now_str} 기준</i>\n\n"
-                f"• <b>고3</b>: 수시 면접 대비 대학별 기출 및 학생부 세특 최종 점검\n"
-                f"• <b>고2</b>: 2학기 기말고사 내신 비중 집중 및 선택과목 성취도 관리\n"
-                f"• <b>고1</b>: 2028 대입 개편안(통합사회·통합과학) 대비 겨울방학 로드맵 수립"
-            )
-            inline_keyboard = [[{"text": "📅 주간 입시 캘린더 상세보기", "url": admission_url}]]
+        admission_url = _get_env_val("ADMISSION_REPORT_URL", "https://kkjhj1.github.io/kwDailyMarketReport/reports/admission_latest.html")
+        try:
+            from admission_brief.ai_curator import AICurator
+            from admission_brief.models import TargetGrade, BriefingType
+            from admission_brief.channels.telegram import format_admission_html
+            from admission_brief.storage.db import AdmissionDatabase
 
-    # 4. MENU BOT (통합 포털)
+            curator = AICurator()
+            adm_db = AdmissionDatabase(db_path=str(ROOT_DIR / "data/admission_brief.db"))
+
+            if preset_id == "ticketing":
+                events = adm_db.list_all_events()
+                ticketing_events = [e for e in events if e.event_type == BriefingType.TICKETING_ALERT]
+                if ticketing_events:
+                    briefing = curator.curate_event_briefing(ticketing_events[0])
+                else:
+                    briefing = curator.generate_weekly_todo_briefing(TargetGrade.HIGH_3_N)
+            else:
+                briefing = curator.generate_weekly_todo_briefing(TargetGrade.ALL)
+
+            title = f"[{briefing.briefing_type.title}] {briefing.headline}"
+            content_html = format_admission_html(briefing)
+            btn_text = briefing.booking_button_text or "🌐 상세 안내 확인하기"
+            btn_url = briefing.booking_url or admission_url
+            inline_keyboard = [[{"text": btn_text, "url": btn_url}]]
+        except Exception as e:
+            logger.error(f"Error generating admission_bot briefing: {e}", exc_info=True)
+            title = f"🎓 [입시 교육 브리핑] {now_str}"
+            content_html = f"<b>🎓 [입시 교육 브리핑]</b>\n<i>{now_str}</i>\n\n입시 큐레이션 생성 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": "📅 입시 캘린더 확인", "url": admission_url}]]
+
+    # =========================================================================
+    # 4. MENU BOT (통합 포털) -> .env usernames & telegram links
+    # =========================================================================
     elif bot_id == "menu_bot":
+        brief_un = get_bot_username("brief_bot", db=db) or "KwDailyMarketInfo_bot"
+        travel_un = get_bot_username("travel_bot", db=db) or "KwTravelLowPrice_bot"
+        edu_un = get_bot_username("admission_bot", db=db) or "KwEduInfo_bot"
+
+        brief_link = f"https://t.me/{brief_un}"
+        travel_link = f"https://t.me/{travel_un}"
+        edu_link = f"https://t.me/{edu_un}"
+
         title = f"🧭 [통합 메뉴봇 공식 카탈로그] {now_str}"
         content_html = (
             f"<b>🧭 [통합 안내 포털] 봇 구독 서비스에 오신 것을 환영합니다!</b>\n\n"
             f"원하시는 전문 정보봇을 선택하여 구독하시면 정기 브리핑을 실시간으로 수신하실 수 있습니다.\n\n"
             f"<b>[현재 운영 중인 전문 정보봇]</b>\n"
-            f"📈 <b>시황 브리핑봇</b>: 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
-            f"✈️ <b>여행 특가봇</b>: 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
-            f"🎓 <b>입시 교육봇</b>: 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n\n"
+            f"📈 <b>시황 브리핑봇</b> (@{brief_un}): 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
+            f"✈️ <b>여행 특가봇</b> (@{travel_un}): 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
+            f"🎓 <b>입시 교육봇</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n\n"
             f"<i>※ 화이트 등급(무료)은 1개 봇, 그린 3개, 레드 5개, 블랙은 전체 봇을 이용하실 수 있습니다.</i>"
         )
         inline_keyboard = [
-            [{"text": "📈 시황 브리핑봇 가기", "url": "https://t.me/"}],
-            [{"text": "✈️ 여행 특가봇 가기", "url": "https://t.me/"}],
-            [{"text": "🎓 입시 교육봇 가기", "url": "https://t.me/"}],
+            [{"text": f"📈 시황 브리핑봇 바로가기 (@{brief_un})", "url": brief_link}],
+            [{"text": f"✈️ 여행 특가봇 바로가기 (@{travel_un})", "url": travel_link}],
+            [{"text": f"🎓 입시 교육봇 바로가기 (@{edu_un})", "url": edu_link}],
         ]
 
     else:

@@ -20,12 +20,39 @@ class DestinationMeta:
     daily_meal_transit_krw: int
     currency: str
     tips: str
+    recommended_hotel_name: str = ""
+    recommended_hotel_grade: str = ""
+    recommended_hotel_features: str = ""
 
     def is_best_month(self, month: int) -> bool:
         return month in self.best_months
 
     def is_caution_month(self, month: int) -> bool:
         return month in self.caution_months
+
+
+def format_departure_time_slot(departure_day_of_week: str, time_category: str = "morning") -> str:
+    """Formats realistic departure time slot with worker vacation recommendation.
+    - 목요일: 오전 08:30~10:30 (목·금 연차 2일 추천)
+    - 금요일 아침: 오전 08:30~10:30 (금요일 전일 연차 · 알찬 3박4일)
+    - 금요일 오후: 오후 14:00~16:00 (금요일 오후 반차 추천)
+    - 금요일 야간: 야간 19:30~21:00 (퇴근 후 출발 · 연차 절약)
+    """
+    dow = departure_day_of_week.strip()
+    tc = time_category.strip().lower()
+
+    if dow in ("목", "Thu", "Thursday"):
+        return "오전 08:30~10:30 (목·금 연차 2일 추천)"
+
+    if dow in ("금", "Fri", "Friday"):
+        if tc in ("afternoon", "오후", "afternoon_half"):
+            return "오후 14:00~16:00 (금요일 오후 반차 추천)"
+        elif tc in ("night", "evening", "야간", "night_saver"):
+            return "야간 19:30~21:00 (퇴근 후 출발 · 연차 절약)"
+        else:
+            return "오전 08:30~10:30 (금요일 전일 연차 · 알찬 3박4일)"
+
+    return "오전 08:30~10:30 (주말 출발)"
 
 
 @dataclass
@@ -42,6 +69,15 @@ class FlightDeal:
     price_krw: int
     baseline_krw: int
     is_super_deal: bool = False
+    departure_time_slot: str = ""
+    return_time_slot: str = "오후 18:00~21:30 (귀국 후 휴식 가능)"
+    time_category: str = "morning"  # morning, afternoon, night
+
+    def __post_init__(self):
+        if not self.departure_time_slot or self.departure_time_slot == "오전 08:30~10:30 (직장인 반차 추천)":
+            self.departure_time_slot = format_departure_time_slot(
+                self.departure_day_of_week, self.time_category
+            )
 
     @property
     def discount_pct(self) -> float:
@@ -89,3 +125,5 @@ class TravelRecommendation:
     season_status: Literal["BEST_SEASON", "NORMAL", "CAUTION"]
     recommendation_score: int  # 1~100 가성비 점수
     summary_reason: str
+    naver_flight_url: str = ""
+    hotel_search_url: str = ""

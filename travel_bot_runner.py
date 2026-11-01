@@ -87,8 +87,9 @@ def format_telegram_briefing(
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [
         "✈️ <b>[주말 해외여행 6개월 특가 & 예산 브리핑]</b>",
-        f"📅 기준 일시: {now_str}",
+        f"📅 기준 일시: {now_str} KST",
         "📌 대상: 목~일 & 금~월 (3박 4일) 직장인 실속 주말 일정",
+        "💡 <i>네이버 항공권 실시간 잔여석/유류세에 따라 결제가는 변동될 수 있습니다.</i>",
         "──────────────────────",
         "🔥 <b>이번 주 BEST 추천 TOP 3</b>",
     ]
@@ -105,20 +106,37 @@ def format_telegram_briefing(
             AIPromptGenerator.build_compact_prompt(dest, deal, budget)
         )
 
+        hotel_name_str = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else f"{dest.name} 추천 호텔"
+        hotel_grade_str = f" ({dest.recommended_hotel_grade})" if dest.recommended_hotel_grade else ""
+        feat_raw = dest.recommended_hotel_features.split(",")[0].strip() if dest.recommended_hotel_features else ""
+        hotel_feat_str = f" · {feat_raw}" if feat_raw else ""
+
+        naver_flight_link = rec.naver_flight_url or FlightEngine.build_naver_flight_url(
+            deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
+        )
+        hotel_search_link = rec.hotel_search_url or FlightEngine.build_naver_hotel_url(
+            hotel_name_str, deal.departure_date, deal.return_date
+        )
+
+        tip_clean = dest.tips.split(",")[0].strip() if dest.tips else ""
+        tip_str = f" · {tip_clean}" if tip_clean else ""
+
         lines.extend([
             f"\n<b>{i}. {dest.name} ({dest.code})</b> {season_icon}{deal_tag}",
             f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)",
-            f"  • 항공: <b>{deal.price_krw:,}원</b> ({deal.airline} 왕복 직항)",
-            f"  • 1인 총예산: <b>약 {budget.total_per_person_krw // 10000}만 원</b> (숙소 {budget.hotel_total_krw // 10000}만 + 식비/교통 {budget.meal_transit_total_krw // 10000}만)",
+            f"  • 시간대: <b>{deal.departure_time_slot}</b>",
+            f"  • 예상 항공: <b>{deal.price_krw:,}원</b> ({deal.airline} 직항)",
+            f"  • 추천 숙소: <b>{hotel_name_str}</b>{hotel_grade_str}",
+            f"    └ 3박 약 {budget.hotel_total_krw // 10000}만 원{hotel_feat_str}",
+            f"  • 1인 총예산: <b>약 {budget.total_per_person_krw // 10000}만 원</b> (항공 {deal.price_krw // 10000}만 + 숙소 {budget.hotel_total_krw // 10000}만 + 식비 {budget.meal_transit_total_krw // 10000}만)",
             f"  • 2인 총예산: 약 {budget.estimated_for_two_krw // 10000}만 원 (1실 쉐어)",
-            f"  • 비자/팁: {dest.visa_info} ({dest.tips})",
-            f'  👉 <a href="{chatgpt_link}">🤖 ChatGPT로 3박4일 일정 짜기</a>',
+            f"  • 비자/팁: {dest.visa_info}{tip_str}",
+            f'  👉 <a href="{naver_flight_link}">[✈️ 항공권 최저가]</a> · <a href="{hotel_search_link}">[🏨 추천 숙소]</a> · <a href="{chatgpt_link}">[🤖 AI 맞춤일정]</a>',
         ])
 
     lines.extend([
         "\n──────────────────────",
         f'📊 <b>6개월 최저가 히트맵 전체보기:</b>\n<a href="{web_report_url}">{web_report_url}</a>',
-        "\n💡 <i>본 브리핑은 SafeTelegramDispatcher를 통해 안전하게 발송되었습니다.</i>",
     ])
 
     return "\n".join(lines)

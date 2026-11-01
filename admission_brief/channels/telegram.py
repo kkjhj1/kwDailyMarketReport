@@ -41,14 +41,13 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     lines = [
         f"{icon} <b>[{html.escape(type_title)}]</b> {grade_badge}{region_badge}",
         f"🕒 기준: <code>{html.escape(briefing.as_of)}</code>",
-        "",
-        f"📌 <b>【{html.escape(briefing.headline)}】</b>",
+        f"📌 <b>{html.escape(briefing.headline)}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
     # 1. 3-line summary
     if briefing.summary_3lines:
-        lines.append("<b>■ 🔍 핵심 요약 3가지</b>")
+        lines.append("<b>🔍 핵심 요약 3가지</b>")
         for i, pt in enumerate(briefing.summary_3lines, 1):
             lines.append(f"<b>{i}.</b> {html.escape(pt)}")
         lines.append("")
@@ -56,16 +55,16 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     # 2. So What (학부모 기준 득실 해석)
     if briefing.so_what:
         lines.extend([
-            "<b>■ 💡 학부모 득실 분석 (So What?)</b>",
+            "<b>💡 학부모 득실 분석 및 핵심 인사이트</b>",
             f"<i>{html.escape(briefing.so_what)}</i>",
             "",
         ])
 
     # 3. Weekly Action To-Dos
     if briefing.action_todos:
-        lines.append("<b>■ 📋 이번 주 필수 행동 지침 (To-Do)</b>")
+        lines.append("<b>📋 이번 주 필수 행동 지침 (To-Do)</b>")
         for item in briefing.action_todos:
-            lines.append(f"  ▪ {html.escape(item)}")
+            lines.append(f"• {html.escape(item)}")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")

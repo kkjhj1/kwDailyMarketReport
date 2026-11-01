@@ -123,7 +123,7 @@ class AdmissionCollector:
                 ),
             },
             {
-                "title": "메가스터디 2026 수시 최종 지원 배치전략 라이브 설명회",
+                "title": "메가스터디 수능 가채점 분석 및 2027 정시 합격 전략 라이브 설명회",
                 "organizer": "메가스터디",
                 "target_grade": TargetGrade.HIGH_3_N,
                 "target_region": TargetRegion.ONLINE,
@@ -135,7 +135,7 @@ class AdmissionCollector:
                 "booking_url": "https://megastudy.net/live/admission",
                 "content": (
                     "수능 직후 메가스터디 입시전략연구소 온라인 라이브 생중계. "
-                    "실시간 등급컷 분석 및 대학별 환산점수 유불리 배치표 공개."
+                    "실시간 가채점 등급컷 분석 및 2027 정시 대학별 환산점수 유불리 배치표 공개."
                 ),
             },
         ]
@@ -183,6 +183,17 @@ class AdmissionCollector:
             todos = [
                 "오늘 선착순 예약 오픈 시 1분 내 신청 완료",
                 "자녀의 현재 수학 심화 성취도(블랙라벨/일품) 자가진단",
+            ]
+        elif "정시" in content or "수능" in content or "가채점" in content:
+            summary = [
+                f"{organizer} 수능 실시간 가채점 등급컷 및 정시 환산점수 유불리 분석",
+                "수능 직후 주말 대학별 수시 논술/면접 고사 응시 여부 판단 가이드",
+                "정시 가/나/다군 군별 지원 포트폴리오 및 배치표 활용 전략",
+            ]
+            so_what = "가채점 점수를 바탕으로 수시 수능 최저 충족 여부를 확인하고, 정시 유불리를 정밀 계산해야 합니다."
+            todos = [
+                "온라인 라이브 설명회 사전 알림 신청 완료",
+                "수능 당일 가채점 표준점수 및 백분위 실시간 입력",
             ]
         else:
             summary = [

@@ -1,5 +1,5 @@
 from datetime import date
-from travel_brief.models import DestinationMeta, FlightDeal, BudgetBreakdown, TravelRecommendation
+from travel_brief.models import DestinationMeta, FlightDeal, BudgetBreakdown, TravelRecommendation, format_departure_time_slot
 
 
 def test_destination_meta_methods():
@@ -71,3 +71,47 @@ def test_budget_breakdown_calculation():
     assert budget.meal_transit_total_krw == 140000  # 35k * 4
     assert budget.total_per_person_krw == 520000  # 200k + 180k + 140k
     assert budget.estimated_for_two_krw == 860000  # (200k*2) + 180k + (140k*2)
+
+
+def test_departure_time_slot_branching():
+    # 1. Thursday
+    assert format_departure_time_slot("목") == "오전 08:30~10:30 (목·금 연차 2일 추천)"
+    assert format_departure_time_slot("목", "afternoon") == "오전 08:30~10:30 (목·금 연차 2일 추천)"
+
+    # 2. Friday Morning
+    assert format_departure_time_slot("금", "morning") == "오전 08:30~10:30 (금요일 전일 연차 · 알찬 3박4일)"
+
+    # 3. Friday Afternoon
+    assert format_departure_time_slot("금", "afternoon") == "오후 14:00~16:00 (금요일 오후 반차 추천)"
+    assert format_departure_time_slot("금", "오후") == "오후 14:00~16:00 (금요일 오후 반차 추천)"
+
+    # 4. Friday Night
+    assert format_departure_time_slot("금", "night") == "야간 19:30~21:00 (퇴근 후 출발 · 연차 절약)"
+    assert format_departure_time_slot("금", "야간") == "야간 19:30~21:00 (퇴근 후 출발 · 연차 절약)"
+
+    # 5. FlightDeal auto post-init
+    deal_thu = FlightDeal(
+        destination_code="FUK", destination_name="후쿠오카", origin_code="ICN",
+        departure_date="2026-12-24", return_date="2026-12-27",
+        departure_day_of_week="목", return_day_of_week="일",
+        nights=3, airline="진에어", price_krw=167000, baseline_krw=220000,
+    )
+    assert deal_thu.departure_time_slot == "오전 08:30~10:30 (목·금 연차 2일 추천)"
+
+    deal_fri_aft = FlightDeal(
+        destination_code="DAD", destination_name="다낭", origin_code="ICN",
+        departure_date="2026-12-18", return_date="2026-12-21",
+        departure_day_of_week="금", return_day_of_week="월",
+        nights=3, airline="비엣젯", price_krw=223000, baseline_krw=320000,
+        time_category="afternoon",
+    )
+    assert deal_fri_aft.departure_time_slot == "오후 14:00~16:00 (금요일 오후 반차 추천)"
+
+    deal_fri_night = FlightDeal(
+        destination_code="DAD", destination_name="다낭", origin_code="ICN",
+        departure_date="2026-12-18", return_date="2026-12-21",
+        departure_day_of_week="금", return_day_of_week="월",
+        nights=3, airline="비엣젯", price_krw=223000, baseline_krw=320000,
+        time_category="night",
+    )
+    assert deal_fri_night.departure_time_slot == "야간 19:30~21:00 (퇴근 후 출발 · 연차 절약)"
