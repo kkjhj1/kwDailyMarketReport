@@ -11,6 +11,10 @@ from portal_hub.interactive import (
     render_category_home_view,
     render_search_results_view,
     render_tier_benefits_view,
+    render_help_view,
+    render_support_center_view,
+    render_upgrade_request_view,
+    render_inquiry_prompt_view,
     handle_callback_query,
 )
 
@@ -27,5 +31,9 @@ __all__ = [
     "render_category_home_view",
     "render_search_results_view",
     "render_tier_benefits_view",
+    "render_help_view",
+    "render_support_center_view",
+    "render_upgrade_request_view",
+    "render_inquiry_prompt_view",
     "handle_callback_query",
 ]

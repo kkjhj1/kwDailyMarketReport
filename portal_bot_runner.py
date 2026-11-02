@@ -62,6 +62,26 @@ logging.basicConfig(
 logger = logging.getLogger("portal_runner")
 
 
+MENU_START_COMMANDS = {
+    "/start", "/menu", "/home", "홈", "메인", "메인 메뉴", "메인메뉴", "시작", "🏠 메인 메뉴", "🏠 홈", "🏠 메인", "🏠 메인 홈"
+}
+MENU_SUBS_COMMANDS = {
+    "/subs", "/mysubs", "/sub", "내구독", "내 구독", "내 구독 관리", "📋 내 구독 관리", "내 구독 센터", "📋 내 구독 센터", "구독 관리", "구독 센터", "구독", "구독설정", "구독 설정"
+}
+MENU_CAT_COMMANDS = {
+    "/category", "/categories", "/cats", "/cat", "카테고리", "카테고리 둘러보기", "📂 카테고리 둘러보기", "둘러보기", "분야별", "카탈로그", "봇 둘러보기", "전체 봇"
+}
+MENU_TIER_COMMANDS = {
+    "/tiers", "/tier", "/upgrade", "등급", "내 등급", "내 등급 & 혜택", "💎 내 등급 & 혜택", "내 등급/혜택", "💎 내 등급/혜택", "혜택", "멤버십", "등급 혜택", "내 등급 혜택"
+}
+MENU_HELP_COMMANDS = {
+    "/help", "/guide", "도움말", "이용 도움말", "❓ 이용 도움말", "안내", "가이드", "faq", "이용안내", "사용법"
+}
+MENU_SUPPORT_COMMANDS = {
+    "/support", "/inquiry", "/contact", "고객센터", "💬 고객센터", "문의", "1:1 문의", "문의하기", "상담", "고객지원", "관리자 문의", "1:1 문의사항", "💬 고객센터/문의"
+}
+
+
 def get_portal_token() -> str:
     token = os.environ.get("PORTAL_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     return token.strip()
@@ -82,6 +102,7 @@ def run_polling(token: str) -> None:
         {"command": "subs", "description": "📋 내 구독 센터"},
         {"command": "category", "description": "📂 카테고리 둘러보기"},
         {"command": "tiers", "description": "💎 등급 혜택 안내"},
+        {"command": "support", "description": "💬 고객센터 / 문의"},
         {"command": "help", "description": "❓ 이용 도움말"},
     ])
 
@@ -124,73 +145,92 @@ def run_polling(token: str) -> None:
 
                     clean_text = text.lower()
 
-                    # Handle Awaiting Inquiry State
-                    if USER_STATES.get(user_id) == "AWAITING_INQUIRY" and not clean_text.startswith("/"):
-                        USER_STATES.pop(user_id, None)
-                        admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        u_name = html.escape(user.first_name or user.username or "회원")
-                        u_handle = f"@{user.username}" if user.username else "없음"
+                    is_menu_action = (
+                        clean_text.startswith("/")
+                        or clean_text in MENU_START_COMMANDS
+                        or clean_text in MENU_SUBS_COMMANDS
+                        or clean_text in MENU_CAT_COMMANDS
+                        or clean_text in MENU_TIER_COMMANDS
+                        or clean_text in MENU_HELP_COMMANDS
+                        or clean_text in MENU_SUPPORT_COMMANDS
+                    )
 
-                        if admin_chat:
-                            admin_forward = (
-                                f"📩 <b>[1:1 고객 문의 접수]</b>\n"
+                    # Handle Awaiting Inquiry State
+                    if USER_STATES.get(user_id) == "AWAITING_INQUIRY":
+                        if not is_menu_action:
+                            USER_STATES.pop(user_id, None)
+                            admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+                            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            u_name = html.escape(user.first_name or user.username or "회원")
+                            u_handle = f"@{user.username}" if user.username else "없음"
+
+                            if admin_chat:
+                                admin_forward = (
+                                    f"📩 <b>[1:1 고객 문의 접수]</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
+                                    f"• 핸들: {u_handle}\n"
+                                    f"• 회원 등급: {user.tier.display_name}\n"
+                                    f"• 접수 시각: <code>{now_str}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"<b>【문의 내용】</b>\n"
+                                    f"<i>{html.escape(text)}</i>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━"
+                                )
+                                try:
+                                    client.send_message(admin_chat, admin_forward)
+                                except Exception as e:
+                                    logger.warning("Failed forwarding inquiry to admin: %s", e)
+
+                            ack_text = (
+                                f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
-                                f"• 핸들: {u_handle}\n"
-                                f"• 회원 등급: {user.tier.display_name}\n"
-                                f"• 접수 시각: <code>{now_str}</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"<b>【문의 내용】</b>\n"
-                                f"<i>{html.escape(text)}</i>\n"
+                                f"작성하신 내용:\n"
+                                f"<i>\"{html.escape(text)}\"</i>\n\n"
+                                f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏\n"
                                 f"━━━━━━━━━━━━━━━━━━━━"
                             )
-                            try:
-                                client.send_message(admin_chat, admin_forward)
-                            except Exception as e:
-                                logger.warning("Failed forwarding inquiry to admin: %s", e)
-
-                        ack_text = (
-                            f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"작성하신 내용:\n"
-                            f"<i>\"{html.escape(text)}\"</i>\n\n"
-                            f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏\n"
-                            f"━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        ack_markup = {
-                            "inline_keyboard": [
-                                [{"text": "🏠 메인 홈으로", "callback_data": "nav:main"}]
-                            ]
-                        }
-                        client.send_message(chat_id, ack_text, reply_markup=ack_markup)
-                        continue
+                            ack_markup = {
+                                "inline_keyboard": [
+                                    [{"text": "🏠 메인 홈으로", "callback_data": "nav:main"}]
+                                ]
+                            }
+                            client.send_message(chat_id, ack_text, reply_markup=ack_markup)
+                            continue
+                        else:
+                            # User selected another menu action while awaiting inquiry; cancel inquiry mode
+                            USER_STATES.pop(user_id, None)
 
                     # Clear awaiting state if user clicked command or persistent menu
                     USER_STATES.pop(user_id, None)
 
                     # Handle Fixed Commands & Persistent Keyboard Texts
-                    if clean_text in ("/start", "/menu", "홈", "메인"):
+                    if clean_text == "/start" or clean_text.startswith("/start ") or clean_text in MENU_START_COMMANDS:
                         reply_text, markup = render_main_menu(user)
                         client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=reply_kb)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in ("/subs", "/mysubs", "📋 내 구독 관리", "내 구독 관리", "내구독"):
+                    elif clean_text in MENU_SUBS_COMMANDS:
                         subs = db.get_user_subscriptions(user_id)
                         reply_text, markup = render_subscription_view(user, subs)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in ("/category", "/cats", "📂 카테고리 둘러보기", "카테고리", "둘러보기"):
+                    elif clean_text in MENU_CAT_COMMANDS:
                         reply_text, markup = render_category_home_view()
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in ("/tiers", "/upgrade", "💎 내 등급 & 혜택", "내 등급 & 혜택", "등급"):
+                    elif clean_text in MENU_TIER_COMMANDS:
                         reply_text, markup = render_tier_benefits_view(user)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in ("/help", "❓ 이용 도움말", "도움말", "안내"):
+                    elif clean_text in MENU_HELP_COMMANDS:
                         from portal_hub.interactive import render_help_view
                         reply_text, markup = render_help_view()
+                        client.send_message(chat_id, reply_text, reply_markup=markup)
+
+                    elif clean_text in MENU_SUPPORT_COMMANDS:
+                        from portal_hub.interactive import render_support_center_view
+                        reply_text, markup = render_support_center_view(user)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
                     else:
@@ -208,14 +248,80 @@ def run_polling(token: str) -> None:
             time.sleep(2)
 
 
+def run_demo() -> None:
+    """Token-free in-memory console verification of all menus and interactive operations ([TG-06])."""
+    print("=" * 60)
+    print("🧪 [Portal Hub Bot v2.0] Console Demo & Interactive Menu Verification")
+    print("=" * 60)
+    demo_db = PortalDatabase(":memory:")
+    demo_user = demo_db.get_or_create_user(
+        user_id=999001,
+        chat_id=999001,
+        username="demo_tester",
+        first_name="데모테스터",
+    )
+    print(f"1. 회원 프로필 생성: {demo_user.first_name} (@{demo_user.username}) | 등급: {demo_user.tier.display_name}")
+
+    # Main Menu
+    menu_text, menu_kb = render_main_menu(demo_user)
+    print(f"2. 메인 메뉴 렌더링 검증: {len(menu_text)} 글자 | 버튼 수: {sum(len(r) for r in menu_kb['inline_keyboard'])}개")
+
+    # Categories
+    for cat in BotCategory:
+        subs = demo_db.get_user_subscriptions(demo_user.user_id)
+        cat_text, cat_kb = render_category_view(cat, demo_user, subs)
+        print(f"3. 카테고리 [{cat.title}] 렌더링: {len(cat_text)} 글자 | 버튼 수: {sum(len(r) for r in cat_kb['inline_keyboard'])}개")
+
+    # Subscription Flow (Subscribe brief_bot)
+    ok, msg = demo_db.subscribe(demo_user.user_id, BotServiceType.BRIEF)
+    subs = demo_db.get_user_subscriptions(demo_user.user_id)
+    sub_text, sub_kb = render_subscription_view(demo_user, subs)
+    print(f"4. 구독 신청 및 구독 센터 렌더링: 성공={ok} ({msg}) | 활성={subs[BotServiceType.BRIEF]}")
+
+    # Unsubscribe with in-place confirmation
+    unsub_text, unsub_kb = render_subscription_view(demo_user, subs, confirming_bot_id="brief_bot")
+    print(f"5. 해지 재확인 화면 펼침 렌더링: {len(unsub_text)} 글자 | 버튼 수: {sum(len(r) for r in unsub_kb['inline_keyboard'])}개")
+
+    # Final Unsubscribe
+    ok_unsub, msg_unsub = demo_db.unsubscribe(demo_user.user_id, BotServiceType.BRIEF)
+    subs_after = demo_db.get_user_subscriptions(demo_user.user_id)
+    print(f"6. 해지 완료 검증: 성공={ok_unsub} ({msg_unsub}) | 활성={subs_after[BotServiceType.BRIEF]}")
+
+    # Keyword Search
+    for query in ["환율", "수시", "비행기", "없는키워드"]:
+        results = demo_db.search_bots(query)
+        search_text, _ = render_search_results_view(query, results, demo_user, subs_after)
+        print(f"7. 키워드 검색 '{query}': {len(results)}건 매칭")
+
+    # Support Center & Upgrade Views
+    from portal_hub.interactive import (
+        render_inquiry_prompt_view,
+        render_support_center_view,
+        render_upgrade_request_view,
+    )
+    sup_text, _ = render_support_center_view(demo_user)
+    upg_text, _ = render_upgrade_request_view(demo_user)
+    inq_text, _ = render_inquiry_prompt_view(demo_user)
+    print(f"8. 고객센터 / 등급 업그레이드 / 1:1 문의 뷰 렌더링 검증 완료")
+    print("=" * 60)
+    print("✅ [DEMO SUCCESS] All Portal Menus & Workflows Verified in :memory:!")
+    print("=" * 60)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Main Hub Portal Telegram Bot Runner v2.0")
+    parser.add_argument("--demo", action="store_true", help="Token-free console verification of all menus in :memory:")
     parser.add_argument("--poll", action="store_true", help="Start Telegram long-polling bot")
     parser.add_argument("--list-users", action="store_true", help="List registered users from alerts.sqlite3")
     parser.add_argument("--set-tier", nargs=2, metavar=("USER_ID", "TIER"), help="Set user tier in alerts.sqlite3")
     parser.add_argument("--test-search", metavar="KEYWORD", help="Test keyword search matching in console")
 
     args = parser.parse_args()
+
+    if args.demo:
+        run_demo()
+        return
+
     db = PortalDatabase()
 
     if args.test_search:

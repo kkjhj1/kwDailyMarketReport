@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 from http.server import HTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -257,33 +257,32 @@ def main() -> int:
     is_kr_trading = cal.is_trading_day("KR", today)
 
     if args.auto_schedule:
-        # 1) 평일 장마감 후 (15:30 ~ 23:59 KST):
-        # GitHub Actions 크론이 1~2시간 지연되어 17시, 18시에 늦게 돌더라도
-        # 오늘 마감 브리핑이 아직 발송되지 않았다면 무조건 closing 1회 발송 보장!
-        if is_kr_trading and (now_kst.hour > 15 or (now_kst.hour == 15 and now_kst.minute >= 30)):
+        current_time = now_kst.time()
+
+        # 1) 평일 장마감 후 (15:30 ~ 18:00 KST):
+        # 18:00 이후에는 야간장이 가까워지므로 당일 마감 브리핑 윈도우는 만료(Expired) 처리!
+        if is_kr_trading and (dtime(15, 30) <= current_time <= dtime(18, 0)):
             if not pipeline.alert_store.is_regular_briefing_sent("closing", today):
                 print(f"⏰ [AutoSchedule] 금일({today}) 마감 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 마감 브리핑 즉시 발송 진행")
                 args.send_now = "closing"
             else:
-                # 이미 마감 브리핑이 발송 완료된 경우, 미 야간장(22:30~)이면 긴급 감시 실행
-                if now_kst.hour >= 22 or now_kst.hour < 6:
-                    args.check_urgent = True
-                else:
-                    print(f"✅ [AutoSchedule] 금일({today}) 마감 브리핑 이미 발송 완료됨. (정규장 종료 상태)")
-                    return 0
-        # 2) 평일 아침 (06:30 ~ 10:00 KST):
-        # 06:30 크론이 지연되어 7~8시에 돌더라도 오늘 모닝 브리핑 미발송 상태면 무조건 발송!
-        elif is_kr_trading and ((now_kst.hour == 6 and now_kst.minute >= 30) or (7 <= now_kst.hour <= 10)):
+                print(f"✅ [AutoSchedule] 금일({today}) 마감 브리핑 이미 발송 완료됨. (정규장 종료 상태)")
+                return 0
+
+        # 2) 평일 아침 장전 (06:30 ~ 08:50 KST):
+        # 정규장 개장(09:00) 10분 전인 08:50까지만 장전 모닝 브리핑 발송 허용!
+        # 08:50 이후에는 장전 브리핑이 유효기간 만료(EXPIRED)되었으므로 절대 발송하지 않고
+        # 개장 후 장중 변동성 감시(check_urgent) 모드로 강제 전환한다!
+        elif is_kr_trading and (dtime(6, 30) <= current_time <= dtime(8, 50)):
             if not pipeline.alert_store.is_regular_briefing_sent("morning", today):
                 print(f"⏰ [AutoSchedule] 금일({today}) 모닝 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 모닝 브리핑 즉시 발송 진행")
                 args.send_now = "morning"
             else:
-                if now_kst.hour >= 9:
-                    args.check_urgent = True
-                else:
-                    print(f"✅ [AutoSchedule] 금일({today}) 모닝 브리핑 이미 발송 완료됨.")
-                    return 0
-        # 3) 장중 (09:00 ~ 15:30 KST) 또는 미 야간장 (22:30 ~ 06:00 KST):
+                print(f"✅ [AutoSchedule] 금일({today}) 모닝 브리핑 이미 발송 완료됨.")
+                return 0
+
+        # 3) 장중 (08:50 ~ 15:30 KST) 또는 미 야간장 (22:30 ~ 06:00 KST):
+        # 08:50 이후에 실행되는 모든 크론은 모닝 브리핑을 절대로 보내지 않고 장중 ±3% 감시만 수행!
         else:
             args.check_urgent = True
 

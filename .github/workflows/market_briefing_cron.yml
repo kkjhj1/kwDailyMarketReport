@@ -19,24 +19,16 @@ on:
         required: false
         default: ""
 
-  # 2. 24시간 365일 무중단 정기 시황 & 장중 ±3% 수시 감시 크론 (혼잡 피크 회피 + 다중 세이프티)
+  # 2. 24시간 365일 정기 시황 & 장중 감시 크론 (표준 3대 파이프라인)
   schedule:
-    # ① 한국시간(KST) 평일 아침 장전 모닝 브리핑 (오프피크 분 + 3단계 세이프티 크론)
-    #    - 06:33 KST (UTC 21:33) : 1차 정기 발송 (전 세계 30분대 트래픽 회피)
-    #    - 07:18 KST (UTC 22:18) : 2차 세이프티 크론 (06:33 지연/누락 시 자동 보정 발송)
-    #    - 08:03 KST (UTC 23:03) : 3차 개장전 최종 보조 (개장 전 1회 발송 무조건 보장)
+    # ① 한국시간(KST) 평일 아침 06:33 장전 모닝 브리핑 (월~금, UTC 전일 21:33)
     - cron: "33 21 * * 0-4"
-    - cron: "18 22 * * 0-4"
-    - cron: "3 23 * * 0-4"
 
-    # ② 한국시간(KST) 평일 오후 장마감 브리핑 (오프피크 분 + 세이프티 보조)
-    #    - 15:42 KST (UTC 06:42) : 1차 마감 정기 발송 (40분 혼잡 회피)
-    #    - 16:18 KST (UTC 07:18) : 2차 마감 세이프티 크론 (15:42 지연/누락 시 자동 보정)
-    - cron: "42 6 * * 1-5"
-    - cron: "18 7 * * 1-5"
-
-    # ③ 한국 정규장(09:00~15:30 KST = UTC 00:00~06:30) 혼잡 피크(00/15/30/45) 회피 15분 간격 감시
+    # ② 한국 정규장(09:00~15:30 KST = UTC 00:00~06:30) 혼잡 피크 회피 15분 간격 장중 감시
     - cron: "7,22,37,52 0-6 * * 1-5"
+
+    # ③ 한국시간(KST) 평일 오후 15:42 장마감 시황 브리핑 (월~금, UTC 06:42)
+    - cron: "42 6 * * 1-5"
 
     # ④ 미국 정규장(22:30~06:00 KST = UTC 13:30~21:00) 혼잡 피크 회피 15분 간격 감시
     - cron: "8,23,38,53 13-21 * * 1-5"
@@ -106,18 +98,25 @@ jobs:
             python telegram_bot_runner.py --auto-schedule --live-naver --chat-id "$TARGET_CHAT_ID"
           fi
 
-      - name: 5. GitHub Pages 아티팩트 업로드 (상세 HTML 리포트 웹 호스팅)
+      - name: 5. GitHub Pages 전용 배포 디렉터리 격리 (DB 및 시스템 파일 노출 원천 차단)
+        if: always()
+        run: |
+          mkdir -p _site
+          cp -r reports _site/
+          cp index.html _site/ 2>/dev/null || true
+
+      - name: 6. GitHub Pages 아티팩트 업로드 (정적 HTML 리포트 전용)
         if: always()
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "."
+          path: "_site"
 
-      - name: 6. GitHub Pages 배포 실행 (클릭 가능한 HTTPS 리포트 링크 활성화)
+      - name: 7. GitHub Pages 배포 실행 (클릭 가능한 HTTPS 리포트 링크 활성화)
         if: always()
         id: deployment
         uses: actions/deploy-pages@v4
 
-      - name: 7. 발송 이력 및 상태 영구 보존 (Git Commit & Push)
+      - name: 8. 발송 이력 및 상태 영구 보존 (Git Commit & Push)
         if: always()
         run: |
           git config user.name "github-actions[bot]"

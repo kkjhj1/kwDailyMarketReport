@@ -4,6 +4,7 @@ Integrates SafeTelegramDispatcher (25 msg/s) and SQLite recipient storage.
 Designed for Multi-Bot Monorepo Architecture with Zero-Breaking guarantees for Market Brief.
 """
 from __future__ import annotations
+import re
 import argparse
 import html
 import os
@@ -247,20 +248,34 @@ def format_telegram_briefing(
             monthly_limit=m_lim,
             top_limit=top_lim,
         )
-        if len(rendered) <= 4096:
+        visible = re.sub(r'<[^>]+>', '', rendered)
+        # TG-01 strict goal: HTML <= 3500 & visible <= 1800; hard limit <= 4096
+        if len(rendered) <= 3500 and len(visible) <= 1800:
             return rendered
+        if len(rendered) <= 4096:
+            last_valid = rendered
+    if 'last_valid' in locals():
+        return last_valid
     raise ValueError(f"Formatted Telegram message ({len(rendered)} chars) exceeds Telegram 4096-char limit")
 
 def run_briefing(
     dest_code: Optional[str] = None,
     max_budget: Optional[int] = None,
     dry_run: bool = False,
+    demo: bool = False,
     recipients_override: Optional[list[str]] = None,
     web_report_url: Optional[str] = None,
     db_path: str = "alerts.sqlite3",
     live_naver: bool = False,
+    output_dir: Optional[Path | str] = None,
 ) -> bool:
     effective_live = bool(live_naver or os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1")
+    if demo:
+        dry_run = True
+        scratch_dir = BASE_DIR / "scratch"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        db_path = str(scratch_dir / "demo_travel.sqlite3")
+        effective_live = False
     print("=" * 60)
     print(f"✈️ Travel Briefing Runner Starting... (live_naver={effective_live})")
     print("=" * 60)
@@ -288,15 +303,23 @@ def run_briefing(
         )
 
     # 2. Generate Web Reports (reuses singleflight memory cache in 0.00s!)
-    travel_reports_dir = BASE_DIR / "reports" / "travel"
+    if output_dir is not None:
+        travel_reports_dir = Path(output_dir)
+    elif demo or dry_run:
+        travel_reports_dir = BASE_DIR / "scratch" / "reports_demo" / "travel"
+    else:
+        travel_reports_dir = BASE_DIR / "reports" / "travel"
     travel_reports_dir.mkdir(parents=True, exist_ok=True)
     report_gen = WebReportGenerator(engine=engine)
     dated_file, latest_file = report_gen.save_reports(output_dir=travel_reports_dir)
 
     # Also save a top-level travel_latest.html for easy GitHub Pages routing
-    top_travel_latest = BASE_DIR / "reports" / "travel_latest.html"
-    top_travel_latest.write_text(latest_file.read_text(encoding="utf-8"), encoding="utf-8")
-    print(f"Web Reports generated: {dated_file.name}, {latest_file.name}, {top_travel_latest.name}")
+    if output_dir is None and not demo and not dry_run:
+        top_travel_latest = BASE_DIR / "reports" / "travel_latest.html"
+        top_travel_latest.write_text(latest_file.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"Web Reports generated: {dated_file.name}, {latest_file.name}, {top_travel_latest.name}")
+    else:
+        print(f"Demo mode: Web Report generated in scratch without touching production reports.")
 
     if not recommendations:
         print("❌ No matching travel recommendations found.")
@@ -370,6 +393,7 @@ def main():
     parser = argparse.ArgumentParser(description="Travel Briefing Bot Runner")
     parser.add_argument("--send-brief", action="store_true", help="Generate and send travel briefing")
     parser.add_argument("--dry-run", action="store_true", help="Generate report and preview message without sending")
+    parser.add_argument("--demo", action="store_true", help="Run token-free demo mode without touching production DB or reports")
     parser.add_argument("--budget", type=int, help="Filter by maximum 1-person total budget (KRW)")
     parser.add_argument("--dest", type=str, help="Target specific destination code (e.g. FUK, DAD)")
     parser.add_argument("--recipients", type=str, help="Comma-separated chat IDs override")
@@ -385,7 +409,8 @@ def main():
         run_briefing(
             dest_code=args.dest,
             max_budget=args.budget,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run or args.demo,
+            demo=args.demo,
             recipients_override=recipients_list,
             live_naver=args.live_naver,
         )
@@ -396,7 +421,8 @@ def main():
         run_briefing(
             dest_code=args.dest,
             max_budget=args.budget,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run or args.demo,
+            demo=args.demo,
             recipients_override=recipients_list,
             live_naver=args.live_naver,
         )

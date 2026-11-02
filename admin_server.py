@@ -66,6 +66,19 @@ ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
 
 
+def verify_admin_token(request: Request) -> None:
+    """Validates X-Admin-Token or query parameter 'admin_token' against ADMIN_API_TOKEN.
+    Fails-open (no-op) if ADMIN_API_TOKEN is not configured in environment."""
+    expected = os.environ.get("ADMIN_API_TOKEN", "").strip()
+    if not expected:
+        return
+    token = request.headers.get("X-Admin-Token", "").strip()
+    if not token:
+        token = request.query_params.get("admin_token", "").strip()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="유효한 관리자 인증 토큰(X-Admin-Token)이 필요합니다.")
+
+
 # =========================================================================
 # Request Schemas (Legacy + Travel + Multi-Bot Platform v2.0)
 # =========================================================================
@@ -163,6 +176,10 @@ class PlatformTierUpdateRequest(BaseModel):
     downgrade_mode: str = "GRACE"  # 'GRACE' | 'KEEP_RECENT' | 'KEEP_SELECTED' | 'CANCEL_ALL'
     keep_bot_ids: list[str] | None = None
     memo: str | None = None
+
+
+class UpgradeRequestRejectPayload(BaseModel):
+    reason: str = "운영 정책 기준 미달"
 
 
 class SubscriptionActionRequest(BaseModel):
@@ -273,7 +290,7 @@ def create_admin_app(
     app.state.router = router
     app.state.bot_manager = bot_manager
 
-    adm_db = AdmissionDatabase(db_path=ROOT / "data/admission_brief.db") if _HAS_ADMISSION_MODULE else None
+    adm_db = AdmissionDatabase(db_path=db_path) if _HAS_ADMISSION_MODULE else None
     adm_curator = AICurator() if _HAS_ADMISSION_MODULE else None
     if adm_db:
         app.state.adm_db = adm_db
@@ -498,7 +515,8 @@ def create_admin_app(
         return {"success": True, "bot_profile": me}
 
     @app.post("/api/platform/bots/sync-all")
-    def sync_all_platform_bots():
+    def sync_all_platform_bots(request: Request):
+        verify_admin_token(request)
         bots = sub_engine.list_bots(include_raw_token=True)
         total_processed = 0
         details = []
@@ -513,7 +531,8 @@ def create_admin_app(
         return {"success": True, "total_processed": total_processed, "details": details}
 
     @app.post("/api/platform/bots/{bot_id}/sync")
-    def sync_single_platform_bot(bot_id: str):
+    def sync_single_platform_bot(bot_id: str, request: Request):
+        verify_admin_token(request)
         bot = sub_engine.get_bot(bot_id)
         if not bot:
             raise HTTPException(status_code=404, detail="봇을 찾을 수 없습니다.")
@@ -525,7 +544,8 @@ def create_admin_app(
             raise HTTPException(status_code=502, detail=f"텔레그램 업데이트 동기화 실패: {exc}")
 
     @app.delete("/api/platform/bots/{bot_id}")
-    async def delete_platform_bot(bot_id: str):
+    async def delete_platform_bot(bot_id: str, request: Request):
+        verify_admin_token(request)
         try:
             deleted = sub_engine.delete_bot(bot_id)
         except ValueError as err:
@@ -538,7 +558,8 @@ def create_admin_app(
         return {"users": sub_engine.list_users_with_subscriptions(q=q, tier_filter=tier, status_filter=status)}
 
     @app.post("/api/platform/users")
-    def create_platform_user(req: PlatformUserCreateRequest):
+    def create_platform_user(req: PlatformUserCreateRequest, request: Request):
+        verify_admin_token(request)
         try:
             user = sub_engine.upsert_user(
                 telegram_user_id=req.telegram_user_id,
@@ -555,7 +576,8 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail=str(err))
 
     @app.put("/api/platform/users/{user_id}")
-    def update_platform_user(user_id: str, req: PlatformUserUpdateRequest):
+    def update_platform_user(user_id: str, req: PlatformUserUpdateRequest, request: Request):
+        verify_admin_token(request)
         try:
             user = sub_engine.update_user_details(
                 telegram_user_id=user_id,
@@ -569,7 +591,8 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail=str(err))
 
     @app.put("/api/platform/users/{user_id}/tier")
-    def change_platform_user_tier(user_id: str, req: PlatformTierUpdateRequest):
+    def change_platform_user_tier(user_id: str, req: PlatformTierUpdateRequest, request: Request):
+        verify_admin_token(request)
         try:
             user = sub_engine.update_user_tier(
                 telegram_user_id=user_id,
@@ -587,11 +610,38 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail=str(err))
 
     @app.delete("/api/platform/users/{user_id}")
-    def remove_platform_user(user_id: str):
+    def remove_platform_user(user_id: str, request: Request):
+        verify_admin_token(request)
         return {"success": sub_engine.delete_user(user_id)}
 
+    @app.get("/api/platform/upgrade-requests")
+    def list_platform_upgrade_requests(status: str | None = None):
+        return {"requests": sub_engine.get_upgrade_requests(status=status)}
+
+    @app.post("/api/platform/upgrade-requests/{request_id}/approve")
+    def approve_platform_upgrade_request(request_id: int, request: Request):
+        verify_admin_token(request)
+        try:
+            return sub_engine.approve_upgrade_request(request_id, actor="ADMIN")
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=str(err))
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
+    @app.post("/api/platform/upgrade-requests/{request_id}/reject")
+    def reject_platform_upgrade_request(request_id: int, request: Request, payload: UpgradeRequestRejectPayload | None = None):
+        verify_admin_token(request)
+        try:
+            reason = payload.reason if payload else "운영 정책 기준 미달"
+            return sub_engine.reject_upgrade_request(request_id, actor="ADMIN", reason=reason)
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=str(err))
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err))
+
     @app.post("/api/platform/subscriptions/subscribe")
-    def platform_subscribe(req: SubscriptionActionRequest):
+    def platform_subscribe(req: SubscriptionActionRequest, request: Request):
+        verify_admin_token(request)
         return sub_engine.attempt_subscribe(
             telegram_user_id=req.telegram_user_id,
             bot_id=req.bot_id,
@@ -600,7 +650,8 @@ def create_admin_app(
         )
 
     @app.post("/api/platform/subscriptions/unsubscribe")
-    def platform_unsubscribe(req: SubscriptionActionRequest):
+    def platform_unsubscribe(req: SubscriptionActionRequest, request: Request):
+        verify_admin_token(request)
         return sub_engine.unsubscribe_bot(
             telegram_user_id=req.telegram_user_id,
             bot_id=req.bot_id,
@@ -609,7 +660,8 @@ def create_admin_app(
         )
 
     @app.post("/api/platform/subscriptions/swap")
-    def platform_swap(req: SubscriptionSwapRequest):
+    def platform_swap(req: SubscriptionSwapRequest, request: Request):
+        verify_admin_token(request)
         try:
             return sub_engine.atomic_swap_subscription(
                 telegram_user_id=req.telegram_user_id,
@@ -1379,13 +1431,15 @@ if __name__ == "__main__":
     is_cloud = bool(os.environ.get("PORT") or os.environ.get("RENDER"))
     if is_cloud:
         port = int(os.environ.get("PORT", "8002"))
+        default_host = "0.0.0.0"
     else:
         configured_port = int(os.environ.get("ADMIN_PORT", 8002))
         port = find_available_port(configured_port)
         if port != configured_port:
             print(f"⚠️ [PORT FALLBACK: {configured_port} -> {port}] 포트 {configured_port}번 충돌로 인해 가용 포트 {port}번으로 안전 전환되었습니다.")
+        default_host = "127.0.0.1"
 
-    host = os.environ.get("ADMIN_HOST", "0.0.0.0")
-    print(f"🚀 [Multi-Bot Subscription Admin Console] Local: http://127.0.0.1:{port} | Mobile/Network: http://{host}:{port}")
+    host = os.environ.get("ADMIN_HOST", default_host)
+    print(f"🚀 [Multi-Bot Subscription Admin Console] Local: http://127.0.0.1:{port} | Host: http://{host}:{port}")
     app = create_admin_app(enable_bot_workers=True)
     uvicorn.run(app, host=host, port=port)

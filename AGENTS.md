@@ -1,7 +1,7 @@
 # ============================================================
 # PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
 # Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
-# Version: 2.0 (Telegram 7 Golden Rules Edition)
+# Version: 2.1 (Telegram 7 Golden Rules & Multi-AI 1-Pass Audit Edition)
 # ============================================================
 
 ## 1. 프로젝트 개요 및 멀티봇 파이프라인
@@ -42,3 +42,16 @@
 - **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
   - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
   - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.
+
+## 4. 멀티 AI 역할 분담 및 1-Pass 최종 감사 규약 (Multi-AI Audit Protocol)
+- **3인 역할 분담 (전역 헌법 `[META-03]` 준수)**:
+  - **총괄 판결 & 단일 Writer (`Gemini` / 주 세션)**: 사용자 맥락 보존, 초안·코드·테스트 작성 및 기계적 실행, 외부 감사 의견의 `1-Pass` 최종 수용/기각 판결 및 실제 파일 수정 전담.
+  - **기획·UI/UX 최종 감사관 (`GPT` / `codex`)**: 신규 기획안·메시지 템플릿·모바일 웹 UI 설계(L2/L3) 확정 전 가독성·프롬프트·UX 누락을 1회 최종 감사한다.
+  - **개발·테스트 최종 감사관 (`Claude` / `claude`)**: 신규 기능·핵심 로직 구현 및 테스트 개편(L2/L3) 시, **기계적 선행 검증(`py_compile` + `pytest` + `--demo`) 통과 직후** 코드 결함·제3장 7대 수칙 위반·엣지케이스 누락을 1회 최종 감사한다.
+- **4대 운영 안전핀 (Mandatory Safeguards)**:
+  1. **위험도 비례 발동**: 단순 오타·문구·소규모 패치(L0/L1)는 단독 즉시 완결하며, **구조적 기획·개발·테스트(L2/L3) 또는 사용자 명시 요청 시**에만 발동한다.
+  2. **Read-Only 격리 실행 & 재귀 금지**: Handoff 입출력은 `scratch/`로 격리하며, 파일 수정·쉘 실행(재귀 호출)이 물리적으로 차단된 읽기 전용 명령어만 사용한다:
+     - **GPT 기획 감사**: `Get-Content -Raw "scratch\handoff_to_gpt.md" -Encoding UTF8 | codex exec --skip-git-repo-check -s read-only -o "scratch\gpt_audit_result.md" -`
+     - **Claude 개발·테스트 감사**: `Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --tools "Read,Grep,Glob" --permission-prompts none --no-session-persistence`
+  3. **`1-Pass` 종결 & 기준 서열**: 감사 결과 중 실제 결함·헌법 위반(`Critical`/`Major`)만 즉시 반영하고 맥락 외 취향 지적(`Minor`)은 기각 사유만 요약해 **재호출 없이 1라운드에 종결**한다(기획·개발 피드백 충돌 시 제3장 7대 수칙 우선).
+  4. **`Fail-Open` 비상 우회**: 외부 CLI 쿼터 소진·인증 만료·90초 타임아웃 발생 시 작업을 멈추지 않고 완료 보고서에 `[외부 감사 생략: 사유]`를 정직하게 명시한다.

@@ -132,6 +132,35 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(res_disp.status_code, 200)
         self.assertTrue(res_disp.json()["success"])
 
+    def test_admin_token_guard(self):
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            # Unauthorized request without token should return 401
+            res_no_token = self.client.post("/api/platform/upgrade-requests/1/approve")
+            self.assertEqual(res_no_token.status_code, 401)
+
+            # Unauthorized request with wrong token should return 401
+            res_bad_token = self.client.post(
+                "/api/platform/upgrade-requests/1/approve",
+                headers={"X-Admin-Token": "wrong_token"},
+            )
+            self.assertEqual(res_bad_token.status_code, 401)
+
+            # Authorized request with correct header token passes token check (reaches logic, returns 404 for non-existent req)
+            res_ok_header = self.client.post(
+                "/api/platform/upgrade-requests/999/approve",
+                headers={"X-Admin-Token": "secret_token_123"},
+            )
+            self.assertEqual(res_ok_header.status_code, 404)
+
+            # Authorized request with query param token also passes
+            res_ok_query = self.client.post(
+                "/api/platform/upgrade-requests/999/approve?admin_token=secret_token_123"
+            )
+            self.assertEqual(res_ok_query.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

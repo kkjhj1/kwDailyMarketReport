@@ -57,12 +57,14 @@ def build_slot_gauge(active_count: int, tier: UserTier) -> str:
 def _safe_edit_or_send(
     client: TelegramPortalClient,
     chat_id: int | str,
-    message_id: int,
+    message_id: Optional[int],
     text: str,
     reply_markup: Optional[dict[str, Any]] = None,
 ) -> None:
     """Edits message in-place; if Telegram edit fails (e.g. outdated message), sends fresh message as fallback."""
-    ok = client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+    ok = False
+    if message_id is not None:
+        ok = client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
     if not ok:
         logger.info("edit_message_text fallback to send_message for chat %s", chat_id)
         client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -104,6 +106,9 @@ def render_main_menu(user: UserProfile) -> tuple[str, dict[str, Any]]:
             ],
             [
                 {"text": "💎 내 등급 & 혜택", "callback_data": "nav:tiers"},
+                {"text": "💬 고객센터 / 문의", "callback_data": "support:home"},
+            ],
+            [
                 {"text": "❓ 이용 도움말", "callback_data": "nav:help"},
             ],
         ]
@@ -458,9 +463,12 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
     )
     keyboard = [
         [
+            {"text": "💬 1:1 고객센터 문의", "callback_data": "support:home"},
             {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+        ],
+        [
             {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
-        ]
+        ],
     ]
     return text, {"inline_keyboard": keyboard}
 
@@ -469,19 +477,36 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
 # Callback Query Router (Instant Spinner Stop + In-Place Safety)
 # ============================================================
 
+def _is_portal_admin(user_id: Any, chat_id: Any) -> bool:
+    """Checks whether the callback query sender is an authorized administrator."""
+    uid = str(user_id).strip()
+    cid = str(chat_id).strip()
+    admin_chat = os.environ.get("PORTAL_ADMIN_CHAT_ID") or os.environ.get("PORTAL_TELEGRAM_CHAT_ID", "")
+    admin_users_str = os.environ.get("PORTAL_ADMIN_USER_IDS", "")
+    allowed_ids = {x.strip() for x in admin_users_str.split(",") if x.strip()}
+    if admin_chat:
+        allowed_ids.add(admin_chat.strip())
+    # If no admin credentials set in env, restrict Telegram inline admin actions (Web Console only)
+    if not allowed_ids:
+        return False
+    return uid in allowed_ids or cid in allowed_ids
+
+
 def handle_callback_query(
     cq: dict[str, Any], db: PortalDatabase, client: TelegramPortalClient
 ) -> None:
     """Dispatches inline button clicks with zero lag and in-place confirmation."""
     cq_id = cq["id"]
-    from_user = cq["from"]
-    user_id = from_user["id"]
-    chat_id = cq["message"]["chat"]["id"]
-    message_id = cq["message"]["message_id"]
+    from_user = cq.get("from") or {}
+    user_id = from_user.get("id")
+    msg = cq.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id") or user_id
+    message_id = msg.get("message_id")
     data = cq.get("data", "")
 
-    # 1. Stop button loading spinner immediately (except sub:toggle which sends alert/popup text)
-    if not data.startswith("sub:toggle:"):
+    # 1. Stop button loading spinner immediately (except sub:toggle and adm which send popup text or verify auth)
+    if not data.startswith("sub:toggle:") and not data.startswith("adm:"):
         client.answer_callback_query(cq_id)
 
     if data == "noop":
@@ -549,39 +574,65 @@ def handle_callback_query(
 
     if data.startswith("support:req_tier:"):
         USER_STATES.pop(user_id, None)
-        req_tier = data.split(":", 2)[2].upper()
+        raw_tier = data.split(":", 2)[2].upper()
+        if raw_tier not in ("GREEN", "RED", "BLACK"):
+            client.answer_callback_query(cq_id, "유효하지 않은 등급입니다.", show_alert=True)
+            return
+
+        req_tier = raw_tier
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 1. Forward notification to admin chat
-        admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        # 1. Store upgrade request in alerts.sqlite3 database (viewed and approved in Admin Web Console)
+        try:
+            req_id, is_updated = db.request_tier_upgrade(user_id, req_tier)
+        except ValueError as ve:
+            client.answer_callback_query(cq_id, str(ve), show_alert=True)
+            return
+        except Exception as e:
+            logger.warning("Failed to store upgrade request for %s: %s", user_id, e)
+            client.answer_callback_query(cq_id, "신청 처리 중 오류가 발생했습니다.", show_alert=True)
+            return
+
+        # 2. Forward notification to admin chat with inline 1-click approve/reject buttons
+        # Dedicated admin chat only; never fallback to comma-separated broadcast list
+        admin_chat = os.environ.get("PORTAL_ADMIN_CHAT_ID") or os.environ.get("PORTAL_TELEGRAM_CHAT_ID")
         if admin_chat:
             u_name = html.escape(user.first_name or user.username or "회원")
-            u_handle = f"@{user.username}" if user.username else "없음"
+            u_handle = f"@{html.escape(user.username)}" if user.username else "없음"
+            safe_curr_tier = html.escape(user.tier.display_name)
+            safe_req_tier = html.escape(req_tier)
             admin_msg = (
                 f"🔔 <b>[등급 업그레이드 신청 접수]</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"• 신청자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
                 f"• 핸들: {u_handle}\n"
-                f"• 현재 등급: {user.tier.display_name}\n"
-                f"• 희망 등급: <b>{req_tier}</b>\n"
+                f"• 현재 등급: {safe_curr_tier} ➔ 희망: <b>{safe_req_tier}</b>\n"
+                f"• 접수 번호: <code>#{req_id}</code>\n"
                 f"• 접수 시각: <code>{now_str}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"👉 <b>승인 CLI</b>:\n"
-                f"<code>python portal_bot_runner.py --set-tier {user_id} {req_tier}</code>"
+                f"아래 버튼 또는 관리자 콘솔 웹에서 즉시 승인/반려할 수 있습니다."
             )
+            admin_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": f"✅ #{req_id} {safe_req_tier} 승인", "callback_data": f"adm:appr:{req_id}:{req_tier}"},
+                        {"text": f"❌ #{req_id} 반려", "callback_data": f"adm:rejc:{req_id}:{req_tier}"},
+                    ]
+                ]
+            }
             try:
-                client.send_message(admin_chat, admin_msg)
+                client.send_message(admin_chat, admin_msg, reply_markup=admin_kb)
             except Exception as e:
                 logger.warning("Failed to notify admin of tier request: %s", e)
 
-        # 2. Reply to user with success notice
+        # 3. Reply to user with clean success notice
         done_text = (
             f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"• 희망 등급: <b>{req_tier}</b>\n"
+            f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n"
             f"• 접수 일시: <code>{now_str}</code>\n\n"
-            f"운영팀으로 신청서가 안전하게 전달되었습니다. 🫡\n"
-            f"확인 후 빠르게 승인 처리해 드리겠습니다.\n"
+            f"운영팀 관리자 페이지로 신청서가 안전하게 접수되었습니다. 🫡\n"
+            f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         done_markup = {
@@ -594,6 +645,94 @@ def handle_callback_query(
         }
         _safe_edit_or_send(client, chat_id, message_id, done_text, done_markup)
         return
+
+    # Admin 1-Click Inline Approve / Reject Callbacks from Telegram (Strict Admin Authorization)
+    if data.startswith("adm:"):
+        if not _is_portal_admin(user_id, chat_id):
+            client.answer_callback_query(cq_id, "⚠️ 관리자 권한이 없습니다.", show_alert=True)
+            return
+        client.answer_callback_query(cq_id)
+
+        parts = data.split(":")
+        action_type = parts[1]  # 'appr', 'rejc', 'rejx', 'cncl'
+        req_id_str = parts[2] if len(parts) > 2 else ""
+        expected_tier = parts[3] if len(parts) > 3 else None
+
+        try:
+            req_id = int(req_id_str)
+        except ValueError:
+            client.answer_callback_query(cq_id, "유효하지 않은 요청 번호입니다.", show_alert=True)
+            return
+
+        if action_type == "appr":
+            try:
+                res = db.review_upgrade_request(
+                    req_id, "APPROVED", reviewed_by=f"TG_ADMIN_{user_id}", expected_tier=expected_tier
+                )
+                target_uid = res["telegram_user_id"]
+                new_tier = res["tier"]
+                _safe_edit_or_send(
+                    client, chat_id, message_id,
+                    f"✅ <b>[승인 완료]</b> 신청 #{req_id} (유저: <code>{target_uid}</code>)의 {new_tier} 등급 승인이 완료되었습니다.",
+                    {"inline_keyboard": []}
+                )
+            except Exception as e:
+                safe_err = html.escape(str(e))
+                _safe_edit_or_send(client, chat_id, message_id, f"❌ 승인 처리 실패: {safe_err}", {"inline_keyboard": []})
+            return
+
+        elif action_type == "rejc":
+            # 2-Step In-Place Confirmation [TG-04]
+            confirm_text = (
+                f"⚠️ <b>[반려 확인]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"신청 <code>#{req_id}</code> 건을 정말 반려하시겠습니까?\n"
+                f"반려 시 신청 상태가 즉시 종료됩니다."
+            )
+            confirm_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "❌ 확인 (반려 실행)", "callback_data": f"adm:rejx:{req_id}:{expected_tier or ''}"},
+                        {"text": "🔙 취소", "callback_data": f"adm:cncl:{req_id}:{expected_tier or ''}"},
+                    ]
+                ]
+            }
+            _safe_edit_or_send(client, chat_id, message_id, confirm_text, confirm_kb)
+            return
+
+        elif action_type == "cncl":
+            # Cancel rejection confirmation, restore original admin prompt
+            restore_text = (
+                f"🔔 <b>[등급 업그레이드 심사 대기]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 신청 번호: <code>#{req_id}</code>\n"
+                f"• 희망 등급: <b>{html.escape(expected_tier or '')}</b>\n\n"
+                f"원하시는 심사 처리를 선택해 주세요."
+            )
+            restore_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": f"✅ #{req_id} 승인", "callback_data": f"adm:appr:{req_id}:{expected_tier or ''}"},
+                        {"text": f"❌ #{req_id} 반려", "callback_data": f"adm:rejc:{req_id}:{expected_tier or ''}"},
+                    ]
+                ]
+            }
+            _safe_edit_or_send(client, chat_id, message_id, restore_text, restore_kb)
+            return
+
+        elif action_type == "rejx":
+            try:
+                res = db.review_upgrade_request(req_id, "REJECTED", reviewed_by=f"TG_ADMIN_{user_id}", expected_tier=expected_tier)
+                target_uid = res["telegram_user_id"]
+                _safe_edit_or_send(
+                    client, chat_id, message_id,
+                    f"❌ <b>[반려 완료]</b> 신청 #{req_id} (유저: <code>{target_uid}</code>)이(가) 반려되었습니다.",
+                    {"inline_keyboard": []}
+                )
+            except Exception as e:
+                safe_err = html.escape(str(e))
+                _safe_edit_or_send(client, chat_id, message_id, f"❌ 반려 처리 실패: {safe_err}", {"inline_keyboard": []})
+            return
 
     # 3. Category Views
     if data == "cat:home":
@@ -703,8 +842,16 @@ def handle_callback_query(
 
         ok, msg = db.subscribe(user_id, bot_type)
         if not ok:
-            # Over quota modal popup
-            client.send_message(chat_id, msg)
+            # Over quota prompt with 1-click Upgrade / Manage buttons
+            quota_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
+                        {"text": "📋 내 구독 관리", "callback_data": "nav:subs"},
+                    ]
+                ]
+            }
+            client.send_message(chat_id, msg, reply_markup=quota_markup)
             return
 
         subs = db.get_user_subscriptions(user_id)

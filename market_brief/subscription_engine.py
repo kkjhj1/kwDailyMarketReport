@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime
+import html
 import json
+import os
 import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -654,8 +656,9 @@ class SubscriptionEngine:
                 conn.execute("UPDATE recipients SET name = ? WHERE chat_id = ?", (new_name, uid))
         return self.get_user_profile(uid) or {"telegram_user_id": uid}
 
-    def update_user_tier(
+    def _update_user_tier_in_tx(
         self,
+        conn: sqlite3.Connection,
         telegram_user_id: str,
         new_tier: str,
         tier_expires_at: str | None = None,
@@ -664,7 +667,7 @@ class SubscriptionEngine:
         memo: str | None = None,
         actor: str = "ADMIN",
     ) -> dict[str, Any]:
-        """Updates a user's tier and safely reconciles active subscriptions against the new quota."""
+        """Atomic implementation of tier update inside an active transaction."""
         uid = str(telegram_user_id).strip()
         target_tier = new_tier.strip().upper()
         if target_tier not in TIER_DEFAULT_SPECS:
@@ -672,59 +675,42 @@ class SubscriptionEngine:
         norm_exp = normalize_expiry_str(tier_expires_at) if target_tier != UserTier.WHITE.value else None
         now_str = now_kst_str()
 
-        with self._exclusive_tx() as conn:
-            user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
-            if not user:
-                raise KeyError(f"유저를 찾을 수 없습니다: {uid}")
+        user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
+        if not user:
+            raise KeyError(f"유저를 찾을 수 없습니다: {uid}")
 
-            old_tier = user["tier"]
-            policy = self._get_tier_policy_in_tx(conn, target_tier)
-            max_allowed = policy.max_bots
+        old_tier = user["tier"]
+        policy = self._get_tier_policy_in_tx(conn, target_tier)
+        max_allowed = policy.max_bots
 
-            active_subs = conn.execute(
-                """SELECT s.id, s.bot_id, s.status
-                   FROM subscriptions s
-                   JOIN bots b ON s.bot_id = b.bot_id
-                   WHERE s.telegram_user_id = ? AND s.status = 'ACTIVE' AND b.bot_type = 'INFO'
-                   ORDER BY s.subscribed_at DESC, s.id DESC""",
-                (uid,),
-            ).fetchall()
+        active_subs = conn.execute(
+            """SELECT s.id, s.bot_id, s.status
+               FROM subscriptions s
+               JOIN bots b ON s.bot_id = b.bot_id
+               WHERE s.telegram_user_id = ? AND s.status = 'ACTIVE' AND b.bot_type = 'INFO'
+               ORDER BY s.subscribed_at DESC, s.id DESC""",
+            (uid,),
+        ).fetchall()
 
-            suspended_subs = conn.execute(
-                """SELECT s.id, s.bot_id
-                   FROM subscriptions s
-                   JOIN bots b ON s.bot_id = b.bot_id
-                   WHERE s.telegram_user_id = ? AND s.status = 'SUSPENDED_OVER_QUOTA' AND b.bot_type = 'INFO'
-                   ORDER BY s.subscribed_at DESC, s.id DESC""",
-                (uid,),
-            ).fetchall()
+        suspended_subs = conn.execute(
+            """SELECT s.id, s.bot_id
+               FROM subscriptions s
+               JOIN bots b ON s.bot_id = b.bot_id
+               WHERE s.telegram_user_id = ? AND s.status = 'SUSPENDED_OVER_QUOTA' AND b.bot_type = 'INFO'
+               ORDER BY s.subscribed_at DESC, s.id DESC""",
+            (uid,),
+        ).fetchall()
 
-            new_user_status = "BLOCKED" if user["status"] == "BLOCKED" else "ACTIVE"
-            affected_bots: list[str] = []
+        new_user_status = "BLOCKED" if user["status"] == "BLOCKED" else "ACTIVE"
+        affected_bots: list[str] = []
 
-            if len(active_subs) > max_allowed:
-                # Downgrade over-quota reconciliation
-                mode = (downgrade_mode or "GRACE").upper()
-                if mode == "KEEP_SELECTED" and keep_bot_ids is not None:
-                    allowed_keep = set(keep_bot_ids[:max_allowed])
-                    for s in active_subs:
-                        if s["bot_id"] not in allowed_keep:
-                            conn.execute(
-                                "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
-                                (now_str, s["id"]),
-                            )
-                            affected_bots.append(s["bot_id"])
-                            if s["bot_id"] == "brief_bot":
-                                self._sync_legacy_brief_recipient_in_tx(
-                                    conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE"
-                                )
-                    for s in suspended_subs:
-                        conn.execute(
-                            "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
-                            (now_str, s["id"]),
-                        )
-                elif mode == "KEEP_RECENT":
-                    for s in active_subs[max_allowed:]:
+        if len(active_subs) > max_allowed:
+            # Downgrade over-quota reconciliation
+            mode = (downgrade_mode or "GRACE").upper()
+            if mode == "KEEP_SELECTED" and keep_bot_ids is not None:
+                allowed_keep = set(keep_bot_ids[:max_allowed])
+                for s in active_subs:
+                    if s["bot_id"] not in allowed_keep:
                         conn.execute(
                             "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
                             (now_str, s["id"]),
@@ -734,72 +720,112 @@ class SubscriptionEngine:
                             self._sync_legacy_brief_recipient_in_tx(
                                 conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE"
                             )
-                    for s in suspended_subs:
-                        conn.execute(
-                            "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
-                            (now_str, s["id"]),
-                        )
-                elif mode == "CANCEL_ALL":
-                    for s in active_subs:
-                        conn.execute(
-                            "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
-                            (now_str, s["id"]),
-                        )
-                        affected_bots.append(s["bot_id"])
-                        if s["bot_id"] == "brief_bot":
-                            self._sync_legacy_brief_recipient_in_tx(
-                                conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE"
-                            )
-                else:
-                    # GRACE mode: keep most recent `max_allowed` active, suspend excess safely
-                    new_user_status = "GRACE_PERIOD" if new_user_status != "BLOCKED" else "BLOCKED"
-                    for s in active_subs[max_allowed:]:
-                        conn.execute(
-                            "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE id = ?",
-                            (s["id"],),
-                        )
-                        affected_bots.append(s["bot_id"])
-                        if s["bot_id"] == "brief_bot":
-                            self._sync_legacy_brief_recipient_in_tx(
-                                conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE_GRACE"
-                            )
-            else:
-                # Upgrade or within quota: restore any previously suspended bots up to new limit
-                slots_left = max_allowed - len(active_subs)
-                for s in suspended_subs[:slots_left]:
+                for s in suspended_subs:
                     conn.execute(
-                        "UPDATE subscriptions SET status = 'ACTIVE', cancelled_at = NULL WHERE id = ?",
+                        "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
+                        (now_str, s["id"]),
+                    )
+            elif mode == "KEEP_RECENT":
+                for s in active_subs[max_allowed:]:
+                    conn.execute(
+                        "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
+                        (now_str, s["id"]),
+                    )
+                    affected_bots.append(s["bot_id"])
+                    if s["bot_id"] == "brief_bot":
+                        self._sync_legacy_brief_recipient_in_tx(
+                            conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE"
+                        )
+                for s in suspended_subs:
+                    conn.execute(
+                        "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
+                        (now_str, s["id"]),
+                    )
+            elif mode == "CANCEL_ALL":
+                for s in active_subs:
+                    conn.execute(
+                        "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
+                        (now_str, s["id"]),
+                    )
+                    affected_bots.append(s["bot_id"])
+                    if s["bot_id"] == "brief_bot":
+                        self._sync_legacy_brief_recipient_in_tx(
+                            conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE"
+                        )
+            else:
+                # GRACE mode: keep most recent `max_allowed` active, suspend excess safely
+                new_user_status = "GRACE_PERIOD" if new_user_status != "BLOCKED" else "BLOCKED"
+                for s in active_subs[max_allowed:]:
+                    conn.execute(
+                        "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE id = ?",
                         (s["id"],),
                     )
                     affected_bots.append(s["bot_id"])
                     if s["bot_id"] == "brief_bot":
-                        self._sync_legacy_brief_recipient_in_tx(conn, uid, user["full_name"], True)
-                remaining_suspended = len(suspended_subs) - min(len(suspended_subs), slots_left)
-                if remaining_suspended > 0 and new_user_status != "BLOCKED":
-                    new_user_status = "GRACE_PERIOD"
+                        self._sync_legacy_brief_recipient_in_tx(
+                            conn, uid, user["full_name"], False, reason="TIER_DOWNGRADE_GRACE"
+                        )
+        else:
+            # Upgrade or within quota: restore any previously suspended bots up to new limit
+            slots_left = max_allowed - len(active_subs)
+            for s in suspended_subs[:slots_left]:
+                conn.execute(
+                    "UPDATE subscriptions SET status = 'ACTIVE', cancelled_at = NULL WHERE id = ?",
+                    (s["id"],),
+                )
+                affected_bots.append(s["bot_id"])
+                if s["bot_id"] == "brief_bot":
+                    self._sync_legacy_brief_recipient_in_tx(conn, uid, user["full_name"], True)
+            remaining_suspended = len(suspended_subs) - min(len(suspended_subs), slots_left)
+            if remaining_suspended > 0 and new_user_status != "BLOCKED":
+                new_user_status = "GRACE_PERIOD"
 
-            final_memo = memo if memo is not None else user["memo"]
-            conn.execute(
-                """UPDATE users
-                   SET tier = ?, tier_expires_at = ?, status = ?, memo = ?, updated_at = ?
-                   WHERE telegram_user_id = ?""",
-                (target_tier, norm_exp, new_user_status, final_memo or "", now_str, uid),
-            )
-            self._log_audit_in_tx(
+        final_memo = memo if memo is not None else user["memo"]
+        conn.execute(
+            """UPDATE users
+               SET tier = ?, tier_expires_at = ?, status = ?, memo = ?, updated_at = ?
+               WHERE telegram_user_id = ?""",
+            (target_tier, norm_exp, new_user_status, final_memo or "", now_str, uid),
+        )
+        self._log_audit_in_tx(
+            conn,
+            uid,
+            None,
+            "TIER_CHANGE",
+            actor=actor,
+            detail={
+                "old_tier": old_tier,
+                "new_tier": target_tier,
+                "expires_at": norm_exp,
+                "downgrade_mode": downgrade_mode,
+                "affected_bots": affected_bots,
+            },
+        )
+        return {"old_tier": old_tier, "new_tier": target_tier, "affected_bots": affected_bots}
+
+    def update_user_tier(
+        self,
+        telegram_user_id: str,
+        new_tier: str,
+        tier_expires_at: str | None = None,
+        downgrade_mode: str = "GRACE",
+        keep_bot_ids: list[str] | None = None,
+        memo: str | None = None,
+        actor: str = "ADMIN",
+    ) -> dict[str, Any]:
+        """Updates a user's tier and safely reconciles active subscriptions against the new quota."""
+        uid = str(telegram_user_id).strip()
+        with self._exclusive_tx() as conn:
+            self._update_user_tier_in_tx(
                 conn,
                 uid,
-                None,
-                "TIER_CHANGE",
+                new_tier,
+                tier_expires_at=tier_expires_at,
+                downgrade_mode=downgrade_mode,
+                keep_bot_ids=keep_bot_ids,
+                memo=memo,
                 actor=actor,
-                detail={
-                    "old_tier": old_tier,
-                    "new_tier": target_tier,
-                    "expires_at": norm_exp,
-                    "downgrade_mode": downgrade_mode,
-                    "affected_bots": affected_bots,
-                },
             )
-
         return self.get_user_profile(uid) or {"telegram_user_id": uid}
 
     def delete_user(self, telegram_user_id: str) -> bool:
@@ -811,6 +837,249 @@ class SubscriptionEngine:
             if cur.rowcount > 0:
                 self._log_audit_in_tx(conn, uid, None, "USER_DELETED", actor="ADMIN")
             return cur.rowcount > 0
+
+    # =========================================================================
+    # Tier Upgrade Requests Queue (#Approval via Admin Console)
+    # =========================================================================
+
+    def submit_upgrade_request(
+        self,
+        telegram_user_id: str,
+        requested_tier: str,
+        memo: str = "",
+        full_name: str = "",
+        username: str = "",
+    ) -> dict[str, Any]:
+        """Submits or updates a pending tier upgrade request idempotently."""
+        uid = str(telegram_user_id).strip()
+        req_tier = requested_tier.upper().strip()
+        tier_ranks = {"WHITE": 1, "GREEN": 2, "RED": 3, "BLACK": 4}
+        if req_tier not in tier_ranks:
+            raise ValueError(f"유효하지 않은 등급입니다: {req_tier}")
+
+        now_str = now_kst_str()
+        with self._exclusive_tx() as conn:
+            # 1. Ensure user exists
+            user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
+            if not user:
+                conn.execute(
+                    """INSERT INTO users (telegram_user_id, full_name, username, tier, status, created_at, updated_at)
+                       VALUES (?, ?, ?, 'WHITE', 'ACTIVE', ?, ?)""",
+                    (uid, full_name or f"유저_{uid[-4:]}", username or "", now_str, now_str),
+                )
+                curr_tier = "WHITE"
+            else:
+                curr_tier = str(user["tier"] or "WHITE").upper()
+
+            # 2. Check if current tier >= requested tier
+            if tier_ranks.get(curr_tier, 1) >= tier_ranks[req_tier]:
+                raise ValueError(f"이미 {curr_tier} 등급이거나 그 이상입니다 (신청 등급: {req_tier})")
+
+            # 3. Check for existing PENDING request (Idempotency)
+            pending = conn.execute(
+                "SELECT * FROM upgrade_requests WHERE telegram_user_id = ? AND status = 'PENDING'",
+                (uid,),
+            ).fetchone()
+
+            if pending:
+                conn.execute(
+                    """UPDATE upgrade_requests
+                       SET current_tier = ?, requested_tier = ?, memo = ?, requested_at = ?
+                       WHERE id = ?""",
+                    (curr_tier, req_tier, memo or pending["memo"] or "", now_str, pending["id"]),
+                )
+                req_id = pending["id"]
+                is_updated = True
+            else:
+                cur = conn.execute(
+                    """INSERT INTO upgrade_requests (telegram_user_id, current_tier, requested_tier, status, memo, requested_at)
+                       VALUES (?, ?, ?, 'PENDING', ?, ?)""",
+                    (uid, curr_tier, req_tier, memo, now_str),
+                )
+                req_id = cur.lastrowid
+                is_updated = False
+
+            self._log_audit_in_tx(
+                conn,
+                uid,
+                None,
+                "UPGRADE_REQUESTED",
+                actor="USER",
+                detail={"request_id": req_id, "current_tier": curr_tier, "requested_tier": req_tier, "updated": is_updated},
+            )
+
+        return {
+            "success": True,
+            "request_id": req_id,
+            "telegram_user_id": uid,
+            "current_tier": curr_tier,
+            "requested_tier": req_tier,
+            "status": "PENDING",
+            "is_updated": is_updated,
+        }
+
+    def get_upgrade_requests(self, status: str | None = None) -> list[dict[str, Any]]:
+        """Returns upgrade requests joined with user profile info."""
+        with self._read_conn() as conn:
+            query = """
+                SELECT ur.id, ur.telegram_user_id, ur.current_tier, ur.requested_tier,
+                       ur.status, ur.requested_at, ur.reviewed_at, ur.reviewed_by, ur.memo,
+                       u.full_name, u.username, u.tier as latest_tier
+                FROM upgrade_requests ur
+                LEFT JOIN users u ON ur.telegram_user_id = u.telegram_user_id
+            """
+            params: list[Any] = []
+            if status:
+                query += " WHERE ur.status = ?"
+                params.append(status.upper())
+            query += " ORDER BY ur.requested_at DESC, ur.id DESC"
+            rows = conn.execute(query, params).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "telegram_user_id": r["telegram_user_id"],
+                    "full_name": r["full_name"] or f"유저_{r['telegram_user_id'][-4:]}",
+                    "username": r["username"] or "",
+                    "current_tier": r["current_tier"],
+                    "latest_tier": r["latest_tier"] or r["current_tier"],
+                    "requested_tier": r["requested_tier"],
+                    "status": r["status"],
+                    "requested_at": str(r["requested_at"]),
+                    "reviewed_at": str(r["reviewed_at"]) if r["reviewed_at"] else None,
+                    "reviewed_by": r["reviewed_by"],
+                    "memo": r["memo"] or "",
+                }
+                for r in rows
+            ]
+
+    def approve_upgrade_request(
+        self, request_id: int, actor: str = "ADMIN", expected_tier: str | None = None
+    ) -> dict[str, Any]:
+        """Approves a pending upgrade request, updates user tier atomically, and notifies user via Telegram."""
+        with self._exclusive_tx() as conn:
+            row = conn.execute("SELECT * FROM upgrade_requests WHERE id = ?", (request_id,)).fetchone()
+            if not row:
+                raise KeyError(f"업그레이드 신청을 찾을 수 없습니다: #{request_id}")
+            if row["status"] != "PENDING":
+                raise ValueError(f"이미 처리된 신청입니다 (현재 상태: {row['status']})")
+
+            uid = str(row["telegram_user_id"])
+            req_tier = str(row["requested_tier"])
+
+            if expected_tier and req_tier != expected_tier.upper():
+                raise ValueError(f"신청 등급이 변경되었습니다 (버튼: {expected_tier} != 최신: {req_tier})")
+
+            now_str = now_kst_str()
+
+            conn.execute(
+                """UPDATE upgrade_requests
+                   SET status = 'APPROVED', reviewed_at = ?, reviewed_by = ?
+                   WHERE id = ?""",
+                (now_str, actor, request_id),
+            )
+
+            # Atomically update user tier inside the same exclusive transaction
+            self._update_user_tier_in_tx(
+                conn,
+                uid,
+                req_tier,
+                actor=actor,
+                memo=f"승인된 등업신청 #{request_id}",
+            )
+
+        user_info = self.get_user_profile(uid)
+
+        # Dispatch congratulatory Telegram notification to the user
+        self._notify_user_upgrade_result(uid, req_tier, approved=True)
+
+        return {
+            "success": True,
+            "request_id": request_id,
+            "telegram_user_id": uid,
+            "new_tier": req_tier,
+            "user": user_info,
+        }
+
+    def reject_upgrade_request(self, request_id: int, actor: str = "ADMIN", reason: str = "") -> dict[str, Any]:
+        """Rejects a pending upgrade request."""
+        with self._exclusive_tx() as conn:
+            row = conn.execute("SELECT * FROM upgrade_requests WHERE id = ?", (request_id,)).fetchone()
+            if not row:
+                raise KeyError(f"업그레이드 신청을 찾을 수 없습니다: #{request_id}")
+            if row["status"] != "PENDING":
+                raise ValueError(f"이미 처리된 신청입니다 (현재 상태: {row['status']})")
+
+            uid = str(row["telegram_user_id"])
+            req_tier = str(row["requested_tier"])
+            now_str = now_kst_str()
+
+            conn.execute(
+                """UPDATE upgrade_requests
+                   SET status = 'REJECTED', reviewed_at = ?, reviewed_by = ?, memo = ?
+                   WHERE id = ?""",
+                (now_str, actor, reason or "운영팀 반려", request_id),
+            )
+
+        self._notify_user_upgrade_result(uid, req_tier, approved=False, reason=reason)
+
+        return {"success": True, "request_id": request_id, "status": "REJECTED"}
+
+    def _notify_user_upgrade_result(
+        self, telegram_user_id: str, tier: str, approved: bool, reason: str = ""
+    ) -> None:
+        """Sends an in-bot notification message to the user about their tier upgrade decision."""
+        token = os.environ.get("PORTAL_TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            logger.info("PORTAL_TELEGRAM_BOT_TOKEN not configured; skipping in-bot upgrade notification")
+            return
+        if not token.strip():
+            return
+
+        limits = {"WHITE": "1", "GREEN": "3", "RED": "5", "BLACK": "무제한"}
+        max_slots = limits.get(tier.upper(), "3")
+
+        if approved:
+            text = (
+                f"🎉 <b>[등급 업그레이드 승인 완료]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"축하합니다! 회원님의 등급이 <b>{html.escape(tier.upper())}</b> 등급으로 상향되었습니다. 👏\n\n"
+                f"• 이용 가능 슬롯: <b>{max_slots}개</b>\n"
+                f"• 적용 일시: <code>{now_kst_str()}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"지금 바로 원하는 정보봇을 추가로 구독해 보세요!"
+            )
+            markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📋 내 구독 센터 바로가기", "callback_data": "nav:subs"},
+                        {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+                    ]
+                ]
+            }
+        else:
+            safe_reason = html.escape(reason.strip()) if reason else ""
+            reason_line = f"• 사유: <i>{safe_reason}</i>\n" if safe_reason else ""
+            text = (
+                f"ℹ️ <b>[등급 업그레이드 신청 안내]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"신청하신 <b>{html.escape(tier.upper())}</b> 등급 업그레이드가 운영 정책에 따라 반려되었습니다.\n"
+                f"{reason_line}"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"궁금하신 사항은 고객센터 1:1 문의를 이용해 주세요."
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "💬 1:1 고객센터 문의", "callback_data": "support:write_inquiry"}]
+                ]
+            }
+
+        try:
+            from portal_hub.telegram import TelegramPortalClient
+            client = TelegramPortalClient(token)
+            client.send_message(telegram_user_id, text, reply_markup=markup)
+        except Exception as e:
+            logger.warning("Failed to notify user %s of tier upgrade result: %s", telegram_user_id, e)
+            pass
 
     # =========================================================================
     # Atomic Subscription, Quota Verification & One-Click Swap (#2, #3, #4)

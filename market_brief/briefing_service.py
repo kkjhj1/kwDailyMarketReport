@@ -282,7 +282,10 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             from admission_brief.storage.db import AdmissionDatabase
 
             curator = AICurator()
-            adm_db = AdmissionDatabase(db_path=str(ROOT_DIR / "data/admission_brief.db"))
+            adm_db_path = getattr(db, "db_path", None) or str(ROOT_DIR / "alerts.sqlite3")
+            if not Path(adm_db_path).exists() and (ROOT_DIR / "data/admission_brief.db").exists():
+                adm_db_path = str(ROOT_DIR / "data/admission_brief.db")
+            adm_db = AdmissionDatabase(db_path=adm_db_path)
 
             if preset_id == "ticketing":
                 events = adm_db.list_all_events()

@@ -357,6 +357,7 @@ class TravelNaverLiveTests(unittest.TestCase):
                     recipients_override=["7820975792", "7820975792", " 7820975792 "],
                     db_path=db_file,
                     live_naver=False,
+                    output_dir=Path(tmp),
                 )
         self.assertTrue(ok)
         self.assertEqual(sent_ids, ["7820975792"])

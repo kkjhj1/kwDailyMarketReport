@@ -295,10 +295,23 @@ class AdmissionInteractiveBot:
         """Processes inline button clicks (grade and region selection)."""
         cb_id = cb["id"]
         data = cb.get("data", "")
-        msg = cb.get("message", {})
-        chat = msg.get("chat", {})
-        chat_id = str(chat.get("id"))
+        msg = cb.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = str(chat.get("id") or cb.get("from", {}).get("id") or "")
         message_id = msg.get("message_id")
+
+        # Ensure subscriber profile exists in DB before updating preferences
+        profile = self.db.get_subscriber(chat_id)
+        if not profile:
+            from_u = cb.get("from") or {}
+            profile = ParentUserProfile(
+                chat_id=chat_id,
+                username=from_u.get("username", "") or chat.get("username", ""),
+                first_name=from_u.get("first_name", "") or chat.get("first_name", ""),
+                registered_at=datetime.now(),
+                last_active_at=datetime.now(),
+            )
+            self.db.upsert_subscriber(profile)
 
         # 1. Grade selection
         if data.startswith("grade:"):

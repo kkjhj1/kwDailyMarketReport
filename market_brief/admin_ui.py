@@ -1052,6 +1052,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
         </div>
 
+        <!-- 🔔 등급 업그레이드 신청 대기 큐 섹션 -->
+        <div id="upgradeRequestsSection" style="margin-bottom: 20px;"></div>
+
         <!-- Search & Filter Bar -->
         <div class="user-filter-bar">
           <div class="filter-chips">
@@ -1400,6 +1403,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     let S = {
       users: [],
       bots: [],
+      upgradeRequests: [],
       overview: null,
       tierFilter: '',
       activeTab: 'users',
@@ -1423,6 +1427,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function req(url, opts = {}) {
       const headers = opts.headers || {};
+      const token = localStorage.getItem('admin_api_token') || new URLSearchParams(window.location.search).get('token') || '';
+      if (token) {
+        headers['X-Admin-Token'] = token;
+      }
       if (opts.body && typeof opts.body === 'object') {
         headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(opts.body);
@@ -1479,12 +1487,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       if (S.tierFilter) p.set('tier', S.tierFilter);
 
       try {
-        const [uRes, bRes] = await Promise.all([
+        const [uRes, bRes, reqRes] = await Promise.all([
           req('/api/platform/users?' + p.toString()),
-          req('/api/platform/bots')
+          req('/api/platform/bots'),
+          req('/api/platform/upgrade-requests')
         ]);
         S.users = uRes.users || [];
         S.bots = bRes.bots || [];
+        S.upgradeRequests = reqRes.requests || [];
+
+        renderUpgradeRequests(S.upgradeRequests);
 
         const tbody = document.getElementById('userTableBody');
         if (S.users.length === 0) {
@@ -1511,19 +1523,33 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </span>
           `).join('');
 
+          const pendingReq = (S.upgradeRequests || []).find(r => r.telegram_user_id === u.telegram_user_id && r.status === 'PENDING');
+          const pendingBadge = pendingReq
+            ? `<span class="pill" style="background:#fef3c7; color:#b45309; border:1.5px solid #fcd34d; font-size:11px; font-weight:800; margin-left:6px;" title="승인 대기 중">🔔 ${esc(pendingReq.requested_tier)} 등업대기</span>`
+            : '';
+          const quickApproveBtn = pendingReq
+            ? `<button class="btn btn-sm" style="background:#10b981; color:#fff; font-size:11px; font-weight:800; padding:5px 10px; margin-left:5px; border-radius:6px;" data-req-id="${pendingReq.id}" data-user-name="${esc(u.full_name)}" data-requested-tier="${esc(pendingReq.requested_tier)}" onclick="handleApproveBtnClick(this)">승인</button>`
+            : '';
+
           return `
             <tr>
               <td data-label="회원 정보">
-                <div style="font-weight:800; font-size:14.5px;">${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px;">[차단]</span>' : ''}</div>
-                <div style="font-size:12px; color:var(--text-muted);">ID: <code>${esc(u.telegram_user_id)}</code> ${u.username ? `· @${esc(u.username)}` : ''}</div>
+                <div style="font-weight:800; font-size:14.5px; display:flex; align-items:center; flex-wrap:wrap;">
+                  ${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px; margin-left:4px;">[차단]</span>' : ''}
+                  ${pendingBadge}
+                </div>
+                <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">ID: <code>${esc(u.telegram_user_id)}</code> ${u.username ? `· @${esc(u.username)}` : ''}</div>
               </td>
               <td data-label="회원 등급">
-                <select class="form-select user-tier-select" style="width:160px; font-weight:700; padding:6px 9px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
-                  <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1개)</option>
-                  <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3개)</option>
-                  <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5개)</option>
-                  <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
-                </select>
+                <div style="display:flex; align-items:center;">
+                  <select class="form-select user-tier-select" style="width:160px; font-weight:700; padding:6px 9px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
+                    <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1개)</option>
+                    <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3개)</option>
+                    <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5개)</option>
+                    <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
+                  </select>
+                  ${quickApproveBtn}
+                </div>
               </td>
               <td data-label="슬롯 사용">
                 <div style="font-weight:800; font-size:12.5px;">${slotTxt}</div>
@@ -1550,6 +1576,112 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         }).join('');
       } catch (e) {
         toast('유저 목록 로드 오류: ' + e.message);
+      }
+    }
+
+    function renderUpgradeRequests(requests) {
+      const wrap = document.getElementById('upgradeRequestsSection');
+      if (!wrap) return;
+
+      const pending = (requests || []).filter(r => r.status === 'PENDING');
+      if (pending.length === 0) {
+        wrap.innerHTML = `
+          <div style="background:var(--surface-sub); border:1px dashed var(--border); border-radius:10px; padding:10px 16px; display:flex; justify-content:space-between; align-items:center; font-size:12.5px; color:var(--text-muted);">
+            <span>✅ 대기 중인 등급 업그레이드 신청이 없습니다.</span>
+            <span style="font-size:11px;">봇에서 신청이 접수되면 이곳에 1-클릭 승인 카드가 즉시 나타납니다.</span>
+          </div>
+        `;
+        return;
+      }
+
+      const tierColors = {
+        WHITE: { bg: '#f1f5f9', fg: '#475569' },
+        GREEN: { bg: '#ecfdf5', fg: '#047857' },
+        RED: { bg: '#fef2f2', fg: '#b91c1c' },
+        BLACK: { bg: '#0f172a', fg: '#f8fafc' },
+      };
+
+      wrap.innerHTML = `
+        <div style="background:linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border:1.5px solid #fcd34d; border-radius:12px; padding:16px 20px; box-shadow:0 4px 12px rgba(245, 158, 11, 0.12);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:20px;">🔔</span>
+              <span style="font-weight:800; font-size:15px; color:#92400e;">등급 업그레이드 신청 대기</span>
+              <span class="pill" style="background:#f59e0b; color:#fff; font-size:11px; padding:2px 8px; font-weight:800;">${pending.length}건 대기</span>
+            </div>
+            <span style="font-size:12px; color:#b45309;">👉 <b>[승인]</b> 클릭 시 등급이 즉시 변경되고 텔레그램으로 완료 축하 알림이 발송됩니다.</span>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            ${pending.map(r => {
+              const reqColor = tierColors[r.requested_tier] || { bg: '#ecfdf5', fg: '#047857' };
+              return `
+                <div style="background:#ffffff; border:1px solid #fde68a; border-radius:8px; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                  <div>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                      <span style="font-weight:800; font-size:14.5px;">${esc(r.full_name)}</span>
+                      <span style="font-size:12px; color:var(--text-muted);">(ID: <code>${esc(r.telegram_user_id)}</code> ${r.username ? `· @${esc(r.username)}` : ''})</span>
+                    </div>
+                    <div style="margin-top:5px; font-size:13px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                      <span class="pill" style="background:#e2e8f0; color:#475569; font-size:11px;">현재: ${esc(r.current_tier)}</span>
+                      <span>➔</span>
+                      <span class="pill" style="background:${reqColor.bg}; color:${reqColor.fg}; font-size:11px; font-weight:800; border:1px solid ${reqColor.fg};">신청: ${esc(r.requested_tier)}</span>
+                      <span style="font-size:11.5px; color:#94a3b8; margin-left:6px;">접수: <code>${esc(r.requested_at)}</code></span>
+                    </div>
+                  </div>
+                  <div style="display:flex; gap:8px;">
+                    <button class="btn btn-sm" style="background:#10b981; color:#fff; border-color:#059669; font-weight:800; padding:6px 16px; border-radius:6px; font-size:13px;" data-req-id="${r.id}" data-user-name="${esc(r.full_name)}" data-requested-tier="${esc(r.requested_tier)}" onclick="handleApproveBtnClick(this)">
+                      ✅ 즉시 승인
+                    </button>
+                    <button class="btn btn-sm btn-outline" style="color:#64748b; padding:6px 12px; border-radius:6px; font-size:12px;" data-req-id="${r.id}" data-user-name="${esc(r.full_name)}" onclick="handleRejectBtnClick(this)">
+                      ✕ 반려
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function handleApproveBtnClick(btn) {
+      const id = btn.dataset.reqId;
+      const userName = btn.dataset.userName;
+      const requestedTier = btn.dataset.requestedTier;
+      approveUpgradeRequest(id, userName, requestedTier);
+    }
+
+    function handleRejectBtnClick(btn) {
+      const id = btn.dataset.reqId;
+      const userName = btn.dataset.userName;
+      rejectUpgradeRequest(id, userName);
+    }
+
+    async function approveUpgradeRequest(requestId, userName, requestedTier) {
+      if (!confirm(`[${userName}] 님의 ${requestedTier} 등급 업그레이드를 승인하시겠습니까?\n승인 시 유저 등급이 즉시 상향되고 텔레그램으로 완료 안내가 자동 발송됩니다.`)) {
+        return;
+      }
+      try {
+        await req(`/api/platform/upgrade-requests/${requestId}/approve`, { method: 'POST' });
+        toast(`🎉 [${userName}] 님의 ${requestedTier} 등급 승인이 완료되었습니다!`);
+        await loadUsers();
+      } catch (err) {
+        alert('승인 처리 실패: ' + err.message);
+      }
+    }
+
+    async function rejectUpgradeRequest(requestId, userName) {
+      const reason = prompt(`[${userName}] 님의 등급 업그레이드를 반려하시겠습니까?\n반려 사유를 입력하세요 (선택):`, '운영 정책 기준 미달');
+      if (reason === null) return;
+      try {
+        await req(`/api/platform/upgrade-requests/${requestId}/reject`, {
+          method: 'POST',
+          body: { reason: reason || '운영 정책 기준 미달' }
+        });
+        toast(`반려 처리되었습니다.`);
+        await loadUsers();
+      } catch (err) {
+        alert('반려 처리 실패: ' + err.message);
       }
     }
 

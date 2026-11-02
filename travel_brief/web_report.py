@@ -162,82 +162,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       margin-bottom: 1.25rem;
     }
 
-    /* Transparency & Methodology Box */
-    .source-transparency-card {
-      background: rgba(15, 23, 42, 0.7);
-      border: 1px solid rgba(56, 189, 248, 0.28);
-      border-radius: 18px;
-      padding: 1.5rem 1.75rem;
-      margin-bottom: 2rem;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
-    }
-    .source-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1rem;
-      padding-bottom: 0.75rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      flex-wrap: wrap;
-      gap: 0.75rem;
-    }
-    .source-title-group {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .source-badge {
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--accent-cyan);
-      border: 1px solid rgba(56, 189, 248, 0.35);
-      padding: 0.25rem 0.65rem;
-      border-radius: 9999px;
-      font-size: 0.72rem;
-      font-weight: 800;
-      letter-spacing: 0.06em;
-    }
-    .source-header h3 {
-      font-size: 1.18rem;
-      font-weight: 800;
-      color: #f8fafc;
-    }
-    .source-stamp {
-      font-size: 0.82rem;
-      color: #94a3b8;
-    }
-    .source-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 1.25rem;
-    }
-    .source-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.85rem;
-      background: rgba(255, 255, 255, 0.025);
-      border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 12px;
-      padding: 1rem;
-    }
-    .source-icon {
-      font-size: 1.6rem;
-      line-height: 1;
-      padding: 0.35rem;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.05);
-    }
-    .source-text strong {
-      display: block;
-      font-size: 0.92rem;
-      color: #f1f5f9;
-      margin-bottom: 0.3rem;
-    }
-    .source-text p {
-      font-size: 0.83rem;
-      color: #94a3b8;
-      line-height: 1.5;
-    }
 
     /* TOP 3 Cards Grid */
     .top-cards-grid {
@@ -703,29 +627,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       transform: translateY(-1px);
     }
 
-    /* Sticky Heatmap Table (Enlarged 150% Readability) */
+    /* Smart Compact Heatmap Matrix (High-Density Price Board) */
     .table-container {
       overflow-x: auto;
       position: relative;
-      border-radius: 18px;
+      border-radius: 16px;
       border: 1px solid var(--card-border);
-      background: rgba(15, 23, 42, 0.85);
+      background: rgba(15, 23, 42, 0.88);
       backdrop-filter: blur(14px);
-      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
-      margin-bottom: 3.5rem;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+      margin-bottom: 3rem;
     }
     table {
       width: 100%;
       border-collapse: separate;
       border-spacing: 0;
-      min-width: 1280px;
+      min-width: 760px;
     }
     th {
       background: #0f1930;
       color: #94a3b8;
       font-weight: 700;
-      padding: 1.1rem 0.85rem;
-      font-size: 0.92rem;
+      padding: 0.75rem 0.4rem;
+      font-size: 0.85rem;
       letter-spacing: 0.02em;
       border-bottom: 2px solid rgba(255, 255, 255, 0.1);
       text-align: center;
@@ -736,47 +660,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       z-index: 10;
       background: #0a1122;
       border-right: 2px solid rgba(56, 189, 248, 0.2);
-      box-shadow: 4px 0 14px rgba(0, 0, 0, 0.5);
+      box-shadow: 3px 0 10px rgba(0, 0, 0, 0.5);
       text-align: left;
     }
     th.dest-col-th {
       z-index: 15;
       background: #0d172e;
-      padding-left: 1.25rem;
+      padding-left: 1rem;
     }
     td.dest-col {
-      padding: 0.85rem 1.25rem;
-      min-width: 190px;
+      padding: 0.45rem 0.85rem;
+      min-width: 145px;
     }
     .dest-col-main {
       display: flex;
       flex-direction: column;
-      gap: 0.25rem;
+      gap: 0.15rem;
     }
     .dest-name-row {
       display: flex;
       align-items: center;
-      gap: 0.45rem;
+      gap: 0.35rem;
     }
-    .dest-flag { font-size: 1.3rem; }
-    .dest-name { font-size: 1.08rem; font-weight: 800; color: #ffffff; }
-    .dest-code { font-size: 0.8rem; color: var(--accent-cyan); font-weight: 800; }
-    .dest-sub-info { font-size: 0.78rem; color: var(--text-sub); }
-    .dest-baseline-info { font-size: 0.74rem; color: #64748b; font-weight: 600; }
+    .dest-flag { font-size: 1.15rem; }
+    .dest-name { font-size: 0.98rem; font-weight: 800; color: #ffffff; }
+    .dest-code { font-size: 0.75rem; color: var(--accent-cyan); font-weight: 700; }
+    .dest-sub-info { font-size: 0.72rem; color: var(--text-sub); }
+    .dest-baseline-info { font-size: 0.68rem; color: #64748b; font-weight: 600; }
 
-    /* Interactive Matrix Cell */
+    /* Interactive Smart Compact Matrix Cell */
     .matrix-cell-wrap {
-      padding: 0.45rem;
+      padding: 0.22rem;
       vertical-align: middle;
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
     .matrix-cell {
-      display: block;
-      padding: 0.85rem 0.75rem;
-      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.2rem;
+      padding: 0.45rem 0.35rem;
+      min-height: 58px;
+      border-radius: 9px;
       text-decoration: none;
       color: var(--text-main);
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
       border: 1px solid transparent;
       position: relative;
       background: rgba(255, 255, 255, 0.03);
@@ -1051,7 +980,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.85rem;
         margin-bottom: 1rem;
       }
-      .source-transparency-card,
       .top-card,
       .monthly-big-card,
       .dest-card-compact {
@@ -1059,7 +987,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         padding: 1.15rem;
         border-radius: 14px;
       }
-      .source-grid,
       .top-cards-grid,
       .monthly-cards-grid,
       .all-dest-grid {
@@ -1153,7 +1080,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         -webkit-overflow-scrolling: touch;
       }
       table {
-        min-width: 860px;
+        min-width: 660px;
       }
       th {
         padding: 0.75rem 0.45rem;
@@ -1200,40 +1127,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </header>
 
-    <!-- Transparency & Data Source Card -->
-    <div class="source-transparency-card">
-      <div class="source-header">
-        <div class="source-title-group">
-          <span class="source-badge">VERIFIED BENCHMARK</span>
-          <h3>📊 항공권 가격 산정 기준 & 실시간 검증 원칙</h3>
-        </div>
-        <span class="source-stamp">기준: ICN 출발 3박 4일 직항 성인 1인 왕복</span>
-      </div>
-      <div class="source-grid">
-        <div class="source-item">
-          <div class="source-icon">🏛️</div>
-          <div class="source-text">
-            <strong>빅데이터 벤치마크 출처</strong>
-            <p>국토교통부 항공정보포털(Airportal) 최근 3개년 인천 출발 주말 실운임 통계 및 네이버 항공권·스카이스캐너 정기 운임 빅데이터</p>
-          </div>
-        </div>
-        <div class="source-item">
-          <div class="source-icon">⚡</div>
-          <div class="source-text">
-            <strong>직장인 실속 3박 4일 일정 기준</strong>
-            <p>목~일 및 금~월 주말 직항 노선 기준. 유류할증료 및 공항 이용료가 모두 포함된 1인 총액 기준가</p>
-          </div>
-        </div>
-        <div class="source-item">
-          <div class="source-icon">🔍</div>
-          <div class="source-text">
-            <strong>100% 원클릭 실시간 최저가 검증</strong>
-            <p>항공권은 실시간 잔여석에 따라 변동되므로, <strong>히트맵의 각 셀을 클릭하면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>되어 잔여석과 최종 결제가를 직접 확인하실 수 있습니다. (링크 접속 후 약 3~5초 전체 항공사 로딩 완료 시 상단 '인기 항공편' 배너 아래 <strong>'가격 낮은 순' 1위</strong>에서 동일한 직항 최저가가 표시됩니다.)</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <h2>🔥 이번 주 베스트 TOP 3 추천 (초특가 & 여행 최적기)</h2>
     <p class="section-desc">6개월간의 주말 일정 중 항공권 할인율, 현지 날씨 최적기, 가성비 호텔 큐레이션을 종합 평가한 베스트 추천입니다.</p>
     <div class="top-cards-grid">
@@ -1241,7 +1134,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <h2>📊 6개월 주말 왕복 항공권 특가 & 실거래 예상 밴드</h2>
-    <p class="section-desc">유류할증료·공항세·연휴 할증이 반영된 주말 실거래 예상가 밴드입니다. <strong>큰글씨 월별 카드</strong>로 편하게 보시거나 <strong>6개월 전체 비교표</strong>로 전환하실 수 있습니다.</p>
+    <p class="section-desc">6개월 가격 흐름은 <strong>컴팩트 히트맵</strong>으로 한눈에 비교하고, 상세 운항·숙소·예산은 <strong>월별 카드</strong>로 확인하세요. 셀 클릭 시 실시간 항공권으로 바로 연결됩니다.</p>
 
     <!-- View Mode Switcher -->
     <div class="view-mode-bar">
@@ -1561,17 +1454,17 @@ class WebReportGenerator:
           </div>
         </div>
         <div class="action-buttons-group">
-          <a class="act-btn btn-flight" href="{rec.naver_flight_url}" target="_blank" rel="noopener noreferrer">
-            🔍 네이버 항공권 실시간 ↗
+          <a class="act-btn btn-flight" href="{html.escape(rec.naver_flight_url, quote=True)}" target="_blank" rel="noopener noreferrer">
+            ✈️ 네이버항공권 ↗
           </a>
-          <a class="act-btn btn-hotel" href="{rec.hotel_search_url}" target="_blank" rel="noopener noreferrer">
-            🏨 추천 숙소 요금 확인 ↗
+          <a class="act-btn btn-hotel" href="{html.escape(rec.hotel_search_url, quote=True)}" target="_blank" rel="noopener noreferrer">
+            🏨 호텔요금 ↗
           </a>
-          <a class="act-btn btn-ai" href="{chatgpt_link}" target="_blank" rel="noopener noreferrer">
-            🤖 ChatGPT 일정 짜기
+          <a class="act-btn btn-ai" href="{html.escape(chatgpt_link, quote=True)}" target="_blank" rel="noopener noreferrer">
+            🤖 GPT일정짜기 ↗
           </a>
           <button class="act-btn btn-prompt" onclick="openPromptModal('{dest.code}')">
-            📋 AI 프롬프트 보기
+            📋 AI프롬프트실행
           </button>
         </div>
       </div>
@@ -1648,7 +1541,7 @@ class WebReportGenerator:
               <div>💼 1인 총예산 <strong>약 {total_1p_man}만 원</strong> <span class="muted">· 2인 총 {total_2p_man}만 (1인당 약 {share_1p_man}만)</span></div>
             </div>
           </div>
-          <a href="{naver_url}" target="_blank" rel="noopener noreferrer" class="mbc-cta-btn">
+          <a href="{html.escape(naver_url, quote=True)}" target="_blank" rel="noopener noreferrer" class="mbc-cta-btn">
             ✈️ 네이버 항공권 실시간 좌석·가격 확인 ↗
           </a>
         </div>"""
@@ -1727,22 +1620,10 @@ class WebReportGenerator:
 
                     cell_html = f"""
             <td class="matrix-cell-wrap">
-              <a href="{naver_url}" target="_blank" rel="noopener noreferrer" class="matrix-cell {price_cls}" title="{dest.name} {deal.departure_date} 네이버 실시간 항공권 조회 (새 창)">
-                <div class="cell-header">
-                  <span class="cell-price">{deal.exact_price_str if deal.is_live else deal.price_band_compact_str}</span>
-                  <span class="cell-badge {badge_cls}">{badge_label}</span>
-                </div>
-                <div class="cell-dates">
-                  <strong>{dep_short}({deal.departure_day_of_week})~{ret_short}({deal.return_day_of_week})</strong>
-                  <span class="nights-tag">3박4일</span>
-                </div>
-                <div class="cell-footer">
-                  <span class="cell-airline">{html.escape(deal.airline if "직항" in deal.airline else f"{deal.airline} 직항")}</span>
-                  {weather_chip}
-                </div>
-                <div class="cell-action-hint">
-                  🔍 실시간 확인 ↗
-                </div>
+              <a href="{html.escape(naver_url, quote=True)}" target="_blank" rel="noopener noreferrer" class="matrix-cell {price_cls}" title="{dest.name} {deal.departure_date} 네이버 실시간 항공권 조회 (새 창)">
+                <span class="cell-price">{deal.exact_price_str if deal.is_live else deal.price_band_compact_str}</span>
+                <span class="cell-dates">{dep_short}({deal.departure_day_of_week}) {weather_chip}</span>
+                <span class="cell-badge {badge_cls}">{badge_label}</span>
               </a>
             </td>
 """

@@ -249,6 +249,20 @@ class MarketBriefDatabase:
                     logged_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )"""
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS upgrade_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id TEXT NOT NULL,
+                    current_tier TEXT NOT NULL,
+                    requested_tier TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    requested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at TEXT,
+                    reviewed_by TEXT,
+                    memo TEXT DEFAULT '',
+                    FOREIGN KEY(telegram_user_id) REFERENCES users(telegram_user_id)
+                )"""
+            )
 
     def _seed_initial_data(self) -> None:
         with self._connect() as db:
@@ -277,11 +291,16 @@ class MarketBriefDatabase:
                         line = line.strip()
                         if line.startswith("TELEGRAM_BOT_TOKEN="):
                             env_brief_token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        elif line.startswith("MENU_BOT_TOKEN=") or line.startswith("MENU_TELEGRAM_BOT_TOKEN="):
+                        elif (
+                            line.startswith("PORTAL_TELEGRAM_BOT_TOKEN=")
+                            or line.startswith("PORTAL_BOT_TOKEN=")
+                            or line.startswith("MENU_BOT_TOKEN=")
+                            or line.startswith("MENU_TELEGRAM_BOT_TOKEN=")
+                        ):
                             env_menu_token = line.split("=", 1)[1].strip().strip('"').strip("'")
                         elif line.startswith("TRAVEL_TELEGRAM_BOT_TOKEN=") or line.startswith("TRAVEL_BOT_TOKEN="):
                             env_travel_token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        elif line.startswith("EDU_TELEGRAM_BOT_TOKEN=") or line.startswith("EDU_BOT_TOKEN="):
+                        elif line.startswith("EDU_TELEGRAM_BOT_TOKEN=") or line.startswith("EDU_BOT_TOKEN=") or line.startswith("ADMISSION_TELEGRAM_BOT_TOKEN="):
                             env_edu_token = line.split("=", 1)[1].strip().strip('"').strip("'")
                     row_count = db.execute("SELECT COUNT(*) FROM recipients").fetchone()[0]
                     if row_count == 0:
@@ -323,7 +342,7 @@ class MarketBriefDatabase:
                     "menu_bot",
                     BotType.MENU.value,
                     "통합 안내 메뉴봇",
-                    "",
+                    "KwMenu_bot",
                     env_menu_token,
                     "가입·포털",
                     "🧭",
@@ -336,7 +355,7 @@ class MarketBriefDatabase:
                     "brief_bot",
                     BotType.INFO.value,
                     "시황 브리핑봇",
-                    "",
+                    "KwDailyMarketInfo_bot",
                     env_brief_token,
                     "금융·시황",
                     "📈",
@@ -349,7 +368,7 @@ class MarketBriefDatabase:
                     "travel_bot",
                     BotType.INFO.value,
                     "여행 특가봇",
-                    "",
+                    "KwTravelLowPrice_bot",
                     env_travel_token,
                     "여행·라이프",
                     "✈️",
@@ -362,7 +381,7 @@ class MarketBriefDatabase:
                     "admission_bot",
                     BotType.INFO.value,
                     "입시 교육봇",
-                    "",
+                    "KwEduInfo_bot",
                     env_edu_token,
                     "입시·교육",
                     "🎓",
@@ -399,32 +418,28 @@ class MarketBriefDatabase:
                     db.execute(
                         """INSERT INTO bots
                            (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description, topic_code, is_active, sort_order)
-                           VALUES ('admission_bot', 'INFO', '입시 교육봇', '', ?, '입시·교육', '🎓',
+                           VALUES ('admission_bot', 'INFO', '입시 교육봇', 'KwEduInfo_bot', ?, '입시·교육', '🎓',
                                    '학년별 주간 대입·고입 큐레이션 및 학부모 설명회 티켓팅 오픈 알림을 제공합니다.', 'EDUCATION', 1, 3)""",
                         (env_edu_token,),
                     )
 
-                # Backfill tokens from .env
-                if env_brief_token:
+                # Backfill verified usernames and missing tokens from .env
+                bot_updates = [
+                    ("menu_bot", "KwMenu_bot", env_menu_token),
+                    ("brief_bot", "KwDailyMarketInfo_bot", env_brief_token),
+                    ("travel_bot", "KwTravelLowPrice_bot", env_travel_token),
+                    ("admission_bot", "KwEduInfo_bot", env_edu_token),
+                ]
+                for bid, un, tok in bot_updates:
                     db.execute(
-                        "UPDATE bots SET token = ? WHERE bot_id = 'brief_bot' AND (token IS NULL OR token = '')",
-                        (env_brief_token,),
+                        "UPDATE bots SET telegram_username = ? WHERE bot_id = ? AND (telegram_username IS NULL OR telegram_username = '')",
+                        (un, bid),
                     )
-                if env_travel_token:
-                    db.execute(
-                        "UPDATE bots SET token = ? WHERE bot_id = 'travel_bot' AND (token IS NULL OR token = '')",
-                        (env_travel_token,),
-                    )
-                if env_edu_token:
-                    db.execute(
-                        "UPDATE bots SET token = ? WHERE bot_id = 'admission_bot' AND (token IS NULL OR token = '')",
-                        (env_edu_token,),
-                    )
-                if env_menu_token:
-                    db.execute(
-                        "UPDATE bots SET token = ? WHERE bot_id = 'menu_bot' AND (token IS NULL OR token = '')",
-                        (env_menu_token,),
-                    )
+                    if tok:
+                        db.execute(
+                            "UPDATE bots SET token = ? WHERE bot_id = ? AND (token IS NULL OR token = '')",
+                            (tok, bid),
+                        )
 
             # Migrate existing legacy `recipients` seamlessly into `users` and `brief_bot` subscriptions
             legacy_rows = db.execute("SELECT * FROM recipients").fetchall()
