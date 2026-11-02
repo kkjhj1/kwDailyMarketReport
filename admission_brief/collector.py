@@ -74,6 +74,9 @@ class AdmissionCollector:
                 "event_type": BriefingType.POLICY_TRANSLATE,
                 "event_date": "2026-11-10 10:00",
                 "booking_url": "https://www.moe.go.kr/boardCnts/view.do",
+                "source_name": "교육부 / 한국대학교육협의회",
+                "source_url": "https://www.moe.go.kr",
+                "urgency": "BREAKING",
                 "content": (
                     "교육부 2028학년도 대입개편 확정 고시. 수능 선택과목 전면 통합, "
                     "내신 9등급제에서 5등급제 상대평가 전환. 학생부 교과 세특 정성평가 비중 확대."
@@ -88,6 +91,9 @@ class AdmissionCollector:
                 "event_type": BriefingType.BRIEFING_RECAP,
                 "event_date": "2026-11-18 19:00",
                 "booking_url": "https://sen.go.kr/admission/seminar",
+                "source_name": "서울시교육청 교육연구정보원",
+                "source_url": "https://sen.go.kr",
+                "urgency": "NORMAL",
                 "content": (
                     "서울시 관내 중3 학부모 대상 일반고 및 자사고·외고 진학 로드맵 안내. "
                     "유튜브 서울시교육청 채널 생중계 동시 송출 및 설명회 자료집 무료 배포."
@@ -117,6 +123,9 @@ class AdmissionCollector:
                 "booking_opens_at": datetime.now() + timedelta(minutes=5),
                 "is_first_come": True,
                 "booking_url": "https://sdij.com/admission/winter_open",
+                "source_name": "시대인재 대치 본원",
+                "source_url": "https://sdij.com",
+                "urgency": "HIGH",
                 "content": (
                     "시대인재 대치 본원 예비고1 윈터스쿨 설명회. 통합과학/통합사회 1등급 대비법 및 "
                     "수학 심화(상/하) 완성 전략. 오늘 14:00 정각 선착순 마감."
@@ -133,6 +142,9 @@ class AdmissionCollector:
                 "booking_opens_at": datetime.now() + timedelta(minutes=10),
                 "is_first_come": False,
                 "booking_url": "https://megastudy.net/live/admission",
+                "source_name": "메가스터디 입시전략연구소",
+                "source_url": "https://megastudy.net",
+                "urgency": "HIGH",
                 "content": (
                     "수능 직후 메가스터디 입시전략연구소 온라인 라이브 생중계. "
                     "실시간 가채점 등급컷 분석 및 2027 정시 대학별 환산점수 유불리 배치표 공개."
@@ -223,6 +235,9 @@ class AdmissionCollector:
             so_what=so_what,
             action_todos=todos,
             credibility_score=score,
+            source_name=post.get("source_name", organizer),
+            source_url=post.get("source_url", post.get("booking_url")),
+            urgency=post.get("urgency", "NORMAL"),
         )
         return event
 

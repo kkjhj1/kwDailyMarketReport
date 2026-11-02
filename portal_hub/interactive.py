@@ -6,6 +6,7 @@ Equipped with:
 4. Immediate Callback Acknowledgement to eliminate button spinner lag.
 """
 from __future__ import annotations
+from datetime import datetime
 import html
 import logging
 import os
@@ -51,6 +52,20 @@ def build_slot_gauge(active_count: int, tier: UserTier) -> str:
     gauge_str = " ".join([filled_char] * filled_len + [empty_char] * empty_len)
     status_suffix = " (FULL)" if filled_len >= max_slots else ""
     return f"[ {gauge_str} ] {filled_len}/{max_slots}개 사용 중{status_suffix}"
+
+
+def _safe_edit_or_send(
+    client: TelegramPortalClient,
+    chat_id: int | str,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[dict[str, Any]] = None,
+) -> None:
+    """Edits message in-place; if Telegram edit fails (e.g. outdated message), sends fresh message as fallback."""
+    ok = client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+    if not ok:
+        logger.info("edit_message_text fallback to send_message for chat %s", chat_id)
+        client.send_message(chat_id, text, reply_markup=reply_markup)
 
 
 # ============================================================
@@ -317,6 +332,9 @@ def render_search_results_view(
     return "\n".join(lines), {"inline_keyboard": keyboard}
 
 
+USER_STATES: dict[int, str] = {}
+
+
 def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     """Renders tier level comparison table and upgrade guidance."""
     text = (
@@ -336,18 +354,91 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
         f"• 구독 슬롯: <b>무제한 (All-Access)</b>\n"
         f"• 신규 베타 봇 우선 초대 & 1:1 전담 문의\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 등급 변경은 관리자에게 문의해 주세요."
+        f"💡 등급 변경 및 문의는 아래 버튼을 이용해 주세요."
     )
 
-    admin_handle = os.environ.get("ADMIN_TELEGRAM_HANDLE", "admin")
     keyboard = [
         [
-            {"text": "💬 관리자 문의하기", "url": f"https://t.me/{admin_handle}"},
+            {"text": "💬 관리자 문의 & 등급 신청", "callback_data": "support:home"},
         ],
         [
             {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
             {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
         ],
+    ]
+    return text, {"inline_keyboard": keyboard}
+
+
+def render_support_center_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
+    """Renders In-App Support & Customer Inquiry Hub."""
+    name = html.escape(user.first_name or user.username or "회원")
+    text = (
+        f"💬 <b>고객센터 & 관리자 문의 창구</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"안녕하세요, <b>{name}</b>님! 무엇을 도와드릴까요?\n\n"
+        f"• 💎 <b>등급 업그레이드 신청</b>: 원클릭으로 상향 접수\n"
+        f"• ✉️ <b>1:1 문의사항 작성</b>: 운영팀에 직접 메시지 전송\n"
+        f"• ❓ <b>자주 묻는 질문</b>: 이용 방법 및 FAQ\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"원하시는 메뉴를 선택해 주세요."
+    )
+    keyboard = [
+        [
+            {"text": "💎 등급 업그레이드 신청 (원클릭)", "callback_data": "support:upgrade_menu"},
+        ],
+        [
+            {"text": "✉️ 1:1 문의사항 작성하기", "callback_data": "support:write_inquiry"},
+        ],
+        [
+            {"text": "❓ 자주 묻는 질문(FAQ)", "callback_data": "nav:help"},
+            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+        ],
+    ]
+    return text, {"inline_keyboard": keyboard}
+
+
+def render_upgrade_request_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
+    """Renders 1-click tier upgrade request form."""
+    text = (
+        f"💎 <b>등급 업그레이드 신청</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"현재 회원님의 등급: {user.tier.badge}\n\n"
+        f"원하시는 희망 등급을 선택해 주세요.\n"
+        f"터치 즉시 운영팀에 신청서가 전송되며, 확인 후 신속히 승인해 드립니다!\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    keyboard = [
+        [
+            {"text": "🟢 그린 등급 신청 (최대 3개)", "callback_data": "support:req_tier:GREEN"},
+        ],
+        [
+            {"text": "🔴 레드 등급 신청 (최대 5개)", "callback_data": "support:req_tier:RED"},
+        ],
+        [
+            {"text": "⚫ 블랙 VIP 신청 (무제한)", "callback_data": "support:req_tier:BLACK"},
+        ],
+        [
+            {"text": "🔙 고객센터 홈", "callback_data": "support:home"},
+            {"text": "🏠 메인 홈", "callback_data": "nav:main"},
+        ],
+    ]
+    return text, {"inline_keyboard": keyboard}
+
+
+def render_inquiry_prompt_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
+    """Prompts user to type inquiry message."""
+    text = (
+        f"✉️ <b>1:1 문의사항 작성</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"운영팀에 전달하실 <b>문의 내용이나 제휴/건의사항</b>을\n"
+        f"채팅창에 메시지로 자유롭게 입력해 주세요. ✍️\n\n"
+        f"입력하신 즉시 운영팀 텔레그램으로 안전하게 전달됩니다.\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    keyboard = [
+        [
+            {"text": "🔙 작성 취소 (고객센터 홈)", "callback_data": "support:home"},
+        ]
     ]
     return text, {"inline_keyboard": keyboard}
 
@@ -418,29 +509,96 @@ def handle_callback_query(
     # 2. Main Navigation
     if data == "nav:main":
         text, markup = render_main_menu(user)
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     if data == "nav:subs":
         subs = db.get_user_subscriptions(user_id)
         text, markup = render_subscription_view(user, subs)
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     if data == "nav:tiers":
         text, markup = render_tier_benefits_view(user)
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     if data == "nav:help":
         text, markup = render_help_view()
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # Support Center & Inquiry Actions
+    if data == "support:home":
+        USER_STATES.pop(user_id, None)
+        text, markup = render_support_center_view(user)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    if data == "support:upgrade_menu":
+        USER_STATES.pop(user_id, None)
+        text, markup = render_upgrade_request_view(user)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    if data == "support:write_inquiry":
+        USER_STATES[user_id] = "AWAITING_INQUIRY"
+        text, markup = render_inquiry_prompt_view(user)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    if data.startswith("support:req_tier:"):
+        USER_STATES.pop(user_id, None)
+        req_tier = data.split(":", 2)[2].upper()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Forward notification to admin chat
+        admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        if admin_chat:
+            u_name = html.escape(user.first_name or user.username or "회원")
+            u_handle = f"@{user.username}" if user.username else "없음"
+            admin_msg = (
+                f"🔔 <b>[등급 업그레이드 신청 접수]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 신청자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
+                f"• 핸들: {u_handle}\n"
+                f"• 현재 등급: {user.tier.display_name}\n"
+                f"• 희망 등급: <b>{req_tier}</b>\n"
+                f"• 접수 시각: <code>{now_str}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👉 <b>승인 CLI</b>:\n"
+                f"<code>python portal_bot_runner.py --set-tier {user_id} {req_tier}</code>"
+            )
+            try:
+                client.send_message(admin_chat, admin_msg)
+            except Exception as e:
+                logger.warning("Failed to notify admin of tier request: %s", e)
+
+        # 2. Reply to user with success notice
+        done_text = (
+            f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 희망 등급: <b>{req_tier}</b>\n"
+            f"• 접수 일시: <code>{now_str}</code>\n\n"
+            f"운영팀으로 신청서가 안전하게 전달되었습니다. 🫡\n"
+            f"확인 후 빠르게 승인 처리해 드리겠습니다.\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        done_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+                    {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+                ]
+            ]
+        }
+        _safe_edit_or_send(client, chat_id, message_id, done_text, done_markup)
         return
 
     # 3. Category Views
     if data == "cat:home":
         text, markup = render_category_home_view()
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     if data.startswith("cat:view:"):
@@ -451,7 +609,7 @@ def handle_callback_query(
             category = BotCategory.FINANCE
         subs = db.get_user_subscriptions(user_id)
         text, markup = render_category_view(category, user, subs)
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     # 4. In-Place Accidental Click Prevention - Step 1: Expand Confirmation Buttons
@@ -476,7 +634,7 @@ def handle_callback_query(
         else:
             text, markup = render_subscription_view(user, subs, confirming_bot_id=bot_raw)
 
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     # 5. In-Place Accidental Click Prevention - Cancel Unsubscribe
@@ -498,7 +656,7 @@ def handle_callback_query(
         else:
             text, markup = render_subscription_view(user, subs)
 
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     # 6. In-Place Accidental Click Prevention - Step 2: Final Execute Unsubscribe
@@ -529,7 +687,7 @@ def handle_callback_query(
         else:
             text, markup = render_subscription_view(user, subs)
 
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
     # 7. Execute Subscribe
@@ -564,5 +722,5 @@ def handle_callback_query(
         else:
             text, markup = render_subscription_view(user, subs)
 
-        client.edit_message_text(chat_id, message_id, text, markup)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return

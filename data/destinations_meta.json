@@ -20,8 +20,15 @@
       8
     ],
     "caution_note": "7~8월 고온다습 혹서기 및 장마",
-    "flight_baseline_krw": 220000,
-    "flight_deal_threshold_krw": 160000,
+    "flight_baseline_krw": 260000,
+    "flight_deal_threshold_krw": 225000,
+    "flight_min_floor_krw": 210000,
+    "airlines": [
+      "제주항공",
+      "진에어",
+      "티웨이항공",
+      "에어서울"
+    ],
     "hotel_night_avg_krw": 85000,
     "daily_meal_transit_krw": 55000,
     "currency": "JPY",
@@ -52,8 +59,16 @@
       8
     ],
     "caution_note": "7~8월 도심 열섬 현상 및 태풍 시즌",
-    "flight_baseline_krw": 340000,
-    "flight_deal_threshold_krw": 220000,
+    "flight_baseline_krw": 380000,
+    "flight_deal_threshold_krw": 330000,
+    "flight_min_floor_krw": 300000,
+    "airlines": [
+      "진에어",
+      "제주항공",
+      "티웨이항공",
+      "에어프레미아",
+      "에어서울"
+    ],
     "hotel_night_avg_krw": 130000,
     "daily_meal_transit_krw": 65000,
     "currency": "JPY",
@@ -84,8 +99,16 @@
       8
     ],
     "caution_note": "여름철 혹서기 및 장마",
-    "flight_baseline_krw": 290000,
-    "flight_deal_threshold_krw": 190000,
+    "flight_baseline_krw": 330000,
+    "flight_deal_threshold_krw": 285000,
+    "flight_min_floor_krw": 260000,
+    "airlines": [
+      "제주항공",
+      "진에어",
+      "티웨이항공",
+      "피치항공",
+      "에어서울"
+    ],
     "hotel_night_avg_krw": 110000,
     "daily_meal_transit_krw": 60000,
     "currency": "JPY",
@@ -116,8 +139,16 @@
       11
     ],
     "caution_note": "9~11월 우기 집중 호우 및 태풍 주의",
-    "flight_baseline_krw": 320000,
-    "flight_deal_threshold_krw": 230000,
+    "flight_baseline_krw": 400000,
+    "flight_deal_threshold_krw": 350000,
+    "flight_min_floor_krw": 330000,
+    "airlines": [
+      "제주항공",
+      "진에어",
+      "티웨이항공",
+      "비엣젯항공",
+      "에어서울"
+    ],
     "hotel_night_avg_krw": 60000,
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
@@ -148,8 +179,16 @@
       11
     ],
     "caution_note": "10~11월 집중 우기",
-    "flight_baseline_krw": 330000,
-    "flight_deal_threshold_krw": 240000,
+    "flight_baseline_krw": 410000,
+    "flight_deal_threshold_krw": 360000,
+    "flight_min_floor_krw": 340000,
+    "airlines": [
+      "진에어",
+      "제주항공",
+      "티웨이항공",
+      "비엣젯항공",
+      "에어서울"
+    ],
     "hotel_night_avg_krw": 65000,
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
@@ -180,8 +219,16 @@
       9
     ],
     "caution_note": "우기 스콜성 폭우 및 무더위 시즌",
-    "flight_baseline_krw": 380000,
-    "flight_deal_threshold_krw": 270000,
+    "flight_baseline_krw": 460000,
+    "flight_deal_threshold_krw": 405000,
+    "flight_min_floor_krw": 380000,
+    "airlines": [
+      "제주항공",
+      "진에어",
+      "티웨이항공",
+      "타이에어아시아X",
+      "에어프레미아"
+    ],
     "hotel_night_avg_krw": 85000,
     "daily_meal_transit_krw": 40000,
     "currency": "THB",
@@ -212,8 +259,16 @@
       8
     ],
     "caution_note": "여름철 태풍 빈번 및 습한 더위",
-    "flight_baseline_krw": 280000,
-    "flight_deal_threshold_krw": 200000,
+    "flight_baseline_krw": 340000,
+    "flight_deal_threshold_krw": 295000,
+    "flight_min_floor_krw": 270000,
+    "airlines": [
+      "제주항공",
+      "진에어",
+      "티웨이항공",
+      "스쿠트항공",
+      "에어부산"
+    ],
     "hotel_night_avg_krw": 95000,
     "daily_meal_transit_krw": 45000,
     "currency": "TWD",
@@ -245,8 +300,14 @@
       10
     ],
     "caution_note": "우기 스콜 및 열대성 저기압 주의",
-    "flight_baseline_krw": 450000,
-    "flight_deal_threshold_krw": 330000,
+    "flight_baseline_krw": 520000,
+    "flight_deal_threshold_krw": 455000,
+    "flight_min_floor_krw": 430000,
+    "airlines": [
+      "진에어",
+      "제주항공",
+      "티웨이항공"
+    ],
     "hotel_night_avg_krw": 240000,
     "daily_meal_transit_krw": 90000,
     "currency": "USD",
@@ -277,8 +338,14 @@
       2
     ],
     "caution_note": "12~2월 몬순 우기",
-    "flight_baseline_krw": 620000,
-    "flight_deal_threshold_krw": 450000,
+    "flight_baseline_krw": 720000,
+    "flight_deal_threshold_krw": 635000,
+    "flight_min_floor_krw": 600000,
+    "airlines": [
+      "제주항공",
+      "가루다인도네시아",
+      "대한항공"
+    ],
     "hotel_night_avg_krw": 120000,
     "daily_meal_transit_krw": 45000,
     "currency": "IDR",
@@ -309,8 +376,15 @@
       12
     ],
     "caution_note": "연말 몬순 우기 스콜",
-    "flight_baseline_krw": 480000,
-    "flight_deal_threshold_krw": 350000,
+    "flight_baseline_krw": 550000,
+    "flight_deal_threshold_krw": 485000,
+    "flight_min_floor_krw": 460000,
+    "airlines": [
+      "티웨이항공",
+      "스쿠트항공",
+      "대한항공",
+      "아시아나항공"
+    ],
     "hotel_night_avg_krw": 210000,
     "daily_meal_transit_krw": 70000,
     "currency": "SGD",

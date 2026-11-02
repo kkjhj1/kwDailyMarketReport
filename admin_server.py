@@ -95,6 +95,7 @@ class TravelDispatchRequest(BaseModel):
     dest_code: str | None = None
     max_budget: int | None = None
     recipients: list[str] | None = None
+    live_naver: bool = False
 
 
 class AdmissionEventCreateRequest(BaseModel):
@@ -647,7 +648,7 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail=f"[{bot.name}]을 현재 구독 중인 활성 유저가 없습니다.")
 
         transport = TelegramBotTransport(bot.token)
-        limiter = TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=0.5)
+        limiter = TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=1.0)
         sent = 0
         failed = 0
         errors = []
@@ -1097,7 +1098,7 @@ def create_admin_app(
         renderer.render(briefing, quotes, news, output_path=report_path)
 
         tg = TelegramChannel(token, include_inline_button=True, use_html=True)
-        dispatcher = SafeTelegramDispatcher(rate_limiter=TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=0.5))
+        dispatcher = SafeTelegramDispatcher(rate_limiter=TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=1.0))
 
         success_count = 0
         fail_count = 0
@@ -1202,8 +1203,13 @@ def create_admin_app(
             ]
 
         @app.get("/api/travel/preview")
-        def preview_travel_briefing(dest_code: str | None = None, max_budget: int | None = None):
-            f_engine = FlightEngine()
+        def preview_travel_briefing(
+            dest_code: str | None = None,
+            max_budget: int | None = None,
+            live_naver: bool = False,
+        ):
+            eff_live = bool(live_naver or (not env_path and os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1"))
+            f_engine = FlightEngine(live_naver=eff_live)
             all_deals = f_engine.search_deals(dest_code=dest_code, months_ahead=6)
             recommendations = BudgetCalculator.rank_recommendations(
                 destinations=f_engine.destinations,
@@ -1212,7 +1218,7 @@ def create_admin_app(
                 top_n=5,
             )
             report_url = f"{get_report_base_url()}/reports/travel_latest.html"
-            text = format_telegram_briefing(recommendations, web_report_url=report_url)
+            text = format_telegram_briefing(recommendations, web_report_url=report_url, engine=f_engine)
             return {
                 "recommendations_count": len(recommendations),
                 "top_recommendations": [
@@ -1239,6 +1245,7 @@ def create_admin_app(
                 recipients_override=recipients_override,
                 web_report_url=f"{get_report_base_url()}/reports/travel_latest.html",
                 db_path=db_path,
+                live_naver=req.live_naver,
             )
             return {"success": res, "dry_run": req.dry_run}
 

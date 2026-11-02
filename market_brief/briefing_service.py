@@ -203,12 +203,15 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
     elif bot_id == "travel_bot":
         travel_report_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
         try:
+            import html as _html
+            from travel_brief.models import round_man
             from travel_brief.flight_engine import FlightEngine
             from travel_brief.budget_calculator import BudgetCalculator
             from travel_brief.ai_prompts import AIPromptGenerator
             from travel_bot_runner import format_telegram_briefing, resolve_travel_report_url
 
-            engine = FlightEngine()
+            live_flag = os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1"
+            engine = FlightEngine(live_naver=live_flag)
             all_deals = engine.search_deals(months_ahead=6)
             recommendations = BudgetCalculator.rank_recommendations(
                 destinations=engine.destinations,
@@ -216,6 +219,10 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                 top_n=3,
             )
             travel_report_url = resolve_travel_report_url()
+            if live_flag and recommendations:
+                engine.ensure_deals_sse_verified([r.best_deal for r in recommendations])
+                all_deals = engine.search_deals(months_ahead=6)
+                recommendations = BudgetCalculator.rank_recommendations(destinations=engine.destinations, deals=all_deals, top_n=3)
 
             if preset_id == "ai_recommendation" and recommendations:
                 top_rec = recommendations[0]
@@ -232,17 +239,18 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                 hotel_name_str = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else f"{dest.name} 추천 호텔"
 
                 title = f"🌴 [AI 시즌 추천 여행지] {dest.name} ({dest.code})"
+                _air_raw = deal.airline if "직항" in deal.airline else f"{deal.airline} 직항"
                 content_html = (
                     f"🌴 <b>[AI 여행 큐레이션] 이번 달 가성비 1등 추천 여행지</b>\n"
                     f"📅 <i>{now_str} KST 실시간 분석</i>\n\n"
-                    f"<b>추천지: {dest.name} ({dest.code})</b> {season_label}\n"
+                    f"<b>추천지: {_html.escape(dest.name, quote=False)} ({_html.escape(dest.code, quote=False)})</b> {season_label}\n"
                     f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)\n"
-                    f"  • 시간대: <b>{deal.departure_time_slot}</b>\n"
-                    f"  • 예상 항공: <b>{deal.price_krw:,}원</b> ({deal.airline} 직항)\n"
-                    f"  • 추천 숙소: <b>{hotel_name_str}</b> (3박 약 {budget.hotel_total_krw // 10000}만 원)\n"
-                    f"  • 1인 총예산: <b>약 {budget.total_per_person_krw // 10000}만 원</b> (항공 + 숙박 + 식비·교통)\n"
-                    f"  • 2인 총예산: 약 {budget.estimated_for_two_krw // 10000}만 원 (1실 쉐어)\n"
-                    f"  • 비자/팁: {dest.visa_info} ({dest.tips})\n\n"
+                    f"  • 시간대: <b>{_html.escape(deal.departure_time_slot, quote=False)}</b>\n"
+                    f"  • {'실시간 직항 최저가' if deal.is_live else '예상 항공'}: <b>{_html.escape(deal.exact_price_str if deal.is_live else deal.price_band_str, quote=False)}</b> ({_html.escape(_air_raw, quote=False)} · 유류세 포함)\n"
+                    f"  • 추천 숙소: <b>{_html.escape(hotel_name_str, quote=False)}</b> (3박 약 {round_man(budget.hotel_total_krw)}만 원)\n"
+                    f"  • 1인 총예산: <b>약 {round_man(budget.total_per_person_krw)}만 원</b> (항공 + 숙박 + 식비·교통)\n"
+                    f"  • 2인 총예산: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1실 쉐어 · 1인당 약 {round_man(budget.estimated_for_two_krw / 2)}만)\n"
+                    f"  • 비자/팁: {_html.escape(dest.visa_info, quote=False)} ({_html.escape(dest.tips, quote=False)})\n\n"
                     f"💡 <i>ChatGPT 맞춤 코스 생성을 통해 최적 3박 4일 동선을 3초 만에 확인하세요.</i>"
                 )
                 inline_keyboard = [
@@ -252,7 +260,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                 ]
             else:
                 title = f"✈️ [주말 해외여행 6개월 특가 TOP 3] {now_str}"
-                content_html = format_telegram_briefing(recommendations, web_report_url=travel_report_url)
+                content_html = format_telegram_briefing(recommendations, web_report_url=travel_report_url, engine=engine)
                 inline_keyboard = [
                     [{"text": "📊 6개월 최저가 히트맵 전체보기", "url": travel_report_url}]
                 ]
@@ -366,20 +374,16 @@ def send_bot_test_message(
         }
 
     try:
-        from market_brief.channels.telegram import TelegramChannel
-        tg = TelegramChannel(bot_token=token, use_html=True)
-        # Send raw HTML with optional inline keyboard
-        payload: Dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": content_html,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-        }
-        if inline_keyboard and len(inline_keyboard) > 0:
-            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-
-        res = tg._api_call("sendMessage", payload)
-        msg_id = res.get("result", {}).get("message_id")
+        from travel_brief.channels.telegram import TelegramChannel
+        from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
+        tg = TelegramChannel(bot_token=token)
+        dispatcher = SafeTelegramDispatcher()
+        rm = {"inline_keyboard": inline_keyboard} if (inline_keyboard and len(inline_keyboard) > 0) else None
+        status, msg_id, err = dispatcher.send_text_to_recipient(
+            tg=tg, chat_id=chat_id, text=content_html, parse_mode="HTML", reply_markup=rm
+        )
+        if status != "SENT":
+            raise RuntimeError(err or f"Dispatch status: {status}")
         return {
             "success": True,
             "bot_id": bot_id,
@@ -426,8 +430,10 @@ def send_bot_broadcast_message(
         }
 
     try:
-        from market_brief.channels.telegram_limiter import SafeTelegramDispatcher
-        dispatcher = SafeTelegramDispatcher(bot_token=token)
+        from travel_brief.channels.telegram import TelegramChannel
+        from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
+        tg = TelegramChannel(bot_token=token)
+        dispatcher = SafeTelegramDispatcher()
         sent = 0
         failed = 0
 
@@ -442,12 +448,8 @@ def send_bot_broadcast_message(
                 payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
 
             try:
-                ok = dispatcher.send_message(
-                    chat_id=chat_id,
-                    text=content_html,
-                    use_html=True,
-                    reply_markup={"inline_keyboard": inline_keyboard} if inline_keyboard else None,
-                )
+                status, _, _ = dispatcher.send_text_to_recipient(tg=tg, chat_id=chat_id, text=content_html, parse_mode="HTML", reply_markup={"inline_keyboard": inline_keyboard} if inline_keyboard else None)
+                ok = (status == "SENT")
                 if ok:
                     sent += 1
                 else:

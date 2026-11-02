@@ -39,6 +39,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     * { box-sizing: border-box; }
+    html, body {
+      overflow-x: hidden;
+      max-width: 100vw;
+      width: 100%;
+    }
     body {
       margin: 0;
       font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
@@ -46,6 +51,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       color: var(--text);
       line-height: 1.5;
     }
+    .desktop-only { display: inline; }
+    .mobile-only { display: none; }
 
     /* Clean Minimal Header */
     .header {
@@ -568,46 +575,83 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* Mobile Responsive Overrides */
     @media (max-width: 768px) {
+      .desktop-only { display: none !important; }
+      .mobile-only { display: inline !important; }
+
+      html, body {
+        overflow-x: hidden !important;
+        max-width: 100vw !important;
+        width: 100% !important;
+      }
+
       .header {
         padding: 8px 12px;
         flex-wrap: nowrap;
         gap: 8px;
+        max-width: 100vw;
+        box-sizing: border-box;
+      }
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
       }
       .header-logo {
         width: 32px;
         height: 32px;
         font-size: 18px;
         border-radius: 8px;
+        flex-shrink: 0;
       }
       .header-title {
         font-size: 14px;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
       }
       .header-sub {
         display: none;
       }
       .header-actions {
-        gap: 5px;
+        gap: 6px;
         margin-left: auto;
         flex-shrink: 0;
         flex-wrap: nowrap;
+        display: flex;
+        align-items: center;
       }
       .pill {
-        padding: 3px 6px;
+        padding: 4px 6px;
         font-size: 11px;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .pill #topStatusText {
+        display: none;
       }
       .header-actions .btn {
-        padding: 6px 9px;
-        min-height: 32px;
-        font-size: 12px;
+        width: 34px;
+        height: 34px;
+        min-height: 34px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        border-radius: 8px;
+        flex-shrink: 0;
       }
       .header-actions .btn .btn-text {
-        display: none;
+        display: none !important;
       }
 
       /* Hide Desktop Top Tab Bar on Mobile */
       .tab-bar {
-        display: none;
+        display: none !important;
       }
 
       /* Show Mobile App Bottom Navigation Bar */
@@ -619,6 +663,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       .container {
         margin: 10px auto;
         padding: 0 10px calc(80px + env(safe-area-inset-bottom, 0px));
+        max-width: 100vw;
+        box-sizing: border-box;
       }
 
       /* Floating sim button hidden (integrated in bottom nav) */
@@ -631,9 +677,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         padding: 14px;
         border-radius: 12px;
         margin-bottom: 12px;
+        max-width: 100%;
+        box-sizing: border-box;
       }
       .card-header {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
         margin-bottom: 12px;
+      }
+      .card-header > .btn {
+        width: 100%;
+        min-height: 38px;
+        font-size: 13px;
+        justify-content: center;
       }
       .card-title {
         font-size: 15px;
@@ -642,32 +700,44 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         font-size: 12px;
       }
 
-      /* User Filter Bar on Mobile */
+      /* User Filter Bar on Mobile - Segmented Grid (Zero Horizontal Slide) */
       .user-filter-bar {
         flex-direction: column-reverse;
         align-items: stretch;
-        gap: 10px;
+        gap: 8px;
         margin-bottom: 14px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .user-search-wrap {
         width: 100%;
       }
       .filter-chips {
-        overflow-x: auto;
-        flex-wrap: nowrap;
-        padding-bottom: 4px;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        gap: 6px;
-      }
-      .filter-chips::-webkit-scrollbar {
-        display: none;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 4px;
+        width: 100%;
+        overflow-x: visible;
+        padding-bottom: 0;
+        box-sizing: border-box;
       }
       .filter-btn {
         white-space: nowrap;
-        flex-shrink: 0;
-        padding: 7px 12px;
-        font-size: 12.5px;
+        padding: 7px 2px;
+        font-size: 11px;
+        text-align: center;
+        justify-content: center;
+        border-radius: 8px;
+        min-width: 0;
+        width: 100%;
+        box-sizing: border-box;
+        font-weight: 700;
+      }
+      @media (max-width: 350px) {
+        .filter-btn {
+          font-size: 10px;
+          padding: 6px 1px;
+        }
       }
 
       /* User Table -> Mobile Card View Transformation */
@@ -803,6 +873,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         font-size: 13px;
       }
 
+      /* Bot Grid Mobile */
+      .bot-grid {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+      }
+
       /* Menu Bot Mobile */
       .menu-bot-box {
         flex-direction: column;
@@ -909,13 +985,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   <header class="header">
     <div class="header-brand">
       <div class="header-logo">🤖</div>
-      <div>
-        <div class="header-title">텔레그램 봇 구독 서비스 통합 관리자</div>
+      <div style="min-width:0; overflow:hidden;">
+        <div class="header-title">
+          <span class="desktop-only">텔레그램 봇 구독 서비스 통합 관리자</span>
+          <span class="mobile-only">봇 구독 관리자</span>
+        </div>
         <div class="header-sub">Daily Market Brief &amp; Multi-Bot Tier Platform v2.0</div>
       </div>
     </div>
     <div class="header-actions">
-      <span class="pill"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
+      <span class="pill" title="실시간 정상 작동"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
       <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="전체 봇 대화 즉시 수신">
         <span>🔄</span> <span class="btn-text">대화 즉시 수신</span>
       </button>
@@ -976,11 +1055,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <!-- Search & Filter Bar -->
         <div class="user-filter-bar">
           <div class="filter-chips">
-            <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체 보기</button>
-            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트 (1)</button>
-            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린 (3)</button>
-            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드 (5)</button>
-            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙 (∞)</button>
+            <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체<span class="desktop-only"> 보기</span></button>
+            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트<span class="desktop-only"> (1)</span></button>
+            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린<span class="desktop-only"> (3)</span></button>
+            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드<span class="desktop-only"> (5)</span></button>
+            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙<span class="desktop-only"> (∞)</span></button>
           </div>
           <div class="user-search-wrap">
             <input type="text" id="userSearch" class="form-input" placeholder="🔍 이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />

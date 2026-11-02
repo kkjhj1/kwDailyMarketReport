@@ -11,7 +11,13 @@ class BudgetCalculator:
 
     @staticmethod
     def calculate_breakdown(dest: DestinationMeta, flight: FlightDeal, nights: int = 3) -> BudgetBreakdown:
-        return BudgetBreakdown.calculate(dest=dest, flight_price=flight.price_krw, nights=nights)
+        hotel_mult = 1.30 if getattr(flight, "is_peak_holiday", False) else 1.0
+        return BudgetBreakdown.calculate(
+            dest=dest,
+            flight_price=flight.price_krw,
+            nights=nights,
+            hotel_multiplier=hotel_mult,
+        )
 
     @classmethod
     def evaluate_deal(cls, dest: DestinationMeta, flight: FlightDeal) -> TravelRecommendation:
@@ -32,47 +38,54 @@ class BudgetCalculator:
             season_score = 25
             season_text = "🌤️ 무난한 여행 시즌"
 
-        # 2. Discount / Deal score (up to 40 pts)
+        # 2. Discount / Deal score (up to 40 pts; peak holiday dates receive 0 deal bonus)
         discount = flight.discount_pct
-        if discount >= 25:
+        if flight.is_peak_holiday:
+            deal_score = 0
+        elif discount >= 18:
             deal_score = 40
-        elif discount >= 15:
-            deal_score = 30
+        elif discount >= 12:
+            deal_score = 32
         elif discount >= 5:
-            deal_score = 20
+            deal_score = 22
         else:
             deal_score = 10
 
         # 3. Budget friendliness score (up to 25 pts)
-        # 1-person budget <= 500k: 25pts, <= 700k: 20pts, <= 1M: 15pts, > 1M: 10pts
-        if budget.total_per_person_krw <= 500000:
+        if budget.total_per_person_krw <= 650000:
             budget_score = 25
-        elif budget.total_per_person_krw <= 750000:
+        elif budget.total_per_person_krw <= 800000:
             budget_score = 20
-        elif budget.total_per_person_krw <= 1000000:
+        elif budget.total_per_person_krw <= 1050000:
             budget_score = 15
         else:
             budget_score = 10
 
-        total_score = season_score + deal_score + budget_score
+        total_score = max(5, season_score + deal_score + budget_score - (20 if flight.is_peak_holiday else 0))
 
-        # Summary reason
+        # Summary reason (consistent negative sign for discounts, positive for peak surge)
         reasons = []
-        if flight.is_super_deal:
-            reasons.append(f"항공 {discount:+.0f}% 초특가")
+        if flight.is_peak_holiday:
+            reasons.append(f"🚨 {flight.holiday_name or '연휴 성수기'} ({flight.price_diff_pct:+.0f}%)")
+        elif flight.is_super_deal:
+            reasons.append(f"항공 {flight.price_diff_pct:+.0f}% 실속특가")
         if season_status == "BEST_SEASON":
             reasons.append("여행 최적기")
         reasons.append(f"1인 총 {budget.total_per_person_krw // 10000:,}만원대")
 
         summary_reason = " · ".join(reasons)
 
-        dep_c = flight.departure_date.replace("-", "")
-        ret_c = flight.return_date.replace("-", "")
-        naver_flight_url = f"https://m-flight.naver.com/flights/international/{flight.origin_code}-{flight.destination_code}-{dep_c}/{flight.destination_code}-{flight.origin_code}-{ret_c}?fareType=Y&adult=1"
+        from travel_brief.flight_engine import FlightEngine
+        naver_flight_url = FlightEngine.build_naver_flight_url(
+            flight.origin_code,
+            flight.destination_code,
+            flight.departure_date,
+            flight.return_date,
+        )
 
         import urllib.parse
-        short_hotel = dest.recommended_hotel_name.split()[0] if dest.recommended_hotel_name else dest.name
-        hotel_query = f"{dest.name} {short_hotel}"
+        clean_hotel = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else dest.name
+        hotel_query = clean_hotel if dest.name in clean_hotel else f"{dest.name} {clean_hotel}"
         encoded_hotel = urllib.parse.quote(hotel_query)
         hotel_search_url = f"https://m-hotel.naver.com/hotels/search?destination={encoded_hotel}&checkIn={flight.departure_date}&checkOut={flight.return_date}&rooms=1&adults=2"
 
@@ -106,8 +119,14 @@ class BudgetCalculator:
                 continue
             recs.append(rec)
 
-        # Sort by recommendation score descending, then by total price ascending
-        recs.sort(key=lambda r: (-r.recommendation_score, r.budget.total_per_person_krw))
+        # Sort by recommendation score descending, total price ascending, then discount pct descending
+        recs.sort(
+            key=lambda r: (
+                -r.recommendation_score,
+                r.budget.total_per_person_krw,
+                -r.best_deal.discount_pct,
+            )
+        )
         # Deduplicate by destination: keep single best recommendation per destination
         deduped: list[TravelRecommendation] = []
         seen_dest_codes: set[str] = set()

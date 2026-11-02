@@ -168,9 +168,10 @@ def test_build_persistent_reply_keyboard():
     assert kb["is_persistent"] is True
     all_btn_texts = [btn["text"] for row in kb["keyboard"] for btn in row]
     assert "📋 이번 주 필수 To-Do" in all_btn_texts
-    assert "📢 설명회 3줄 요약" in all_btn_texts
-    assert "🎓 학년 변경" in all_btn_texts
-    assert "📍 지역/온라인 설정" in all_btn_texts
+    assert "⚡ 긴급 속보 & 핫 행사 TOP 3" in all_btn_texts
+    assert "💡 1분 입시 팩트체크 (So-What)" in all_btn_texts
+    assert "🎓 학년/지역 설정" in all_btn_texts
+    assert "❓ 이용 도움말" in all_btn_texts
 
 
 def test_interactive_bot_korean_text_touch_buttons():
@@ -190,9 +191,20 @@ def test_interactive_bot_korean_text_touch_buttons():
     assert chat_id == "777"
     assert briefing.target_grade == TargetGrade.HIGH_1_2
 
-    # 2. Tap "📢 설명회 3줄 요약"
+    # 2. Tap "⚡ 긴급 속보 & 핫 행사 TOP 3" (fetches top 3 events)
     bot.handle_update({
         "update_id": 202,
-        "message": {"message_id": 11, "chat": {"id": 777}, "text": "📢 설명회 3줄 요약"},
+        "message": {"message_id": 11, "chat": {"id": 777}, "text": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
     })
-    assert mock_channel.send.call_count == 2
+    # 1 (todo) + 3 (top3 events) = 4 sends
+    assert mock_channel.send.call_count == 4
+
+    # 3. Tap "💡 1분 입시 팩트체크 (So-What)"
+    bot.handle_update({
+        "update_id": 203,
+        "message": {"message_id": 12, "chat": {"id": 777}, "text": "💡 1분 입시 팩트체크 (So-What)"},
+    })
+    assert mock_channel.send.call_count == 5
+    last_chat_id, last_briefing = mock_channel.send.call_args[0]
+    assert last_chat_id == "777"
+    assert last_briefing.briefing_type == BriefingType.POLICY_TRANSLATE

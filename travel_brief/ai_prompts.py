@@ -5,7 +5,7 @@ from __future__ import annotations
 import urllib.parse
 from typing import Optional
 
-from travel_brief.models import DestinationMeta, FlightDeal, BudgetBreakdown
+from travel_brief.models import DestinationMeta, FlightDeal, BudgetBreakdown, round_man
 
 
 class AIPromptGenerator:
@@ -24,7 +24,7 @@ class AIPromptGenerator:
 - 목적지: {dest.country} {dest.name} ({dest.code})
 - 비행 시간: 약 {dest.flight_time_hours}시간
 - 여행 일정: {deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week}) (3박 4일 주말 일정)
-- 항공 정보: {deal.origin_code} ↔ {deal.destination_code} ({deal.airline}, 왕복 약 {deal.price_krw:,}원)
+- 항공 정보: {deal.origin_code} ↔ {deal.destination_code} ({deal.airline if "직항" in deal.airline else f"{deal.airline} 직항"}, 항공운임 {deal.exact_price_str if deal.is_live else deal.price_band_str})
 - 예상 예산: 1인 총 {budget.total_per_person_krw:,}원 (항공 {budget.flight_krw:,}원 / 숙소 {budget.hotel_total_krw:,}원 / 식비·교통 {budget.meal_transit_total_krw:,}원)
 - 2인 기준 예상: 약 {budget.estimated_for_two_krw:,}원 (숙소 1실 쉐어)
 - 비자/입국 정보: {dest.visa_info}
@@ -34,7 +34,7 @@ class AIPromptGenerator:
 2. 요청 사항:
 ① 위 3박 4일 일정에 맞춘 '무리 없는 시간대별 동선(오전/오후/저녁)'을 상세히 짜줘.
 ② 현지인 추천 가성비 로컬 맛집과 카페를 각 일자별로 2곳씩 추천해줘.
-③ 예상 예산({budget.total_per_person_krw // 10000}만 원대) 안에서 알뜰하게 즐길 수 있는 패스권(교통권)이나 결제 꿀팁을 알려줘.
+③ 예상 예산({round_man(budget.total_per_person_krw)}만 원대) 안에서 알뜰하게 즐길 수 있는 패스권(교통권)이나 결제 꿀팁을 알려줘.
 ④ {deal.departure_date[:7]}월 현지 날씨에 맞는 옷차림과 꼭 챙겨야 할 준비물 목록을 정리해줘."""
         return prompt
 
@@ -45,7 +45,7 @@ class AIPromptGenerator:
         budget: BudgetBreakdown,
     ) -> str:
         """Generates an ultra-compact single-line prompt to stay strictly within Telegram URL length limits."""
-        return f"{dest.name} 3박4일 주말 여행 일정과 로컬 맛집 추천해줘"
+        return f"{dest.name} 3박4일 일정·맛집 추천"
 
     @classmethod
     def get_chatgpt_deep_link(cls, prompt: str) -> str:

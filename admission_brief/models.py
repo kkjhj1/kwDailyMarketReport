@@ -72,7 +72,8 @@ class BriefingType(str, Enum):
     WEEKLY_TODO = "WEEKLY_TODO"           # 위클리 액션플랜 & 캘린더
     BRIEFING_RECAP = "BRIEFING_RECAP"     # 설명회 대리참석 3줄 요약
     TICKETING_ALERT = "TICKETING_ALERT"   # 선착순 예약 마감 5분 전 긴급 직링크
-    POLICY_TRANSLATE = "POLICY_TRANSLATE" # 교육부 정책 팩트 번역 (득실 분석)
+    POLICY_TRANSLATE = "POLICY_TRANSLATE" # 교육 정책 팩트 번역 (득실 분석)
+    BREAKING_NEWS = "BREAKING_NEWS"       # 실시간 대입 정책/등급컷 긴급 속보
 
     @property
     def icon(self) -> str:
@@ -81,6 +82,7 @@ class BriefingType(str, Enum):
             "BRIEFING_RECAP": "📢",
             "TICKETING_ALERT": "⚡",
             "POLICY_TRANSLATE": "💡",
+            "BREAKING_NEWS": "🚨",
         }
         return icons.get(self.value, "📌")
 
@@ -90,7 +92,8 @@ class BriefingType(str, Enum):
             "WEEKLY_TODO": "위클리 입시 To-Do 체크리스트",
             "BRIEFING_RECAP": "설명회 대리참석 3줄 요약",
             "TICKETING_ALERT": "선착순 예약 마감 임박 알람",
-            "POLICY_TRANSLATE": "교육 정책 팩트 번역기",
+            "POLICY_TRANSLATE": "입시 팩트체크 (So-What)",
+            "BREAKING_NEWS": "실시간 대입 긴급 속보",
         }
         return titles.get(self.value, self.value)
 
@@ -114,6 +117,9 @@ class AdmissionEvent:
     action_todos: list[str] = field(default_factory=list)   # 이번 주 할 일
     pdf_attachment_path: Optional[str] = None # 첨부 자료집 PDF 파일 경로
     credibility_score: int = 80             # 신뢰도 점수 (0~100)
+    source_name: str = "공식 오피셜"         # 정보 출처 (예: 교육부, 서울시교육청, EBSi, 대교협)
+    source_url: Optional[str] = None        # 원문 공문/기사/모집요강 URL
+    urgency: str = "NORMAL"                 # 긴급도 ("NORMAL", "BREAKING", "HIGH")
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -134,6 +140,9 @@ class AdmissionEvent:
             "action_todos": self.action_todos,
             "pdf_attachment_path": self.pdf_attachment_path,
             "credibility_score": self.credibility_score,
+            "source_name": self.source_name,
+            "source_url": self.source_url,
+            "urgency": self.urgency,
             "created_at": self.created_at.isoformat(),
         }
 
@@ -154,6 +163,9 @@ class AdmissionBriefing:
     booking_url: Optional[str] = None
     booking_button_text: str = "⚡ 선착순 예약창 바로가기"
     pdf_path: Optional[str] = None
+    source_name: str = "공식 오피셜"
+    source_url: Optional[str] = None
+    urgency: str = "NORMAL"                 # "NORMAL", "BREAKING", "HIGH"
     as_of: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
     def is_match_user(

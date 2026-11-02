@@ -74,3 +74,42 @@ def test_departure_time_slot_realism():
 
     # Across 6 months of destinations, all 3 Friday slot types must be generated
     assert len(fri_slots_found) == 3, f"Expected all 3 Friday slots, got {fri_slots_found}"
+
+
+def test_peak_holidays_never_super_deal_and_surge_applied():
+    engine = FlightEngine()
+    ref = date(2026, 11, 2)
+    deals = engine.search_deals(months_ahead=6, ref_date=ref)
+    by_key = {(d.destination_code, d.departure_date): d for d in deals}
+
+    # 1. Christmas Eve (2026-12-24 ~ 12-27) must surge & NEVER be super deal
+    cxr_xmas = by_key[("CXR", "2026-12-24")]
+    fuk_xmas = by_key[("FUK", "2026-12-24")]
+    assert cxr_xmas.is_peak_holiday is True
+    assert cxr_xmas.is_super_deal is False
+    assert cxr_xmas.price_krw >= 600000
+    assert cxr_xmas.price_diff_pct > 40.0
+
+    assert fuk_xmas.is_peak_holiday is True
+    assert fuk_xmas.is_super_deal is False
+    assert fuk_xmas.price_krw >= 390000
+
+    # 2. Return-date overlap with 2027 Seollal (2027-02-04 Thu ~ 02-07 Sun)
+    dad_seollal = by_key[("DAD", "2027-02-04")]
+    assert dad_seollal.is_peak_holiday is True
+    assert dad_seollal.is_super_deal is False
+    assert "설날" in dad_seollal.holiday_name
+
+
+def test_statutory_tax_fuel_floor_and_carrier_mapping():
+    engine = FlightEngine()
+    deals = engine.search_deals(months_ahead=6, ref_date=date(2026, 11, 2))
+    assert len(deals) > 0
+    for d in deals:
+        dest = engine.destinations[d.destination_code]
+        assert d.price_krw >= dest.flight_min_floor_krw
+        assert d.price_krw >= 210000
+        assert d.price_max_krw >= d.price_min_krw + 30000
+        assert "만원대" in d.price_band_str
+        # Carrier mapping must never fall back to broken generic placeholders
+        assert d.airline not in ("국적항공사", "LCC특가")

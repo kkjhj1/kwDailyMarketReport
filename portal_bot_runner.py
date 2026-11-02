@@ -7,6 +7,8 @@ Equipped with:
 """
 from __future__ import annotations
 import argparse
+from datetime import datetime
+import html
 import logging
 import os
 import sys
@@ -50,7 +52,7 @@ from portal_hub import (
     render_subscription_view,
     render_tier_benefits_view,
 )
-from portal_hub.interactive import build_persistent_reply_keyboard, build_slot_gauge
+from portal_hub.interactive import USER_STATES, build_persistent_reply_keyboard, build_slot_gauge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,7 +100,10 @@ def run_polling(token: str) -> None:
                 if "callback_query" in update:
                     cq = update["callback_query"]
                     logger.info("🔘 [버튼 터치] %s (유저: %s)", cq.get("data"), cq.get("from", {}).get("first_name"))
-                    handle_callback_query(cq, db, client)
+                    try:
+                        handle_callback_query(cq, db, client)
+                    except Exception as err:
+                        logger.exception("Callback error on %s: %s", cq.get("data"), err)
                     continue
 
                 # 2. Text Messages & Persistent Bottom Keyboard Touch & Natural Language Keyword Search
@@ -118,6 +123,51 @@ def run_polling(token: str) -> None:
                     )
 
                     clean_text = text.lower()
+
+                    # Handle Awaiting Inquiry State
+                    if USER_STATES.get(user_id) == "AWAITING_INQUIRY" and not clean_text.startswith("/"):
+                        USER_STATES.pop(user_id, None)
+                        admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        u_name = html.escape(user.first_name or user.username or "회원")
+                        u_handle = f"@{user.username}" if user.username else "없음"
+
+                        if admin_chat:
+                            admin_forward = (
+                                f"📩 <b>[1:1 고객 문의 접수]</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
+                                f"• 핸들: {u_handle}\n"
+                                f"• 회원 등급: {user.tier.display_name}\n"
+                                f"• 접수 시각: <code>{now_str}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"<b>【문의 내용】</b>\n"
+                                f"<i>{html.escape(text)}</i>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            try:
+                                client.send_message(admin_chat, admin_forward)
+                            except Exception as e:
+                                logger.warning("Failed forwarding inquiry to admin: %s", e)
+
+                        ack_text = (
+                            f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"작성하신 내용:\n"
+                            f"<i>\"{html.escape(text)}\"</i>\n\n"
+                            f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏\n"
+                            f"━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        ack_markup = {
+                            "inline_keyboard": [
+                                [{"text": "🏠 메인 홈으로", "callback_data": "nav:main"}]
+                            ]
+                        }
+                        client.send_message(chat_id, ack_text, reply_markup=ack_markup)
+                        continue
+
+                    # Clear awaiting state if user clicked command or persistent menu
+                    USER_STATES.pop(user_id, None)
 
                     # Handle Fixed Commands & Persistent Keyboard Texts
                     if clean_text in ("/start", "/menu", "홈", "메인"):

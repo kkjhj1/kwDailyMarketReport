@@ -170,9 +170,10 @@ class PortalDatabase:
                     (uid_str, bid),
                 )
 
-            # Sync legacy recipients if brief_bot or travel_bot
-            if bid in ("brief_bot", "travel_bot"):
-                topic = "FINANCE" if bid == "brief_bot" else "TRAVEL"
+            # Sync legacy recipients table for all topic-enabled bots
+            topic_map = {"brief_bot": "FINANCE", "travel_bot": "TRAVEL", "admission_bot": "EDUCATION"}
+            if bid in topic_map:
+                topic = topic_map[bid]
                 cur.execute("SELECT subscribed_topics, is_active FROM recipients WHERE chat_id = ?", (uid_str,))
                 existing_rec = cur.fetchone()
                 if existing_rec:
@@ -214,8 +215,9 @@ class PortalDatabase:
                 "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (sub_row["id"],),
             )
-            if bid in ("brief_bot", "travel_bot"):
-                topic = "FINANCE" if bid == "brief_bot" else "TRAVEL"
+            topic_map = {"brief_bot": "FINANCE", "travel_bot": "TRAVEL", "admission_bot": "EDUCATION"}
+            if bid in topic_map:
+                topic = topic_map[bid]
                 cur.execute("SELECT subscribed_topics FROM recipients WHERE chat_id = ?", (uid_str,))
                 existing_rec = cur.fetchone()
                 if existing_rec:

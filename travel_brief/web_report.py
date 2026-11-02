@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from travel_brief.models import DestinationMeta, FlightDeal, TravelRecommendation
+from travel_brief.models import DestinationMeta, FlightDeal, TravelRecommendation, reconcile_man_breakdown, round_man
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
@@ -538,13 +538,178 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .pill-weather-best { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
     .pill-weather-caution { background: rgba(244, 63, 94, 0.15); color: #fb7185; }
 
-    /* Sticky Heatmap Table */
+    /* Dual-View Mode Switcher & Month Tabs */
+    .view-mode-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+      margin-bottom: 1.15rem;
+    }
+    .view-mode-group {
+      display: inline-flex;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 14px;
+      padding: 0.3rem;
+      gap: 0.35rem;
+    }
+    .view-mode-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      padding: 0.65rem 1.2rem;
+      border-radius: 10px;
+      font-size: 0.96rem;
+      font-weight: 800;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .view-mode-btn:hover {
+      color: #f8fafc;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .view-mode-btn.active {
+      background: linear-gradient(135deg, #0284c7, #0ea5e9);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.35);
+    }
+    .month-tabs-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-bottom: 1.5rem;
+    }
+    .month-tab-btn {
+      background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #e2e8f0;
+      padding: 0.7rem 1.2rem;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 800;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .month-tab-btn:hover {
+      border-color: #38bdf8;
+      background: rgba(56, 189, 248, 0.14);
+    }
+    .month-tab-btn.active {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: #34d399;
+      color: #6ee7b7;
+      box-shadow: 0 0 16px rgba(16, 185, 129, 0.28);
+    }
+
+    /* Monthly Big-Card Grid (High-Readability Primary View) */
+    .monthly-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 1.35rem;
+      margin-bottom: 3.5rem;
+    }
+    .monthly-big-card {
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      border-radius: 18px;
+      padding: 1.45rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 1rem;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+      transition: transform 0.22s ease, border-color 0.22s ease;
+    }
+    .monthly-big-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(56, 189, 248, 0.5);
+    }
+    .monthly-big-card.card-super {
+      border-color: rgba(52, 211, 153, 0.42);
+      background: linear-gradient(180deg, rgba(16, 185, 129, 0.10) 0%, rgba(15, 23, 42, 0.92) 100%);
+    }
+    .monthly-big-card.card-peak {
+      border-color: rgba(251, 191, 36, 0.42);
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.10) 0%, rgba(15, 23, 42, 0.92) 100%);
+    }
+    .mbc-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 0.6rem;
+    }
+    .mbc-city {
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: #ffffff;
+      line-height: 1.3;
+    }
+    .mbc-sub {
+      font-size: 0.92rem;
+      color: #94a3b8;
+      margin-top: 0.2rem;
+    }
+    .mbc-price-box {
+      padding: 0.85rem 1rem;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+    }
+    .mbc-price-val {
+      font-size: 1.6rem;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+      color: #38bdf8;
+      display: block;
+    }
+    .card-super .mbc-price-val { color: #34d399; }
+    .card-peak .mbc-price-val { color: #fbbf24; }
+    .mbc-price-meta {
+      font-size: 0.94rem;
+      color: #cbd5e1;
+      margin-top: 0.25rem;
+      display: block;
+    }
+    .mbc-sched-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.48rem;
+      font-size: 0.98rem;
+      line-height: 1.55;
+      color: #e2e8f0;
+    }
+    .mbc-sched-list span.muted {
+      color: #94a3b8;
+      font-size: 0.92rem;
+    }
+    .mbc-cta-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: #ffffff;
+      font-size: 1rem;
+      font-weight: 800;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.32);
+    }
+    .mbc-cta-btn:hover {
+      background: linear-gradient(135deg, #0ea5e9, #0284c7);
+      transform: translateY(-1px);
+    }
+
+    /* Sticky Heatmap Table (Enlarged 150% Readability) */
     .table-container {
       overflow-x: auto;
       position: relative;
       border-radius: 18px;
       border: 1px solid var(--card-border);
-      background: rgba(15, 23, 42, 0.8);
+      background: rgba(15, 23, 42, 0.85);
       backdrop-filter: blur(14px);
       box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
       margin-bottom: 3.5rem;
@@ -553,7 +718,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       width: 100%;
       border-collapse: separate;
       border-spacing: 0;
-      min-width: 1080px;
+      min-width: 1280px;
     }
     th {
       background: #0f1930;
@@ -663,8 +828,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       gap: 0.25rem;
     }
     .cell-price {
-      font-size: 1.18rem;
-      font-weight: 800;
+      font-size: 1.26rem;
+      font-weight: 900;
       letter-spacing: -0.02em;
     }
     .cell-deal-super .cell-price { color: #34d399; }
@@ -673,55 +838,56 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .cell-deal-normal .cell-price { color: #f1f5f9; }
 
     .cell-badge {
-      font-size: 0.68rem;
-      font-weight: 700;
-      padding: 0.15rem 0.4rem;
+      font-size: 0.8rem;
+      font-weight: 800;
+      padding: 0.2rem 0.5rem;
       border-radius: 9999px;
       white-space: nowrap;
     }
     .badge-super { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); }
     .badge-good { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
     .badge-peak { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
-    .badge-normal { background: rgba(255, 255, 255, 0.08); color: #94a3b8; }
+    .badge-normal { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; }
 
     .cell-dates {
-      font-size: 0.8rem;
-      color: #cbd5e1;
-      margin-bottom: 0.3rem;
+      font-size: 0.94rem;
+      color: #f1f5f9;
+      margin-bottom: 0.38rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 0.35rem;
     }
     .nights-tag {
-      font-size: 0.68rem;
-      color: #94a3b8;
-      background: rgba(255, 255, 255, 0.06);
-      padding: 0.1rem 0.35rem;
-      border-radius: 4px;
-      font-weight: 600;
+      font-size: 0.78rem;
+      color: #cbd5e1;
+      background: rgba(255, 255, 255, 0.09);
+      padding: 0.14rem 0.42rem;
+      border-radius: 5px;
+      font-weight: 700;
     }
     .cell-footer {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 0.74rem;
-      color: #94a3b8;
-      margin-bottom: 0.45rem;
+      font-size: 0.86rem;
+      color: #cbd5e1;
+      margin-bottom: 0.55rem;
     }
     .cell-weather {
-      font-size: 0.68rem;
+      font-size: 0.78rem;
       font-weight: 700;
-      padding: 0.15rem 0.35rem;
-      border-radius: 4px;
+      padding: 0.18rem 0.45rem;
+      border-radius: 5px;
     }
     .weather-best { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
     .weather-caution { background: rgba(244, 63, 94, 0.15); color: #fb7185; }
 
     .cell-action-hint {
-      font-size: 0.74rem;
-      font-weight: 700;
+      font-size: 0.86rem;
+      font-weight: 800;
       text-align: center;
-      padding: 0.25rem 0.4rem;
+      padding: 0.38rem 0.5rem;
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.05);
       color: #38bdf8;
@@ -876,7 +1042,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div class="source-icon">🔍</div>
           <div class="source-text">
             <strong>100% 원클릭 실시간 최저가 검증</strong>
-            <p>항공권은 실시간 잔여석에 따라 변동되므로, <strong>히트맵의 각 셀을 클릭하면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>되어 잔여석과 최종 결제가를 직접 확인하실 수 있습니다.</p>
+            <p>항공권은 실시간 잔여석에 따라 변동되므로, <strong>히트맵의 각 셀을 클릭하면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>되어 잔여석과 최종 결제가를 직접 확인하실 수 있습니다. (링크 접속 후 약 3~5초 전체 항공사 로딩 완료 시 상단 '인기 항공편' 배너 아래 <strong>'가격 낮은 순' 1위</strong>에서 동일한 직항 최저가가 표시됩니다.)</p>
           </div>
         </div>
       </div>
@@ -888,8 +1054,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <!-- TOP_CARDS_HTML -->
     </div>
 
-    <h2>📊 6개월 주말 왕복 항공권 최저가 히트맵</h2>
-    <p class="section-desc">각 월별 최저가 주말 일정입니다. <strong>원하는 날짜의 셀을 클릭하시면 네이버 항공권 실시간 예약 페이지로 즉시 연결</strong>됩니다.</p>
+    <h2>📊 6개월 주말 왕복 항공권 특가 & 실거래 예상 밴드</h2>
+    <p class="section-desc">유류할증료·공항세·연휴 할증이 반영된 주말 실거래 예상가 밴드입니다. <strong>큰글씨 월별 카드</strong>로 편하게 보시거나 <strong>6개월 전체 비교표</strong>로 전환하실 수 있습니다.</p>
+
+    <!-- View Mode Switcher -->
+    <div class="view-mode-bar">
+      <div class="view-mode-group">
+        <button id="btnViewCards" class="view-mode-btn active" onclick="setViewMode('cards')">🗂️ 월별 큰글씨 카드 보기 (추천)</button>
+        <button id="btnViewTable" class="view-mode-btn" onclick="setViewMode('table')">📊 6개월 한눈에 표 보기 (확대형)</button>
+      </div>
+    </div>
 
     <!-- Region Filter Bar -->
     <div class="filter-bar">
@@ -906,11 +1080,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Heatmap Legend -->
     <div class="heatmap-legend">
       <div class="legend-group">
-        <span class="legend-title">💰 가격 할인율:</span>
-        <span class="legend-pill pill-super">🔥 초특가 (-20% 이상)</span>
-        <span class="legend-pill pill-good">✨ 실속할인 (-10% ~ -20%)</span>
-        <span class="legend-pill pill-normal">⚪ 평수기 표준 (정상가)</span>
-        <span class="legend-pill pill-peak">⚡ 성수기 (+10% 집중)</span>
+        <span class="legend-title">💰 운임 수준:</span>
+        <span class="legend-pill pill-super">🔥 초특가 (기준가 대비 -13% 이하)</span>
+        <span class="legend-pill pill-good">✨ 실속할인 (-7% ~ -13%)</span>
+        <span class="legend-pill pill-normal">⚪ 평수기 표준</span>
+        <span class="legend-pill pill-peak">🚨 연휴·성수기 할증</span>
       </div>
       <div class="legend-group">
         <span class="legend-title">🌤️ 현지 날씨:</span>
@@ -919,19 +1093,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Sticky Heatmap Table -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th class="dest-col-th">도시명 / 비행시간</th>
-            <!-- MONTHS_HEADERS_HTML -->
-          </tr>
-        </thead>
-        <tbody>
-          <!-- MATRIX_ROWS_HTML -->
-        </tbody>
-      </table>
+    <!-- Primary High-Readability Monthly Big-Card View -->
+    <div id="monthlyCardsSection">
+      <div class="month-tabs-bar">
+        <!-- MONTH_TABS_HTML -->
+      </div>
+      <div class="monthly-cards-grid" id="monthlyCardsGrid">
+        <!-- MONTHLY_BIG_CARDS_HTML -->
+      </div>
+    </div>
+
+    <!-- Secondary Enlarged Sticky Heatmap Table -->
+    <div id="matrixTableSection" style="display: none;">
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th class="dest-col-th">도시명 / 비행시간</th>
+              <!-- MONTHS_HEADERS_HTML -->
+            </tr>
+          </thead>
+          <tbody>
+            <!-- MATRIX_ROWS_HTML -->
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <h2>🌍 10대 추천 여행지별 비자 규정 및 핵심 여행 팁</h2>
@@ -992,26 +1178,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       });
     }
 
-    function setRegionFilter(region) {
-      document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.getAttribute('data-filter') === region);
+    let currentRegion = 'all';
+    let currentMonth = 'best';
+
+    function applyCombinedFilters() {
+      document.querySelectorAll('.monthly-big-card').forEach(card => {
+        const r = card.getAttribute('data-dest-region');
+        const m = card.getAttribute('data-month');
+        const matchRegion = (currentRegion === 'all' || r === currentRegion);
+        const matchMonth = (m === currentMonth);
+        card.style.display = (matchRegion && matchMonth) ? '' : 'none';
       });
       document.querySelectorAll('tr[data-dest-region]').forEach(row => {
         const r = row.getAttribute('data-dest-region');
-        if (region === 'all' || r === region) {
-          row.style.display = '';
-        } else {
-          row.style.display = 'none';
-        }
+        row.style.display = (currentRegion === 'all' || r === currentRegion) ? '' : 'none';
       });
       document.querySelectorAll('.dest-card-compact').forEach(card => {
         const r = card.getAttribute('data-dest-region');
-        if (region === 'all' || r === region) {
-          card.style.display = '';
-        } else {
-          card.style.display = 'none';
-        }
+        card.style.display = (currentRegion === 'all' || r === currentRegion) ? '' : 'none';
       });
+    }
+
+    function setViewMode(mode) {
+      const cardsSec = document.getElementById('monthlyCardsSection');
+      const tableSec = document.getElementById('matrixTableSection');
+      document.getElementById('btnViewCards').classList.toggle('active', mode === 'cards');
+      document.getElementById('btnViewTable').classList.toggle('active', mode === 'table');
+      if (mode === 'table') {
+        cardsSec.style.display = 'none';
+        tableSec.style.display = 'block';
+      } else {
+        cardsSec.style.display = 'block';
+        tableSec.style.display = 'none';
+      }
+    }
+
+    function setMonthTab(monthKey) {
+      currentMonth = monthKey;
+      document.querySelectorAll('.month-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-month-tab') === monthKey);
+      });
+      applyCombinedFilters();
+    }
+
+    function setRegionFilter(region) {
+      currentRegion = region;
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-filter') === region);
+      });
+      applyCombinedFilters();
     }
 
     window.onclick = function(event) {
@@ -1043,6 +1258,22 @@ class WebReportGenerator:
         matrix = self.engine.get_6month_matrix()
         # Extract unique sorted months
         all_months = sorted(list({m for d in matrix.values() for m in d.keys()}))
+        if self.engine.live_naver and matrix:
+            hero_deals = [r.best_deal for r in top_recs]
+            hero_deals.extend(min(dm.values(), key=lambda x: x.price_krw) for dm in matrix.values() if dm)
+            for m_key in all_months[:6]:
+                m_cands = [
+                    (BudgetCalculator.evaluate_deal(all_destinations[dc], dm[m_key]).recommendation_score, -dm[m_key].price_krw, dm[m_key])
+                    for dc, dm in matrix.items() if m_key in dm and dc in all_destinations
+                ]
+                if m_cands:
+                    m_cands.sort(reverse=True)
+                    hero_deals.append(m_cands[0][2])
+            if any(d.data_source == "LIVE_PG" for d in hero_deals):
+                self.engine.ensure_deals_sse_verified(hero_deals)
+                all_deals = self.engine.search_deals(months_ahead=6)
+                top_recs = BudgetCalculator.rank_recommendations(destinations=all_destinations, deals=all_deals, top_n=3)
+                matrix = self.engine.get_6month_matrix()
 
         # Prompts data dictionary for interactive modal
         prompts_dict = {}
@@ -1063,12 +1294,12 @@ class WebReportGenerator:
             }
 
             flag = DEST_FLAGS.get(dest.code, "✈️")
-            flight_man = budget.flight_krw // 10000
-            hotel_total_man = budget.hotel_total_krw // 10000
-            meal_man = budget.meal_transit_total_krw // 10000
-            total_1p_man = budget.total_per_person_krw // 10000
-            total_2p_man = budget.estimated_for_two_krw // 10000
-            hotel_night_man = dest.hotel_night_avg_krw // 10000
+            flight_man, hotel_total_man, meal_man, total_1p_man = reconcile_man_breakdown(
+                deal.price_min_krw, budget.hotel_total_krw, budget.meal_transit_total_krw
+            )
+            total_2p_man = round_man(budget.estimated_for_two_krw)
+            share_1p_man = round_man(budget.estimated_for_two_krw / 2)
+            hotel_night_man = round_man(dest.hotel_night_avg_krw)
 
             season_badge = {
                 "BEST_SEASON": '<span class="badge badge-best">☀️ 여행 최적기</span>',
@@ -1077,10 +1308,12 @@ class WebReportGenerator:
             }.get(rec.season_status, "")
 
             deal_badge = (
-                f'<span class="badge badge-deal">🔥 초특가 {deal.discount_pct:+.0f}%</span>'
-                if deal.is_super_deal or deal.discount_pct >= 20.0
-                else f'<span class="badge badge-normal">✨ 실속할인 {deal.discount_pct:+.0f}%</span>'
-                if deal.discount_pct >= 10.0
+                f'<span class="badge badge-caution">🚨 {html.escape(deal.holiday_name or "연휴 성수기")} {deal.price_diff_pct:+.0f}%</span>'
+                if deal.is_peak_holiday and deal.price_diff_pct >= 5.0
+                else f'<span class="badge badge-deal">🔥 초특가 {deal.price_diff_pct:+.0f}%</span>'
+                if deal.is_super_deal or deal.discount_pct >= 13.0
+                else f'<span class="badge badge-normal">✨ 실속할인 {deal.price_diff_pct:+.0f}%</span>'
+                if deal.discount_pct >= 7.0
                 else ""
             )
 
@@ -1096,9 +1329,10 @@ class WebReportGenerator:
             <div class="dest-region-tag">{flag} {html.escape(dest.country)} · 직항 {dest.flight_time_hours}시간</div>
             <div class="dest-main-name">{html.escape(dest.name)} ({dest.code})</div>
             <div class="price-highlight-block">
-              <span class="price-val">{deal.price_krw:,}원</span>
-              <span class="price-sub-tag">{deal.airline} 직항 왕복</span>
+              <span class="price-val">{deal.exact_price_str if deal.is_live else deal.price_band_str}</span>
+              <span class="price-sub-tag">{html.escape(deal.airline if "직항" in deal.airline else f"{deal.airline} 직항")} · {deal.live_payment_note if deal.is_live else f"예상 {deal.price_band_str}"} ({deal.price_band_str})</span>
             </div>
+            {f'<div style="margin-top:0.45rem; font-size:0.82rem; color:#fbbf24; background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.28); border-radius:8px; padding:0.4rem 0.65rem;">💡 {html.escape(deal.popular_banner_note)}</div>' if deal.popular_banner_note else ''}
           </div>
           <div class="badges-row">
             {deal_badge} {season_badge}
@@ -1133,7 +1367,7 @@ class WebReportGenerator:
               <span class="b-label">2인 1실 쉐어 총합</span>
               <span class="highlight-2p">약 {total_2p_man}만 원</span>
             </div>
-            <span class="b-desc">(호텔 1실 분담 시 1인당 약 {round(total_2p_man / 2, 1):.1f}만 원)</span>
+            <span class="b-desc">(호텔 1실 분담 시 1인당 약 {share_1p_man:g}만 원)</span>
           </div>
           <div class="visa-tips-box">
             <strong>📌 비자 & 로컬 팁:</strong> {html.escape(dest.visa_info)} · {html.escape(dest.tips)}
@@ -1157,7 +1391,104 @@ class WebReportGenerator:
 """
             top_cards_html.append(card)
 
-        # 2. MATRIX TABLE HTML
+        # 2. MONTHLY TABS, BIG CARDS & MATRIX TABLE HTML
+        month_tabs_list = [
+            '<button class="month-tab-btn active" data-month-tab="best" onclick="setMonthTab(\'best\')">🌟 6개월 통합 최저가</button>'
+        ]
+        for m in all_months:
+            m_label = f"{m.split('-')[0]}년 {int(m.split('-')[1])}월"
+            month_tabs_list.append(
+                f'<button class="month-tab-btn" data-month-tab="{m}" onclick="setMonthTab(\'{m}\')">{m_label}</button>'
+            )
+        month_tabs_html = "\n        ".join(month_tabs_list)
+
+        def _render_big_card(dest: DestinationMeta, deal: FlightDeal, month_bucket: str, hidden: bool) -> str:
+            flag = DEST_FLAGS.get(dest.code, "✈️")
+            region_tag = DEST_REGION_TAGS.get(dest.code, "asia_city")
+            month_int = int(deal.departure_date.split("-")[1])
+            bd = BudgetCalculator.calculate_breakdown(dest, deal, nights=deal.nights)
+            _, _, _, total_1p_man = reconcile_man_breakdown(
+                deal.price_min_krw, bd.hotel_total_krw, bd.meal_transit_total_krw
+            )
+            total_2p_man = round_man(bd.estimated_for_two_krw)
+            share_1p_man = round_man(bd.estimated_for_two_krw / 2)
+
+            if deal.is_peak_holiday and deal.price_diff_pct >= 5.0:
+                card_cls = "card-peak"
+                badge_html = f'<span class="cell-badge badge-peak">🚨 {html.escape(deal.holiday_name or "연휴 성수기")} {deal.price_diff_pct:+.0f}%</span>'
+            elif deal.price_diff_pct >= 10.0:
+                card_cls = "card-peak"
+                badge_html = f'<span class="cell-badge badge-peak">📈 수요할증 {deal.price_diff_pct:+.0f}%</span>'
+            elif deal.is_super_deal or deal.discount_pct >= 13.0:
+                card_cls = "card-super"
+                badge_html = f'<span class="cell-badge badge-super">🔥 초특가 {deal.price_diff_pct:+.0f}%</span>'
+            elif deal.discount_pct >= 7.0:
+                card_cls = ""
+                badge_html = f'<span class="cell-badge badge-good">✨ 실속 {deal.price_diff_pct:+.0f}%</span>'
+            else:
+                card_cls = ""
+                badge_html = '<span class="cell-badge badge-normal">평수기 표준</span>'
+
+            if dest.is_best_month(month_int):
+                w_text = "☀️ 여행 최적기"
+            elif dest.is_caution_month(month_int):
+                w_text = f"🌧️ {html.escape(dest.caution_note)}"
+            else:
+                w_text = "🌤️ 무난한 날씨"
+
+            naver_url = FlightEngine.build_naver_flight_url(
+                deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
+            )
+            style_attr = ' style="display: none;"' if hidden else ""
+            return f"""
+        <div class="monthly-big-card {card_cls}" data-month="{month_bucket}" data-dest-region="{region_tag}"{style_attr}>
+          <div>
+            <div class="mbc-top">
+              <div>
+                <div class="mbc-city">{flag} {html.escape(dest.name)} ({dest.code})</div>
+                <div class="mbc-sub">{html.escape(dest.country)} · 직항 {dest.flight_time_hours}시간 · {w_text}</div>
+              </div>
+              {badge_html}
+            </div>
+            <div class="mbc-price-box" style="margin-top: 0.9rem;">
+              <span class="mbc-price-val">{deal.exact_price_str if deal.is_live else deal.price_band_str}</span>
+              <span class="mbc-price-meta">{html.escape(deal.airline if "직항" in deal.airline else f"{deal.airline} 직항")} · {deal.live_payment_note} · 기준가({dest.flight_baseline_krw // 10000}만) 대비 {deal.price_diff_pct:+.0f}%</span>
+              {f'<div style="margin-top:0.35rem; font-size:0.8rem; color:#fbbf24;">💡 {html.escape(deal.popular_banner_note)}</div>' if deal.popular_banner_note else ''}
+            </div>
+            <div class="mbc-sched-list" style="margin-top: 0.9rem;">
+              <div>📅 <strong>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</strong> · 3박 4일</div>
+              <div>⏰ <span class="muted">{deal.departure_time_slot}</span></div>
+              <div>💼 1인 총예산 <strong>약 {total_1p_man}만 원</strong> <span class="muted">· 2인 총 {total_2p_man}만 (1인당 약 {share_1p_man}만)</span></div>
+            </div>
+          </div>
+          <a href="{naver_url}" target="_blank" rel="noopener noreferrer" class="mbc-cta-btn">
+            ✈️ 네이버 항공권 실시간 좌석·가격 확인 ↗
+          </a>
+        </div>"""
+
+        monthly_big_cards: list[str] = []
+        # 2a. 'best' bucket: single cheapest weekend per destination across 6 months, sorted cheapest first
+        best_per_dest = []
+        for d_code, d_meta in all_destinations.items():
+            d_deals = list(matrix.get(d_code, {}).values())
+            if d_deals:
+                cheapest_d = min(d_deals, key=lambda x: x.price_krw)
+                best_per_dest.append((d_meta, cheapest_d))
+        best_per_dest.sort(key=lambda pair: pair[1].price_krw)
+        for d_meta, cheapest_d in best_per_dest:
+            monthly_big_cards.append(_render_big_card(d_meta, cheapest_d, "best", hidden=False))
+
+        # 2b. Per-month buckets, sorted cheapest first within each month
+        for m in all_months:
+            month_pairs = []
+            for d_code, d_meta in all_destinations.items():
+                m_deal = matrix.get(d_code, {}).get(m)
+                if m_deal:
+                    month_pairs.append((d_meta, m_deal))
+            month_pairs.sort(key=lambda pair: pair[1].price_krw)
+            for d_meta, m_deal in month_pairs:
+                monthly_big_cards.append(_render_big_card(d_meta, m_deal, m, hidden=True))
+
         months_headers = "".join(f"<th>{m.replace('-', '년 ')}월</th>" for m in all_months)
         matrix_rows = []
 
@@ -1171,26 +1502,26 @@ class WebReportGenerator:
                 if deal:
                     month_int = int(m.split("-")[1])
                     discount = deal.discount_pct
-                    is_super = deal.is_super_deal or discount >= 20.0
-                    is_good = discount >= 10.0
-                    is_peak = discount <= -10.0
+                    is_peak = (deal.is_peak_holiday and deal.price_diff_pct >= 5.0) or discount <= -10.0
+                    is_super = (not is_peak) and (deal.is_super_deal or discount >= 13.0)
+                    is_good = (not is_peak) and discount >= 7.0
 
-                    if is_super:
+                    if is_peak:
+                        price_cls = "cell-deal-peak"
+                        badge_cls = "badge-peak"
+                        badge_label = f"🚨 {deal.price_diff_pct:+.0f}%"
+                    elif is_super:
                         price_cls = "cell-deal-super"
                         badge_cls = "badge-super"
-                        badge_label = f"🔥 -{int(discount)}%"
+                        badge_label = f"🔥 {deal.price_diff_pct:+.0f}%"
                     elif is_good:
                         price_cls = "cell-deal-good"
                         badge_cls = "badge-good"
-                        badge_label = f"✨ -{int(discount)}%"
-                    elif is_peak:
-                        price_cls = "cell-deal-peak"
-                        badge_cls = "badge-peak"
-                        badge_label = f"⚡ +{abs(int(discount))}%"
+                        badge_label = f"✨ {deal.price_diff_pct:+.0f}%"
                     else:
                         price_cls = "cell-deal-normal"
                         badge_cls = "badge-normal"
-                        badge_label = "정상가"
+                        badge_label = "평수기"
 
                     is_best = dest.is_best_month(month_int)
                     is_caution = dest.is_caution_month(month_int)
@@ -1211,7 +1542,7 @@ class WebReportGenerator:
             <td class="matrix-cell-wrap">
               <a href="{naver_url}" target="_blank" rel="noopener noreferrer" class="matrix-cell {price_cls}" title="{dest.name} {deal.departure_date} 네이버 실시간 항공권 조회 (새 창)">
                 <div class="cell-header">
-                  <span class="cell-price">{deal.price_krw:,}원</span>
+                  <span class="cell-price">{deal.exact_price_str if deal.is_live else deal.price_band_compact_str}</span>
                   <span class="cell-badge {badge_cls}">{badge_label}</span>
                 </div>
                 <div class="cell-dates">
@@ -1219,7 +1550,7 @@ class WebReportGenerator:
                   <span class="nights-tag">3박4일</span>
                 </div>
                 <div class="cell-footer">
-                  <span class="cell-airline">{deal.airline} 직항</span>
+                  <span class="cell-airline">{html.escape(deal.airline if "직항" in deal.airline else f"{deal.airline} 직항")}</span>
                   {weather_chip}
                 </div>
                 <div class="cell-action-hint">
@@ -1263,7 +1594,7 @@ class WebReportGenerator:
             caution_m_str = (
                 ", ".join(f"{m}월" for m in dest.caution_months) if dest.caution_months else "없음"
             )
-            hotel_night_man = dest.hotel_night_avg_krw // 10000
+            hotel_night_man = round_man(dest.hotel_night_avg_krw)
             daily_man = dest.daily_meal_transit_krw // 10000
             rec_hotel = html.escape(dest.recommended_hotel_name or "시내 중심 3~4성급 호텔")
 
@@ -1288,6 +1619,8 @@ class WebReportGenerator:
         rendered = (
             HTML_TEMPLATE.replace("<!-- GENERATED_AT -->", now_str)
             .replace("<!-- TOP_CARDS_HTML -->", "\n".join(top_cards_html))
+            .replace("<!-- MONTH_TABS_HTML -->", month_tabs_html)
+            .replace("<!-- MONTHLY_BIG_CARDS_HTML -->", "\n".join(monthly_big_cards))
             .replace("<!-- MONTHS_HEADERS_HTML -->", months_headers)
             .replace("<!-- MATRIX_ROWS_HTML -->", "\n".join(matrix_rows))
             .replace("<!-- DEST_CARDS_HTML -->", "\n".join(dest_cards))

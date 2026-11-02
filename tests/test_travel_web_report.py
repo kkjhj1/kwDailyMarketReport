@@ -53,6 +53,14 @@ class TravelWebReportTests(unittest.TestCase):
         self.assertIn("matrix-cell", html)
         self.assertIn("🔍 실시간 확인 ↗", html)
 
+        # 6. High-Readability Monthly Big-Card View & Dual-View Switcher
+        self.assertIn("monthlyCardsSection", html)
+        self.assertIn("monthly-big-card", html)
+        self.assertIn("mbc-price-val", html)
+        self.assertIn("setViewMode", html)
+        self.assertIn("setMonthTab", html)
+        self.assertIn("만원대", html)
+
         # All 10 destinations in metadata should be present in table
         for code, dest in self.engine.destinations.items():
             self.assertIn(dest.name, html)

@@ -123,13 +123,19 @@ class SafeTelegramDispatcher:
         text: str,
         parse_mode: str = "HTML",
         db: Any = None,
+        reply_markup: dict | None = None,
     ) -> tuple[str, str | None, str | None]:
         """Dispatches a text/HTML message to a single recipient with rate limit & error safety."""
         chat_id_clean = str(chat_id).strip()
         for attempt in range(1, self.max_429_retries + 1):
             self.limiter.wait_before_send(chat_id_clean)
             try:
-                msg_id = tg.send_text(recipient=chat_id_clean, text=text, parse_mode=parse_mode)
+                msg_id = tg.send_text(
+                    recipient=chat_id_clean,
+                    text=text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
                 return "SENT", msg_id, None
             except (socket.timeout, TimeoutError) as net_err:
                 return "UNKNOWN", None, f"Network Timeout / Ambiguous Delivery: {net_err}"

@@ -19,14 +19,25 @@ on:
         required: false
         default: ""
 
-  # 2. 24시간 365일 무중단 정기 시황 & 장중 ±3% 수시 감시 크론 (혼잡 분을 피한 오프피크 스케줄)
+  # 2. 24시간 365일 무중단 정기 시황 & 장중 ±3% 수시 감시 크론 (혼잡 피크 회피 + 다중 세이프티)
   schedule:
-    # ① 한국시간(KST) 평일 아침 06:30 장전 모닝 브리핑 (UTC 전일 21:30)
-    - cron: "30 21 * * 0-4"
-    # ② 한국시간(KST) 평일 오후 15:42 장마감 브리핑 (UTC 06:42, 피크 40분 회피)
+    # ① 한국시간(KST) 평일 아침 장전 모닝 브리핑 (오프피크 분 + 3단계 세이프티 크론)
+    #    - 06:33 KST (UTC 21:33) : 1차 정기 발송 (전 세계 30분대 트래픽 회피)
+    #    - 07:18 KST (UTC 22:18) : 2차 세이프티 크론 (06:33 지연/누락 시 자동 보정 발송)
+    #    - 08:03 KST (UTC 23:03) : 3차 개장전 최종 보조 (개장 전 1회 발송 무조건 보장)
+    - cron: "33 21 * * 0-4"
+    - cron: "18 22 * * 0-4"
+    - cron: "3 23 * * 0-4"
+
+    # ② 한국시간(KST) 평일 오후 장마감 브리핑 (오프피크 분 + 세이프티 보조)
+    #    - 15:42 KST (UTC 06:42) : 1차 마감 정기 발송 (40분 혼잡 회피)
+    #    - 16:18 KST (UTC 07:18) : 2차 마감 세이프티 크론 (15:42 지연/누락 시 자동 보정)
     - cron: "42 6 * * 1-5"
+    - cron: "18 7 * * 1-5"
+
     # ③ 한국 정규장(09:00~15:30 KST = UTC 00:00~06:30) 혼잡 피크(00/15/30/45) 회피 15분 간격 감시
     - cron: "7,22,37,52 0-6 * * 1-5"
+
     # ④ 미국 정규장(22:30~06:00 KST = UTC 13:30~21:00) 혼잡 피크 회피 15분 간격 감시
     - cron: "8,23,38,53 13-21 * * 1-5"
 
@@ -52,6 +63,8 @@ jobs:
     steps:
       - name: 1. 저장소 코드 체크아웃
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 2. Python 3.11 설정
         uses: actions/setup-python@v5
@@ -103,3 +116,15 @@ jobs:
         if: always()
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: 7. 발송 이력 및 상태 영구 보존 (Git Commit & Push)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f alerts.sqlite3 reports/index.html reports/latest.html 2>/dev/null || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(auto): update briefing delivery state and reports [skip ci]"
+            git pull --rebase origin main || true
+            git push origin main || echo "⚠️ Git push failed or skipped (non-critical)"
+          fi

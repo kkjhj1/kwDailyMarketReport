@@ -28,13 +28,13 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
         "keyboard": [
             [
                 {"text": "📋 이번 주 필수 To-Do"},
-                {"text": "📢 설명회 3줄 요약"},
+                {"text": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
             ],
             [
-                {"text": "🎓 학년 변경"},
-                {"text": "📍 지역/온라인 설정"},
+                {"text": "💡 1분 입시 팩트체크 (So-What)"},
             ],
             [
+                {"text": "🎓 학년/지역 설정"},
                 {"text": "❓ 이용 도움말"},
             ],
         ],
@@ -133,14 +133,18 @@ class AdmissionInteractiveBot:
         clean_text = text.strip()
         if clean_text.startswith("/start"):
             self._cmd_start(chat_id, first_name)
+        elif clean_text.startswith("/todo") or "할일" in clean_text or "투두" in clean_text or "이번 주" in clean_text or "체크리스트" in clean_text:
+            self._cmd_todo(chat_id)
+        elif clean_text.startswith("/hot") or "속보" in clean_text or "핫 행사" in clean_text or "행사" in clean_text or "설명회" in clean_text or "요약" in clean_text or clean_text.startswith("/recap"):
+            self._cmd_hot_events(chat_id)
+        elif clean_text.startswith("/fact") or "팩트" in clean_text or "소왓" in clean_text or "so-what" in clean_text.lower() or "인사이트" in clean_text:
+            self._cmd_factcheck(chat_id)
+        elif clean_text.startswith("/settings") or "설정" in clean_text:
+            self._cmd_settings(chat_id)
         elif clean_text.startswith("/grade") or "학년" in clean_text:
             self._cmd_grade(chat_id)
         elif clean_text.startswith("/region") or "지역" in clean_text or "온라인" in clean_text:
             self._cmd_region(chat_id)
-        elif clean_text.startswith("/todo") or "할일" in clean_text or "투두" in clean_text or "이번 주" in clean_text or "체크리스트" in clean_text:
-            self._cmd_todo(chat_id)
-        elif clean_text.startswith("/recap") or "요약" in clean_text or "설명회" in clean_text or "리캡" in clean_text:
-            self._cmd_recap(chat_id)
         elif clean_text.startswith("/help") or "도움말" in clean_text or "안내" in clean_text or "메뉴" in clean_text:
             self._cmd_help(chat_id)
         else:
@@ -159,7 +163,7 @@ class AdmissionInteractiveBot:
             f"반갑습니다{name_str}! 🎓\n"
             "<b>대치동 상위권 입시 인텔리전스, 에듀브리프 (EduBrief)</b>입니다.\n\n"
             "복잡한 입시 설명회와 넘쳐나는 학원 광고 속에서,\n"
-            "<b>내 아이에게 딱 맞는 핵심 팩트와 선착순 티켓팅 알림</b>만 엄선해 드립니다.\n\n"
+            "<b>내 아이에게 딱 맞는 100% 공인 팩트와 긴급 속보 & 핫 행사</b>만 엄선해 드립니다.\n\n"
             "👇 <b>[1단계] 자녀분의 현재 학년을 탭해 주세요:</b>"
         )
         self.channel.send_message(
@@ -184,12 +188,58 @@ class AdmissionInteractiveBot:
             reply_markup=build_region_inline_keyboard(),
         )
 
+    def _cmd_settings(self, chat_id: str) -> None:
+        """Presents grade and region configuration menu."""
+        profile = self.db.get_subscriber(chat_id)
+        current_grade = profile.target_grade.label if profile else "미설정"
+        current_region = profile.target_region.label if profile else "전국 전체"
+        text = (
+            f"⚙️ <b>맞춤 알림 설정 현황</b>\n\n"
+            f"• <b>자녀 학년:</b> {current_grade}\n"
+            f"• <b>관심 지역:</b> {current_region}\n\n"
+            f"변경을 원하시는 항목의 버튼을 선택해 주세요:"
+        )
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🎓 학년 변경하기", "callback_data": "menu:grade"},
+                    {"text": "📍 지역/온라인 변경하기", "callback_data": "menu:region"},
+                ]
+            ]
+        }
+        self.channel.send_message(chat_id, text, reply_markup=markup)
+
     def _cmd_todo(self, chat_id: str) -> None:
         """Sends grade-specific weekly action To-Do list."""
         profile = self.db.get_subscriber(chat_id)
         grade = profile.target_grade if profile else TargetGrade.MIDDLE
         briefing = self.curator.generate_weekly_todo_briefing(grade)
         briefing.silent = True  # Silent push for regular digests
+        self.channel.send(chat_id, briefing)
+
+    def _cmd_hot_events(self, chat_id: str) -> None:
+        """Presents top 3 hot events & breaking notices matching subscriber's profile."""
+        profile = self.db.get_subscriber(chat_id)
+        grade = profile.target_grade if profile else TargetGrade.ALL
+        region = profile.target_region if profile else TargetRegion.ALL
+
+        briefings = self.curator.get_top3_hot_events(grade=grade, region=region, db=self.db)
+        if not briefings:
+            self._cmd_recap(chat_id)
+            return
+
+        for idx, b in enumerate(briefings, 1):
+            b.silent = True
+            self.channel.send(chat_id, b)
+            if idx < len(briefings):
+                time.sleep(0.3)
+
+    def _cmd_factcheck(self, chat_id: str) -> None:
+        """Presents the latest verified 1-minute admission policy factcheck."""
+        profile = self.db.get_subscriber(chat_id)
+        grade = profile.target_grade if profile else TargetGrade.ALL
+        briefing = self.curator.get_latest_factcheck(grade)
+        briefing.silent = True
         self.channel.send(chat_id, briefing)
 
     def _cmd_recap(self, chat_id: str) -> None:
@@ -205,7 +255,7 @@ class AdmissionInteractiveBot:
         else:
             sample_briefing = AdmissionBriefing(
                 briefing_id="recap_sample",
-                briefing_type=self.curator.generate_weekly_todo_briefing(grade).briefing_type,
+                briefing_type=BriefingType.BRIEFING_RECAP,
                 target_grade=grade,
                 headline="2028 대입 개편 대비 대치동 주요 설명회 핵심 총정리",
                 summary_3lines=[
@@ -218,6 +268,8 @@ class AdmissionInteractiveBot:
                     "이번 주말 관내 고등학교 진학 실적 및 교육과정 편제표 비교",
                     "대치동 예비고1 단과반 레벨테스트 신청 마감 확인",
                 ],
+                source_name="대치동 주요 입시센터 분석 자료",
+                source_url="https://www.adiga.kr",
                 silent=True,
             )
             self.channel.send(chat_id, sample_briefing)
@@ -227,11 +279,11 @@ class AdmissionInteractiveBot:
         help_text = (
             "📌 <b>에듀브리프 (EduBrief) 간편 사용 안내</b>\n\n"
             "타자를 치실 필요 없이, **화면 하단의 메뉴 버튼**을 손가락으로 누르시면 됩니다!\n\n"
-            "▪ <b>📋 이번 주 필수 To-Do</b>: 우리 아이 학년의 이번 주 꼭 해야 할 일 3가지\n"
-            "▪ <b>📢 설명회 3줄 요약</b>: 어제 열린 대형 설명회 핵심 요약 모아보기\n"
-            "▪ <b>🎓 학년 변경</b>: 중등/고1·2/고3 설정 변경\n"
-            "▪ <b>📍 지역/온라인 설정</b>: 온라인 라이브만 받기 / 서울·경기 설정\n\n"
-            "📢 <i>공식 채널: @EduBrief_Official</i>"
+            "▪ <b>📋 이번 주 필수 To-Do</b>: 내 아이 학년별 이번 주 꼭 실천해야 할 3가지\n"
+            "▪ <b>⚡ 긴급 속보 & 핫 행사 TOP 3</b>: 실시간 정책 발표 및 선착순 마감 임박 행사\n"
+            "▪ <b>💡 1분 입시 팩트체크</b>: 교육부 발표 및 대입 개편안의 실질 득실 (So-What)\n"
+            "▪ <b>🎓 학년/지역 설정</b>: 중등/고1·2/고3 및 서울·경기·온라인 맞춤 필터링\n\n"
+            "🏛 <i>모든 정보는 교육부, 대교협, 교육청 등 100% 공인 출처에 기반합니다.</i>"
         )
         self.channel.send_message(
             chat_id,
@@ -301,6 +353,14 @@ class AdmissionInteractiveBot:
             except Exception as e:
                 logger.error("Failed to update region: %s", e)
                 self.channel.answer_callback_query(cb_id, text="지역 설정 중 오류가 발생했습니다.")
+
+        # 3. Settings Menu Navigation
+        elif data == "menu:grade":
+            self.channel.answer_callback_query(cb_id)
+            self._cmd_grade(chat_id)
+        elif data == "menu:region":
+            self.channel.answer_callback_query(cb_id)
+            self._cmd_region(chat_id)
 
     def poll_once(self, offset: int = 0) -> int:
         """Polls updates once and returns new offset."""

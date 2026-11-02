@@ -61,7 +61,7 @@ jobs:
           INPUT_RECIPIENTS: ${{ inputs.recipients }}
           INPUT_BUDGET: ${{ inputs.budget }}
         run: |
-          CMD="python travel_bot_runner.py"
+          CMD="python travel_bot_runner.py --live-naver"
           if [ "$INPUT_DRY_RUN" = "true" ]; then
             CMD="$CMD --dry-run"
           else

@@ -96,6 +96,18 @@ class AdmissionDatabase:
                 cursor.execute("ALTER TABLE admission_events ADD COLUMN is_online_live INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            try:
+                cursor.execute("ALTER TABLE admission_events ADD COLUMN source_name TEXT NOT NULL DEFAULT '공식 오피셜'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_events ADD COLUMN source_url TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_events ADD COLUMN urgency TEXT NOT NULL DEFAULT 'NORMAL'")
+            except sqlite3.OperationalError:
+                pass
 
             # 3. Dispatch log table (prevents duplicated alerts)
             cursor.execute(
@@ -250,6 +262,32 @@ class AdmissionDatabase:
 
     # --- Event Methods ---
 
+    def _row_to_event(self, r: sqlite3.Row) -> AdmissionEvent:
+        """Converts database row to AdmissionEvent domain object safely."""
+        keys = r.keys()
+        return AdmissionEvent(
+            event_id=r["event_id"],
+            title=r["title"],
+            organizer=r["organizer"],
+            target_grade=TargetGrade(r["target_grade"]),
+            target_region=TargetRegion(r["target_region"] if "target_region" in keys else "ALL"),
+            is_online_live=bool(r["is_online_live"] if "is_online_live" in keys else 0),
+            event_type=BriefingType(r["event_type"]),
+            event_date_str=r["event_date_str"],
+            booking_opens_at=datetime.fromisoformat(r["booking_opens_at"]) if r["booking_opens_at"] else None,
+            is_first_come=bool(r["is_first_come"]),
+            booking_url=r["booking_url"],
+            summary_3lines=json.loads(r["summary_3lines_json"] or "[]"),
+            so_what=r["so_what"] or "",
+            action_todos=json.loads(r["action_todos_json"] or "[]"),
+            pdf_attachment_path=r["pdf_attachment_path"],
+            credibility_score=r["credibility_score"],
+            source_name=r["source_name"] if "source_name" in keys else "공식 오피셜",
+            source_url=r["source_url"] if "source_url" in keys else None,
+            urgency=r["urgency"] if "urgency" in keys else "NORMAL",
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
+
     def save_event(self, event: AdmissionEvent) -> None:
         """Saves or updates an admission event."""
         with self._get_connection() as conn:
@@ -260,8 +298,8 @@ class AdmissionDatabase:
                     event_id, title, organizer, target_grade, target_region, is_online_live,
                     event_type, event_date_str, booking_opens_at, is_first_come, booking_url,
                     summary_3lines_json, so_what, action_todos_json, pdf_attachment_path,
-                    credibility_score, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?)
+                    credibility_score, source_name, source_url, urgency, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?)
                 ON CONFLICT(event_id) DO UPDATE SET
                     title = excluded.title,
                     organizer = excluded.organizer,
@@ -273,7 +311,11 @@ class AdmissionDatabase:
                     summary_3lines_json = excluded.summary_3lines_json,
                     so_what = excluded.so_what,
                     action_todos_json = excluded.action_todos_json,
-                    pdf_attachment_path = excluded.pdf_attachment_path
+                    pdf_attachment_path = excluded.pdf_attachment_path,
+                    credibility_score = excluded.credibility_score,
+                    source_name = excluded.source_name,
+                    source_url = excluded.source_url,
+                    urgency = excluded.urgency
                 """,
                 (
                     event.event_id,
@@ -292,6 +334,9 @@ class AdmissionDatabase:
                     json.dumps(event.action_todos, ensure_ascii=False),
                     event.pdf_attachment_path,
                     event.credibility_score,
+                    event.source_name,
+                    event.source_url,
+                    event.urgency,
                     event.created_at.isoformat(),
                 ),
             )
@@ -305,25 +350,7 @@ class AdmissionDatabase:
             row = cursor.fetchone()
             if not row:
                 return None
-            return AdmissionEvent(
-                event_id=row["event_id"],
-                title=row["title"],
-                organizer=row["organizer"],
-                target_grade=TargetGrade(row["target_grade"]),
-                target_region=TargetRegion(row["target_region"] if "target_region" in row.keys() else "ALL"),
-                is_online_live=bool(row["is_online_live"] if "is_online_live" in row.keys() else 0),
-                event_type=BriefingType(row["event_type"]),
-                event_date_str=row["event_date_str"],
-                booking_opens_at=datetime.fromisoformat(row["booking_opens_at"]) if row["booking_opens_at"] else None,
-                is_first_come=bool(row["is_first_come"]),
-                booking_url=row["booking_url"],
-                summary_3lines=json.loads(row["summary_3lines_json"] or "[]"),
-                so_what=row["so_what"] or "",
-                action_todos=json.loads(row["action_todos_json"] or "[]"),
-                pdf_attachment_path=row["pdf_attachment_path"],
-                credibility_score=row["credibility_score"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-            )
+            return self._row_to_event(row)
 
     def list_upcoming_ticketing(self) -> list[AdmissionEvent]:
         """Lists active ticketing events whose booking opens soon and is first-come."""
@@ -337,30 +364,7 @@ class AdmissionDatabase:
                 """
             )
             rows = cursor.fetchall()
-            events = []
-            for r in rows:
-                events.append(
-                    AdmissionEvent(
-                        event_id=r["event_id"],
-                        title=r["title"],
-                        organizer=r["organizer"],
-                        target_grade=TargetGrade(r["target_grade"]),
-                        target_region=TargetRegion(r["target_region"] if "target_region" in r.keys() else "ALL"),
-                        is_online_live=bool(r["is_online_live"] if "is_online_live" in r.keys() else 0),
-                        event_type=BriefingType(r["event_type"]),
-                        event_date_str=r["event_date_str"],
-                        booking_opens_at=datetime.fromisoformat(r["booking_opens_at"]) if r["booking_opens_at"] else None,
-                        is_first_come=bool(r["is_first_come"]),
-                        booking_url=r["booking_url"],
-                        summary_3lines=json.loads(r["summary_3lines_json"] or "[]"),
-                        so_what=r["so_what"] or "",
-                        action_todos=json.loads(r["action_todos_json"] or "[]"),
-                        pdf_attachment_path=r["pdf_attachment_path"],
-                        credibility_score=r["credibility_score"],
-                        created_at=datetime.fromisoformat(r["created_at"]),
-                    )
-                )
-            return events
+            return [self._row_to_event(r) for r in rows]
 
     def list_all_events(self) -> list[AdmissionEvent]:
         """Lists all registered admission events."""
@@ -368,28 +372,36 @@ class AdmissionDatabase:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM admission_events ORDER BY created_at DESC")
             rows = cursor.fetchall()
-            return [
-                AdmissionEvent(
-                    event_id=r["event_id"],
-                    title=r["title"],
-                    organizer=r["organizer"],
-                    target_grade=TargetGrade(r["target_grade"]),
-                    target_region=TargetRegion(r["target_region"] if "target_region" in r.keys() else "ALL"),
-                    is_online_live=bool(r["is_online_live"] if "is_online_live" in r.keys() else 0),
-                    event_type=BriefingType(r["event_type"]),
-                    event_date_str=r["event_date_str"],
-                    booking_opens_at=datetime.fromisoformat(r["booking_opens_at"]) if r["booking_opens_at"] else None,
-                    is_first_come=bool(r["is_first_come"]),
-                    booking_url=r["booking_url"],
-                    summary_3lines=json.loads(r["summary_3lines_json"] or "[]"),
-                    so_what=r["so_what"] or "",
-                    action_todos=json.loads(r["action_todos_json"] or "[]"),
-                    pdf_attachment_path=r["pdf_attachment_path"],
-                    credibility_score=r["credibility_score"],
-                    created_at=datetime.fromisoformat(r["created_at"]),
-                )
-                for r in rows
-            ]
+            return [self._row_to_event(r) for r in rows]
+
+    def get_hot_events(
+        self,
+        grade: TargetGrade = TargetGrade.ALL,
+        region: TargetRegion = TargetRegion.ALL,
+        limit: int = 3,
+    ) -> list[AdmissionEvent]:
+        """Returns top N urgent or upcoming admission events matching grade & region."""
+        all_events = self.list_all_events()
+        matched = []
+        for ev in all_events:
+            grade_match = (grade == TargetGrade.ALL) or (ev.target_grade == TargetGrade.ALL) or (ev.target_grade == grade)
+            if not grade_match:
+                continue
+            if region == TargetRegion.ALL:
+                region_match = True
+            elif region == TargetRegion.ONLINE:
+                region_match = ev.is_online_live or (ev.target_region == TargetRegion.ONLINE)
+            else:
+                region_match = ev.is_online_live or (ev.target_region == TargetRegion.ALL) or (ev.target_region == region)
+            if region_match:
+                matched.append(ev)
+
+        def sort_key(e: AdmissionEvent):
+            urgency_rank = 0 if e.urgency == "BREAKING" else (1 if e.urgency == "HIGH" else 2)
+            return (urgency_rank, -e.credibility_score)
+
+        matched.sort(key=sort_key)
+        return matched[:limit]
 
     # --- Dispatch Log Methods ---
 

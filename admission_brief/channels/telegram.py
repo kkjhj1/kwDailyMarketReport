@@ -37,9 +37,10 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     type_title = briefing.briefing_type.title
     grade_badge = briefing.target_grade.badge
     region_badge = " 💻 [온라인]" if briefing.is_online_live else (f" {briefing.target_region.badge}" if briefing.target_region != TargetRegion.ALL else "")
+    urgency_badge = " 🚨 <b>[실시간 긴급 속보]</b>" if (briefing.urgency == "BREAKING" or briefing.briefing_type == BriefingType.BREAKING_NEWS) else ""
 
     lines = [
-        f"{icon} <b>[{html.escape(type_title)}]</b> {grade_badge}{region_badge}",
+        f"{icon} <b>[{html.escape(type_title)}]</b>{urgency_badge} {grade_badge}{region_badge}",
         f"🕒 기준: <code>{html.escape(briefing.as_of)}</code>",
         f"📌 <b>{html.escape(briefing.headline)}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -65,6 +66,14 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
         lines.append("<b>📋 이번 주 필수 행동 지침 (To-Do)</b>")
         for item in briefing.action_todos:
             lines.append(f"• {html.escape(item)}")
+        lines.append("")
+
+    # 4. Source Grounding (100% Official Verifiability)
+    if briefing.source_name:
+        if briefing.source_url and _is_valid_url(briefing.source_url):
+            lines.append(f"🏛 <b>공식 출처:</b> <a href=\"{html.escape(briefing.source_url)}\">{html.escape(briefing.source_name)}</a>")
+        else:
+            lines.append(f"🏛 <b>공식 출처:</b> {html.escape(briefing.source_name)}")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
@@ -114,10 +123,10 @@ class TelegramChannel:
         """Registers official command menu into Telegram app (left-side blue button)."""
         if commands is None:
             commands = [
-                {"command": "todo", "description": "📋 이번 주 우리 아이 필수 To-Do"},
-                {"command": "recap", "description": "📢 설명회 3줄 요약 모아보기"},
-                {"command": "grade", "description": "🎓 자녀 학년 변경"},
-                {"command": "region", "description": "📍 지역/온라인 설정"},
+                {"command": "todo", "description": "📋 이번 주 필수 To-Do"},
+                {"command": "hot", "description": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
+                {"command": "fact", "description": "💡 1분 입시 팩트체크 (So-What)"},
+                {"command": "settings", "description": "⚙️ 학년 및 관심지역 설정"},
                 {"command": "help", "description": "❓ 이용 도움말"},
             ]
         try:
