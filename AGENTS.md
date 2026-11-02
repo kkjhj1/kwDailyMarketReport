@@ -1,19 +1,22 @@
 # ============================================================
-# PROJECT CONSTITUTION: Market Brief Starter (시황 브리핑 & 관리 콘솔)
+# PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
 # Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
+# Version: 2.0 (Telegram 7 Golden Rules Edition)
 # ============================================================
 
-## 1. 프로젝트 개요 및 핵심 인프라
-- **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter`
-- **주요 파이프라인**:
-  - 일일 장전 시황 브리핑 (오전 06:30 KST 자동 실행)
-  - 긴급 변동성 브리핑 (장중 ±3% 이상 급등락 감지 시 발송)
-  - 웹 리포트 정적 페이지 퍼블리싱 (GitHub Pages: `https://kkjhj1.github.io/kwDailyMarketReport/`)
-  - 시황 발송 현황 관리자 콘솔 (`admin_server.py`)
+## 1. 프로젝트 개요 및 멀티봇 파이프라인
+- **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
+- **주요 파이프라인 및 구성 서비스**:
+  - **시황 브리핑 (`telegram_bot_runner.py`)**: 일일 장전 브리핑(오전 06:30 KST 자동 실행) 및 긴급 변동성 브리핑(장중 ±3% 이상 급등락 감지 시 발송)
+  - **트래블 패스파인더 (`travel_bot_runner.py`)**: 네이버 실시간 항공/숙소/예산 검증 및 6개월 특가 브리핑
+  - **입시 나침반 (`admission_bot_runner.py`)**: 주간 대입 일정 큐레이션 및 인터랙티브 상담
+  - **통합 포털 허브 (`portal_bot_runner.py`)**: 회원 등급(FREE/GREEN/RED/BLACK) 기반 구독 슬롯 제어 허브
+  - **웹 리포트 정적 페이지 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
+  - **시황 및 멀티봇 발송 현황 관리자 콘솔**: `admin_server.py`
 
 ## 2. 포트 및 개발 환경 가드 (전역 헌법 [DEV-PORT] 준수)
 - **기본 관리자 포트**: `8002` (환경변수 `ADMIN_PORT=8002` 참조)
-- **가용 포트 스마트 전환**: 
+- **가용 포트 스마트 전환**:
   - 관리자 콘솔(`admin_server.py`)은 독립 Single-Page 도구이므로 `find_available_port(8002)`를 통해 8002 포트 충돌 시 즉시 다음 가용 포트(8003, 8004...)로 안전 전환한다.
   - 포트가 전환될 경우 브라우저 접속을 위해 콘솔 및 터미널에 `[PORT FALLBACK]`과 함께 실제 열린 `http://127.0.0.1:<PORT>` URL을 반드시 명시한다.
 - **다중 프로젝트 포트 격리 규약**:
@@ -21,6 +24,21 @@
   - `market_brief_starter`: 8002
   - 향후 신규 프로젝트: 8003+
 
-## 3. 운영 안정성 원칙 (Zero-Breaking Policy)
-- GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
-- 텔레그램 발송 시 `SafeTelegramDispatcher`와 토큰 버킷 제한기(25 msg/s, 1.0s/chat)를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다.
+## 3. 텔레그램 봇 7대 실전 수칙 및 운영 안정성 (Mandatory Telegram Rules)
+- **[TG-01] 용량 상한 & 고정 슬림 템플릿**:
+  - 가시 텍스트(태그 제외) **1,800자 이내**, HTML 원문(`len`) **3,500자 이내**를 엄수한다(4,096자 절벽 및 임의 항목 삭제식 가변 축약 금지). 상세 표·설명은 웹 리포트 링크로 분리한다.
+- **[TG-02] Strict HTML Escape**:
+  - 모든 동적·외부 수집 문자열은 예외 없이 `html.escape()` 처리 후 주입하며, 텔레그램 허용 태그(`<b>`, `<i>`, `<code>`, `<pre>`, `<a href="...">`) 외 태그 사용을 금한다.
+- **[TG-03] 1행 1정보 & 인앱 웹(`360px`) 연동**:
+  - 모바일 3초 스캔이 가능하도록 `이모지 + 핵심명사 + 수치(Bold)` 단문으로 구성하고 장황한 괄호·원본 URL 노출을 금한다.
+  - 텔레그램에서 연결되는 웹 리포트는 `360px` 뷰포트 가로 오버플로우 제로(`minmax(0, 1fr)`, 터치 타깃 `44px` 이상)를 보장한다.
+- **[TG-04] 0.1초 콜백 응답(MUST) & `64-Byte` 규약**:
+  - 인라인 버튼 수신 즉시 `answerCallbackQuery`를 **무조건 선행 호출**하여 로딩 스피너를 제거한다.
+  - `callback_data`는 **64 bytes 이하 영문 축약 코드(`도메인:액션:ID`)**만 사용하며, 화면 수정은 `_safe_edit_or_send`(`message is not modified` 무시 및 폴백 포함)를 통하고 파괴적 액션(구독 해지 등)은 제자리 2단계 확인(`In-Place Confirm`)을 거친다.
+- **[TG-05] Safe Dispatcher (429 Rate Limit 방어)**:
+  - 다수 수신자 발송 시 단순 루프 직발송을 금하며, `SafeTelegramDispatcher`와 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) 및 지수 백오프 재시도를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다.
+- **[TG-06] 토큰 프리 `--demo` & 운영 자산 무오염**:
+  - 모든 봇 러너는 실제 토큰 없이 1초 내 콘솔 검증이 가능한 `--demo` 플래그를 제공해야 하며, 데모·테스트 실행 중 운영 DB(`*.sqlite3`) 및 배포 폴더(`reports/`)에 파일을 기록하지 않는다(`:memory:` 또는 `scratch/` 격리).
+- **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
+  - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
+  - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.

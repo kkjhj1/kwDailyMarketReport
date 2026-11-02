@@ -85,26 +85,24 @@ def format_telegram_briefing(
     web_report_url: str = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html",
     engine: Optional[FlightEngine] = None,
 ) -> str:
-    """Format rich Telegram message using strict HTML escaping, realistic fare bands, and <=4096 single-message guarantee."""
+    """Format mobile-optimized Telegram message with concise hierarchy and <=4096 single-message guarantee."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     is_live_mode = any(r.best_deal.is_live for r in recommendations[:3])
     if is_live_mode:
         header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 실시간 최저가 &amp; 예산 브리핑]</b>",
-            f"📅 기준 일시: {now_str} KST (🟢 네이버 항공권 실시간 연동)",
-            "📌 대상: 목~일 &amp; 금~월 (3박 4일 직항) · 유류할증료·제세공과금 포함 실측가",
-            "💡 <i>링크 접속 후 로딩 완료(3~5초) 시 상단 '인기항공편' 아래 '가격 낮은 순' 1위와 1원 단위 일치합니다.</i>",
+            "✈️ <b>[주말 해외여행 6개월 실시간 특가 브리핑]</b>",
+            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
+            "💡 <i>네이버 이동 후 3~5초 로딩 시 '가격 낮은 순' 1위와 일치</i>",
             "──────────────────",
-            "🔥 <b>이번 주 실시간 가격·가성비 BEST 추천 TOP 3</b>",
+            "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>",
         ]
     else:
         header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 특가 &amp; 실거래 예산 브리핑]</b>",
-            f"📅 기준 일시: {now_str} KST",
-            "📌 대상: 목~일 &amp; 금~월 (3박 4일) · 유류할증료·공항세 포함 주말 예상 밴드",
-            "💡 <i>공휴일·연말 할증이 반영된 시장가 범위이며, 실시간 잔여석은 아래 링크에서 즉시 확인됩니다.</i>",
+            "✈️ <b>[주말 해외여행 6개월 특가 브리핑]</b>",
+            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드",
+            "💡 <i>공휴일·성수기 할증 반영 시장가 · 실시간 잔여석 링크 확인</i>",
             "──────────────────",
-            "🔥 <b>이번 주 가격·가성비 BEST 추천 TOP 3</b>",
+            "🔥 <b>이번 주 가성비 BEST TOP 3</b>",
         ]
 
     def _build_body(include_banner_note: bool = True, include_monthly_airline: bool = True, monthly_limit: int = 6, top_limit: int = 3) -> str:
@@ -150,40 +148,44 @@ def format_telegram_briefing(
             safe_airline = html.escape(deal.airline)
 
             if deal.data_source == "LIVE_SSE":
-                fare_line = f"  • 실시간 직항 최저가: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} · {html.escape(deal.live_payment_note)})"
+                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · {html.escape(deal.live_payment_note)})"
             elif deal.data_source == "LIVE_PG":
-                fare_line = f"  • 최근 검색 최저가: <b>{html.escape(deal.exact_price_str)}</b> ({html.escape(deal.price_band_str)} · 직항 캐시)"
+                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({html.escape(deal.price_band_str)} · 직항 캐시)"
             else:
                 airline_disp_off = safe_airline if "직항" in safe_airline else f"{safe_airline} 직항"
-                fare_line = f"  • 예상 항공: <b>{html.escape(deal.price_band_str)}</b> ({airline_disp_off} · 유류세 포함)"
+                fare_line = f"  • 항공: <b>{html.escape(deal.price_band_str)}</b> ({airline_disp_off} · 유류세 포함)"
 
             share_1p = round_man(budget.estimated_for_two_krw / 2)
+            f_man, h_man, m_man, total_1p_man = reconcile_man_breakdown(
+                deal.price_min_krw, budget.hotel_total_krw, budget.meal_transit_total_krw
+            )
 
             sched_lines = [
                 f"\n<b>{i}. {html.escape(dest.name)} ({html.escape(dest.code)})</b> {season_icon}{deal_tag}",
                 f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)",
-                f"  • 출발: <b>{html.escape(deal.departure_time_slot)}</b>",
             ]
             if deal.data_source == "LIVE_SSE" and (deal.exact_ret_time or deal.next_day_arrival):
-                sched_lines.append(f"  • 귀국: {html.escape(deal.return_time_slot)}")
+                sched_lines.append(f"  • 운항: 🛫 {html.escape(deal.departure_time_slot)} / 🛬 {html.escape(deal.return_time_slot)}")
+            else:
+                sched_lines.append(f"  • 운항: 🛫 {html.escape(deal.departure_time_slot)}")
+
             sched_lines.append(fare_line)
             if include_banner_note and deal.popular_banner_note:
-                sched_lines.append(f"    └ 💡 <i>{html.escape(deal.popular_banner_note, quote=False)}</i>")
-            sched_lines.append(f"  • 추천 숙소: <b>{hotel_name_str}</b>{hotel_grade_str}")
-            f_man, h_man, m_man, total_1p_man = reconcile_man_breakdown(
-                deal.price_min_krw, budget.hotel_total_krw, budget.meal_transit_total_krw
-            )
-            lines.extend(sched_lines + [
-                f"    └ 3박 약 {h_man}만 원{hotel_feat_str}",
-                f"  • 1인 총예산: <b>약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
-                f"  • 2인 총예산: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1실 쉐어 · 1인당 약 {share_1p}만)",
-                f"  • 비자/팁: {html.escape(dest.visa_info)}{tip_str}",
+                sched_lines.append(f"    └ 💡 <i>네이버 상단 배너 대신 '가격 낮은 순' 1위 실측가</i>")
+
+            visa_short = dest.visa_info.split("(")[0].strip() if dest.visa_info else "무비자"
+            sched_lines.extend([
+                f"  • 숙소: <b>{hotel_name_str}</b>{hotel_grade_str} (3박 약 {h_man}만{hotel_feat_str})",
+                f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
+                f"    └ 2인 동행 시: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1인당 {share_1p}만)",
+                f"  • 참고: {html.escape(visa_short)}{tip_str}",
                 f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 추천 숙소]</a> · <a href="{safe_ai_url}">[🤖 AI 맞춤일정]</a>',
             ])
+            lines.extend(sched_lines)
 
         if monthly_limit > 0 and all_months:
             lines.append("\n──────────────────")
-            lines.append("📅 <b>월별 주말 특가 추천 일정 (한눈에 요약)</b>")
+            lines.append("📅 <b>월별 주말 최저가 (한눈에 요약)</b>")
             for m, c_dest, c_deal in monthly_picks[:monthly_limit]:
                 dep_short = c_deal.departure_date[5:].replace("-", ".")
                 m_short = f"{m[:4]}.{m[5:]}월"
@@ -196,7 +198,7 @@ def format_telegram_briefing(
         safe_web_url = html.escape(web_report_url, quote=True)
         lines.extend([
             "\n──────────────────",
-            f'🗂️ <b>큰글씨 월별 카드 &amp; 6개월 전체 특가 보기:</b>\n👉 <a href="{safe_web_url}">모바일·PC 상세 웹 리포트 바로 열기 (클릭)</a>',
+            f'🗂️ <b>모바일·PC 상세 웹 리포트:</b>\n👉 <a href="{safe_web_url}">월별 큰글씨 카드 &amp; 6개월 전체 비교표 열기</a>',
         ])
         return "\n".join(lines)
 
