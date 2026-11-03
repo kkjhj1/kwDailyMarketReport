@@ -20,7 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -45,6 +45,9 @@ MOBILE_UA = (
 MIN_VALID_FARE_KRW = 90_000
 CACHE_TTL_SECONDS = 1800  # 30 minutes fresh TTL
 STALE_FALLBACK_SECONDS = 43200  # 12 hours emergency stale fallback on network outage
+FAIL_CACHE_TTL_SECONDS = 60.0  # 60s circuit breaker during upstream outage
+MAX_COLLECTION_DEADLINE_SECONDS = 25.0  # Hard deadline for follower wait
+KST = timezone(timedelta(hours=9))
 
 IATA_AIRLINE_KO: dict[str, str] = {
     "7C": "제주항공",
@@ -85,6 +88,8 @@ IATA_AIRLINE_KO: dict[str, str] = {
 
 _CACHE_LOCK = threading.Lock()
 _MEM_CACHE: dict[tuple[str, int], tuple[float, list[FlightDeal]]] = {}
+_IN_FLIGHT: dict[tuple[str, int], concurrent.futures.Future] = {}
+_FAIL_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
 
 
 def _format_hhmm(raw: str) -> str:
@@ -516,12 +521,18 @@ class NaverFlightLiveClient:
         ref_date: Optional[date] = None,
         months_ahead: int = 6,
     ) -> list[FlightDeal]:
-        """Executes full 2-stage live Naver collection with singleflight memory+disk caching
-        and Post-SSE Re-Rank protection.
+        """Executes full 2-stage live Naver collection with thread-safe Future Single-Flight,
+        narrowed cache locking, KST baseline date, and Post-SSE Re-Rank protection.
         """
-        eff_ref = (ref_date or date.today()).isoformat()
+        if ref_date is None:
+            eff_ref = datetime.now(KST).date().isoformat()
+        else:
+            eff_ref = ref_date.isoformat()
         mem_key = (eff_ref, months_ahead)
         disk_key = f"{eff_ref}:{months_ahead}:{','.join(sorted(destinations.keys()))}"
+
+        is_leader = False
+        fut: concurrent.futures.Future[list[FlightDeal]]
 
         with _CACHE_LOCK:
             cached = _MEM_CACHE.get(mem_key)
@@ -533,24 +544,98 @@ class NaverFlightLiveClient:
                 _MEM_CACHE[mem_key] = (time.time(), disk_fresh)
                 return list(disk_fresh)
 
+            # Circuit breaker: check failure cache (60s)
+            fail_entry = _FAIL_CACHE.get(mem_key)
+            if fail_entry and (time.time() - fail_entry[0]) <= FAIL_CACHE_TTL_SECONDS:
+                logger.info("Circuit breaker active for %s (reason: %s); attempting stale fallback.", mem_key, fail_entry[1])
+                disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
+                if disk_stale:
+                    return list(disk_stale)
+                if cached:
+                    return list(cached[1])
+                return []
+
+            # Single-Flight Leader vs Follower assignment
+            if mem_key in _IN_FLIGHT:
+                fut = _IN_FLIGHT[mem_key]
+                is_leader = False
+            else:
+                fut = concurrent.futures.Future()
+                _IN_FLIGHT[mem_key] = fut
+                is_leader = True
+
+        # Follower execution path: wait for Leader's Future outside the lock
+        if not is_leader:
             try:
-                deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
+                res_deals = fut.result(timeout=MAX_COLLECTION_DEADLINE_SECONDS)
+                if res_deals:
+                    return list(res_deals)
             except Exception as exc:
-                logger.warning("Live Naver collection failed (%s); checking emergency stale cache.", exc)
-                deals = []
-
-            if deals:
-                _MEM_CACHE[mem_key] = (time.time(), deals)
-                self._save_disk_cache(disk_key, deals)
-                return list(deals)
-
+                logger.warning(
+                    "SingleFlight follower wait failed or timed out (%s); falling back to SWR stale cache.",
+                    exc,
+                )
+            with _CACHE_LOCK:
+                cached = _MEM_CACHE.get(mem_key)
+                if cached:
+                    return list(cached[1])
             disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
             if disk_stale:
-                logger.warning("Using emergency stale live cache (<12h) due to upstream outage.")
-                _MEM_CACHE[mem_key] = (time.time(), disk_stale)
                 return list(disk_stale)
-
             return []
+
+        # Leader execution path: perform network I/O strictly outside the lock
+        deals: list[FlightDeal] = []
+        try:
+            deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
+            if deals:
+                with _CACHE_LOCK:
+                    _MEM_CACHE[mem_key] = (time.time(), deals)
+                    self._save_disk_cache(disk_key, deals)
+                    _FAIL_CACHE.pop(mem_key, None)
+                fut.set_result(deals)
+                return list(deals)
+            else:
+                with _CACHE_LOCK:
+                    _FAIL_CACHE[mem_key] = (time.time(), "empty_deals_collected")
+                fut.set_result([])
+        except Exception as exc:
+            logger.warning(
+                "Live Naver collection failed (%s); recording fail cooldown & checking emergency stale cache.",
+                exc,
+            )
+            with _CACHE_LOCK:
+                _FAIL_CACHE[mem_key] = (time.time(), str(exc))
+            fut.set_exception(exc)
+        finally:
+            with _CACHE_LOCK:
+                _IN_FLIGHT.pop(mem_key, None)
+
+        # Fallback to stale cache if leader failed or yielded empty
+        with _CACHE_LOCK:
+            cached = _MEM_CACHE.get(mem_key)
+            if cached:
+                return list(cached[1])
+        disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
+        if disk_stale:
+            logger.warning("Using emergency stale live cache (<12h) due to upstream outage.")
+            with _CACHE_LOCK:
+                _MEM_CACHE[mem_key] = (time.time(), disk_stale)
+            return list(disk_stale)
+
+        return []
+
+    @classmethod
+    def invalidate_cache(cls, ref_date: Optional[date] = None, months_ahead: int = 6) -> None:
+        """Invalidates memory cache key to force fresh scrape on next request."""
+        if ref_date is None:
+            eff_ref = datetime.now(KST).date().isoformat()
+        else:
+            eff_ref = ref_date.isoformat()
+        mem_key = (eff_ref, months_ahead)
+        with _CACHE_LOCK:
+            _MEM_CACHE.pop(mem_key, None)
+
 
     def _collect_live_deals_uncached(
         self,

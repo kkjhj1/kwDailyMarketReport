@@ -134,8 +134,8 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         m_home = self.router.handle_interaction("menu_bot", uid, full_name="정메뉴", text="/start")
         self.assertEqual(m_home["result_code"], "MENU_HOME")
         self.assertEqual(m_home["user_profile"]["used_slots"], 0)
-        self.assertIn("시황 브리핑봇", m_home["reply_html"])
-        self.assertIn("여행 특가봇", m_home["reply_html"])
+        self.assertIn("시황", m_home["reply_html"])
+        self.assertIn("여행", m_home["reply_html"])
 
         # Select travel_bot detail inside menu_bot
         m_detail = self.router.handle_interaction("menu_bot", uid, callback_data="menu:bot:travel_bot")

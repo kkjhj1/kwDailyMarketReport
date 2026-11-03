@@ -293,3 +293,21 @@ class TelegramChannel:
         if not res.get("ok"):
             raise RuntimeError("Telegram sendDocument failed")
         return str(res["result"]["message_id"])
+
+    def answer_callback(
+        self,
+        callback_query_id: str,
+        text: str = "",
+        show_alert: bool = False,
+    ) -> bool:
+        """Acknowledges callback query immediately with optional toast notification."""
+        body: dict = {
+            "callback_query_id": str(callback_query_id).strip(),
+            "text": text,
+            "show_alert": show_alert,
+        }
+        try:
+            res = self._api_call("answerCallbackQuery", body)
+            return bool(res.get("ok"))
+        except Exception:
+            return False

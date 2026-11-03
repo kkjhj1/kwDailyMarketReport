@@ -111,9 +111,9 @@ class PortalDatabase:
                 INSERT OR IGNORE INTO bots (bot_id, bot_type, name, category, icon_emoji, is_active, sort_order)
                 VALUES
                     ('menu_bot', 'MENU', '통합 안내 메뉴봇', '가입·포털', '🧭', 1, 0),
-                    ('brief_bot', 'INFO', '시황 브리핑봇', '금융·시황', '📈', 1, 1),
-                    ('travel_bot', 'INFO', '여행 특가봇', '여행·라이프', '✈️', 1, 2),
-                    ('admission_bot', 'INFO', '입시 교육봇', '교육·입시', '🎓', 1, 3);
+                    ('brief_bot', 'INFO', '시황', '금융·시황', '📈', 1, 1),
+                    ('travel_bot', 'INFO', '여행', '여행·라이프', '✈️', 1, 2),
+                    ('admission_bot', 'INFO', '입시', '교육·입시', '🎓', 1, 3);
             """)
             conn.commit()
 

@@ -16,7 +16,10 @@ class AdminApiTests(unittest.TestCase):
         self.client = TestClient(self.app)
 
     def tearDown(self):
-        self.tmp_dir.cleanup()
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
 
     def test_dashboard_html_rendering(self):
         response = self.client.get("/")
@@ -160,6 +163,45 @@ class AdminApiTests(unittest.TestCase):
                 "/api/platform/upgrade-requests/999/approve?admin_token=secret_token_123"
             )
             self.assertEqual(res_ok_query.status_code, 404)
+
+    def test_sync_telegram_names_guard_and_success(self):
+        import os
+        from unittest.mock import patch
+
+        # 1. Pre-seed a user with fallback name
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(
+            telegram_user_id="77777",
+            full_name="수신자_7777",
+            tier="WHITE"
+        )
+        # Ensure brief_bot has a token for fallback path
+        with sub_engine.db._connect() as conn:
+            conn.execute(
+                "UPDATE bots SET token = ? WHERE bot_id = ?",
+                ("bot_fallback_token_999", "brief_bot")
+            )
+
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            # Unauthorized call without token returns 401
+            res = self.client.post("/api/platform/users/sync-telegram-names")
+            self.assertEqual(res.status_code, 401)
+
+            # Authorized call with mock getChat and token fallback path (empty TELEGRAM_BOT_TOKEN)
+            with patch("admin_server.fetch_telegram_profile_name", return_value="홍길동"):
+                with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": ""}):
+                    res_ok = self.client.post(
+                        "/api/platform/users/sync-telegram-names",
+                        headers={"X-Admin-Token": "secret_token_123"}
+                    )
+                    self.assertEqual(res_ok.status_code, 200)
+                    data = res_ok.json()
+                    self.assertTrue(data.get("success"))
+                    self.assertGreaterEqual(data.get("synced_count", 0), 1)
+
+                    # Verify database actual persistence
+                    profile = sub_engine.get_user_profile("77777")
+                    self.assertEqual(profile.get("full_name"), "홍길동")
 
 
 if __name__ == "__main__":

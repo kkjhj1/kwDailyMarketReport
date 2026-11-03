@@ -10,4 +10,6 @@ services:
         value: 3.11.9
       - key: ADMIN_PORT
         value: 8002
+      - key: ENABLE_BOT_WORKERS
+        value: "true"
 

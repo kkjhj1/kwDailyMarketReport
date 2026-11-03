@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -23,32 +24,35 @@ class TelegramRateLimiter:
     - Global broadcast: <= 25 msgs/sec
     - Per individual chat: >= 1.0 sec interval
     - Per group chat: <= 20 msgs/min
+    Thread-safe with internal re-entrant/lock defense.
     """
 
     def __init__(self, max_global_rate: float = 25.0, min_chat_interval: float = 1.0):
         self.max_global_rate = max_global_rate
         self.min_global_interval = 1.0 / max_global_rate if max_global_rate > 0 else 0.04
         self.min_chat_interval = min_chat_interval
+        self._lock = threading.Lock()
         self._last_global_send: float = 0.0
         self._last_chat_send: dict[str, float] = {}
 
     def wait_before_send(self, chat_id: str) -> None:
-        now = time.time()
-        # 1. Global throttle
-        elapsed_global = now - self._last_global_send
-        if elapsed_global < self.min_global_interval:
-            time.sleep(self.min_global_interval - elapsed_global)
+        with self._lock:
+            now = time.time()
+            # 1. Global throttle
+            elapsed_global = now - self._last_global_send
+            if elapsed_global < self.min_global_interval:
+                time.sleep(self.min_global_interval - elapsed_global)
 
-        # 2. Per-chat throttle
-        now = time.time()
-        last_chat = self._last_chat_send.get(chat_id, 0.0)
-        elapsed_chat = now - last_chat
-        if elapsed_chat < self.min_chat_interval:
-            time.sleep(self.min_chat_interval - elapsed_chat)
+            # 2. Per-chat throttle
+            now = time.time()
+            last_chat = self._last_chat_send.get(chat_id, 0.0)
+            elapsed_chat = now - last_chat
+            if elapsed_chat < self.min_chat_interval:
+                time.sleep(self.min_chat_interval - elapsed_chat)
 
-        final_now = time.time()
-        self._last_global_send = final_now
-        self._last_chat_send[chat_id] = final_now
+            final_now = time.time()
+            self._last_global_send = final_now
+            self._last_chat_send[chat_id] = final_now
 
 
 class SafeTelegramDispatcher:
@@ -113,8 +117,6 @@ class SafeTelegramDispatcher:
                 return "FAILED", None, err_str
 
         return "FAILED", None, "Max retries exceeded"
-
-
 
     def send_text_to_recipient(
         self,

@@ -287,6 +287,7 @@ def create_admin_app(
 
     app.state.db = db
     app.state.engine = sub_engine
+    app.state.sub_engine = sub_engine
     app.state.router = router
     app.state.bot_manager = bot_manager
 
@@ -613,6 +614,32 @@ def create_admin_app(
     def remove_platform_user(user_id: str, request: Request):
         verify_admin_token(request)
         return {"success": sub_engine.delete_user(user_id)}
+
+    @app.post("/api/platform/users/sync-telegram-names")
+    def sync_telegram_profile_names(request: Request):
+        verify_admin_token(request)
+        token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+        if not token:
+            brief_bot = sub_engine.get_bot("brief_bot")
+            if brief_bot and getattr(brief_bot, "token", None):
+                token = brief_bot.token
+        if not token:
+            raise HTTPException(status_code=400, detail="텔레그램 봇 토큰이 설정되지 않았습니다.")
+
+        users = sub_engine.list_users_with_subscriptions()
+        synced_count = 0
+        for u in users:
+            uid = str(u.get("telegram_user_id") or "").strip()
+            if not uid:
+                continue
+            name = fetch_telegram_profile_name(token, uid)
+            if name and not name.startswith("수신자_") and name != u.get("full_name"):
+                try:
+                    sub_engine.update_user_details(telegram_user_id=uid, full_name=name)
+                    synced_count += 1
+                except KeyError:
+                    continue
+        return {"success": True, "synced_count": synced_count}
 
     @app.get("/api/platform/upgrade-requests")
     def list_platform_upgrade_requests(status: str | None = None):
@@ -1441,5 +1468,7 @@ if __name__ == "__main__":
 
     host = os.environ.get("ADMIN_HOST", default_host)
     print(f"🚀 [Multi-Bot Subscription Admin Console] Local: http://127.0.0.1:{port} | Host: http://{host}:{port}")
-    app = create_admin_app(enable_bot_workers=True)
+    default_workers = "true" if is_cloud else "false"
+    enable_workers = os.environ.get("ENABLE_BOT_WORKERS", default_workers).lower() in ("true", "1")
+    app = create_admin_app(enable_bot_workers=enable_workers)
     uvicorn.run(app, host=host, port=port)

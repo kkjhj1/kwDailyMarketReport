@@ -85,8 +85,14 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
         """Test nav:main, nav:subs, nav:tiers, nav:help, support:home."""
         callbacks = [
             ("nav:main", "통합 인텔리전스 허브"),
+            ("menu:home", "통합 인텔리전스 허브"),
             ("nav:subs", "구독 센터"),
+            ("menu:my_subs", "구독 센터"),
             ("nav:tiers", "등급별 혜택"),
+            ("menu:tiers", "등급별 혜택"),
+            ("cat:home", "전체 카테고리 탐색"),
+            ("menu:cats", "전체 카테고리 탐색"),
+            ("menu:categories", "전체 카테고리 탐색"),
             ("nav:help", "이용 가이드"),
             ("support:home", "고객센터 & 관리자 문의"),
             ("support:upgrade_menu", "등급 업그레이드 신청"),
@@ -303,6 +309,88 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             USER_STATES.pop(self.user_id, None)
 
         self.assertNotIn(self.user_id, USER_STATES, "Inquiry state must be cleared on menu tap")
+
+    def test_legacy_menu_bot_compatibility_callbacks(self):
+        """Test menu:bot, menu:sub, menu:unsub, menu:swap, and invalid bot fallback."""
+        # 1. menu:bot:travel_bot renders category view
+        self.client.reset_mock()
+        cq_bot = {
+            "id": "cq_mbot1",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 150, "chat": {"id": self.chat_id}},
+            "data": "menu:bot:travel_bot",
+        }
+        handle_callback_query(cq_bot, self.db, self.client)
+        self.client.edit_message_text.assert_called_once()
+        self.assertIn("라이프 / 여가", self.client.edit_message_text.call_args[0][2])
+
+        # 2. menu:bot:unknown falls back to main menu
+        self.client.reset_mock()
+        cq_unknown = {
+            "id": "cq_mbot2",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 151, "chat": {"id": self.chat_id}},
+            "data": "menu:bot:nonexistent_bot",
+        }
+        handle_callback_query(cq_unknown, self.db, self.client)
+        self.client.edit_message_text.assert_called_once()
+        self.assertIn("통합 인텔리전스 허브", self.client.edit_message_text.call_args[0][2])
+
+        # 3. menu:sub:travel_bot subscribes successfully
+        self.client.reset_mock()
+        cq_sub = {
+            "id": "cq_msub1",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 152, "chat": {"id": self.chat_id}},
+            "data": "menu:sub:travel_bot",
+        }
+        handle_callback_query(cq_sub, self.db, self.client)
+        subs = self.db.get_user_subscriptions(self.user_id)
+        self.assertTrue(subs[BotServiceType.TRAVEL])
+
+        # 4. menu:unsub:travel_bot unsubscribes cleanly
+        self.client.reset_mock()
+        cq_unsub = {
+            "id": "cq_munsub1",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 153, "chat": {"id": self.chat_id}},
+            "data": "menu:unsub:travel_bot",
+        }
+        handle_callback_query(cq_unsub, self.db, self.client)
+        subs = self.db.get_user_subscriptions(self.user_id)
+        self.assertFalse(subs[BotServiceType.TRAVEL])
+
+        # 5. menu:swap:brief_bot:travel_bot swaps subscriptions
+        self.db.subscribe(self.user_id, BotServiceType.BRIEF)
+        self.client.reset_mock()
+        cq_swap = {
+            "id": "cq_mswap1",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 154, "chat": {"id": self.chat_id}},
+            "data": "menu:swap:brief_bot:travel_bot",
+        }
+        handle_callback_query(cq_swap, self.db, self.client)
+        subs = self.db.get_user_subscriptions(self.user_id)
+        self.assertFalse(subs[BotServiceType.BRIEF])
+        self.assertTrue(subs[BotServiceType.TRAVEL])
+
+    def test_multi_bot_router_menu_home(self):
+        """Test MultiBotInteractionRouter renders catalog on menu:home callback."""
+        from market_brief.storage.db import MarketBriefDatabase
+        from market_brief.subscription_engine import SubscriptionEngine
+        from market_brief.multi_bot_manager import MultiBotInteractionRouter
+        mb_db_path = Path(self.tmp_dir.name) / "test_mb.sqlite3"
+        mb_db = MarketBriefDatabase(db_path=str(mb_db_path))
+        engine = SubscriptionEngine(mb_db)
+        router = MultiBotInteractionRouter(engine)
+
+        out = router.handle_interaction(
+            bot_id="menu_bot",
+            telegram_user_id=str(self.chat_id),
+            callback_data="menu:home"
+        )
+        self.assertEqual(out["result_code"], "MENU_HOME")
+        self.assertIn("구독 가능한 정보봇 목록", out["reply_html"])
 
 
 class ExhaustiveAdmissionBotMenuTests(unittest.TestCase):

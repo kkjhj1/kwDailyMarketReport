@@ -161,113 +161,36 @@ class UpgradeRequestsWorkflowTests(unittest.TestCase):
         user_in_db = self.sub_engine.get_user_profile(str(self.user_id))
         self.assertEqual(user_in_db["tier"], "WHITE")
 
-    def test_telegram_inline_admin_approval_callback(self):
-        """Telegram inline admin approval callback (adm:appr:{id}:{tier}) approves request and notifies user."""
+    def test_legacy_adm_callback_redirects_to_web_console(self):
+        """Legacy inline admin buttons (adm:appr / adm:rejc) direct admins to the Web Console without executing."""
         req_id, _ = self.portal_db.request_tier_upgrade(self.user_id, "GREEN")
 
-        admin_user_id = 99999999
-        with patch.dict(
-            "os.environ",
-            {
-                "PORTAL_ADMIN_USER_IDS": str(admin_user_id),
-                "PORTAL_TELEGRAM_BOT_TOKEN": "mock_portal_bot_token",
-            },
-        ), patch("portal_hub.telegram.TelegramPortalClient.send_message") as mock_portal_send:
-            cq = {
-                "id": "cq_admin_appr",
-                "from": {"id": admin_user_id, "first_name": "관리자", "username": "admin_kw"},
-                "message": {"message_id": 456, "chat": {"id": admin_user_id}},
-                "data": f"adm:appr:{req_id}:GREEN",
-            }
-            handle_callback_query(cq, self.portal_db, self.tg_client)
+        cq = {
+            "id": "cq_admin_legacy",
+            "from": {"id": self.user_id, "first_name": "관리자"},
+            "message": {"message_id": 456, "chat": {"id": self.user_id}},
+            "data": f"adm:appr:{req_id}:GREEN",
+        }
+        handle_callback_query(cq, self.portal_db, self.tg_client)
 
-            # 1. User tier is upgraded to GREEN
-            user_in_db = self.sub_engine.get_user_profile(str(self.user_id))
-            self.assertEqual(user_in_db["tier"], "GREEN")
-
-            # 2. Database request is marked APPROVED
-            pending = self.portal_db.get_pending_upgrade_requests()
-            self.assertEqual(len(pending), 0)
-
-            # 3. Notification message sent to user via engine
-            mock_portal_send.assert_called_with(
-                str(self.user_id),
-                unittest.mock.ANY,
-                reply_markup=unittest.mock.ANY,
-            )
-            user_msg = mock_portal_send.call_args[0][1]
-            self.assertIn("GREEN", user_msg)
-            self.assertIn("승인", user_msg)
-
-    def test_unauthorized_telegram_admin_attempt_blocked(self):
-        """Regular user attempting to forge admin callback (adm:appr) is strictly rejected."""
-        req_id, _ = self.portal_db.request_tier_upgrade(self.user_id, "BLACK")
-
-        normal_user_id = self.user_id  # 7820975792
-        with patch.dict(
-            "os.environ",
-            {
-                "PORTAL_ADMIN_USER_IDS": "99999999",
-                "PORTAL_ADMIN_CHAT_ID": "99999999",
-                "PORTAL_TELEGRAM_CHAT_ID": "99999999",
-            },
-        ):
-            cq = {
-                "id": "cq_fake_admin",
-                "from": {"id": normal_user_id, "first_name": "일반인", "username": "hacker"},
-                "message": {"message_id": 999, "chat": {"id": normal_user_id}},
-                "data": f"adm:appr:{req_id}:BLACK",
-            }
-            handle_callback_query(cq, self.portal_db, self.tg_client)
-
-        # 1. Verification alert sent to client
+        # 1. Shows alert directing to web console
         self.tg_client.answer_callback_query.assert_called_with(
-            "cq_fake_admin", "⚠️ 관리자 권한이 없습니다.", show_alert=True
+            "cq_admin_legacy", "등급 업그레이드 심사는 관리자 웹 콘솔(http://127.0.0.1:8002)에서 처리됩니다.", show_alert=True
         )
 
-        # 2. User tier is NOT upgraded (remains WHITE)
-        user_in_db = self.sub_engine.get_user_profile(str(self.user_id))
-        self.assertEqual(user_in_db["tier"], "WHITE")
+        # 2. Replaces message with info text and removes inline keyboard
+        self.tg_client.edit_message_text.assert_called_once()
+        msg_text = self.tg_client.edit_message_text.call_args[0][2]
+        self.assertIn("관리자 웹 콘솔", msg_text)
 
-        # 3. Request remains PENDING
+        # 3. Request remains untouched (PENDING in DB)
         pending = self.portal_db.get_pending_upgrade_requests()
         self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["status"], "PENDING")
 
-    def test_telegram_two_step_rejection_workflow(self):
-        """Telegram rejection follows 2-step in-place confirmation (rejc -> rejx)."""
-        req_id, _ = self.portal_db.request_tier_upgrade(self.user_id, "RED")
-
-        admin_user_id = 99999999
-        with patch.dict("os.environ", {"PORTAL_ADMIN_USER_IDS": str(admin_user_id)}):
-            # Step 1: Click adm:rejc -> Prompts confirmation in-place
-            cq1 = {
-                "id": "cq_rejc_step1",
-                "from": {"id": admin_user_id, "first_name": "관리자"},
-                "message": {"message_id": 457, "chat": {"id": admin_user_id}},
-                "data": f"adm:rejc:{req_id}:RED",
-            }
-            handle_callback_query(cq1, self.portal_db, self.tg_client)
-
-            # Verification: still PENDING
-            pending1 = self.portal_db.get_pending_upgrade_requests()
-            self.assertEqual(len(pending1), 1)
-
-            # Step 2: Confirm rejection via adm:rejx
-            cq2 = {
-                "id": "cq_rejc_step2",
-                "from": {"id": admin_user_id, "first_name": "관리자"},
-                "message": {"message_id": 457, "chat": {"id": admin_user_id}},
-                "data": f"adm:rejx:{req_id}:RED",
-            }
-            handle_callback_query(cq2, self.portal_db, self.tg_client)
-
-        # 1. User tier remains WHITE
+        # 4. User tier remains WHITE
         user_in_db = self.sub_engine.get_user_profile(str(self.user_id))
         self.assertEqual(user_in_db["tier"], "WHITE")
-
-        # 2. Database request is marked REJECTED
-        pending2 = self.portal_db.get_pending_upgrade_requests()
-        self.assertEqual(len(pending2), 0)
 
     def test_double_approval_and_rejection_protection(self):
         """Prevent double approval or reviewing already processed requests."""

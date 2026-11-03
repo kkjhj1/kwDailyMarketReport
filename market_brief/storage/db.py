@@ -354,7 +354,7 @@ class MarketBriefDatabase:
                 (
                     "brief_bot",
                     BotType.INFO.value,
-                    "시황 브리핑봇",
+                    "시황",
                     "KwDailyMarketInfo_bot",
                     env_brief_token,
                     "금융·시황",
@@ -367,7 +367,7 @@ class MarketBriefDatabase:
                 (
                     "travel_bot",
                     BotType.INFO.value,
-                    "여행 특가봇",
+                    "여행",
                     "KwTravelLowPrice_bot",
                     env_travel_token,
                     "여행·라이프",
@@ -380,7 +380,7 @@ class MarketBriefDatabase:
                 (
                     "admission_bot",
                     BotType.INFO.value,
-                    "입시 교육봇",
+                    "입시",
                     "KwEduInfo_bot",
                     env_edu_token,
                     "입시·교육",
@@ -418,7 +418,7 @@ class MarketBriefDatabase:
                     db.execute(
                         """INSERT INTO bots
                            (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description, topic_code, is_active, sort_order)
-                           VALUES ('admission_bot', 'INFO', '입시 교육봇', 'KwEduInfo_bot', ?, '입시·교육', '🎓',
+                           VALUES ('admission_bot', 'INFO', '입시', 'KwEduInfo_bot', ?, '입시·교육', '🎓',
                                    '학년별 주간 대입·고입 큐레이션 및 학부모 설명회 티켓팅 오픈 알림을 제공합니다.', 'EDUCATION', 1, 3)""",
                         (env_edu_token,),
                     )

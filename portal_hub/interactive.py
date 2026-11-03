@@ -531,20 +531,101 @@ def handle_callback_query(
         first_name=from_user.get("first_name"),
     )
 
-    # 2. Main Navigation
-    if data == "nav:main":
+    # 2. Main Navigation (with full backwards compatibility for menu:home, menu:my_subs, menu:tiers)
+    if data in ("nav:main", "menu:home", "home"):
         text, markup = render_main_menu(user)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
-    if data == "nav:subs":
+    if data in ("nav:subs", "menu:my_subs"):
         subs = db.get_user_subscriptions(user_id)
         text, markup = render_subscription_view(user, subs)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
-    if data == "nav:tiers":
+    if data in ("nav:tiers", "menu:tiers"):
         text, markup = render_tier_benefits_view(user)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    if data in ("cat:home", "menu:cats", "menu:categories"):
+        text, markup = render_category_home_view()
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # Compatibility: menu:bot:<bot_id>
+    if data.startswith("menu:bot:"):
+        bot_raw = data.split(":", 2)[2]
+        try:
+            bot_type = BotServiceType(bot_raw)
+            category = bot_type.category
+            subs = db.get_user_subscriptions(user_id)
+            text, markup = render_category_view(category, user, subs)
+        except ValueError:
+            text, markup = render_main_menu(user)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # Compatibility: menu:sub:<bot_id> & info:sub:<bot_id>
+    if data.startswith("menu:sub:") or data.startswith("info:sub:"):
+        bot_raw = data.split(":", 2)[2]
+        try:
+            bot_type = BotServiceType(bot_raw)
+        except ValueError:
+            text, markup = render_main_menu(user)
+            _safe_edit_or_send(client, chat_id, message_id, text, markup)
+            return
+
+        ok, msg = db.subscribe(user_id, bot_type)
+        if not ok:
+            quota_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
+                        {"text": "📋 내 구독 관리", "callback_data": "nav:subs"},
+                    ]
+                ]
+            }
+            client.send_message(chat_id, msg, reply_markup=quota_markup)
+            return
+
+        subs = db.get_user_subscriptions(user_id)
+        text, markup = render_category_view(bot_type.category, user, subs)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # Compatibility: menu:unsub:<bot_id> & info:unsub:<bot_id>
+    if data.startswith("menu:unsub:") or data.startswith("info:unsub:"):
+        bot_raw = data.split(":", 2)[2]
+        try:
+            bot_type = BotServiceType(bot_raw)
+        except ValueError:
+            text, markup = render_main_menu(user)
+            _safe_edit_or_send(client, chat_id, message_id, text, markup)
+            return
+
+        ok, msg = db.unsubscribe(user_id, bot_type)
+        subs = db.get_user_subscriptions(user_id)
+        text, markup = render_category_view(bot_type.category, user, subs)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # Compatibility: menu:swap:<cancel_id>:<new_id> & info:swap:<cancel_id>:<new_id>
+    if data.startswith("menu:swap:") or data.startswith("info:swap:"):
+        parts = data.split(":")
+        if len(parts) == 4:
+            cancel_raw, new_raw = parts[2], parts[3]
+            try:
+                cancel_type = BotServiceType(cancel_raw)
+                new_type = BotServiceType(new_raw)
+                db.unsubscribe(user_id, cancel_type)
+                sub_ok, _ = db.subscribe(user_id, new_type)
+                if not sub_ok:
+                    db.subscribe(user_id, cancel_type)  # rollback if new sub failed
+            except ValueError:
+                pass
+        subs = db.get_user_subscriptions(user_id)
+        text, markup = render_subscription_view(user, subs)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
@@ -593,39 +674,7 @@ def handle_callback_query(
             client.answer_callback_query(cq_id, "신청 처리 중 오류가 발생했습니다.", show_alert=True)
             return
 
-        # 2. Forward notification to admin chat with inline 1-click approve/reject buttons
-        # Dedicated admin chat only; never fallback to comma-separated broadcast list
-        admin_chat = os.environ.get("PORTAL_ADMIN_CHAT_ID") or os.environ.get("PORTAL_TELEGRAM_CHAT_ID")
-        if admin_chat:
-            u_name = html.escape(user.first_name or user.username or "회원")
-            u_handle = f"@{html.escape(user.username)}" if user.username else "없음"
-            safe_curr_tier = html.escape(user.tier.display_name)
-            safe_req_tier = html.escape(req_tier)
-            admin_msg = (
-                f"🔔 <b>[등급 업그레이드 신청 접수]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 신청자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
-                f"• 핸들: {u_handle}\n"
-                f"• 현재 등급: {safe_curr_tier} ➔ 희망: <b>{safe_req_tier}</b>\n"
-                f"• 접수 번호: <code>#{req_id}</code>\n"
-                f"• 접수 시각: <code>{now_str}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"아래 버튼 또는 관리자 콘솔 웹에서 즉시 승인/반려할 수 있습니다."
-            )
-            admin_kb = {
-                "inline_keyboard": [
-                    [
-                        {"text": f"✅ #{req_id} {safe_req_tier} 승인", "callback_data": f"adm:appr:{req_id}:{req_tier}"},
-                        {"text": f"❌ #{req_id} 반려", "callback_data": f"adm:rejc:{req_id}:{req_tier}"},
-                    ]
-                ]
-            }
-            try:
-                client.send_message(admin_chat, admin_msg, reply_markup=admin_kb)
-            except Exception as e:
-                logger.warning("Failed to notify admin of tier request: %s", e)
-
-        # 3. Reply to user with clean success notice
+        # 2. Reply to user with clean in-place success notice (No admin spam sent to chat)
         done_text = (
             f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -646,100 +695,21 @@ def handle_callback_query(
         _safe_edit_or_send(client, chat_id, message_id, done_text, done_markup)
         return
 
-    # Admin 1-Click Inline Approve / Reject Callbacks from Telegram (Strict Admin Authorization)
+    # Legacy Telegram admin button handler: defuse and direct to Admin Web Console
     if data.startswith("adm:"):
-        if not _is_portal_admin(user_id, chat_id):
-            client.answer_callback_query(cq_id, "⚠️ 관리자 권한이 없습니다.", show_alert=True)
-            return
-        client.answer_callback_query(cq_id)
-
-        parts = data.split(":")
-        action_type = parts[1]  # 'appr', 'rejc', 'rejx', 'cncl'
-        req_id_str = parts[2] if len(parts) > 2 else ""
-        expected_tier = parts[3] if len(parts) > 3 else None
-
-        try:
-            req_id = int(req_id_str)
-        except ValueError:
-            client.answer_callback_query(cq_id, "유효하지 않은 요청 번호입니다.", show_alert=True)
-            return
-
-        if action_type == "appr":
-            try:
-                res = db.review_upgrade_request(
-                    req_id, "APPROVED", reviewed_by=f"TG_ADMIN_{user_id}", expected_tier=expected_tier
-                )
-                target_uid = res["telegram_user_id"]
-                new_tier = res["tier"]
-                _safe_edit_or_send(
-                    client, chat_id, message_id,
-                    f"✅ <b>[승인 완료]</b> 신청 #{req_id} (유저: <code>{target_uid}</code>)의 {new_tier} 등급 승인이 완료되었습니다.",
-                    {"inline_keyboard": []}
-                )
-            except Exception as e:
-                safe_err = html.escape(str(e))
-                _safe_edit_or_send(client, chat_id, message_id, f"❌ 승인 처리 실패: {safe_err}", {"inline_keyboard": []})
-            return
-
-        elif action_type == "rejc":
-            # 2-Step In-Place Confirmation [TG-04]
-            confirm_text = (
-                f"⚠️ <b>[반려 확인]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"신청 <code>#{req_id}</code> 건을 정말 반려하시겠습니까?\n"
-                f"반려 시 신청 상태가 즉시 종료됩니다."
-            )
-            confirm_kb = {
-                "inline_keyboard": [
-                    [
-                        {"text": "❌ 확인 (반려 실행)", "callback_data": f"adm:rejx:{req_id}:{expected_tier or ''}"},
-                        {"text": "🔙 취소", "callback_data": f"adm:cncl:{req_id}:{expected_tier or ''}"},
-                    ]
-                ]
-            }
-            _safe_edit_or_send(client, chat_id, message_id, confirm_text, confirm_kb)
-            return
-
-        elif action_type == "cncl":
-            # Cancel rejection confirmation, restore original admin prompt
-            restore_text = (
-                f"🔔 <b>[등급 업그레이드 심사 대기]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 신청 번호: <code>#{req_id}</code>\n"
-                f"• 희망 등급: <b>{html.escape(expected_tier or '')}</b>\n\n"
-                f"원하시는 심사 처리를 선택해 주세요."
-            )
-            restore_kb = {
-                "inline_keyboard": [
-                    [
-                        {"text": f"✅ #{req_id} 승인", "callback_data": f"adm:appr:{req_id}:{expected_tier or ''}"},
-                        {"text": f"❌ #{req_id} 반려", "callback_data": f"adm:rejc:{req_id}:{expected_tier or ''}"},
-                    ]
-                ]
-            }
-            _safe_edit_or_send(client, chat_id, message_id, restore_text, restore_kb)
-            return
-
-        elif action_type == "rejx":
-            try:
-                res = db.review_upgrade_request(req_id, "REJECTED", reviewed_by=f"TG_ADMIN_{user_id}", expected_tier=expected_tier)
-                target_uid = res["telegram_user_id"]
-                _safe_edit_or_send(
-                    client, chat_id, message_id,
-                    f"❌ <b>[반려 완료]</b> 신청 #{req_id} (유저: <code>{target_uid}</code>)이(가) 반려되었습니다.",
-                    {"inline_keyboard": []}
-                )
-            except Exception as e:
-                safe_err = html.escape(str(e))
-                _safe_edit_or_send(client, chat_id, message_id, f"❌ 반려 처리 실패: {safe_err}", {"inline_keyboard": []})
-            return
-
-    # 3. Category Views
-    if data == "cat:home":
-        text, markup = render_category_home_view()
-        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        client.answer_callback_query(
+            cq_id, "등급 업그레이드 심사는 관리자 웹 콘솔(http://127.0.0.1:8002)에서 처리됩니다.", show_alert=True
+        )
+        _safe_edit_or_send(
+            client,
+            chat_id,
+            message_id,
+            "ℹ️ <b>[안내]</b> 등급 업그레이드 심사는 <b>관리자 웹 콘솔</b>(http://127.0.0.1:8002)에서만 진행됩니다.",
+            {"inline_keyboard": []},
+        )
         return
 
+    # 3. Category Views
     if data.startswith("cat:view:"):
         cat_raw = data.split(":", 2)[2]
         try:

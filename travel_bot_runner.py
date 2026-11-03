@@ -1,6 +1,6 @@
 """Travel briefing telegram bot runner.
-Supports manual dispatch, dry-run previews, scheduled automation, and budget filtering.
-Integrates SafeTelegramDispatcher (25 msg/s) and SQLite recipient storage.
+Supports manual dispatch, dry-run previews, scheduled automation, budget filtering, and on-demand polling.
+Integrates SafeTelegramDispatcher (25 msg/s), UserCooldownManager, Single-Flight caching, and SQLite recipient storage.
 Designed for Multi-Bot Monorepo Architecture with Zero-Breaking guarantees for Market Brief.
 """
 from __future__ import annotations
@@ -258,6 +258,7 @@ def format_telegram_briefing(
         return last_valid
     raise ValueError(f"Formatted Telegram message ({len(rendered)} chars) exceeds Telegram 4096-char limit")
 
+
 def run_briefing(
     dest_code: Optional[str] = None,
     max_budget: Optional[int] = None,
@@ -284,7 +285,7 @@ def run_briefing(
     engine = FlightEngine(live_naver=effective_live)
     print(f"Loaded {len(engine.destinations)} destinations metadata.")
 
-    # 1. Warm cache & get Top Recommendations first (ensuring SSE verification updates cache before HTML render)
+    # 1. Warm cache & get Top Recommendations first
     all_deals = engine.search_deals(dest_code=dest_code, months_ahead=6)
     recommendations = BudgetCalculator.rank_recommendations(
         destinations=engine.destinations,
@@ -319,7 +320,7 @@ def run_briefing(
         top_travel_latest.write_text(latest_file.read_text(encoding="utf-8"), encoding="utf-8")
         print(f"Web Reports generated: {dated_file.name}, {latest_file.name}, {top_travel_latest.name}")
     else:
-        print(f"Demo mode: Web Report generated in scratch without touching production reports.")
+        print("Demo mode: Web Report generated in scratch without touching production reports.")
 
     if not recommendations:
         print("❌ No matching travel recommendations found.")
@@ -374,11 +375,24 @@ def run_briefing(
     tg = TelegramChannel(bot_token=token)
     dispatcher = SafeTelegramDispatcher()
 
+    # Generate inline interactive keyboard for on-demand actions
+    from travel_brief.interactive import TravelInteractiveHandler
+    interactive_handler = TravelInteractiveHandler(bot_token=token, engine=engine, report_url=report_link)
+    keyboard = interactive_handler.build_inline_keyboard()
+
     success_count = 0
     for chat_id in target_recipients:
-        status, msg_id, err = dispatcher.send_text_to_recipient(
-            tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db
-        )
+        try:
+            status, msg_id, err = dispatcher.send_text_to_recipient(
+                tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db, reply_markup=keyboard
+            )
+        except TypeError as type_err:
+            if "reply_markup" in str(type_err):
+                status, msg_id, err = dispatcher.send_text_to_recipient(
+                    tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db
+                )
+            else:
+                raise
         if status == "SENT":
             success_count += 1
             print(f"  Sent to {chat_id} (msg_id: {msg_id})")
@@ -387,6 +401,138 @@ def run_briefing(
 
     print(f"Dispatch finished: {success_count}/{len(target_recipients)} succeeded.")
     return success_count > 0
+
+
+def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
+    """Runs long-polling daemon for on-demand interactive travel queries.
+    Equipped with 0.1s callback ACK, Single-Flight caching, and decoupled background workers.
+    """
+    token = get_travel_bot_token()
+    if demo or not token:
+        print("🎮 Running Travel Bot On-Demand Poller in DEMO mode...")
+        from travel_brief.interactive import TravelInteractiveHandler
+        engine = FlightEngine(live_naver=False)
+        handler = TravelInteractiveHandler(bot_token=token or "dummy", engine=engine)
+        kb = handler.build_inline_keyboard()
+        print(f"  Inline keyboard generated with {len(kb.get('inline_keyboard', []))} rows.")
+        allowed, toast = handler.cooldown.check_and_acquire("demo_user_1")
+        print(f"  Demo cooldown check 1: allowed={allowed}, toast='{toast}'")
+        allowed_2, toast_2 = handler.cooldown.check_and_acquire("demo_user_1")
+        print(f"  Demo cooldown check 2 (blocked): allowed={allowed_2}, toast='{toast_2}'")
+        handler.cooldown.release("demo_user_1")
+        handler.shutdown()
+        print("✅ Demo On-Demand Poller verification passed cleanly.")
+        return
+
+    print(f"🚀 Starting Travel Pathfinder Interactive Poller (v2.2, live_naver={live_naver})...")
+    db_path = BASE_DIR / "alerts.sqlite3"
+    db = TravelBriefDatabase(db_path=db_path)
+    engine = FlightEngine(live_naver=live_naver)
+    from travel_brief.interactive import TravelInteractiveHandler
+    handler = TravelInteractiveHandler(bot_token=token, engine=engine)
+    dispatcher = SafeTelegramDispatcher()
+    last_offset = db.get_telegram_offset()
+
+    import json
+    import urllib.request
+
+    def _async_send_welcome(chat_id: str, sender_name: str) -> None:
+        try:
+            all_deals = engine.search_deals(dest_code=None, months_ahead=6)
+            recs = BudgetCalculator.rank_recommendations(
+                destinations=engine.destinations,
+                deals=all_deals,
+                top_n=3,
+            )
+            if not recs:
+                return
+            welcome_text = format_telegram_briefing(
+                recommendations=recs[:3],
+                web_report_url=handler.report_url,
+                engine=engine,
+            )
+            kb = handler.build_inline_keyboard()
+            dispatcher.send_text_to_recipient(
+                tg=handler.tg,
+                chat_id=chat_id,
+                text=welcome_text,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        except Exception as exc:
+            logger.error("Async welcome dispatch failed for %s: %s", chat_id, exc)
+
+    print(f"📡 Polling active on bot (offset: {last_offset}). Press Ctrl+C to stop.")
+    try:
+        while True:
+            url = f"https://api.telegram.org/bot{token}/getUpdates?offset={last_offset + 1}&timeout=5"
+            try:
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.load(resp)
+            except Exception as exc:
+                print(f"Poller getUpdates warning: {exc}")
+                time.sleep(2.0)
+                continue
+
+            updates = data.get("result", [])
+            for item in updates:
+                try:
+                    up_id = int(item.get("update_id", 0))
+                    if up_id > last_offset:
+                        last_offset = up_id
+
+                    if "callback_query" in item:
+                        cq = item["callback_query"]
+                        cq_id = str(cq.get("id", ""))
+                        sender = cq.get("from", {}) or {}
+                        msg = cq.get("message", {}) or {}
+                        chat = msg.get("chat", {}) or sender
+                        chat_id = str(chat.get("id") or sender.get("id") or "")
+                        msg_id = int(msg.get("message_id") or 0)
+                        cb_data = str(cq.get("data") or "")
+
+                        if cb_data.startswith("trv:"):
+                            handler.handle_callback_query(
+                                cq_id=cq_id,
+                                chat_id=chat_id,
+                                message_id=msg_id,
+                                callback_data=cb_data,
+                                from_user=sender,
+                            )
+
+                    elif "message" in item:
+                        msg = item["message"]
+                        chat = msg.get("chat", {}) or {}
+                        chat_id = str(chat.get("id") or "")
+                        text = (msg.get("text") or "").strip().lower()
+                        sender = msg.get("from", {}) or chat
+                        sender_name = chat.get("title") or chat.get("first_name") or f"사용자_{chat_id[-4:]}"
+
+                        if not chat_id or not text:
+                            continue
+
+                        if text in {"/stop", "/구독취소", "/unsubscribe"}:
+                            db.deactivate_recipient(chat_id, reason="USER_STOP_COMMAND")
+                            dispatcher.send_text_to_recipient(
+                                tg=handler.tg,
+                                chat_id=chat_id,
+                                text="👋 여행 특가 구독이 해지되었습니다. 언제든 <code>/start</code>를 누르면 다시 받아보실 수 있습니다.",
+                                parse_mode="HTML",
+                            )
+                        elif text in {"/start", "/구독", "안녕", "/여행", "/today", "/특가"}:
+                            db.add_recipient(chat_id, name=sender_name, topic="TRAVEL")
+                            # Offload welcome brief to worker pool so polling loop NEVER blocks (C-B)
+                            handler.worker_pool.submit(_async_send_welcome, chat_id, sender_name)
+                except Exception as item_exc:
+                    logger.warning("Error processing update item: %s", item_exc)
+
+            db.update_telegram_offset(last_offset)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping Travel Pathfinder poller...")
+    finally:
+        handler.shutdown()
 
 
 def main():
@@ -399,12 +545,15 @@ def main():
     parser.add_argument("--recipients", type=str, help="Comma-separated chat IDs override")
     parser.add_argument("--auto-schedule", action="store_true", help="Run in periodic daemon schedule mode")
     parser.add_argument("--live-naver", action="store_true", help="Fetch real-time nonstop fares from Naver Flights")
+    parser.add_argument("--poll", action="store_true", help="Run in on-demand interactive polling mode")
 
     args = parser.parse_args()
 
     recipients_list = [r.strip() for r in args.recipients.split(",") if r.strip()] if args.recipients else None
 
-    if args.auto_schedule:
+    if args.poll:
+        run_polling_mode(demo=args.demo, live_naver=args.live_naver)
+    elif args.auto_schedule:
         print("⏰ Starting Travel Briefing daemon scheduler...")
         run_briefing(
             dest_code=args.dest,

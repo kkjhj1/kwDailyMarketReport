@@ -325,15 +325,15 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             f"<b>🧭 [통합 안내 포털] 봇 구독 서비스에 오신 것을 환영합니다!</b>\n\n"
             f"원하시는 전문 정보봇을 선택하여 구독하시면 정기 브리핑을 실시간으로 수신하실 수 있습니다.\n\n"
             f"<b>[현재 운영 중인 전문 정보봇]</b>\n"
-            f"📈 <b>시황 브리핑봇</b> (@{brief_un}): 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
-            f"✈️ <b>여행 특가봇</b> (@{travel_un}): 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
-            f"🎓 <b>입시 교육봇</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n\n"
+            f"📈 <b>시황</b> (@{brief_un}): 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
+            f"✈️ <b>여행</b> (@{travel_un}): 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
+            f"🎓 <b>입시</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n\n"
             f"<i>※ 화이트 등급(무료)은 1개 봇, 그린 3개, 레드 5개, 블랙은 전체 봇을 이용하실 수 있습니다.</i>"
         )
         inline_keyboard = [
-            [{"text": f"📈 시황 브리핑봇 바로가기 (@{brief_un})", "url": brief_link}],
-            [{"text": f"✈️ 여행 특가봇 바로가기 (@{travel_un})", "url": travel_link}],
-            [{"text": f"🎓 입시 교육봇 바로가기 (@{edu_un})", "url": edu_link}],
+            [{"text": f"📈 시황 바로가기 (@{brief_un})", "url": brief_link}],
+            [{"text": f"✈️ 여행 바로가기 (@{travel_un})", "url": travel_link}],
+            [{"text": f"🎓 입시 바로가기 (@{edu_un})", "url": edu_link}],
         ]
 
     else:

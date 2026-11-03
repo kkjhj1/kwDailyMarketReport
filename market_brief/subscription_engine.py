@@ -19,12 +19,15 @@ from contextlib import contextmanager
 from datetime import datetime
 import html
 import json
+import logging
 import os
 import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from market_brief.storage.db import MarketBriefDatabase
+logger = logging.getLogger(__name__)
+
 from market_brief.storage.models import (
     BotRecord,
     BotType,
