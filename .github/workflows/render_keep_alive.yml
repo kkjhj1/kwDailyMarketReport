@@ -1,0 +1,30 @@
+name: Render Server Keep-Alive
+
+on:
+  schedule:
+    # Trigger every 12 minutes to prevent Render free instance from sleeping (15 min inactivity timeout)
+    - cron: '*/12 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: render-keep-alive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    name: Keep Render Warm
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping Healthcheck Endpoint
+        run: |
+          TARGET_URL="https://kwdailymarketreport.onrender.com/healthz"
+          echo "Pinging ${TARGET_URL} at $(date -u) to maintain active state..."
+          RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 45 -H "User-Agent: GitHubActions-KeepAlive/1.0" "${TARGET_URL}" || echo "000")
+          echo "HTTP Response: ${RESPONSE_CODE}"
+          if [ "${RESPONSE_CODE}" = "200" ]; then
+            echo "✅ Render server is healthy and warm."
+          else
+            echo "⚠️ Non-200 response (${RESPONSE_CODE}). Waking up server..."
+          fi

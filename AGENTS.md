@@ -1,7 +1,7 @@
 # ============================================================
 # PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
 # Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
-# Version: 2.1 (Telegram 7 Golden Rules & Multi-AI 1-Pass Audit Edition)
+# Version: 2.2 (Multi-Bot Platform & 4-Stage Multi-AI Pipeline Edition)
 # ============================================================
 
 ## 1. 프로젝트 개요 및 멀티봇 파이프라인
@@ -39,19 +39,38 @@
   - 다수 수신자 발송 시 단순 루프 직발송을 금하며, `SafeTelegramDispatcher`와 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) 및 지수 백오프 재시도를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다.
 - **[TG-06] 토큰 프리 `--demo` & 운영 자산 무오염**:
   - 모든 봇 러너는 실제 토큰 없이 1초 내 콘솔 검증이 가능한 `--demo` 플래그를 제공해야 하며, 데모·테스트 실행 중 운영 DB(`*.sqlite3`) 및 배포 폴더(`reports/`)에 파일을 기록하지 않는다(`:memory:` 또는 `scratch/` 격리).
+  - *[현행 과제]*: `travel_bot_runner.py`와 `portal_bot_runner.py`는 `--demo` 완비 상태이나, 미구현된 `telegram_bot_runner.py`와 `admission_bot_runner.py`는 향후 L2 작업 시 `--demo`를 최우선 구현 과제로 둔다.
 - **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
   - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
   - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.
 
-## 4. 멀티 AI 역할 분담 및 1-Pass 최종 감사 규약 (Multi-AI Audit Protocol)
-- **3인 역할 분담 (전역 헌법 `[META-03]` 준수)**:
-  - **총괄 판결 & 단일 Writer (`Gemini` / 주 세션)**: 사용자 맥락 보존, 초안·코드·테스트 작성 및 기계적 실행, 외부 감사 의견의 `1-Pass` 최종 수용/기각 판결 및 실제 파일 수정 전담.
-  - **기획·UI/UX 최종 감사관 (`GPT` / `codex`)**: 신규 기획안·메시지 템플릿·모바일 웹 UI 설계(L2/L3) 확정 전 가독성·프롬프트·UX 누락을 1회 최종 감사한다.
-  - **개발·테스트 최종 감사관 (`Claude` / `claude`)**: 신규 기능·핵심 로직 구현 및 테스트 개편(L2/L3) 시, **기계적 선행 검증(`py_compile` + `pytest` + `--demo`) 통과 직후** 코드 결함·제3장 7대 수칙 위반·엣지케이스 누락을 1회 최종 감사한다.
-- **4대 운영 안전핀 (Mandatory Safeguards)**:
-  1. **위험도 비례 발동**: 단순 오타·문구·소규모 패치(L0/L1)는 단독 즉시 완결하며, **구조적 기획·개발·테스트(L2/L3) 또는 사용자 명시 요청 시**에만 발동한다.
-  2. **Read-Only 격리 실행 & 재귀 금지**: Handoff 입출력은 `scratch/`로 격리하며, 파일 수정·쉘 실행(재귀 호출)이 물리적으로 차단된 읽기 전용 명령어만 사용한다:
-     - **GPT 기획 감사**: `Get-Content -Raw "scratch\handoff_to_gpt.md" -Encoding UTF8 | codex exec --skip-git-repo-check -s read-only -o "scratch\gpt_audit_result.md" -`
-     - **Claude 개발·테스트 감사**: `Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --tools "Read,Grep,Glob" --permission-prompts none --no-session-persistence`
-  3. **`1-Pass` 종결 & 기준 서열**: 감사 결과 중 실제 결함·헌법 위반(`Critical`/`Major`)만 즉시 반영하고 맥락 외 취향 지적(`Minor`)은 기각 사유만 요약해 **재호출 없이 1라운드에 종결**한다(기획·개발 피드백 충돌 시 제3장 7대 수칙 우선).
-  4. **`Fail-Open` 비상 우회**: 외부 CLI 쿼터 소진·인증 만료·90초 타임아웃 발생 시 작업을 멈추지 않고 완료 보고서에 `[외부 감사 생략: 사유]`를 정직하게 명시한다.
+## 4. 멀티 AI 4단계 바톤터치 파이프라인 (Multi-AI Pipeline)
+
+### 4.1 위험도별 라우팅 규약 (Token & Latency Guard)
+- **L0 (문구, 주석, 오타, 마크다운)**: Gemini 단독 처리 (외부 호출 전면 금지, 토큰 소모 0%).
+- **L1 (단일 파일 국소 버그, 단일 테스트 보완)**: GPT 설계 생략, Gemini ➔ Claude 직행 구현.
+- **L2 (봇 비즈니스 로직, 메시지 템플릿, 웹 UI, 다중 파일 테스트)**: Gemini(요구정리) ➔ GPT(아키텍처 설계) ➔ Claude(시니어 구현) ➔ Gemini(최종 통합).
+- **L3 (SQLite 스키마, 인증·구독 권한, 발송 디스패처, GitHub Actions 크론)**: 풀체인 가동 + 사용자 명시 승인(`[AUTH-01]`) 필수.
+
+### 4.2 외부 에이전트 CLI 실행 표준 및 Handoff 규약
+
+#### ① GPT 아키텍처 수석 설계 호출 (Read-Only)
+```powershell
+Get-Content -Raw "scratch\handoff_to_gpt.md" -Encoding UTF8 | codex exec --skip-git-repo-check -s read-only -o "scratch\gpt_architecture.md" -
+```
+- **Handoff 및 산출물**: 전체 소스 복사를 금하고 대상 인터페이스만 1~2KB로 압축 전달(`Targeted Handoff`). 결과물에는 불변조건(Invariants), DB/수식 계약, 엣지케이스, 구현 금지사항을 명시한다.
+
+#### ② Claude 시니어 구현 호출 (Lease 범위 내 Write 허용)
+```powershell
+Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --tools "Read,Grep,Glob,Edit,Write,Bash" --permission-prompts none --no-session-persistence
+```
+- **Claude 작업 수칙**:
+  - `allowed_paths`에 명시된 파일만 수정하며, `forbidden_paths`(.env, *.sqlite3, reports/)는 절대 수정 금지.
+  - 수정 직후 스스로 `python -m py_compile` 및 관련 `pytest` 통과 확인 후 결과 요약 제출.
+  - 완료 시 변경 내역과 함께 **"설계와 달라진 점(Drift Self-Report)"**을 필수 제출.
+  - Claude 작업 중 Gemini는 파일 수정을 중단하고 대기 (Single-Writer Lease).
+
+### 4.3 Git 상태 동기화 및 최종 판결 (Fresh Read & Anti-Drift)
+- 작업 착수 전 `git rev-parse HEAD` 및 `git status --short`로 기준점을 고정한다.
+- Claude 작업 반환 즉시 Gemini는 실제 `git diff`를 통해 변경분을 신선하게 대조(Fresh Read)하고, 7대 수칙(`[TG-01]`~`[TG-07]`) 및 불변조건 준수 여부를 최종 판정하여 통합한다.
+- **비상 안전핀**: 로컬 개발(L0~L2)은 타임아웃/쿼터 소진 시 `[외부 작업 생략: 사유]`를 보고하고 진행(Fail-Open)하되, 배포 및 운영 DB 마이그레이션(L3)은 외부 감사가 누락된 경우 즉시 작업을 중단(Fail-Closed)한다.
