@@ -45,7 +45,7 @@ class UpgradeRequestsWorkflowTests(unittest.TestCase):
         self.tg_client.edit_message_text.return_value = True
         self.tg_client.answer_callback_query.return_value = True
 
-        self.user_id = 7820975792
+        self.user_id = 999888
         self.user_profile = self.portal_db.get_or_create_user(
             user_id=self.user_id,
             chat_id=self.user_id,

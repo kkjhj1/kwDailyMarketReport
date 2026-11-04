@@ -1434,7 +1434,7 @@ class WebReportGenerator:
               <span class="hotel-grade-badge">{hotel_grade}</span>
             </div>
             <div class="hotel-feature-line">
-              └ 3박 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만) · {hotel_features}
+              └ 3박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만) · {hotel_features}
             </div>
           </div>
           <div class="budget-summary-box">
@@ -1442,7 +1442,7 @@ class WebReportGenerator:
               <span class="b-label">1인 총 예상 경비</span>
               <span class="highlight-1p">약 {total_1p_man}만 원</span>
             </div>
-            <span class="b-desc">(항공 {flight_man}만 + 호텔 {hotel_total_man}만 + 식비 {meal_man}만)</span>
+            <span class="b-desc">(항공 {flight_man}만 + 숙소예산 {hotel_total_man}만 + 식비 {meal_man}만)</span>
             <div class="budget-item" style="margin-top: 0.35rem;">
               <span class="b-label">2인 1실 쉐어 총합</span>
               <span class="highlight-2p">약 {total_2p_man}만 원</span>
@@ -1675,7 +1675,7 @@ class WebReportGenerator:
           <div class="dest-detail-line"><strong>비자 규정:</strong> {html.escape(dest.visa_info)}</div>
           <div class="dest-detail-line"><strong>☀️ 최적 시즌:</strong> {best_m_str}</div>
           <div class="dest-detail-line"><strong>🌧️ 기상 주의:</strong> {caution_m_str} ({html.escape(dest.caution_note)})</div>
-          <div class="dest-detail-line"><strong>🏨 추천 숙소:</strong> {rec_hotel} (1박 약 {hotel_night_man}만 원)</div>
+          <div class="dest-detail-line"><strong>🏨 추천 숙소:</strong> {rec_hotel} (1박 기준예산 약 {hotel_night_man}만 원)</div>
           <div class="dest-detail-line"><strong>🍽️ 일일 생활경비:</strong> 약 {daily_man}만 원 (식비+대중교통)</div>
           <div class="dest-detail-line" style="margin-top: 0.6rem; color: #cbd5e1; background: rgba(255,255,255,0.03); padding: 0.5rem; border-radius: 6px;">💡 {html.escape(dest.tips)}</div>
         </div>

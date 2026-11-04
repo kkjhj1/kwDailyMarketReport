@@ -761,14 +761,16 @@ class DynamicBotManager:
             elif clean_text in MENU_TIER_COMMANDS:
                 t_out, m_out = render_tier_benefits_view(user)
             elif clean_text in MENU_SUPPORT_COMMANDS:
-                from portal_hub.interactive import render_support_home_view
-                t_out, m_out = render_support_home_view(user)
+                from portal_hub.interactive import render_support_center_view
+                t_out, m_out = render_support_center_view(user)
             elif clean_text in MENU_HELP_COMMANDS:
                 from portal_hub.interactive import render_help_view
                 t_out, m_out = render_help_view()
             else:
                 from portal_hub.interactive import render_search_results_view
-                t_out, m_out = render_search_results_view(text, user)
+                matched_bots = portal_db.search_bots(clean_text)
+                subs = portal_db.get_user_subscriptions(user_id)
+                t_out, m_out = render_search_results_view(text, matched_bots, user, subs)
 
             portal_client.send_message(chat_id, t_out, reply_markup=m_out)
             return True, "portal_message_handled"
@@ -821,6 +823,16 @@ class DynamicBotManager:
         last_offset = bot.last_offset or 0
         processed = 0
         events: list[dict[str, Any]] = []
+
+        if last_offset <= 0:
+            try:
+                stale = transport.get_updates(offset=-1, timeout=1)
+                if stale:
+                    last_offset = int(stale[-1]["update_id"])
+                    self.engine.update_bot_offset(bot.bot_id, last_offset)
+                    logger.info("⏩ [초기화] 과거 대기 업데이트 %d건 소거 (offset: %d)", len(stale), last_offset)
+            except Exception as exc:
+                logger.warning("초기 offset 소거 실패 on %s: %s", bot_id, exc)
 
         updates = transport.get_updates(offset=last_offset + 1, timeout=timeout)
         for item in updates:

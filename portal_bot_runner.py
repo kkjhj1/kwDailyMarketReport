@@ -84,6 +84,22 @@ MENU_SUPPORT_COMMANDS = {
 
 def get_portal_token() -> str:
     token = os.environ.get("PORTAL_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token.strip():
+        env_p = Path(__file__).resolve().parent / ".env"
+        if env_p.exists():
+            for line in env_p.read_text(encoding="utf-8-sig").splitlines():
+                if line.startswith("PORTAL_TELEGRAM_BOT_TOKEN="):
+                    token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    if not token.strip():
+        try:
+            db = PortalDatabase()
+            with db._get_conn() as conn:
+                row = conn.execute("SELECT token FROM bots WHERE bot_id = 'menu_bot'").fetchone()
+                if row and row["token"]:
+                    token = row["token"].strip()
+        except Exception:
+            pass
     return token.strip()
 
 

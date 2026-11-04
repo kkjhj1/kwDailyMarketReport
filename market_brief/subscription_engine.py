@@ -1031,6 +1031,10 @@ class SubscriptionEngine:
         self, telegram_user_id: str, tier: str, approved: bool, reason: str = ""
     ) -> None:
         """Sends an in-bot notification message to the user about their tier upgrade decision."""
+        if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TESTING") == "true":
+            logger.info("Test environment detected; skipping live Telegram upgrade notification")
+            return
+
         token = os.environ.get("PORTAL_TELEGRAM_BOT_TOKEN", "").strip()
         if not token:
             logger.info("PORTAL_TELEGRAM_BOT_TOKEN not configured; skipping in-bot upgrade notification")

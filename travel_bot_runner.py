@@ -96,7 +96,8 @@ def format_telegram_briefing(
         header_lines = [
             "✈️ <b>[주말 해외여행 6개월 실시간 특가 브리핑]</b>",
             f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
-            "💡 <i>네이버 이동 후 3~5초 로딩 시 '가격 낮은 순' 1위와 일치</i>",
+            "💡 <i>항공권: '가격 낮은 순' 1위 실측가 (상단 배너 제외)</i>",
+            "💡 <i>숙소: 3~4성급 기준예산 (객실 타입별 실시간 요금 상이)</i>",
             "──────────────────",
             "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>",
         ]
@@ -104,7 +105,8 @@ def format_telegram_briefing(
         header_lines = [
             "✈️ <b>[주말 해외여행 6개월 특가 브리핑]</b>",
             f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드",
-            "💡 <i>공휴일·성수기 할증 반영 시장가 · 실시간 잔여석 링크 확인</i>",
+            "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>",
+            "💡 <i>숙소: 3~4성급 기준예산 (객실 타입별 실시간 요금 상이)</i>",
             "──────────────────",
             "🔥 <b>이번 주 가성비 BEST TOP 3</b>",
         ]
@@ -179,11 +181,11 @@ def format_telegram_briefing(
 
             visa_short = dest.visa_info.split("(")[0].strip() if dest.visa_info else "무비자"
             sched_lines.extend([
-                f"  • 숙소: <b>{hotel_name_str}</b>{hotel_grade_str} (3박 약 {h_man}만{hotel_feat_str})",
+                f"  • 숙소: <b>{hotel_name_str}</b>{hotel_grade_str} (3박 기준예산 약 {h_man}만{hotel_feat_str})",
                 f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
                 f"    └ 2인 동행 시: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1인당 {share_1p}만)",
                 f"  • 참고: {html.escape(visa_short)}{tip_str}",
-                f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 추천 숙소]</a> · <a href="{safe_ai_url}">[🤖 AI 맞춤일정]</a>',
+                f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 숙소 실시간 요금]</a> · <a href="{safe_ai_url}">[🤖 AI 맞춤일정]</a>',
             ])
             lines.extend(sched_lines)
 

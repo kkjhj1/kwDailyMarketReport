@@ -1268,10 +1268,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="user-filter-bar">
           <div class="filter-chips">
             <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체<span class="desktop-only"> 보기</span></button>
-            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트<span class="desktop-only"> (1)</span></button>
-            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린<span class="desktop-only"> (3)</span></button>
-            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드<span class="desktop-only"> (5)</span></button>
-            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙<span class="desktop-only"> (∞)</span></button>
+            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트<span class="desktop-only"> (1슬롯)</span></button>
+            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린<span class="desktop-only"> (3슬롯)</span></button>
+            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드<span class="desktop-only"> (5슬롯)</span></button>
+            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙<span class="desktop-only"> (무제한)</span></button>
           </div>
           <div class="user-search-wrap">
             <input type="text" id="userSearch" class="form-input" placeholder="🔍 이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />
@@ -1336,9 +1336,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="font-size:12px; color:var(--text-muted);">유저 × 정보봇 활성 합계</div>
         </div>
         <div class="card" style="margin-bottom:0;">
-          <div style="font-size:12px; font-weight:700; color:var(--text-muted);">운영 중인 봇 채널</div>
+          <div style="font-size:12px; font-weight:700; color:var(--text-muted);">운영 중인 정보봇</div>
           <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiBots">0개</div>
-          <div style="font-size:12px; color:var(--text-muted);">메뉴봇 1 + 정보봇 4개</div>
+          <div style="font-size:12px; color:var(--text-muted);" id="kpiBotsSub">정보봇 3개 (포털 메뉴봇 1개 별도)</div>
         </div>
       </div>
 
@@ -1563,9 +1563,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="form-group">
           <label class="form-label">회원 등급</label>
           <select id="umTier" class="form-select">
-            <option value="WHITE">⚪ 화이트 (1개)</option>
-            <option value="GREEN">🟢 그린 (최대 3개)</option>
-            <option value="RED">🔴 레드 (최대 5개)</option>
+            <option value="WHITE">⚪ 화이트 (1슬롯)</option>
+            <option value="GREEN">🟢 그린 (3슬롯)</option>
+            <option value="RED">🔴 레드 (5슬롯)</option>
             <option value="BLACK">⚫ 블랙 (무제한)</option>
           </select>
         </div>
@@ -1766,9 +1766,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               <td data-label="회원 등급" class="desktop-only-cell">
                 <div style="display:flex; align-items:center;">
                   <select class="form-select user-tier-select" style="width:150px; font-weight:700; padding:5px 8px; font-size:12.5px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
-                    <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1개)</option>
-                    <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3개)</option>
-                    <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5개)</option>
+                    <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1슬롯)</option>
+                    <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3슬롯)</option>
+                    <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5슬롯)</option>
                     <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
                   </select>
                   ${quickApproveBtn}
@@ -2439,7 +2439,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('kpiUsers').textContent = `${ov.total_users}명`;
         document.getElementById('kpiUsersSub').textContent = ov.over_quota_users > 0 ? `⚠️ 초과 정리 필요: ${ov.over_quota_users}명` : '모든 유저 한도 준수 중';
         document.getElementById('kpiSubs').textContent = `${ov.total_active_subscriptions}건`;
-        document.getElementById('kpiBots').textContent = `${ov.total_bots}개`;
+        const infoBotsCount = ov.info_bots_count ?? (ov.bot_rankings ? ov.bot_rankings.length : 3);
+        document.getElementById('kpiBots').textContent = `${infoBotsCount}개`;
+        const kpiBotsSubEl = document.getElementById('kpiBotsSub');
+        if (kpiBotsSubEl) {
+          kpiBotsSubEl.textContent = `정보봇 ${infoBotsCount}개 (포털 메뉴봇 1개 별도)`;
+        }
 
         // Tier Bars
         document.getElementById('tierDistList').innerHTML = ov.tier_distribution.map(t => `

@@ -193,8 +193,8 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             inline_keyboard = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
         except Exception as e:
             logger.error(f"Error generating brief_bot briefing: {e}", exc_info=True)
-            title = f"📊 [시황 브리핑] {now_str}"
-            content_html = f"<b>📊 [시황 브리핑]</b>\n<i>{now_str} KST</i>\n\n데이터 수집 중 오류: {html.escape(str(e))}"
+            title = f"📊 [시황] {now_str}"
+            content_html = f"<b>📊 [시황]</b>\n<i>{now_str} KST</i>\n\n데이터 수집 중 오류: {html.escape(str(e))}"
             inline_keyboard = [[{"text": "📊 웹 리포트 보러가기", "url": report_url}]]
 
     # =========================================================================
