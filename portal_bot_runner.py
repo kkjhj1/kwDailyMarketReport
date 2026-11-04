@@ -108,7 +108,17 @@ def run_polling(token: str) -> None:
 
     logger.info("🚀 [Portal Hub Bot v2.0] 롱폴링 시작... (카테고리 2-Tap & 키워드 검색 엔진 탑재)")
 
-    offset = 0
+    # Discard backlog on startup so old updates from past sessions don't replay
+    try:
+        stale = client.get_updates(offset=-1, timeout=1)
+        if stale:
+            offset = stale[-1]["update_id"] + 1
+            logger.info("⏩ [초기화] 과거 대기 업데이트 %d건 소거 (offset: %d)", len(stale), offset)
+        else:
+            offset = 0
+    except Exception as exc:
+        logger.warning("초기 offset 조회 실패: %s", exc)
+        offset = 0
     reply_kb = build_persistent_reply_keyboard()
 
     while True:

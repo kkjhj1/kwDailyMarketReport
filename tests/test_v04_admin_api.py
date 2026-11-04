@@ -26,6 +26,13 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Daily Market Brief", response.text)
         self.assertIn("원클릭 즉시 발송 센터", response.text)
+        self.assertIn("appSplashLoader", response.text)
+        self.assertIn("splash.jpg", response.text)
+
+        # Verify static image serving returns 200 OK
+        img_resp = self.client.get("/static/splash.jpg")
+        self.assertEqual(img_resp.status_code, 200)
+        self.assertGreater(len(img_resp.content), 10000)
 
     def test_status_endpoint(self):
         response = self.client.get("/api/status")
@@ -202,6 +209,14 @@ class AdminApiTests(unittest.TestCase):
                     # Verify database actual persistence
                     profile = sub_engine.get_user_profile("77777")
                     self.assertEqual(profile.get("full_name"), "홍길동")
+
+    def test_healthz_endpoint(self):
+        """Validates that /healthz returns 200 OK for Uptime ping monitors."""
+        res = self.client.get("/healthz")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data.get("status"), "HEALTHY")
+        self.assertIn("active_workers", data)
 
 
 if __name__ == "__main__":

@@ -1000,9 +1000,192 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         gap: 8px !important;
       }
     }
+
+    /* 🚀 Fullscreen App Splash & Cold-Start Loader */
+    .app-splash-loader {
+      position: fixed;
+      inset: 0;
+      z-index: 999999;
+      background: radial-gradient(circle at 50% 30%, #1e293b 0%, #0b1120 100%);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+      box-sizing: border-box;
+      transition: opacity 0.4s ease, visibility 0.4s ease;
+      overflow-y: auto;
+    }
+    .app-splash-loader.fade-out {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .splash-card {
+      width: 100%;
+      max-width: 380px;
+      margin: auto;
+      background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 24px;
+      padding: 20px 18px 22px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 35px rgba(56, 189, 248, 0.18);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      box-sizing: border-box;
+      animation: splashCardEnter 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes splashCardEnter {
+      from { transform: scale(0.92) translateY(12px); opacity: 0; }
+      to { transform: scale(1) translateY(0); opacity: 1; }
+    }
+    .splash-img-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 270px;
+      margin-bottom: 14px;
+    }
+    .splash-img {
+      width: 100%;
+      height: auto;
+      max-height: 310px;
+      border-radius: 18px;
+      object-fit: cover;
+      display: block;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      animation: splashPulse 3.5s ease-in-out infinite;
+    }
+    @keyframes splashPulse {
+      0%, 100% { transform: translateY(0); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 15px rgba(56, 189, 248, 0.12); }
+      50% { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(0, 0, 0, 0.55), 0 0 25px rgba(56, 189, 248, 0.28); }
+    }
+    .splash-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #ffffff;
+      letter-spacing: -0.3px;
+      margin-bottom: 6px;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    }
+    .splash-badge-row {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .splash-pill {
+      background: rgba(255, 255, 255, 0.08);
+      color: #94a3b8;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 9px;
+      border-radius: 9999px;
+    }
+    .splash-spinner-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      margin-bottom: 10px;
+    }
+    .splash-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2.5px solid rgba(255, 255, 255, 0.15);
+      border-top-color: #38bdf8;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .splash-status-text {
+      font-size: 13px;
+      font-weight: 700;
+      color: #e2e8f0;
+      letter-spacing: -0.2px;
+    }
+    .splash-progress-wrap {
+      width: 100%;
+      margin-top: 4px;
+      margin-bottom: 10px;
+      animation: fadeIn 0.4s ease;
+    }
+    .splash-progress-bar {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 9999px;
+      overflow: hidden;
+      margin-bottom: 7px;
+    }
+    .splash-progress-fill {
+      width: 15%;
+      height: 100%;
+      background: linear-gradient(90deg, #38bdf8, #818cf8, #34d399);
+      border-radius: 9999px;
+      animation: progressIndeterminate 8s ease-out forwards;
+    }
+    @keyframes progressIndeterminate {
+      0% { width: 15%; }
+      30% { width: 45%; }
+      70% { width: 75%; }
+      90% { width: 92%; }
+      100% { width: 98%; }
+    }
+    .splash-sub-text {
+      font-size: 11.5px;
+      color: #cbd5e1;
+      line-height: 1.45;
+    }
+    .splash-footer {
+      font-size: 10.5px;
+      color: #64748b;
+      margin-top: 8px;
+      font-weight: 600;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
+
+  <!-- 🚀 Fullscreen App Splash & Cold-Start Loader -->
+  <div id="appSplashLoader" class="app-splash-loader">
+    <div class="splash-card">
+      <div class="splash-img-wrap">
+        <img src="/static/splash.jpg" alt="Multi-Bot Intelligence Platform" class="splash-img" onerror="this.onerror=null; this.src='/reports/assets/splash.jpg';" />
+      </div>
+      <div class="splash-title">Multi-Bot Intelligence</div>
+      <div class="splash-badge-row">
+        <span class="splash-pill">📈 시황</span>
+        <span class="splash-pill">✈️ 여행</span>
+        <span class="splash-pill">🎓 입시</span>
+      </div>
+      
+      <div class="splash-spinner-wrap">
+        <div class="splash-spinner"></div>
+        <span id="splashStatusText" class="splash-status-text">⚡ 플랫폼 데이터를 불러오는 중...</span>
+      </div>
+
+      <!-- 스마트 콜드스타트 프로그레스바 (서버 지연 시 자동 활성화) -->
+      <div id="splashProgressWrap" class="splash-progress-wrap" style="display:none;">
+        <div class="splash-progress-bar">
+          <div id="splashProgressFill" class="splash-progress-fill"></div>
+        </div>
+        <div class="splash-sub-text">⚡ 플랫폼 데이터 응답 대기 중입니다<br><span style="color:#94a3b8; font-size:10.5px;">(초기 연결 시 잠시만 기다려주세요)</span></div>
+      </div>
+
+      <div class="splash-footer">Daily Market Brief &amp; Multi-Bot Platform v2.0</div>
+    </div>
+  </div>
 
   <!-- Top Minimal Header -->
   <header class="header">
@@ -1616,6 +1799,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         }).join('');
       } catch (e) {
         toast('유저 목록 로드 오류: ' + e.message);
+      } finally {
+        hideSplashLoader();
       }
     }
 
@@ -2401,7 +2586,38 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Splash Loader Control
+    let splashTimer = null;
+    let splashHidden = false;
+
+    function initSplashLoader() {
+      // If server takes more than 2.5s (Cold Start on Render), show helpful message and progress bar
+      splashTimer = setTimeout(() => {
+        if (!splashHidden) {
+          const wrap = document.getElementById('splashProgressWrap');
+          const txt = document.getElementById('splashStatusText');
+          if (wrap) wrap.style.display = 'block';
+          if (txt) txt.textContent = '⚡ 데이터 응답 대기 중...';
+        }
+      }, 2500);
+
+      // Maximum 8s safety fallback to prevent UI block if an endpoint fails
+      setTimeout(hideSplashLoader, 8000);
+    }
+
+    function hideSplashLoader() {
+      if (splashHidden) return;
+      splashHidden = true;
+      if (splashTimer) clearTimeout(splashTimer);
+      const el = document.getElementById('appSplashLoader');
+      if (el) {
+        el.classList.add('fade-out');
+        setTimeout(() => { el.style.display = 'none'; }, 450);
+      }
+    }
+
     // Initial load
+    initSplashLoader();
     switchTab('users');
   </script>
 </body>

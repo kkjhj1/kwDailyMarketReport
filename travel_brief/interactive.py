@@ -171,9 +171,12 @@ class TravelInteractiveHandler:
             # Blocked by cooldown or already in-progress; no background task submitted
             return
 
-        # If force refresh, invalidate memory cache so single-flight fetches fresh data (M-F)
+        # If force refresh, invalidate memory and disk cache so single-flight fetches fresh data (M-F)
         if is_refresh:
-            NaverFlightLiveClient.invalidate_cache()
+            if hasattr(self.engine, "_live_client") and self.engine._live_client:
+                self.engine._live_client.invalidate_cache()
+            else:
+                NaverFlightLiveClient.invalidate_global_cache()
 
         # 3. Offload execution to decoupled background worker (C3)
         self.worker_pool.submit(

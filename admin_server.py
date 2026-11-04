@@ -285,6 +285,10 @@ def create_admin_app(
     reports_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/reports", StaticFiles(directory=str(reports_dir)), name="reports")
 
+    static_dir = ROOT / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     app.state.db = db
     app.state.engine = sub_engine
     app.state.sub_engine = sub_engine
@@ -1432,6 +1436,24 @@ def create_admin_app(
             dispatcher = AdmissionSafeDispatcher()
             stats = dispatcher.dispatch(channel=channel, briefing=briefing, db=adm_db)
             return {"success": True, "dry_run": False, "stats": stats}
+
+    @app.get("/healthz")
+    def healthz_check():
+        """Lightweight health check endpoint for UptimeRobot / cron-job.org pings.
+        Returns 200 OK if active workers are running, or 503 if bot workers have crashed."""
+        worker_statuses = bot_manager.get_worker_statuses() if enable_bot_workers else {}
+        failed_workers = [bid for bid, st in worker_statuses.items() if not st.get("worker_running")]
+        status_code = 503 if failed_workers and enable_bot_workers else 200
+        return JSONResponse(
+            content={
+                "status": "HEALTHY" if status_code == 200 else "DEGRADED",
+                "active_workers": [bid for bid, st in worker_statuses.items() if st.get("worker_running")],
+                "failed_workers": failed_workers,
+                "bot_workers_enabled": enable_bot_workers,
+                "timestamp_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            status_code=status_code,
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def render_admin_dashboard():

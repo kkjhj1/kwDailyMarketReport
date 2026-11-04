@@ -76,7 +76,7 @@ class TelegramBotTransport:
         res = self.api_call("deleteWebhook", {"drop_pending_updates": drop_pending_updates}, timeout=8)
         return bool(res.get("ok"))
 
-    def get_updates(self, offset: int = 0, timeout: int = 3) -> list[dict[str, Any]]:
+    def get_updates(self, offset: int = 0, timeout: int = 25) -> list[dict[str, Any]]:
         try:
             res = self.api_call(
                 "getUpdates",
@@ -86,7 +86,7 @@ class TelegramBotTransport:
             return res.get("result", [])
         except RuntimeError as err:
             err_msg = str(err).lower()
-            if "webhook is active" in err_msg or "conflict" in err_msg:
+            if "webhook is active" in err_msg:
                 logger.info(f"Active webhook detected on bot. Auto-deleting webhook to enable polling...")
                 self.delete_webhook(drop_pending_updates=False)
                 res = self.api_call(
@@ -95,6 +95,11 @@ class TelegramBotTransport:
                     timeout=timeout + 6,
                 )
                 return res.get("result", [])
+            elif "conflict" in err_msg or "409" in err_msg:
+                # 409 Conflict: another poller instance is active on this bot token.
+                # Do NOT auto-delete webhook; log warning and back off gracefully to avoid race condition.
+                logger.warning("Telegram getUpdates conflict (409): another poller is active on this bot token. Backing off.")
+                return []
             raise
 
     def send_html(
@@ -102,6 +107,7 @@ class TelegramBotTransport:
         chat_id: str,
         html_text: str,
         inline_keyboard: list[list[dict[str, Any]]] | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": str(chat_id).strip(),
@@ -109,7 +115,9 @@ class TelegramBotTransport:
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
-        if inline_keyboard:
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        elif inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         return self.api_call("sendMessage", payload, timeout=10)
 
@@ -644,7 +652,164 @@ class DynamicBotManager:
             }
         return statuses
 
-    def sync_bot_updates_once(self, bot_id: str, opener=None) -> dict[str, Any]:
+    def _dispatch_portal_menu_update(self, bot_token: str, item: dict[str, Any]) -> tuple[bool, str]:
+        """Dispatches update to portal_hub's full-featured interactive engine."""
+        try:
+            from portal_hub import PortalDatabase, TelegramPortalClient, handle_callback_query
+            from portal_hub.interactive import (
+                USER_STATES,
+                render_main_menu,
+                render_subscription_view,
+                render_category_home_view,
+                render_tier_benefits_view,
+            )
+            from portal_bot_runner import (
+                MENU_START_COMMANDS,
+                MENU_SUBS_COMMANDS,
+                MENU_CAT_COMMANDS,
+                MENU_TIER_COMMANDS,
+                MENU_HELP_COMMANDS,
+                MENU_SUPPORT_COMMANDS,
+            )
+        except ImportError:
+            return False, "portal_hub_not_available"
+
+        portal_client = TelegramPortalClient(bot_token)
+        portal_db = PortalDatabase()
+
+        if "callback_query" in item:
+            cq = item["callback_query"]
+            handle_callback_query(cq, portal_db, portal_client)
+            return True, "portal_callback_handled"
+
+        if "message" in item:
+            msg = item["message"]
+            chat = msg.get("chat", {}) or {}
+            chat_id = chat.get("id")
+            text = (msg.get("text") or "").strip()
+            user_info = msg.get("from", {}) or chat
+            user_id = user_info.get("id", chat_id)
+            if not chat_id or not text:
+                return True, "empty_message"
+
+            user = portal_db.get_or_create_user(
+                user_id=user_id,
+                chat_id=chat_id,
+                username=user_info.get("username"),
+                first_name=user_info.get("first_name"),
+            )
+
+            clean_text = text.lower()
+            is_menu_action = (
+                clean_text.startswith("/")
+                or clean_text in MENU_START_COMMANDS
+                or clean_text in MENU_SUBS_COMMANDS
+                or clean_text in MENU_CAT_COMMANDS
+                or clean_text in MENU_TIER_COMMANDS
+                or clean_text in MENU_HELP_COMMANDS
+                or clean_text in MENU_SUPPORT_COMMANDS
+            )
+
+            if USER_STATES.get(user_id) == "AWAITING_INQUIRY":
+                if not is_menu_action:
+                    USER_STATES.pop(user_id, None)
+                    admin_chat = os.environ.get("PORTAL_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    u_name = html.escape(user.first_name or user.username or "회원")
+                    u_handle = f"@{user.username}" if user.username else "없음"
+
+                    if admin_chat:
+                        admin_forward = (
+                            f"📩 <b>[1:1 고객 문의 접수]</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
+                            f"• 핸들: {u_handle}\n"
+                            f"• 회원 등급: {user.tier.display_name}\n"
+                            f"• 접수 시각: <code>{now_str}</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"<b>【문의 내용】</b>\n"
+                            f"<i>{html.escape(text)}</i>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        try:
+                            portal_client.send_message(admin_chat, admin_forward)
+                        except Exception:
+                            pass
+
+                    ack_text = (
+                        f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"작성하신 내용:\n"
+                        f"<i>\"{html.escape(text)}\"</i>\n\n"
+                        f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏"
+                    )
+                    portal_client.send_message(
+                        chat_id, ack_text,
+                        reply_markup={"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": "nav:main"}]]}
+                    )
+                    return True, "inquiry_forwarded"
+                else:
+                    USER_STATES.pop(user_id, None)
+
+            if clean_text in MENU_START_COMMANDS or clean_text.startswith("/start"):
+                t_out, m_out = render_main_menu(user)
+            elif clean_text in MENU_SUBS_COMMANDS:
+                subs = portal_db.get_user_subscriptions(user_id)
+                t_out, m_out = render_subscription_view(user, subs)
+            elif clean_text in MENU_CAT_COMMANDS:
+                t_out, m_out = render_category_home_view()
+            elif clean_text in MENU_TIER_COMMANDS:
+                t_out, m_out = render_tier_benefits_view(user)
+            elif clean_text in MENU_SUPPORT_COMMANDS:
+                from portal_hub.interactive import render_support_home_view
+                t_out, m_out = render_support_home_view(user)
+            elif clean_text in MENU_HELP_COMMANDS:
+                from portal_hub.interactive import render_help_view
+                t_out, m_out = render_help_view()
+            else:
+                from portal_hub.interactive import render_search_results_view
+                t_out, m_out = render_search_results_view(text, user)
+
+            portal_client.send_message(chat_id, t_out, reply_markup=m_out)
+            return True, "portal_message_handled"
+
+        return False, "unsupported_update_type"
+
+    def _dispatch_travel_bot_update(self, bot_token: str, item: dict[str, Any]) -> tuple[bool, str]:
+        """Dispatches update to travel_brief's interactive on-demand handler."""
+        try:
+            from travel_brief.interactive import TravelInteractiveHandler
+        except ImportError:
+            return False, "travel_interactive_not_available"
+
+        handler = getattr(self, "_travel_handler", None)
+        if handler is None or getattr(handler, "bot_token", "") != bot_token:
+            handler = TravelInteractiveHandler(bot_token=bot_token)
+            self._travel_handler = handler
+
+        if "callback_query" in item:
+            cq = item["callback_query"]
+            cq_id = str(cq.get("id", ""))
+            sender = cq.get("from", {}) or {}
+            msg = cq.get("message", {}) or {}
+            chat = msg.get("chat", {}) or sender
+            chat_id = str(chat.get("id") or sender.get("id") or "")
+            msg_id = int(msg.get("message_id") or 0)
+            cb_data = str(cq.get("data") or "")
+
+            if cb_data.startswith("trv:"):
+                handler.handle_callback_query(
+                    cq_id=cq_id,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    callback_data=cb_data,
+                    from_user=sender,
+                )
+                return True, "travel_callback_handled"
+
+        return False, "not_travel_interactive_event"
+
+    def sync_bot_updates_once(self, bot_id: str, opener=None, timeout: int = 1) -> dict[str, Any]:
         """Synchronously fetches pending Telegram updates for `bot_id`, routes them, and replies."""
         bot = self.engine.get_bot(bot_id)
         if not bot:
@@ -657,11 +822,25 @@ class DynamicBotManager:
         processed = 0
         events: list[dict[str, Any]] = []
 
-        updates = transport.get_updates(offset=last_offset + 1, timeout=1)
+        updates = transport.get_updates(offset=last_offset + 1, timeout=timeout)
         for item in updates:
             up_id = int(item.get("update_id", 0))
             if up_id > last_offset:
                 last_offset = up_id
+
+            if bot.bot_id == "menu_bot":
+                handled, reason = self._dispatch_portal_menu_update(bot.token, item)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "portal", "type": "portal_integrated", "code": reason})
+                    continue
+
+            if bot.bot_id == "travel_bot":
+                handled, reason = self._dispatch_travel_bot_update(bot.token, item)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "travel", "type": "travel_integrated", "code": reason})
+                    continue
 
             if "callback_query" in item:
                 cq = item["callback_query"]
@@ -724,14 +903,14 @@ class DynamicBotManager:
     async def _poll_loop_for_bot(self, bot_id: str) -> None:
         while self._running:
             try:
-                await asyncio.to_thread(self.sync_bot_updates_once, bot_id)
+                await asyncio.to_thread(self.sync_bot_updates_once, bot_id, timeout=25)
+                await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.warning(f"[DynamicBotManager] Poll warning on {bot_id}: {exc}")
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(3.0)
                 continue
-            await asyncio.sleep(2.0)
 
     async def start(self) -> None:
         self._running = True

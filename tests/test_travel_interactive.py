@@ -166,20 +166,85 @@ class TestTravelInteractive(unittest.TestCase):
         finally:
             handler.shutdown()
 
-    @patch("travel_brief.interactive.NaverFlightLiveClient.invalidate_cache")
-    def test_force_refresh_invalidates_cache(self, mock_inv):
-        handler = TravelInteractiveHandler(bot_token="dummy_token")
-        try:
-            handler.handle_callback_query(
-                cq_id="cq_ref",
-                chat_id="chat_adm",
-                message_id=55,
-                callback_data="trv:r:ALL",
-                from_user={"id": 111},
+    def test_force_refresh_invalidates_disk_cache_real_trigger(self):
+        """Validates that trv:r:ALL truly deletes disk cache file and triggers uncached collection without mocks (M-F)."""
+        import tempfile
+        from datetime import date, timedelta
+        from travel_brief.models import FlightDeal
+        from travel_brief.naver_live import NaverFlightLiveClient, _CACHE_LOCK, _MEM_CACHE
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            custom_cache = Path(tmp_dir) / "test_live_cache.json"
+            live_client = NaverFlightLiveClient(cache_path=custom_cache)
+            engine = FlightEngine(live_naver=True)
+            engine._live_client = live_client
+
+            # 1. Pre-seed disk cache
+            dest = engine.destinations["NRT"]
+            today = date(2026, 11, 20)
+            slots = [(today, today + timedelta(days=3), "목", "일", 3)]
+            mock_deal = FlightDeal(
+                destination_code="NRT",
+                destination_name="도쿄",
+                origin_code="ICN",
+                departure_date="2026-11-20",
+                return_date="2026-11-23",
+                departure_day_of_week="목",
+                return_day_of_week="일",
+                nights=3,
+                airline="티웨이항공",
+                price_krw=300000,
+                baseline_krw=350000,
+                is_peak_holiday=False,
+                holiday_name="",
+                data_source="LIVE_PG",
             )
-            mock_inv.assert_called_once()
-        finally:
-            handler.shutdown()
+            disk_key = "2026-11-20:6:NRT"
+            live_client._save_disk_cache(disk_key, [mock_deal])
+            self.assertTrue(custom_cache.exists())
+
+            # Clear memory cache
+            with _CACHE_LOCK:
+                _MEM_CACHE.clear()
+
+            # First fetch should read from disk cache (uncached collection not called)
+            collect_count = 0
+
+            def mock_collect(*args, **kwargs):
+                nonlocal collect_count
+                collect_count += 1
+                return [mock_deal]
+
+            with patch.object(live_client, "_collect_live_deals_uncached", side_effect=mock_collect):
+                deals1 = live_client.fetch_all_weekend_deals(
+                    {"NRT": dest}, slots, lambda d1, d2: (False, "", 1.0), ref_date=today
+                )
+                self.assertEqual(len(deals1), 1)
+                self.assertEqual(collect_count, 0)  # Hit disk cache!
+
+            # 2. Trigger on-demand force refresh callback
+            handler = TravelInteractiveHandler(bot_token="dummy_token", engine=engine)
+            handler._async_execute_and_update = MagicMock()
+            try:
+                handler.handle_callback_query(
+                    cq_id="cq_ref_real",
+                    chat_id="chat_adm",
+                    message_id=55,
+                    callback_data="trv:r:ALL",
+                    from_user={"id": 111},
+                )
+                # Disk cache file must have been physically unlinked!
+                self.assertFalse(custom_cache.exists())
+
+                # 3. Next fetch must actually trigger uncached live scraper!
+                with patch.object(live_client, "_collect_live_deals_uncached", side_effect=mock_collect):
+                    deals2 = live_client.fetch_all_weekend_deals(
+                        {"NRT": dest}, slots, lambda d1, d2: (False, "", 1.0), ref_date=today
+                    )
+                    self.assertEqual(len(deals2), 1)
+                    self.assertEqual(collect_count, 1)  # Scraper executed!
+            finally:
+                handler.shutdown()
 
 
 if __name__ == "__main__":

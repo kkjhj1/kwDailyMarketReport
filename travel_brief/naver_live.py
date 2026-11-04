@@ -625,17 +625,29 @@ class NaverFlightLiveClient:
 
         return []
 
-    @classmethod
-    def invalidate_cache(cls, ref_date: Optional[date] = None, months_ahead: int = 6) -> None:
-        """Invalidates memory cache key to force fresh scrape on next request."""
-        if ref_date is None:
-            eff_ref = datetime.now(KST).date().isoformat()
-        else:
-            eff_ref = ref_date.isoformat()
-        mem_key = (eff_ref, months_ahead)
+    def invalidate_cache(self, ref_date: Optional[date] = None, months_ahead: int = 6) -> None:
+        """Invalidates memory, disk, and failure caches to guarantee fresh collection."""
         with _CACHE_LOCK:
-            _MEM_CACHE.pop(mem_key, None)
+            _MEM_CACHE.clear()
+            _FAIL_CACHE.clear()
+        try:
+            if self.cache_path and self.cache_path.exists():
+                self.cache_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Disk cache removal skipped: %s", exc)
 
+    @classmethod
+    def invalidate_global_cache(cls, ref_date: Optional[date] = None, months_ahead: int = 6, custom_path: Optional[Path] = None) -> None:
+        """Classmethod helper to invalidate global memory, fail cache, and default disk cache file."""
+        with _CACHE_LOCK:
+            _MEM_CACHE.clear()
+            _FAIL_CACHE.clear()
+        try:
+            target_path = custom_path or (Path(tempfile.gettempdir()) / "kw_travel_naver_live_v4.json")
+            if target_path.exists():
+                target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def _collect_live_deals_uncached(
         self,

@@ -7,12 +7,15 @@ from __future__ import annotations
 import re
 import argparse
 import html
+import logging
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Set console encoding on Windows to prevent UnicodeEncodeError
 if sys.platform == "win32":
