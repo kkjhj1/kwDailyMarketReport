@@ -146,7 +146,7 @@ class InternalBriefingScheduler:
         self.deliverer = deliverer or MarketBriefingDeliverer(root_dir, get_report_base_url)
         self.poll_interval = poll_interval
 
-        self.runner_id = f"render_scheduler_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        self.runner_id = f"oracle_scheduler_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
