@@ -272,8 +272,22 @@ class ProductionV03Tests(unittest.TestCase):
         self.assertIn("<b>주가:</b>", html_out)
         self.assertIn("<b>채권:</b>", html_out)
         self.assertIn("<b>기타:</b>", html_out)
-        self.assertIn("⚡ 매크로 금융 레이더", html_out)
+        self.assertIn("⚡ 스프레드 분석", html_out)
+        self.assertNotIn("⚡ 매크로 금융 레이더", html_out)
         self.assertIn("한·미 10년물 금리차", html_out)
+        self.assertIn("미국 장단기 금리차", html_out)
+        self.assertIn("국내 장단기 금리차", html_out)
+        for leg_val in ("3.140%", "4.100%", "3.960%", "3.015%"):
+            self.assertIn(leg_val, html_out)
+        for leg_chg in ("-2.5 bp", "+5.0 bp", "+4.0 bp", "-3.0 bp"):
+            self.assertIn(leg_chg, html_out)
+        # Spreads: US10Y-KR10Y=+96.0, US10Y-US2Y=+14.0, KR10Y-KR3Y=+12.5
+        self.assertIn("+96.0 bp", html_out)
+        self.assertIn("+14.0 bp", html_out)
+        self.assertIn("+12.5 bp", html_out)
+        self.assertIn("⚠️ 한·미 금리 역전 지속 (외환 변동성 주의)", html_out)
+        self.assertIn("🟢 정상 수익률 곡선 (연착륙 시그널)", html_out)
+        self.assertIn("🟢 정상 수익률 곡선 (경기 연착륙)", html_out)
         self.assertIn("KOSPI 200", html_out)
         self.assertIn("WTI유가", html_out)
         self.assertIn("국제금", html_out)
@@ -290,7 +304,32 @@ class ProductionV03Tests(unittest.TestCase):
         html_out = renderer.render(briefing, quotes)
         # Should render cleanly without throwing exception
         self.assertIn("KOSPI", html_out)
-        self.assertNotIn("⚡ 매크로 금융 레이더", html_out)  # Gracefully omitted when missing pair
+        self.assertNotIn("⚡ 스프레드 분석", html_out)  # Gracefully omitted when missing pair
+        self.assertNotIn("⚡ 매크로 금융 레이더", html_out)
+
+        # KR3Y missing: Cards 1 and 2 render, Card 3 omitted
+        quotes = provider.fetch(["KOSPI", "KR10Y", "US10Y", "US2Y"])
+        html_out = renderer.render(builder.build(quotes, kind="closing"), quotes)
+        self.assertIn("⚡ 스프레드 분석", html_out)
+        self.assertIn("한·미 10년물 금리차", html_out)
+        self.assertIn("미국 장단기 금리차", html_out)
+        self.assertNotIn("국내 장단기 금리차", html_out)
+
+        # US2Y missing: Cards 1 and 3 render, Card 2 omitted
+        quotes = provider.fetch(["KOSPI", "KR3Y", "KR10Y", "US10Y"])
+        html_out = renderer.render(builder.build(quotes, kind="closing"), quotes)
+        self.assertIn("⚡ 스프레드 분석", html_out)
+        self.assertIn("한·미 10년물 금리차", html_out)
+        self.assertNotIn("미국 장단기 금리차", html_out)
+        self.assertIn("국내 장단기 금리차", html_out)
+
+        # Only domestic curve available: Card 3 alone
+        quotes = provider.fetch(["KOSPI", "KR3Y", "KR10Y"])
+        html_out = renderer.render(builder.build(quotes, kind="closing"), quotes)
+        self.assertIn("⚡ 스프레드 분석", html_out)
+        self.assertNotIn("한·미 10년물 금리차", html_out)
+        self.assertNotIn("미국 장단기 금리차", html_out)
+        self.assertIn("국내 장단기 금리차", html_out)
 
 
 if __name__ == "__main__":

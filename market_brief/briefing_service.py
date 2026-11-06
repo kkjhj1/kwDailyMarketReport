@@ -422,7 +422,12 @@ def send_bot_broadcast_message(
         return {"success": False, "error": "데이터베이스 연결이 필요합니다."}
 
     # Fetch active subscriptions
-    subs = db.get_subscriptions_by_bot(bot_id, status="ACTIVE")
+    if hasattr(db, "get_bot_active_recipients"):
+        subs = db.get_bot_active_recipients(bot_id)
+    elif hasattr(db, "get_subscriptions_by_bot"):
+        subs = db.get_subscriptions_by_bot(bot_id, status="ACTIVE")
+    else:
+        subs = []
     if not subs:
         return {
             "success": True,
@@ -441,7 +446,7 @@ def send_bot_broadcast_message(
         failed = 0
 
         for sub in subs:
-            chat_id = str(sub.telegram_user_id)
+            chat_id = str(getattr(sub, "chat_id", None) or getattr(sub, "telegram_user_id", None))
             payload: Dict[str, Any] = {
                 "chat_id": chat_id,
                 "text": content_html,

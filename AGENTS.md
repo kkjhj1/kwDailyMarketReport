@@ -1,11 +1,15 @@
 # ============================================================
 # PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
 # Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
-# Version: 2.2 (Multi-Bot Platform & 4-Stage Multi-AI Pipeline Edition)
+# Version: 2.3 (Two-Phase Multi-AI Pipeline & Autonomous Planning Audit Edition)
 # ============================================================
 
 ## 1. 프로젝트 개요 및 멀티봇 파이프라인
 - **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
+- **운영 인프라 환경**:
+  - **운영 메인 서버**: **오라클 클라우드(OCI) VM** (`161.33.196.211`, `systemd` 서비스 `multibot.service`, 포트 `8002`, 24/7 상시 가동)
+  - **웹 대시보드 및 정적 리포트 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
+  - **클라우드 퇴역 완료**: Render Cloud는 완전히 폐기되었으며 일체 사용하지 않음
 - **주요 파이프라인 및 구성 서비스**:
   - **시황 브리핑 (`telegram_bot_runner.py`)**: 일일 장전 브리핑(오전 06:30 KST 자동 실행) 및 긴급 변동성 브리핑(장중 ±3% 이상 급등락 감지 시 발송)
   - **트래블 패스파인더 (`travel_bot_runner.py`)**: 네이버 실시간 항공/숙소/예산 검증 및 6개월 특가 브리핑
@@ -46,11 +50,18 @@
 
 ## 4. 멀티 AI 4단계 바톤터치 파이프라인 (Multi-AI Pipeline)
 
-### 4.1 위험도별 라우팅 규약 (Token & Latency Guard)
+### 4.1 2단계 분리형 게이트 및 위험도별 라우팅 규약 (Two-Phase Multi-AI Protocol)
 - **L0 (문구, 주석, 오타, 마크다운)**: Gemini 단독 처리 (외부 호출 전면 금지, 토큰 소모 0%).
-- **L1 (단일 파일 국소 버그, 단일 테스트 보완)**: GPT 설계 생략, Gemini ➔ Claude 직행 구현.
-- **L2 (봇 비즈니스 로직, 메시지 템플릿, 웹 UI, 다중 파일 테스트)**: Gemini(요구정리) ➔ GPT(아키텍처 설계) ➔ Claude(시니어 구현) ➔ Gemini(최종 통합).
-- **L3 (SQLite 스키마, 인증·구독 권한, 발송 디스패처, GitHub Actions 크론)**: 풀체인 가동 + 사용자 명시 승인(`[AUTH-01]`) 필수.
+- **L1 (단일 파일 국소 버그, 단일 테스트 보완)**: GPT 설계 생략, Gemini ➔ Claude(Write Lease) 직행 구현.
+- **L2/L3 (비즈니스 로직, 메시지 템플릿, 웹 UI, DB 스키마, 기획안 리팩토링, 대규모 리팩토링)**:
+  - **[Phase 1: 기획·아키텍처 자율 감사 단계 (Non-Destructive / Read-Only)]**:
+    1. **Gemini (요구정리)**: 사용자 요청 및 자연어 의도 분석, 1차 타겟 명세/초안(Draft) 작성.
+    2. **GPT (수석 기획·설계 감사 - codex CLI)**: 1차 초안을 바탕으로 금융 산식, UI/UX, 불변조건, 엣지케이스 전문 감사 및 리팩토링 설계를 **사용자 승인 대기 없이 즉시 자동 실행** (`-s read-only`).
+    3. **Gemini (계획서 확정 및 보고)**: GPT 감사 결과를 반영하여 **「GPT 감사가 완료된 확정 계획서(Artifact)」**를 생성하여 사용자에게 보고.
+  - **[Phase 2: 구현 착수 게이트 (Destructive / Two-Phase Gate [AUTH-01])]**:
+    4. **사용자 승인 게이트**: 완성된 계획서를 확인한 사용자의 명시적 `"개발진행하라"` 확인 후 구현 착수.
+    5. **Claude (시니어 구현 - claude CLI)**: Single-Writer Lease 권한을 부여받아 실제 코드 작성 및 단위 테스트 실행.
+    6. **Gemini (최종 판결 & 통합)**: git diff 기계적 신선 대조(Fresh Read) 및 7대 수칙 검증 후 최종 통합 완료.
 
 ### 4.2 외부 에이전트 CLI 실행 표준 및 Handoff 규약
 

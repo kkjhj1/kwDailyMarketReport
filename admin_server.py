@@ -32,6 +32,7 @@ from market_brief.market_data import CompositeMarketDataProvider, FixtureProvide
 from market_brief.market_data.naver_provider import fetch_naver_market_news
 from market_brief.multi_bot_manager import DynamicBotManager, MultiBotInteractionRouter, TelegramBotTransport
 from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
+from market_brief.briefing_scheduler import InternalBriefingScheduler
 from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
 from market_brief.subscription_engine import SubscriptionEngine
@@ -266,10 +267,12 @@ def create_admin_app(
     async def lifespan(_app: FastAPI):
         if enable_bot_workers:
             await bot_manager.start()
+            await briefing_scheduler.start()
         try:
             yield
         finally:
             if enable_bot_workers:
+                await briefing_scheduler.stop()
                 await bot_manager.stop()
 
     app = FastAPI(title="Multi-Bot Subscription & Market Brief Admin Console", version="2.0.0", lifespan=lifespan)
@@ -318,6 +321,15 @@ def create_admin_app(
                 if line.startswith("REPORT_BASE_URL="):
                     configured = line.split("=", 1)[1].strip().strip('"').strip("'")
         return configured or "https://kkjhj1.github.io/kwDailyMarketReport"
+
+    briefing_scheduler = InternalBriefingScheduler(
+        db=db,
+        sub_engine=sub_engine,
+        root_dir=ROOT,
+        get_bot_token=get_bot_token,
+        get_report_base_url=get_report_base_url,
+    )
+    app.state.briefing_scheduler = briefing_scheduler
 
     def get_github_repo() -> str:
         repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
@@ -832,6 +844,7 @@ def create_admin_app(
             "active_recipients_count": len(active_recipients),
             "report_base_url": get_report_base_url(),
             "github_connected": bool(get_github_token()),
+            "briefing_scheduler": briefing_scheduler.get_status() if enable_bot_workers else {"is_running": False},
         }
 
     @app.get("/api/recipients")
@@ -1443,13 +1456,16 @@ def create_admin_app(
         Returns 200 OK if active workers are running, or 503 if bot workers have crashed."""
         worker_statuses = bot_manager.get_worker_statuses() if enable_bot_workers else {}
         failed_workers = [bid for bid, st in worker_statuses.items() if not st.get("worker_running")]
-        status_code = 503 if failed_workers and enable_bot_workers else 200
+        sched_status = briefing_scheduler.get_status() if enable_bot_workers else {"is_running": False}
+        sched_crashed = bool(enable_bot_workers and sched_status.get("has_crashed"))
+        status_code = 503 if (failed_workers or sched_crashed) and enable_bot_workers else 200
         return JSONResponse(
             content={
                 "status": "HEALTHY" if status_code == 200 else "DEGRADED",
                 "active_workers": [bid for bid, st in worker_statuses.items() if st.get("worker_running")],
                 "failed_workers": failed_workers,
                 "bot_workers_enabled": enable_bot_workers,
+                "briefing_scheduler": sched_status,
                 "timestamp_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
             },
             status_code=status_code,
@@ -1477,7 +1493,7 @@ def find_available_port(preferred_port: int = 8002, max_attempts: int = 20) -> i
 
 
 if __name__ == "__main__":
-    is_cloud = bool(os.environ.get("PORT") or os.environ.get("RENDER"))
+    is_cloud = bool(os.environ.get("PORT") or os.environ.get("ORACLE_CLOUD") or os.environ.get("OCI"))
     if is_cloud:
         port = int(os.environ.get("PORT", "8002"))
         default_host = "0.0.0.0"

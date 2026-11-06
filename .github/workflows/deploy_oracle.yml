@@ -1,0 +1,55 @@
+name: Deploy to Oracle Cloud VM
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'PORTAL_BOT_GUIDE.md'
+      - '.gitignore'
+      - 'reports/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-oracle-cloud
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Oracle Server
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check Oracle Secrets Availability
+        id: check_secrets
+        run: |
+          if [ -n "${{ secrets.ORACLE_SSH_KEY }}" ] && [ -n "${{ secrets.ORACLE_HOST }}" ]; then
+            echo "has_secrets=true" >> $GITHUB_OUTPUT
+            echo "✅ Oracle secrets configured. Proceeding with deployment."
+          else
+            echo "has_secrets=false" >> $GITHUB_OUTPUT
+            echo "⚠️ ORACLE_SSH_KEY or ORACLE_HOST not set in GitHub Secrets. Skipping automatic SSH deploy (Use local deploy_to_oracle.ps1 instead)."
+          fi
+
+      - name: Execute Remote Deploy on Oracle VM
+        if: steps.check_secrets.outputs.has_secrets == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER || 'ubuntu' }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            cd /home/ubuntu/kwDailyMarketReport
+            git fetch origin main
+            git reset --hard origin/main
+            if [ -f "requirements.txt" ]; then
+              ./venv/bin/pip install -r requirements.txt --quiet
+            fi
+            sudo systemctl restart multibot
+            sleep 2
+            sudo systemctl is-active multibot
+            curl -s http://127.0.0.1:8002/healthz

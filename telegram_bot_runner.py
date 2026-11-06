@@ -165,6 +165,18 @@ def interactive_setup(env_path: Path) -> tuple[str, str]:
     return token, merged_chat_ids
 
 
+def check_oracle_server_sent(kind: str) -> bool:
+    """오라클 클라우드 운영 서버(OCI)에서 해당 브리핑이 이미 발송 완료되었는지 중복 발송 여부를 확인합니다."""
+    target_url = os.environ.get("ORACLE_SERVER_URL", "http://161.33.196.211:8002/api/status")
+    try:
+        req = urllib.request.Request(target_url, headers={"User-Agent": "MarketBriefRunner/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get(f"{kind}_status") == "COMPLETED"
+    except Exception:
+        return False
+
+
 def main() -> int:
     env_path = ROOT / ".env"
     load_dotenv_file(ROOT)
@@ -262,6 +274,9 @@ def main() -> int:
         # 1) 평일 장마감 후 (15:30 ~ 18:00 KST):
         # 18:00 이후에는 야간장이 가까워지므로 당일 마감 브리핑 윈도우는 만료(Expired) 처리!
         if is_kr_trading and (dtime(15, 30) <= current_time <= dtime(18, 0)):
+            if check_oracle_server_sent("closing"):
+                print(f"✅ [AutoSchedule] 오라클 클라우드 서버(OCI)에서 금일({today}) 마감 브리핑이 이미 발송 완료되었습니다. (중복 방지 스킵)")
+                return 0
             if not pipeline.alert_store.is_regular_briefing_sent("closing", today):
                 print(f"⏰ [AutoSchedule] 금일({today}) 마감 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 마감 브리핑 즉시 발송 진행")
                 args.send_now = "closing"
@@ -274,6 +289,9 @@ def main() -> int:
         # 08:50 이후에는 장전 브리핑이 유효기간 만료(EXPIRED)되었으므로 절대 발송하지 않고
         # 개장 후 장중 변동성 감시(check_urgent) 모드로 강제 전환한다!
         elif is_kr_trading and (dtime(6, 30) <= current_time <= dtime(8, 50)):
+            if check_oracle_server_sent("morning"):
+                print(f"✅ [AutoSchedule] 오라클 클라우드 서버(OCI)에서 금일({today}) 모닝 브리핑이 이미 발송 완료되었습니다. (중복 방지 스킵)")
+                return 0
             if not pipeline.alert_store.is_regular_briefing_sent("morning", today):
                 print(f"⏰ [AutoSchedule] 금일({today}) 모닝 브리핑 미발송 상태 감지 (실행 시각: {now_kst.strftime('%H:%M')} KST) -> 모닝 브리핑 즉시 발송 진행")
                 args.send_now = "morning"

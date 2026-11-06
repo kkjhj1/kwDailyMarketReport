@@ -102,47 +102,78 @@ class HTMLReportRenderer:
                 </div>
                 """)
 
-        # 1. Macro Spread Radar Cards (Resilient to partial data)
+        # 1. Spread Analysis Cards (each card rendered independently; omitted when its pair is incomplete)
         us10y = quotes_map.get("US10Y")
         kr10y = quotes_map.get("KR10Y")
         us2y = quotes_map.get("US2Y")
+        kr3y = quotes_map.get("KR3Y")
         macro_cards = []
 
-        if us10y and kr10y and us10y.value is not None and kr10y.value is not None:
-            spread_10y = (us10y.value - kr10y.value) * 100
-            s10_cls = "alert" if spread_10y > 0 else "ok"
-            s10_desc = "⚠️ 한·미 금리 역전 지속 (외환 변동성 주의)" if spread_10y > 0 else "🟢 정상 스프레드 (외환 안정권)"
-            macro_cards.append(f"""
-            <div class="macro-card">
-              <div class="macro-title">
-                <span>한·미 10년물 금리차</span>
-                <span style="font-size:10px;">외환/외인수급</span>
-              </div>
-              <div class="macro-val">{spread_10y:+.1f} bp</div>
-              <span class="macro-desc {s10_cls}">{s10_desc}</span>
-            </div>
-            """)
+        def _has_value(q) -> bool:
+            return q is not None and q.value is not None
 
-        if us10y and us2y and us10y.value is not None and us2y.value is not None:
-            spread_2_10 = (us10y.value - us2y.value) * 100
-            s2_cls = "ok" if spread_2_10 > 0 else "alert"
-            s2_desc = "🟢 정상 수익률 곡선 (연착륙 시그널)" if spread_2_10 > 0 else "🔴 장단기 금리 역전 (경기 침체 주의)"
-            macro_cards.append(f"""
+        def _leg_row(label: str, q) -> str:
+            bp = q.change_bp
+            chg = f"{bp:+.1f} bp" if bp is not None else "—"
+            return f"""
+                <div class="macro-row">
+                  <span class="name">{html.escape(label)}</span>
+                  <span class="val">{q.value:.3f}%</span>
+                  <span class="chg">{chg}</span>
+                </div>"""
+
+        def _spread_card(title: str, tag: str, formula: str, spread, legs, badges) -> str:
+            pos, neg, flat = badges
+            cls, desc = pos if spread > 0 else (neg if spread < 0 else flat)
+            rows = "".join(_leg_row(label, q) for label, q in legs)
+            return f"""
             <div class="macro-card">
               <div class="macro-title">
-                <span>미국 장단기 금리차 (10Y - 2Y)</span>
-                <span style="font-size:10px;">경기 선행 지표</span>
+                <span class="macro-name">{html.escape(title)}</span>
+                <span class="macro-tag">{html.escape(tag)}</span>
               </div>
-              <div class="macro-val">{spread_2_10:+.1f} bp</div>
-              <span class="macro-desc {s2_cls}">{s2_desc}</span>
+              <div class="macro-val">{spread:+.1f} bp <span class="macro-formula">{html.escape(formula)}</span></div>
+              <div class="macro-compare-box">{rows}
+              </div>
+              <span class="macro-desc {cls}">{html.escape(desc)}</span>
             </div>
-            """)
+            """
+
+        if _has_value(us10y) and _has_value(kr10y):
+            spread_10y = (us10y.value - kr10y.value) * 100
+            macro_cards.append(_spread_card(
+                "한·미 10년물 금리차", "외환 / 외국인 수급", "(미 10Y - 국고 10Y)", spread_10y,
+                [("한국 10Y", kr10y), ("미국 10Y", us10y)],
+                (("alert", "⚠️ 한·미 금리 역전 지속 (외환 변동성 주의)"),
+                 ("ok", "🟢 정상 스프레드 (외환 안정권)"),
+                 ("ok", "⚪ 스프레드 평탄 (0.0 bp)")),
+            ))
+
+        if _has_value(us10y) and _has_value(us2y):
+            spread_2_10 = (us10y.value - us2y.value) * 100
+            macro_cards.append(_spread_card(
+                "미국 장단기 금리차 (10Y - 2Y)", "경기 선행 지표", "(미 10Y - 미 2Y)", spread_2_10,
+                [("미 10Y (장기)", us10y), ("미  2Y (단기)", us2y)],
+                (("ok", "🟢 정상 수익률 곡선 (연착륙 시그널)"),
+                 ("alert", "🔴 장단기 금리 역전 (경기 침체 주의)"),
+                 ("ok", "⚪ 일드커브 평탄 (0.0 bp)")),
+            ))
+
+        if _has_value(kr10y) and _has_value(kr3y):
+            spread_3_10 = (kr10y.value - kr3y.value) * 100
+            macro_cards.append(_spread_card(
+                "국내 장단기 금리차 (10Y - 3Y)", "국내 통화 / 경기", "(국고 10Y - 국고 3Y)", spread_3_10,
+                [("국고 10Y", kr10y), ("국고  3Y", kr3y)],
+                (("ok", "🟢 정상 수익률 곡선 (경기 연착륙)"),
+                 ("alert", "⚠️ 장단기 금리 역전 (경기 둔화 경계)"),
+                 ("ok", "⚪ 일드커브 평탄 (0.0 bp)")),
+            ))
 
         macro_html = ""
         if macro_cards:
             macro_html = f"""
             <div class="macro-section">
-              <div class="section-title">⚡ 매크로 금융 레이더 (스프레드 분석)</div>
+              <div class="section-title">⚡ 스프레드 분석</div>
               <div class="macro-grid">
                 {''.join(macro_cards)}
               </div>
@@ -400,11 +431,14 @@ class HTMLReportRenderer:
     }}
     .macro-grid {{
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
     }}
-    @media (max-width: 480px) {{
-      .macro-grid {{ grid-template-columns: 1fr; }}
+    @media (max-width: 659px) {{
+      .macro-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 439px) {{
+      .macro-grid {{ grid-template-columns: minmax(0, 1fr); }}
     }}
     .macro-card {{
       background: var(--card-bg);
@@ -412,21 +446,82 @@ class HTMLReportRenderer:
       border-radius: 12px;
       padding: 12px 14px;
       box-shadow: var(--shadow-sm);
+      min-width: 0;
     }}
     .macro-title {{
       font-size: 12px;
-      font-weight: 600;
-      color: var(--text-muted);
-      margin-bottom: 4px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 6px;
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
+      gap: 6px;
+      flex-wrap: wrap;
+    }}
+    .macro-title .macro-name {{
+      min-width: 0;
+    }}
+    .macro-title .macro-tag {{
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      white-space: nowrap;
     }}
     .macro-val {{
       font-size: 18px;
       font-weight: 800;
       color: var(--text-main);
-      margin-bottom: 4px;
+      margin-bottom: 6px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .macro-val .macro-formula {{
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-left: 4px;
+      white-space: nowrap;
+    }}
+    .macro-compare-box {{
+      background: #f8fafc;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-bottom: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }}
+    [data-theme="dark"] .macro-compare-box {{
+      background: rgba(255, 255, 255, 0.04);
+    }}
+    .macro-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+    }}
+    .macro-row .name {{
+      color: var(--text-muted);
+      font-weight: 600;
+      white-space: pre;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .macro-row .val {{
+      color: var(--text-main);
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .macro-row .chg {{
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: 52px;
+      text-align: right;
     }}
     .macro-desc {{
       font-size: 11px;

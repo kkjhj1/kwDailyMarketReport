@@ -7,3 +7,5 @@ __pycache__/
 .pytest_cache/
 *.log
 scratch/
+*.key
+참고파일/
