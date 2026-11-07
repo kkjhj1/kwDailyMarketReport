@@ -3,17 +3,30 @@ import io
 import json
 from unittest.mock import MagicMock
 from admission_brief.ai_curator import AICurator
-from admission_brief.channels.telegram import TelegramChannel, format_admission_html
+from admission_brief.channels.telegram import (
+    TG_MAX_HTML_LEN,
+    TG_MAX_VISIBLE_LEN,
+    TelegramChannel,
+    format_admission_html,
+    measure_message,
+)
+from admission_brief.collector import AdmissionCollector
 from admission_brief.interactive_bot import (
     AdmissionInteractiveBot,
+    build_events_category_keyboard,
+    build_events_page_keyboard,
     build_grade_inline_keyboard,
     build_persistent_reply_keyboard,
+    format_events_page_html,
 )
 from admission_brief.models import (
     AdmissionBriefing,
+    AdmissionEvent,
     BriefingType,
+    EventCategory,
     ParentUserProfile,
     TargetGrade,
+    TargetRegion,
 )
 from admission_brief.storage.db import AdmissionDatabase
 

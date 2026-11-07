@@ -101,3 +101,37 @@ def test_parent_user_profile_serialization():
     assert data["target_grade"] == "MIDDLE"
     assert data["username"] == "test_mom"
     assert data["alert_enabled"] is True
+
+
+def test_event_category_properties():
+    from admission_brief.models import EventCategory
+
+    assert EventCategory.EXPO.icon == "🎪"
+    assert EventCategory.EXPO.badge == "🎪 [대입박람회]"
+    assert EventCategory.EXPO.title == "공공·대학 대입 박람회"
+    assert EventCategory.BRIEFING.badge == "📢 [대형설명회]"
+    assert EventCategory.BRIEFING.title == "5대 대형 입시기관 설명회"
+    assert EventCategory.SEMINAR.icon == "💡"
+    assert EventCategory.SEMINAR.title == "테마별 전략 세미나"
+
+
+def test_admission_event_category_defaults_and_serialization():
+    from admission_brief.models import EventCategory
+
+    event = AdmissionEvent(
+        event_id="e1",
+        title="t",
+        organizer="종로학원",
+        target_grade=TargetGrade.HIGH_3_N,
+        event_type=BriefingType.BRIEFING_RECAP,
+        event_date_str="2026-11-22 14:00",
+    )
+    assert event.category == EventCategory.BRIEFING
+    assert event.to_dict()["category"] == "BRIEFING"
+    assert event.to_dict()["expires_at"] is None
+
+    event.category = EventCategory.EXPO
+    event.expires_at = datetime(2027, 1, 7, 18, 0)
+    data = event.to_dict()
+    assert data["category"] == "EXPO"
+    assert data["expires_at"] == "2027-01-07T18:00:00"
