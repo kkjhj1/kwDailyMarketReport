@@ -62,24 +62,114 @@ logging.basicConfig(
 logger = logging.getLogger("portal_runner")
 
 
+import re
+
 MENU_START_COMMANDS = {
     "/start", "/menu", "/home", "홈", "메인", "메인 메뉴", "메인메뉴", "시작", "🏠 메인 메뉴", "🏠 홈", "🏠 메인", "🏠 메인 홈"
 }
 MENU_SUBS_COMMANDS = {
-    "/subs", "/mysubs", "/sub", "내구독", "내 구독", "내 구독 관리", "📋 내 구독 관리", "내 구독 센터", "📋 내 구독 센터", "구독 관리", "구독 센터", "구독", "구독설정", "구독 설정"
+    "/subs", "/mysubs", "/sub", "내구독", "내 구독", "내구독관리", "내 구독 관리", "📋 내 구독 관리",
+    "내구독센터", "내 구독 센터", "📋 내 구독 센터", "구독 관리", "구독관리", "구독 센터", "구독센터",
+    "구독", "구독설정", "구독 설정", "내구독현황", "내 구독 현황", "내구독목록", "내 구독 목록"
 }
 MENU_CAT_COMMANDS = {
-    "/category", "/categories", "/cats", "/cat", "카테고리", "카테고리 둘러보기", "📂 카테고리 둘러보기", "둘러보기", "분야별", "카탈로그", "봇 둘러보기", "전체 봇"
+    "/category", "/categories", "/cats", "/cat", "카테고리", "카테고리 둘러보기", "카테고리둘러보기",
+    "📂 카테고리 둘러보기", "둘러보기", "분야별", "카탈로그", "봇 둘러보기", "봇둘러보기", "📂 봇 둘러보기",
+    "전체 봇", "전체봇", "전체정보봇", "정보봇목록", "봇목록"
 }
 MENU_TIER_COMMANDS = {
-    "/tiers", "/tier", "/upgrade", "등급", "내 등급", "내 등급 & 혜택", "💎 내 등급 & 혜택", "내 등급/혜택", "💎 내 등급/혜택", "혜택", "멤버십", "등급 혜택", "내 등급 혜택"
+    "/tiers", "/tier", "/upgrade", "등급", "내 등급", "내등급", "내 등급 & 혜택", "💎 내 등급 & 혜택",
+    "내 등급 혜택", "내등급혜택", "💎 내 등급 혜택", "내 등급/혜택", "💎 내 등급/혜택", "혜택", "멤버십",
+    "등급 혜택", "등급혜택", "등급안내", "회원등급", "등급별혜택"
 }
 MENU_HELP_COMMANDS = {
-    "/help", "/guide", "도움말", "이용 도움말", "❓ 이용 도움말", "안내", "가이드", "faq", "이용안내", "사용법"
+    "/help", "/guide", "도움말", "이용 도움말", "이용도움말", "❓ 이용 도움말", "안내", "가이드", "faq", "이용안내", "사용법", "도움"
 }
 MENU_SUPPORT_COMMANDS = {
-    "/support", "/inquiry", "/contact", "고객센터", "💬 고객센터", "문의", "1:1 문의", "문의하기", "상담", "고객지원", "관리자 문의", "1:1 문의사항", "💬 고객센터/문의"
+    "/support", "/inquiry", "/contact", "고객센터", "💬 고객센터", "문의", "1:1 문의", "1:1문의", "11문의",
+    "문의하기", "상담", "고객지원", "관리자 문의", "관리자문의", "1:1 문의사항", "💬 고객센터/문의"
 }
+
+
+def normalize_menu_text(text: str) -> str:
+    """Strips whitespace, emojis, and special punctuation for robust Korean voice/typing command matching."""
+    if not text:
+        return ""
+    has_slash = text.strip().startswith("/")
+    cleaned = re.sub(r"[^\w가-힣a-zA-Z0-9]", "", text.lower())
+    return ("/" + cleaned) if has_slash and not cleaned.startswith("/") else cleaned
+
+
+def match_menu_action(text: str) -> Optional[str]:
+    """Matches raw or space-free text to one of: 'START', 'SUBS', 'CAT', 'TIER', 'HELP', 'SUPPORT'.
+    Returns None if text is a keyword search query."""
+    if not text:
+        return None
+    raw_lower = text.strip().lower()
+    norm = normalize_menu_text(text)
+
+    # 1. Start / Home
+    if (
+        raw_lower in MENU_START_COMMANDS
+        or raw_lower.startswith("/start")
+        or norm in {"start", "/start", "menu", "/menu", "home", "/home", "홈", "메인", "메인메뉴", "시작", "메인홈"}
+    ):
+        return "START"
+
+    # 2. My Subscriptions / Management
+    if (
+        raw_lower in MENU_SUBS_COMMANDS
+        or norm in {
+            "subs", "/subs", "mysubs", "/mysubs", "sub", "/sub",
+            "내구독", "내구독관리", "내구독센터", "구독관리", "구독센터",
+            "구독", "구독설정", "내구독현황", "내구독목록", "구독현황",
+        }
+    ):
+        return "SUBS"
+
+    # 3. Browse Bots / Categories
+    if (
+        raw_lower in MENU_CAT_COMMANDS
+        or norm in {
+            "category", "/category", "categories", "/categories", "cats", "/cats", "cat", "/cat",
+            "카테고리", "카테고리둘러보기", "봇둘러보기", "둘러보기", "분야별",
+            "카탈로그", "전체봇", "전체정보봇", "정보봇목록", "봇목록",
+        }
+    ):
+        return "CAT"
+
+    # 4. Membership Tiers & Benefits
+    if (
+        raw_lower in MENU_TIER_COMMANDS
+        or norm in {
+            "tiers", "/tiers", "tier", "/tier", "upgrade", "/upgrade",
+            "등급", "내등급", "내등급혜택", "내등급과혜택", "등급혜택",
+            "혜택", "멤버십", "등급안내", "회원등급", "등급별혜택",
+        }
+    ):
+        return "TIER"
+
+    # 5. Usage Help & Guide
+    if (
+        raw_lower in MENU_HELP_COMMANDS
+        or norm in {
+            "help", "/help", "guide", "/guide", "faq", "/faq",
+            "도움말", "이용도움말", "안내", "가이드", "이용안내", "사용법", "도움",
+        }
+    ):
+        return "HELP"
+
+    # 6. Customer Support / Inquiry
+    if (
+        raw_lower in MENU_SUPPORT_COMMANDS
+        or norm in {
+            "support", "/support", "inquiry", "/inquiry", "contact", "/contact",
+            "고객센터", "문의", "11문의", "문의하기", "상담", "고객지원", "관리자문의",
+        }
+    ):
+        return "SUPPORT"
+
+    return None
 
 
 def get_portal_token() -> str:
@@ -170,16 +260,8 @@ def run_polling(token: str) -> None:
                     )
 
                     clean_text = text.lower()
-
-                    is_menu_action = (
-                        clean_text.startswith("/")
-                        or clean_text in MENU_START_COMMANDS
-                        or clean_text in MENU_SUBS_COMMANDS
-                        or clean_text in MENU_CAT_COMMANDS
-                        or clean_text in MENU_TIER_COMMANDS
-                        or clean_text in MENU_HELP_COMMANDS
-                        or clean_text in MENU_SUPPORT_COMMANDS
-                    )
+                    action = match_menu_action(text)
+                    is_menu_action = action is not None
 
                     # Handle Awaiting Inquiry State
                     if USER_STATES.get(user_id) == "AWAITING_INQUIRY":
@@ -231,30 +313,30 @@ def run_polling(token: str) -> None:
                     USER_STATES.pop(user_id, None)
 
                     # Handle Fixed Commands & Persistent Keyboard Texts
-                    if clean_text == "/start" or clean_text.startswith("/start ") or clean_text in MENU_START_COMMANDS:
+                    if action == "START":
                         reply_text, markup = render_main_menu(user)
                         client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=reply_kb)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in MENU_SUBS_COMMANDS:
+                    elif action == "SUBS":
                         subs = db.get_user_subscriptions(user_id)
                         reply_text, markup = render_subscription_view(user, subs)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in MENU_CAT_COMMANDS:
+                    elif action == "CAT":
                         reply_text, markup = render_category_home_view()
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in MENU_TIER_COMMANDS:
+                    elif action == "TIER":
                         reply_text, markup = render_tier_benefits_view(user)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in MENU_HELP_COMMANDS:
+                    elif action == "HELP":
                         from portal_hub.interactive import render_help_view
                         reply_text, markup = render_help_view()
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
-                    elif clean_text in MENU_SUPPORT_COMMANDS:
+                    elif action == "SUPPORT":
                         from portal_hub.interactive import render_support_center_view
                         reply_text, markup = render_support_center_view(user)
                         client.send_message(chat_id, reply_text, reply_markup=markup)

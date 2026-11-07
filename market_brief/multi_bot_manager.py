@@ -1299,6 +1299,7 @@ class DynamicBotManager:
                 MENU_TIER_COMMANDS,
                 MENU_HELP_COMMANDS,
                 MENU_SUPPORT_COMMANDS,
+                match_menu_action,
             )
         except ImportError:
             return False, "portal_hub_not_available"
@@ -1328,16 +1329,8 @@ class DynamicBotManager:
                 first_name=user_info.get("first_name"),
             )
 
-            clean_text = text.lower()
-            is_menu_action = (
-                clean_text.startswith("/")
-                or clean_text in MENU_START_COMMANDS
-                or clean_text in MENU_SUBS_COMMANDS
-                or clean_text in MENU_CAT_COMMANDS
-                or clean_text in MENU_TIER_COMMANDS
-                or clean_text in MENU_HELP_COMMANDS
-                or clean_text in MENU_SUPPORT_COMMANDS
-            )
+            action = match_menu_action(text)
+            is_menu_action = action is not None
 
             if USER_STATES.get(user_id) == "AWAITING_INQUIRY":
                 if not is_menu_action:
@@ -1380,23 +1373,42 @@ class DynamicBotManager:
                 else:
                     USER_STATES.pop(user_id, None)
 
-            if clean_text in MENU_START_COMMANDS or clean_text.startswith("/start"):
+            # Auto-register official bot commands menu (blue [/] button)
+            if not getattr(self, "_menu_commands_registered", False):
+                try:
+                    portal_client.set_my_commands([
+                        {"command": "start", "description": "🏠 메인 포털 홈"},
+                        {"command": "subs", "description": "📋 내 구독 관리"},
+                        {"command": "category", "description": "📂 봇 둘러보기"},
+                        {"command": "tiers", "description": "💎 내 등급 혜택"},
+                        {"command": "support", "description": "💬 고객센터 / 문의"},
+                        {"command": "help", "description": "❓ 이용 도움말"},
+                    ])
+                    self._menu_commands_registered = True
+                except Exception as exc:
+                    logger.debug("set_my_commands fallback: %s", exc)
+
+            if action == "START":
+                from portal_hub.interactive import build_persistent_reply_keyboard
+                # Send persistent 2x2 reply keyboard pinned to mobile screen
+                portal_client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=build_persistent_reply_keyboard())
                 t_out, m_out = render_main_menu(user)
-            elif clean_text in MENU_SUBS_COMMANDS:
+            elif action == "SUBS":
                 subs = portal_db.get_user_subscriptions(user_id)
                 t_out, m_out = render_subscription_view(user, subs)
-            elif clean_text in MENU_CAT_COMMANDS:
+            elif action == "CAT":
                 t_out, m_out = render_category_home_view()
-            elif clean_text in MENU_TIER_COMMANDS:
+            elif action == "TIER":
                 t_out, m_out = render_tier_benefits_view(user)
-            elif clean_text in MENU_SUPPORT_COMMANDS:
+            elif action == "SUPPORT":
                 from portal_hub.interactive import render_support_center_view
                 t_out, m_out = render_support_center_view(user)
-            elif clean_text in MENU_HELP_COMMANDS:
+            elif action == "HELP":
                 from portal_hub.interactive import render_help_view
                 t_out, m_out = render_help_view()
             else:
                 from portal_hub.interactive import render_search_results_view
+                clean_text = text.lower()
                 matched_bots = portal_db.search_bots(clean_text)
                 subs = portal_db.get_user_subscriptions(user_id)
                 t_out, m_out = render_search_results_view(text, matched_bots, user, subs)

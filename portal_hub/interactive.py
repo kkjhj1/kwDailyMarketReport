@@ -25,10 +25,10 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
         "keyboard": [
             [
                 {"text": "📋 내 구독 관리"},
-                {"text": "📂 카테고리 둘러보기"},
+                {"text": "📂 봇 둘러보기"},
             ],
             [
-                {"text": "💎 내 등급 & 혜택"},
+                {"text": "💎 내 등급 혜택"},
                 {"text": "❓ 이용 도움말"},
             ],
         ],
@@ -84,11 +84,14 @@ def render_main_menu(user: UserProfile) -> tuple[str, dict[str, Any]]:
         f"🏅 <b>나의 회원 등급</b>: {user.tier.badge}\n"
         f"📦 <b>구독 가능 슬롯</b>: <b>{user.tier.max_slots if user.tier != UserTier.BLACK else '무제한'}개</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔥 <b>[이번 주 인기 봇 Top 3]</b>\n"
-        f"• 📈 <b>시황 브리핑</b>: 매일 06:30 글로벌 증시/환율\n"
-        f"• 🎓 <b>입시 나침반</b>: 주간 수험생 To-Do & 설명회\n"
-        f"• ✈️ <b>여행 특가</b>: 주간 최저가 항공권 딜\n\n"
-        f"💡 <i>관심 카테고리를 터치하거나, 찾으시는 단어(예: '환율', '수시')를 채팅창에 바로 입력하세요!</i>"
+        f"🔥 <b>[운영 중인 6대 전문 AI 브리핑 봇]</b>\n"
+        f"• 📈 <b>시황 브리핑</b>: 매일 06:30·15:40 증시/환율\n"
+        f"• 🎓 <b>입시 나침반</b>: 학년별 대입 To-Do & 설명회\n"
+        f"• ✈️ <b>여행 특가</b>: 6개월 최저가 항공권·숙소 딜\n"
+        f"• 👵 <b>부모님 복지</b>: 실버케어 맞춤 혜택·효도 비서\n"
+        f"• 🍼 <b>키즈 나침반</b>: 주말 아이 나들이·해열제·달빛병원\n"
+        f"• 🏄 <b>욜로 라이프</b>: 1인 액티비티·전시·힐링 큐레이션\n\n"
+        f"💡 <i>관심 카테고리를 터치하거나, 찾으시는 단어(예: '환율', '수시', '특가', '실버', '키즈', '욜로')를 채팅창에 바로 입력하세요!</i>"
     )
 
     markup = {
@@ -98,11 +101,11 @@ def render_main_menu(user: UserProfile) -> tuple[str, dict[str, Any]]:
                 {"text": "🎓 교육 / 입시", "callback_data": "cat:view:EDU"},
             ],
             [
-                {"text": "✈️ 라이프 / 여가", "callback_data": "cat:view:LIFE"},
+                {"text": "✈️ 라이프 / 여가 (4종)", "callback_data": "cat:view:LIFE"},
                 {"text": "💼 업무 / 생산성", "callback_data": "cat:view:BIZ"},
             ],
             [
-                {"text": "📋 내 구독 센터 (원클릭 설정)", "callback_data": "nav:subs"},
+                {"text": "📋 내 구독 센터 (6대 봇 원클릭 설정)", "callback_data": "nav:subs"},
             ],
             [
                 {"text": "💎 내 등급 & 혜택", "callback_data": "nav:tiers"},
@@ -157,12 +160,19 @@ def render_subscription_view(
                 {"text": "🔙 취소 (구독 유지)", "callback_data": f"sub:cancel_unsub:subs"},
             ])
         else:
+            deep_link_url = f"https://t.me/{bot.telegram_handle}?start=portal"
             if is_subbed:
                 btn_text = f"🟢 구독중  │  {bot.icon} {bot.short_name}"
-                keyboard.append([{"text": btn_text, "callback_data": f"sub:ask_unsub:{bot.value}:subs"}])
+                keyboard.append([
+                    {"text": btn_text, "callback_data": f"sub:ask_unsub:{bot.value}:subs"},
+                    {"text": f"{bot.short_name} 이동 🔗", "url": deep_link_url},
+                ])
             else:
                 btn_text = f"⚪ 미구독  │  {bot.icon} {bot.short_name}"
-                keyboard.append([{"text": btn_text, "callback_data": f"sub:do_sub:{bot.value}:subs"}])
+                keyboard.append([
+                    {"text": btn_text, "callback_data": f"sub:do_sub:{bot.value}:subs"},
+                    {"text": f"{bot.short_name} 이동 🔗", "url": deep_link_url},
+                ])
 
     keyboard.extend([
         [
@@ -249,9 +259,9 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
         f"📂 <b>전체 카테고리 탐색</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"원하시는 분야를 선택하시면 세부 봇 목록을 확인하실 수 있습니다.\n\n"
-        f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율 등\n"
-        f"• 🎓 <b>교육 / 입시</b>: 대입/수시 To-Do, 설명회 요약 등\n"
-        f"• ✈️ <b>라이프 / 여가</b>: 주간 특가 항공권, 여행지 큐레이션 등\n"
+        f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율 등 (시황 브리핑)\n"
+        f"• 🎓 <b>교육 / 입시</b>: 대입/수시 To-Do, 설명회 요약 등 (입시 나침반)\n"
+        f"• ✈️ <b>라이프 / 여가</b>: 특가 항공권(여행), 부모님 복지(실버케어), 주말 나들이·육아(키즈), 1인 취미·힐링(욜로)\n"
         f"• 💼 <b>업무 / 생산성</b>: 뉴스 클리핑, 생산성 도구 등 (준비중)\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -293,7 +303,7 @@ def render_search_results_view(
 
     if not matched_bots:
         lines.append(f"'{clean_q}'와(과) 일치하는 봇을 찾지 못했습니다. 😢\n")
-        lines.append("💡 <i>추천 검색어: '환율', '시황', '입시', '수능', '여행', '특가'</i>")
+        lines.append("💡 <i>추천 검색어: '환율', '시황', '입시', '수능', '여행', '특가', '실버', '효도', '키즈', '해열제', '욜로', '혼놀'</i>")
     else:
         for i, b in enumerate(matched_bots, 1):
             is_sub = subs.get(b, False)
@@ -454,7 +464,7 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
         f"❓ <b>포털 봇 이용 가이드</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Q. 원하는 봇을 가장 빠르게 찾는 방법은?</b>\n"
-        f"A. 채팅창에 '환율', '수능', '항공' 등 찾으시는 단어를 그냥 입력하시면 0.1초 만에 봇을 찾아드립니다!\n\n"
+        f"A. 채팅창에 '환율', '수능', '항공', '실버', '키즈', '욜로' 등 찾으시는 단어를 그냥 입력하시면 0.1초 만에 봇을 찾아드립니다!\n\n"
         f"<b>Q. 실수로 해지 버튼을 눌렀는데 바로 해지되나요?</b>\n"
         f"A. 아닙니다! 실수 방지를 위해 [해지 확정] / [취소] 버튼이 펼쳐지며, [취소]를 누르면 안전하게 구독이 유지됩니다.\n\n"
         f"<b>Q. 알림은 어디로 오나요?</b>\n"

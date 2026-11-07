@@ -270,6 +270,23 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             )
             self.assertTrue(matched, f"Persistent keyboard button '{btn_text}' is not mapped to any menu!")
 
+        # Verify space-free robust matching (match_menu_action)
+        from portal_bot_runner import match_menu_action
+        self.assertEqual(match_menu_action("내구독관리"), "SUBS")
+        self.assertEqual(match_menu_action("내 구독 관리"), "SUBS")
+        self.assertEqual(match_menu_action("📋 내 구독 관리"), "SUBS")
+        self.assertEqual(match_menu_action("봇둘러보기"), "CAT")
+        self.assertEqual(match_menu_action("봇 둘러보기"), "CAT")
+        self.assertEqual(match_menu_action("📂 봇 둘러보기"), "CAT")
+        self.assertEqual(match_menu_action("내등급혜택"), "TIER")
+        self.assertEqual(match_menu_action("내 등급 혜택"), "TIER")
+        self.assertEqual(match_menu_action("💎 내 등급 혜택"), "TIER")
+        self.assertEqual(match_menu_action("이용도움말"), "HELP")
+        self.assertEqual(match_menu_action("이용 도움말"), "HELP")
+        self.assertEqual(match_menu_action("❓ 이용 도움말"), "HELP")
+        self.assertIsNone(match_menu_action("환율"))
+        self.assertIsNone(match_menu_action("비행기"))
+
         # Verify deep-link /start parameter handling
         self.assertTrue("/start portal".startswith("/start "))
         self.assertTrue("/start 12345".startswith("/start "))
