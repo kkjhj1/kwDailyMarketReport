@@ -1454,7 +1454,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="card-header">
           <div>
             <h2 class="card-title">📡 운영 중인 정보봇 목록 &amp; 원클릭 즉시 발송 센터</h2>
-            <p class="card-desc">각 봇의 [🚀 정규 브리핑 발송 센터]를 누르면 정해진 실시간 콘텐츠(시황 데이터, 특가 항공권, 입시 큐레이션)를 즉시 생성하여 미리보고, 관리자 테스트 발송 및 전체 구독자 발송을 실행할 수 있습니다.</p>
+            <p class="card-desc">각 봇의 [🚀 정규 브리핑 발송 센터]를 누르면 정해진 실시간 콘텐츠(시황 데이터, 여행 특가, 입시 나침반, 실버케어 복지, 자녀 나침반, 욜로 1인 라이프)를 즉시 생성하여 미리보고, 관리자 테스트 발송 및 전체 구독자 발송을 실행할 수 있습니다.</p>
           </div>
           <button class="btn btn-primary" onclick="openNewBotModal()">➕ 새 정보봇 추가</button>
         </div>
@@ -1481,7 +1481,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="card" style="margin-bottom:0;">
           <div style="font-size:12px; font-weight:700; color:var(--text-muted);">운영 중인 정보봇</div>
           <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiBots">0개</div>
-          <div style="font-size:12px; color:var(--text-muted);" id="kpiBotsSub">정보봇 3개 (포털 메뉴봇 1개 별도)</div>
+          <div style="font-size:12px; color:var(--text-muted);" id="kpiBotsSub">정보봇 6개 (포털 메뉴봇 1개 별도)</div>
         </div>
       </div>
 
@@ -2434,6 +2434,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           const tokenBadge = menuBot.has_token
             ? `<span style="color:var(--success); font-weight:700;">🟢 토큰 등록됨</span>`
             : `<span style="color:var(--warning); font-weight:700;">🟠 토큰 필요</span>`;
+          const workerBadge = menuBot.worker_running
+            ? `<span style="background:#dcfce7; color:#15803d; font-size:11px; padding:2px 6px; border-radius:4px; font-weight:700;">⚡ 실시간 폴링 가동중</span>`
+            : '';
           mBox.innerHTML = `
             <div class="menu-bot-box">
               <div class="menu-bot-info">
@@ -2443,14 +2446,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                     <strong style="font-size:16px;">${esc(menuBot.name)}</strong>
                     <span style="font-size:12px; color:var(--primary); font-weight:700;">${uname}</span>
                     <span style="font-size:12px;">${tokenBadge}</span>
-                    <span class="badge" style="background:#dbeafe; color:#1e40af; font-size:11.5px; padding:2px 7px; border-radius:4px; font-weight:700;">가입·안내 포털 (쿼터 미차감)</span>
+                    ${workerBadge}
+                    <span class="badge" style="background:#dbeafe; color:#1e40af; font-size:11.5px; padding:2px 7px; border-radius:4px; font-weight:700;">가입·안내 포털 (6대 봇 통합 허브)</span>
                   </div>
                   <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${esc(menuBot.description)}</div>
                 </div>
               </div>
               <div class="menu-bot-btns">
+                <button class="btn btn-sm btn-primary" onclick="openBriefingModal('${esc(menuBot.bot_id)}')">🚀 포털 카탈로그 발송 센터</button>
                 <button class="btn btn-sm btn-dark" onclick="openSimModal('${esc(menuBot.bot_id)}')">👁️ 유저 시점 미리보기</button>
-                <button class="btn btn-sm btn-primary" onclick="openEditBotModal('${esc(menuBot.bot_id)}')">⚙️ 설정·토큰 수정</button>
+                <button class="btn btn-sm" onclick="openEditBotModal('${esc(menuBot.bot_id)}')">⚙️ 설정·토큰 수정</button>
               </div>
             </div>
           `;
@@ -2461,6 +2466,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           const tokenBadge = b.has_token
             ? `<span style="color:var(--success); font-weight:700;">🟢 연결됨</span>`
             : `<span style="color:var(--warning); font-weight:700;">🟠 토큰 필요</span>`;
+          const unameTag = b.telegram_username
+            ? `<span style="color:var(--primary); font-weight:700;">@${esc(b.telegram_username)}</span> · `
+            : '';
+          const workerTag = b.worker_running
+            ? ` · <span style="color:#15803d; font-weight:700;">⚡ 폴링중</span>`
+            : '';
 
           return `
             <div class="bot-card">
@@ -2470,7 +2481,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                     <span style="font-size:28px;">${esc(b.icon_emoji)}</span>
                     <div>
                       <div style="font-size:15px; font-weight:800;">${esc(b.name)}</div>
-                      <div style="font-size:12px; color:var(--text-muted);">${esc(b.category)} · ${tokenBadge}</div>
+                      <div style="font-size:12px; color:var(--text-muted);">${unameTag}${esc(b.category)} · ${tokenBadge}${workerTag}</div>
                     </div>
                   </div>
                   <span style="font-size:12px; font-weight:800; background:#dbeafe; color:#1e40af; padding:3px 8px; border-radius:6px; flex-shrink:0;">
@@ -2700,7 +2711,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('kpiUsers').textContent = `${ov.total_users}명`;
         document.getElementById('kpiUsersSub').textContent = ov.over_quota_users > 0 ? `⚠️ 초과 정리 필요: ${ov.over_quota_users}명` : '모든 유저 한도 준수 중';
         document.getElementById('kpiSubs').textContent = `${ov.total_active_subscriptions}건`;
-        const infoBotsCount = ov.info_bots_count ?? (ov.bot_rankings ? ov.bot_rankings.length : 3);
+        const infoBotsCount = ov.info_bots_count ?? (ov.bot_rankings ? ov.bot_rankings.length : 6);
         document.getElementById('kpiBots').textContent = `${infoBotsCount}개`;
         const kpiBotsSubEl = document.getElementById('kpiBotsSub');
         if (kpiBotsSubEl) {
@@ -2855,16 +2866,35 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           tbody.innerHTML = '<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">발송 이력이 없습니다.</td></tr>';
           return;
         }
+        const BOT_TOPIC_LABELS = {
+          brief_bot: '📈 시황 브리핑',
+          travel_bot: '✈️ 여행 특가',
+          admission_bot: '🎓 입시 나침반',
+          silver_bot: '👵 실버케어',
+          kids_bot: '👶 자녀 나침반',
+          yolo_bot: '🏄 욜로 라이프',
+          menu_bot: '🧭 통합 메뉴봇',
+          FINANCE: '📈 시황 브리핑',
+          TRAVEL: '✈️ 여행 특가',
+          EDUCATION: '🎓 입시 나침반',
+          ADMISSION: '🎓 입시 나침반',
+          SILVER: '👵 실버케어',
+          KIDS: '👶 자녀 나침반',
+          YOLO: '🏄 욜로 라이프',
+          PORTAL: '🧭 통합 메뉴봇',
+        };
         tbody.innerHTML = jobs.map(j => {
           const total = Number(j.total_targets || 0);
           const ok = Number(j.success_count || 0);
           const pct = total > 0 ? Math.round((ok / total) * 100) : 0;
           const bk = String(j.batch_key || '');
           const manualBot = bk.indexOf('MANUAL:') === 0 ? bk.split(':')[1] : '';
+          const rawKey = manualBot || j.topic || '-';
+          const friendlyBot = BOT_TOPIC_LABELS[rawKey] || rawKey;
           return `
             <tr>
               <td data-label="발송 일시">${esc(utcToKst(j.finished_at || j.started_at))}</td>
-              <td data-label="봇 / 토픽"><b>${esc(manualBot || j.topic || '-')}</b>${manualBot ? ` <span class="hist-meta">${esc(j.topic || '')}</span>` : ''}</td>
+              <td data-label="봇 / 토픽"><b>${esc(friendlyBot)}</b>${manualBot ? ` <span class="hist-meta">(${esc(manualBot)})</span>` : ` <span class="hist-meta">${esc(j.topic || '')}</span>`}</td>
               <td data-label="유형">${dispatchKindLabel(j.kind, j.is_forced)}</td>
               <td data-label="성공률"><b>${pct}%</b> <span class="hist-meta">(${ok}/${total})</span></td>
               <td data-label="상태">${deliveryStatusBadge(j.status)}</td>
