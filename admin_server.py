@@ -1053,11 +1053,17 @@ def create_admin_app(
         finance_ids = [r.chat_id for r in db.get_active_recipients("FINANCE")]
         travel_ids = [r.chat_id for r in db.get_active_recipients("TRAVEL")]
         edu_ids = [s.chat_id for s in adm_db.list_subscribers(active_only=True)] if _HAS_ADMISSION_MODULE else []
+        silver_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("silver_bot")]
+        kids_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("kids_bot")]
+        yolo_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("yolo_bot")]
 
         bots_status = {
             "finance": _check_bot("TELEGRAM_CHAT_ID", finance_ids),
             "travel": _check_bot("TRAVEL_TELEGRAM_CHAT_ID", travel_ids),
             "admission": _check_bot("EDU_TELEGRAM_CHAT_ID", edu_ids),
+            "silver": _check_bot("SILVER_TELEGRAM_CHAT_ID", silver_ids),
+            "kids": _check_bot("KIDS_TELEGRAM_CHAT_ID", kids_ids),
+            "yolo": _check_bot("YOLO_TELEGRAM_CHAT_ID", yolo_ids),
         }
         all_synced = all(b["is_synced"] for b in bots_status.values())
 
@@ -1094,9 +1100,27 @@ def create_admin_app(
                 ok, msg = sync_github_variable("EDU_TELEGRAM_CHAT_ID", ",".join(edu_ids))
                 results["admission"] = {"success": ok, "count": len(edu_ids), "message": msg}
 
+        # 4. Silver Care (실버케어)
+        silver_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("silver_bot")]
+        if silver_ids:
+            ok, msg = sync_github_variable("SILVER_TELEGRAM_CHAT_ID", ",".join(silver_ids))
+            results["silver"] = {"success": ok, "count": len(silver_ids), "message": msg}
+
+        # 5. Kids Compass (자녀 나침반)
+        kids_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("kids_bot")]
+        if kids_ids:
+            ok, msg = sync_github_variable("KIDS_TELEGRAM_CHAT_ID", ",".join(kids_ids))
+            results["kids"] = {"success": ok, "count": len(kids_ids), "message": msg}
+
+        # 6. YOLO Bot (욜로 라이프)
+        yolo_ids = [r.chat_id for r in sub_engine.get_bot_active_recipients("yolo_bot")]
+        if yolo_ids:
+            ok, msg = sync_github_variable("YOLO_TELEGRAM_CHAT_ID", ",".join(yolo_ids))
+            results["yolo"] = {"success": ok, "count": len(yolo_ids), "message": msg}
+
         return {
             "success": True,
-            "message": "✅ 시황, 여행, 입시봇 전체 깃허브 Actions 수신자 변수 동기화 완료!",
+            "message": "✅ 6대 전문 정보봇(시황·여행·입시·실버·키즈·욜로) 전체 수신자 변수 동기화 완료!",
             "details": results,
         }
 

@@ -5,6 +5,8 @@ Enforces GPT audit requirements:
 - `yolo_users` onboarding vs active CHECK constraints
 - 1NF normalized `yolo_curation_archetypes` and `yolo_curation_solo_tags`
 - `UNIQUE(chat_id, week_key, dispatch_type)` with `IN_FLIGHT` / `SENT` / `FAILED` state reservation
+- v2.0 visual magazine fields: additive `ALTER TABLE` migration for legacy DBs and
+  ordered child tables (`yolo_curation_gallery` / `_timelines` / `_budgets`)
 """
 from __future__ import annotations
 
@@ -22,6 +24,9 @@ from yolo_brief.models import (
     Season,
     SoloArchetype,
     WeatherClass,
+    BudgetLine,
+    GalleryImage,
+    TimelineEntry,
     YoloCuration,
     YoloUserProfile,
 )
@@ -69,7 +74,12 @@ CREATE TABLE IF NOT EXISTS yolo_curations (
     is_active INTEGER NOT NULL DEFAULT 1
         CHECK(is_active IN (0, 1)),
     emoji TEXT NOT NULL DEFAULT '✨',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    hero_image_url TEXT NOT NULL DEFAULT '',
+    hero_image_alt TEXT NOT NULL DEFAULT '',
+    solo_secrets TEXT NOT NULL DEFAULT '',
+    map_naver_url TEXT NOT NULL DEFAULT '',
+    map_kakao_url TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS yolo_curation_archetypes (
@@ -84,6 +94,35 @@ CREATE TABLE IF NOT EXISTS yolo_curation_solo_tags (
     curation_id TEXT NOT NULL,
     solo_tag TEXT NOT NULL,
     PRIMARY KEY (curation_id, solo_tag),
+    FOREIGN KEY (curation_id) REFERENCES yolo_curations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS yolo_curation_gallery (
+    curation_id TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    alt TEXT NOT NULL,
+    PRIMARY KEY (curation_id, sort_order),
+    FOREIGN KEY (curation_id) REFERENCES yolo_curations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS yolo_curation_timelines (
+    curation_id TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    time_label TEXT NOT NULL,
+    spot_name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    PRIMARY KEY (curation_id, sort_order),
+    FOREIGN KEY (curation_id) REFERENCES yolo_curations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS yolo_curation_budgets (
+    curation_id TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    cost_krw INTEGER NOT NULL CHECK(cost_krw >= 0),
+    category TEXT NOT NULL DEFAULT 'etc',
+    PRIMARY KEY (curation_id, sort_order),
     FOREIGN KEY (curation_id) REFERENCES yolo_curations(id) ON DELETE CASCADE
 );
 
@@ -111,6 +150,16 @@ ON yolo_curation_archetypes (archetype, curation_id);
 CREATE INDEX IF NOT EXISTS idx_yolo_curation_tag
 ON yolo_curation_solo_tags (solo_tag, curation_id);
 """
+
+
+# v2.0 additive columns on `yolo_curations` (legacy DB auto-migration in `init_db()`)
+CURATION_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("hero_image_url", "TEXT NOT NULL DEFAULT ''"),
+    ("hero_image_alt", "TEXT NOT NULL DEFAULT ''"),
+    ("solo_secrets", "TEXT NOT NULL DEFAULT ''"),
+    ("map_naver_url", "TEXT NOT NULL DEFAULT ''"),
+    ("map_kakao_url", "TEXT NOT NULL DEFAULT ''"),
+)
 
 
 def _now_iso() -> str:
@@ -157,6 +206,17 @@ class YoloDatabase:
     def init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA_DDL)
+            self._migrate_curation_columns(conn)
+
+    @staticmethod
+    def _migrate_curation_columns(conn: sqlite3.Connection) -> None:
+        """Adds v2.0 columns to legacy `yolo_curations` tables (idempotent)."""
+        existing = {
+            str(r["name"]) for r in conn.execute("PRAGMA table_info(yolo_curations)").fetchall()
+        }
+        for col_name, col_ddl in CURATION_V2_COLUMNS:
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE yolo_curations ADD COLUMN {col_name} {col_ddl}")
 
     def close(self) -> None:
         if self._mem_conn is not None:
@@ -313,8 +373,9 @@ class YoloDatabase:
                 INSERT INTO yolo_curations (
                     id, title, summary, season, weather_class, activity_mode,
                     location_name, location_area_code, cost_or_duration, action_url,
-                    is_fallback, fallback_for, priority, is_active, emoji, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_fallback, fallback_for, priority, is_active, emoji, created_at,
+                    hero_image_url, hero_image_alt, solo_secrets, map_naver_url, map_kakao_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     summary = excluded.summary,
@@ -329,7 +390,12 @@ class YoloDatabase:
                     fallback_for = excluded.fallback_for,
                     priority = excluded.priority,
                     is_active = excluded.is_active,
-                    emoji = excluded.emoji
+                    emoji = excluded.emoji,
+                    hero_image_url = excluded.hero_image_url,
+                    hero_image_alt = excluded.hero_image_alt,
+                    solo_secrets = excluded.solo_secrets,
+                    map_naver_url = excluded.map_naver_url,
+                    map_kakao_url = excluded.map_kakao_url
                 """,
                 (
                     curation.id,
@@ -348,6 +414,11 @@ class YoloDatabase:
                     1 if curation.is_active else 0,
                     curation.emoji,
                     now,
+                    curation.hero_image_url,
+                    curation.hero_image_alt,
+                    curation.solo_secrets,
+                    curation.map_naver_url,
+                    curation.map_kakao_url,
                 ),
             )
             conn.execute(
@@ -367,6 +438,31 @@ class YoloDatabase:
                 conn.execute(
                     "INSERT INTO yolo_curation_solo_tags (curation_id, solo_tag) VALUES (?, ?)",
                     (curation.id, tag),
+                )
+            for table in ("yolo_curation_gallery", "yolo_curation_timelines", "yolo_curation_budgets"):
+                conn.execute(f"DELETE FROM {table} WHERE curation_id = ?", (curation.id,))
+            for idx, img in enumerate(curation.gallery_images):
+                conn.execute(
+                    "INSERT INTO yolo_curation_gallery (curation_id, sort_order, url, alt) VALUES (?, ?, ?, ?)",
+                    (curation.id, idx, img.url, img.alt),
+                )
+            for idx, entry in enumerate(curation.timeline):
+                conn.execute(
+                    """
+                    INSERT INTO yolo_curation_timelines (
+                        curation_id, sort_order, time_label, spot_name, description
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (curation.id, idx, entry.time, entry.spot, entry.desc),
+                )
+            for idx, line in enumerate(curation.budget_breakdown):
+                conn.execute(
+                    """
+                    INSERT INTO yolo_curation_budgets (
+                        curation_id, sort_order, item_name, cost_krw, category
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (curation.id, idx, line.item, int(line.cost_krw), line.category),
                 )
 
     def seed_curations(self, curations: Sequence[YoloCuration]) -> int:

@@ -182,6 +182,39 @@ class WeatherSnapshot:
 
 
 @dataclass(frozen=True)
+class TimelineEntry:
+    """나홀로 풀코스 타임라인 1개 구간."""
+    time: str          # "10:30", "14:00" 등 KST 시각
+    spot: str          # 방문 장소명
+    desc: str          # 나홀로 즐기는 구체적 행동 묘사
+
+
+@dataclass(frozen=True)
+class BudgetLine:
+    """1인 예산서 1개 항목 (1원 단위 정수)."""
+    item: str          # "KTX 왕복 (창가1인석)", "초계국수 1인분"
+    cost_krw: int      # 1원 단위 정수 (합산 검증용)
+    category: str = "etc"  # "transport", "food", "ticket", "stay", "etc"
+
+    def __post_init__(self) -> None:
+        if int(self.cost_krw) < 0:
+            raise ValueError(f"BudgetLine {self.item!r} cost_krw must be >= 0")
+
+
+@dataclass(frozen=True)
+class GalleryImage:
+    """매거진 갤러리 이미지."""
+    url: str           # HTTPS 고화질 이미지 URL
+    alt: str           # 접근성 및 이미지 설명
+
+    def __post_init__(self) -> None:
+        if not str(self.url).startswith("https://"):
+            raise ValueError(f"GalleryImage url must start with https://: {self.url!r}")
+        if not self.alt or not self.alt.strip():
+            raise ValueError(f"GalleryImage {self.url!r} must have non-empty alt")
+
+
+@dataclass(frozen=True)
 class YoloCuration:
     """[INV-01] 1인 전용 검증 완료 라이프스타일 큐레이션 도메인 모델."""
     id: str
@@ -201,6 +234,19 @@ class YoloCuration:
     is_active: bool = True
     location_area_code: str = "1100000000"
     emoji: str = "✨"
+    # === v2.0 비주얼 & 디테일 확장 필드 ===
+    hero_image_url: str = ""
+    hero_image_alt: str = ""
+    gallery_images: tuple[GalleryImage, ...] = ()
+    timeline: tuple[TimelineEntry, ...] = ()
+    budget_breakdown: tuple[BudgetLine, ...] = ()
+    solo_secrets: str = ""
+    map_naver_url: str = ""
+    map_kakao_url: str = ""
+
+    @property
+    def total_budget_krw(self) -> int:
+        return sum(b.cost_krw for b in self.budget_breakdown)
 
     def __post_init__(self) -> None:
         if not self.id or not self.id.strip():
@@ -216,6 +262,14 @@ class YoloCuration:
         object.__setattr__(self, "solo_tags", cleaned_tags)
         if not str(self.action_url).startswith("https://"):
             raise ValueError(f"Curation {self.id} action_url must start with https://")
+        # v2.0: 선택 URL 필드는 비어 있거나 https:// 만 허용 (웹 매거진 href/src 주입 방어)
+        for field_name in ("hero_image_url", "map_naver_url", "map_kakao_url"):
+            value = getattr(self, field_name)
+            if value and not str(value).startswith("https://"):
+                raise ValueError(f"Curation {self.id} {field_name} must start with https://")
+        object.__setattr__(self, "gallery_images", tuple(self.gallery_images))
+        object.__setattr__(self, "timeline", tuple(self.timeline))
+        object.__setattr__(self, "budget_breakdown", tuple(self.budget_breakdown))
 
 
 @dataclass
