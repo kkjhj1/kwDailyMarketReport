@@ -113,7 +113,10 @@ class PortalDatabase:
                     ('menu_bot', 'MENU', '통합 안내 메뉴봇', '가입·포털', '🧭', 1, 0),
                     ('brief_bot', 'INFO', '시황', '금융·시황', '📈', 1, 1),
                     ('travel_bot', 'INFO', '여행', '여행·라이프', '✈️', 1, 2),
-                    ('admission_bot', 'INFO', '입시', '교육·입시', '🎓', 1, 3);
+                    ('admission_bot', 'INFO', '입시', '교육·입시', '🎓', 1, 3),
+                    ('silver_bot', 'INFO', '실버케어', '건강·실버', '👵', 1, 4),
+                    ('kids_bot', 'INFO', '자녀', '육아·자녀', '👶', 1, 5),
+                    ('yolo_bot', 'INFO', '욜로', '여가·라이프', '🏄', 1, 6);
             """)
             conn.commit()
 
@@ -275,7 +278,14 @@ class PortalDatabase:
                 )
 
             # Sync legacy recipients table for all topic-enabled bots
-            topic_map = {"brief_bot": "FINANCE", "travel_bot": "TRAVEL", "admission_bot": "EDUCATION"}
+            topic_map = {
+                "brief_bot": "FINANCE",
+                "travel_bot": "TRAVEL",
+                "admission_bot": "EDUCATION",
+                "silver_bot": "SILVER",
+                "kids_bot": "KIDS",
+                "yolo_bot": "YOLO",
+            }
             if bid in topic_map:
                 topic = topic_map[bid]
                 cur.execute("SELECT subscribed_topics, is_active FROM recipients WHERE chat_id = ?", (uid_str,))
@@ -319,7 +329,14 @@ class PortalDatabase:
                 "UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (sub_row["id"],),
             )
-            topic_map = {"brief_bot": "FINANCE", "travel_bot": "TRAVEL", "admission_bot": "EDUCATION"}
+            topic_map = {
+                "brief_bot": "FINANCE",
+                "travel_bot": "TRAVEL",
+                "admission_bot": "EDUCATION",
+                "silver_bot": "SILVER",
+                "kids_bot": "KIDS",
+                "yolo_bot": "YOLO",
+            }
             if bid in topic_map:
                 topic = topic_map[bid]
                 cur.execute("SELECT subscribed_topics FROM recipients WHERE chat_id = ?", (uid_str,))

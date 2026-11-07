@@ -1,5 +1,5 @@
 """Bot Briefing Service.
-Connects domain engines (Market Brief, Travel Brief, Admission Brief, Menu Portal)
+Connects domain engines (Market Brief, Travel Brief, Admission Brief, SilverCare, Kids Compass, YOLO Bot, Menu Portal)
 to provide real-time briefing previews, admin test dispatch, and batch subscriber dispatch.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -55,6 +55,9 @@ def get_bot_username(bot_id: str, db=None) -> str:
         "travel_bot": ["TRAVEL_TELEGRAM_BOT_USERNAME", "TRAVEL_BOT_USERNAME"],
         "admission_bot": ["EDU_TELEGRAM_BOT_USERNAME", "ADMISSION_TELEGRAM_BOT_USERNAME", "EDU_BOT_USERNAME"],
         "edu_bot": ["EDU_TELEGRAM_BOT_USERNAME", "ADMISSION_TELEGRAM_BOT_USERNAME", "EDU_BOT_USERNAME"],
+        "silver_bot": ["SILVER_TELEGRAM_BOT_USERNAME", "SILVER_BOT_USERNAME"],
+        "kids_bot": ["KIDS_TELEGRAM_BOT_USERNAME", "KIDS_BOT_USERNAME"],
+        "yolo_bot": ["YOLO_TELEGRAM_BOT_USERNAME", "YOLO_BOT_USERNAME"],
         "menu_bot": ["PORTAL_TELEGRAM_BOT_USERNAME", "MENU_TELEGRAM_BOT_USERNAME", "MENU_BOT_USERNAME", "PORTAL_BOT_USERNAME"],
     }.get(bot_id, [f"{bot_id.upper()}_USERNAME"])
 
@@ -63,12 +66,15 @@ def get_bot_username(bot_id: str, db=None) -> str:
         if val:
             return val
 
-    # 3. Known fallback defaults for the 4 verified platform bots
+    # 3. Known fallback defaults for the verified platform bots
     defaults = {
         "brief_bot": "KwDailyMarketInfo_bot",
         "travel_bot": "KwTravelLowPrice_bot",
         "admission_bot": "KwEduInfo_bot",
         "edu_bot": "KwEduInfo_bot",
+        "silver_bot": "KwSilver_bot",
+        "kids_bot": "KwKids_bot",
+        "yolo_bot": "KwYolo_bot",
         "menu_bot": "KwMenu_bot",
     }
     return defaults.get(bot_id, "")
@@ -79,16 +85,18 @@ def get_bot_token_and_chat(bot_id: str, db=None) -> Tuple[str, str]:
     token = ""
     admin_chat = ""
 
-    # 1. Try DB first
+    # 1. Try DB first (BotRecord uses .token; keep .bot_token fallback for compatibility)
     if db is not None:
         try:
             bot = db.get_bot(bot_id)
-            if bot and bot.bot_token:
-                token = bot.bot_token
+            if bot:
+                db_tok = getattr(bot, "token", None) or getattr(bot, "bot_token", None) or ""
+                if str(db_tok).strip():
+                    token = str(db_tok).strip()
         except Exception as e:
             logger.debug(f"DB token lookup error for {bot_id}: {e}")
 
-    # 2. Domain-specific fallbacks
+    # 2. Domain-specific fallbacks (never fallback kids/silver/yolo to TELEGRAM_BOT_TOKEN)
     if bot_id == "brief_bot":
         token = token or _get_env_val("TELEGRAM_BOT_TOKEN")
         admin_chat = _get_env_val("TELEGRAM_CHAT_ID")
@@ -98,6 +106,15 @@ def get_bot_token_and_chat(bot_id: str, db=None) -> Tuple[str, str]:
     elif bot_id == "admission_bot" or bot_id == "edu_bot":
         token = token or _get_env_val("EDU_TELEGRAM_BOT_TOKEN") or _get_env_val("TELEGRAM_BOT_TOKEN")
         admin_chat = _get_env_val("EDU_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
+    elif bot_id == "silver_bot":
+        token = token or _get_env_val("SILVER_TELEGRAM_BOT_TOKEN") or _get_env_val("SILVER_BOT_TOKEN")
+        admin_chat = _get_env_val("SILVER_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
+    elif bot_id == "kids_bot":
+        token = token or _get_env_val("KIDS_TELEGRAM_BOT_TOKEN") or _get_env_val("KIDS_BOT_TOKEN")
+        admin_chat = _get_env_val("KIDS_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
+    elif bot_id == "yolo_bot":
+        token = token or _get_env_val("YOLO_TELEGRAM_BOT_TOKEN") or _get_env_val("YOLO_BOT_TOKEN")
+        admin_chat = _get_env_val("YOLO_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
     elif bot_id == "menu_bot":
         token = token or _get_env_val("PORTAL_TELEGRAM_BOT_TOKEN") or _get_env_val("MENU_TELEGRAM_BOT_TOKEN") or _get_env_val("MENU_BOT_TOKEN") or _get_env_val("TELEGRAM_BOT_TOKEN")
         admin_chat = _get_env_val("PORTAL_TELEGRAM_CHAT_ID") or _get_env_val("MENU_TELEGRAM_CHAT_ID") or _get_env_val("TELEGRAM_CHAT_ID")
@@ -129,6 +146,21 @@ def get_bot_presets(bot_id: str) -> List[Dict[str, str]]:
         return [
             {"id": "weekly", "label": "🎓 학년별 주간 입시 큐레이션"},
             {"id": "ticketing", "label": "🎫 대입/고입 설명회 티켓팅 D-day"},
+        ]
+    elif bot_id == "silver_bot":
+        return [
+            {"id": "weekly", "label": "💌 주간 효도 브리핑"},
+            {"id": "benefits", "label": "👵 부모님 맞춤 복지 후보 안내"},
+        ]
+    elif bot_id == "kids_bot":
+        return [
+            {"id": "weekend", "label": "🎈 주말 맞춤 나들이 추천"},
+            {"id": "dday", "label": "⏰ 예약 오픈 D-Day 알림"},
+        ]
+    elif bot_id == "yolo_bot":
+        return [
+            {"id": "weekly", "label": "🏄 성향별 솔로 라이프 큐레이션"},
+            {"id": "weather_safe", "label": "☔ 우천/악천후 실내 플랜 B"},
         ]
     elif bot_id == "menu_bot":
         return [
@@ -282,8 +314,10 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             from admission_brief.storage.db import AdmissionDatabase
 
             curator = AICurator()
-            adm_db_path = getattr(db, "db_path", None) or str(ROOT_DIR / "alerts.sqlite3")
-            if not Path(adm_db_path).exists() and (ROOT_DIR / "data/admission_brief.db").exists():
+            adm_db_path = getattr(db, "db_path", None)
+            if not adm_db_path or str(adm_db_path) == ":memory:":
+                adm_db_path = ":memory:"
+            elif not Path(adm_db_path).exists() and (ROOT_DIR / "data/admission_brief.db").exists():
                 adm_db_path = str(ROOT_DIR / "data/admission_brief.db")
             adm_db = AdmissionDatabase(db_path=adm_db_path)
 
@@ -309,31 +343,171 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             inline_keyboard = [[{"text": "📅 입시 캘린더 확인", "url": admission_url}]]
 
     # =========================================================================
-    # 4. MENU BOT (통합 포털) -> .env usernames & telegram links
+    # 4. SILVER BOT (실버케어 부모님 복지 비서) -> SilverCareDatabase(:memory:)
+    # =========================================================================
+    elif bot_id == "silver_bot":
+        silver_un = get_bot_username("silver_bot", db=db) or "KwSilver_bot"
+        silver_link = f"https://t.me/{silver_un}"
+        try:
+            from silver_care.storage.db import SilverCareDatabase
+            from silver_care.fixtures.seed_benefits import SEED_BENEFITS
+            from silver_care.models import ParentProfile, LivingType
+            from silver_care.channels.telegram_card import format_weekly_briefing, format_candidate_list
+
+            mem_db = SilverCareDatabase(":memory:")
+            mem_db.upsert_benefits(SEED_BENEFITS)
+            sample_parent = ParentProfile(
+                id=1,
+                chat_id=1,
+                alias="어머니",
+                birth_year=1952,
+                sido_code="11",
+                sigungu_name="송파구",
+                living_type=LivingType.ALONE.value,
+                is_pension_receiver=1,
+                is_low_income=-1,
+            )
+            matches = mem_db.match_for_parent(sample_parent, now_kst.year)
+            if preset_id == "benefits":
+                title = f"👵 [실버케어] 부모님 맞춤 복지 후보 ({now_str})"
+                content_html = format_candidate_list(sample_parent, matches, page=0, ref_year=now_kst.year)
+            else:
+                week_label = f"{now_kst.month}월 {now_kst.day}일"
+                title = f"💌 [실버케어] 주간 효도 브리핑 ({week_label})"
+                content_html = format_weekly_briefing(
+                    [(sample_parent, matches[:3])],
+                    bookmarked_titles=[],
+                    week_label=week_label,
+                    ref_year=now_kst.year,
+                )
+            mem_db.close()
+            inline_keyboard = [[{"text": f"👵 실버케어 봇에서 내 부모님 혜택 찾기 (@{silver_un})", "url": silver_link}]]
+        except Exception as e:
+            logger.error(f"Error generating silver_bot briefing: {e}", exc_info=True)
+            title = f"👵 [실버케어 브리핑] {now_str}"
+            content_html = f"<b>👵 [실버케어 브리핑]</b>\n<i>{now_str}</i>\n\n실버케어 데이터 생성 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": f"👵 실버케어 바로가기 (@{silver_un})", "url": silver_link}]]
+
+    # =========================================================================
+    # 5. KIDS BOT (자녀·키즈 나침반) -> KidsCompassDatabase(:memory:)
+    # =========================================================================
+    elif bot_id == "kids_bot":
+        kids_un = get_bot_username("kids_bot", db=db) or "KwKids_bot"
+        kids_link = f"https://t.me/{kids_un}"
+        try:
+            from kids_compass.storage.db import KidsCompassDatabase
+            from kids_compass.collector import seed_all, recommend_weekend_picks
+            from kids_compass.models import AgeGroup
+            from kids_compass.channels.telegram import format_weekend_briefing_html, format_dday_alert_html
+
+            mem_db = KidsCompassDatabase(":memory:")
+            seed_all(mem_db)
+            if preset_id == "dday":
+                events = mem_db.list_upcoming_bookings(
+                    now_kst.strftime("%Y-%m-%d %H:%M"),
+                    (now_kst + timedelta(days=14)).strftime("%Y-%m-%d %H:%M"),
+                )
+                title = f"⏰ [키즈 나침반] 선착순 예약 오픈 D-Day ({now_str})"
+                content_html = format_dday_alert_html(events, now_kst.replace(tzinfo=None))
+            else:
+                picks = recommend_weekend_picks(mem_db, AgeGroup.PRESCHOOL, "서울", weather_rain=False)
+                title = f"🎈 [키즈 나침반] 이번 주말 맞춤 나들이 추천 ({now_str})"
+                content_html = format_weekend_briefing_html(
+                    picks,
+                    AgeGroup.PRESCHOOL,
+                    "☀️ 맑음 기준 · 야외+실내 균형 추천",
+                )
+            mem_db.close()
+            inline_keyboard = [[{"text": f"👶 키즈봇에서 해열제·달빛병원·나들이 보기 (@{kids_un})", "url": kids_link}]]
+        except Exception as e:
+            logger.error(f"Error generating kids_bot briefing: {e}", exc_info=True)
+            title = f"👶 [키즈 나침반 브리핑] {now_str}"
+            content_html = f"<b>👶 [키즈 나침반 브리핑]</b>\n<i>{now_str}</i>\n\n키즈 나침반 데이터 생성 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": f"👶 키즈봇 바로가기 (@{kids_un})", "url": kids_link}]]
+
+    # =========================================================================
+    # 6. YOLO BOT (욜로 1인 라이프 큐레이션) -> YoloDatabase(:memory:)
+    # =========================================================================
+    elif bot_id == "yolo_bot":
+        yolo_un = get_bot_username("yolo_bot", db=db) or "KwYolo_bot"
+        yolo_link = f"https://t.me/{yolo_un}"
+        try:
+            from yolo_brief.storage.db import YoloDatabase
+            from yolo_brief.fixtures.seed_curations import SEED_CURATIONS
+            from yolo_brief.models import SoloArchetype, ProfileState, WeatherClass, WeatherSnapshot, YoloUserProfile
+            from yolo_brief.matching import match_curations
+            from yolo_brief.channels.telegram_card import render_curation_card
+
+            mem_db = YoloDatabase(":memory:")
+            mem_db.seed_curations(SEED_CURATIONS)
+            curations = mem_db.list_active_curations()
+            if preset_id == "weather_safe":
+                sample_user = YoloUserProfile(
+                    chat_id="preview_rain",
+                    profile_state=ProfileState.ACTIVE,
+                    archetype=SoloArchetype.ACTIVE_CHALLENGER,
+                )
+                snap = WeatherSnapshot(
+                    weather_class=WeatherClass.RAIN,
+                    pop_percent=80,
+                    precip_mm=12.0,
+                    feels_like_c=16.0,
+                )
+                title = f"☔ [욜로봇] 우천·악천후 실내 플랜 B 큐레이션 ({now_str})"
+            else:
+                sample_user = YoloUserProfile(
+                    chat_id="preview_weekly",
+                    profile_state=ProfileState.ACTIVE,
+                    archetype=SoloArchetype.URBAN_HIPSTER,
+                )
+                snap = WeatherSnapshot(
+                    weather_class=WeatherClass.CLEAR,
+                    pop_percent=10,
+                    feels_like_c=20.0,
+                )
+                title = f"🏄 [욜로봇] 이번 주 1인 라이프 큐레이션 ({now_str})"
+
+            match = match_curations(sample_user, curations, snapshot=snap, ref_date=now_kst.date())
+            content_html, _ = render_curation_card(sample_user, match)
+            mem_db.close()
+            inline_keyboard = [[{"text": f"🏄 욜로봇에서 내 성향 맞춤 추천받기 (@{yolo_un})", "url": yolo_link}]]
+        except Exception as e:
+            logger.error(f"Error generating yolo_bot briefing: {e}", exc_info=True)
+            title = f"🏄 [욜로봇 브리핑] {now_str}"
+            content_html = f"<b>🏄 [욜로봇 브리핑]</b>\n<i>{now_str}</i>\n\n욜로 큐레이션 데이터 생성 중 오류: {html.escape(str(e))}"
+            inline_keyboard = [[{"text": f"🏄 욜로봇 바로가기 (@{yolo_un})", "url": yolo_link}]]
+
+    # =========================================================================
+    # 7. MENU BOT (통합 포털) -> .env usernames & telegram links (6대 정보봇)
     # =========================================================================
     elif bot_id == "menu_bot":
         brief_un = get_bot_username("brief_bot", db=db) or "KwDailyMarketInfo_bot"
         travel_un = get_bot_username("travel_bot", db=db) or "KwTravelLowPrice_bot"
         edu_un = get_bot_username("admission_bot", db=db) or "KwEduInfo_bot"
-
-        brief_link = f"https://t.me/{brief_un}"
-        travel_link = f"https://t.me/{travel_un}"
-        edu_link = f"https://t.me/{edu_un}"
+        silver_un = get_bot_username("silver_bot", db=db) or "KwSilver_bot"
+        kids_un = get_bot_username("kids_bot", db=db) or "KwKids_bot"
+        yolo_un = get_bot_username("yolo_bot", db=db) or "KwYolo_bot"
 
         title = f"🧭 [통합 메뉴봇 공식 카탈로그] {now_str}"
         content_html = (
             f"<b>🧭 [통합 안내 포털] 봇 구독 서비스에 오신 것을 환영합니다!</b>\n\n"
             f"원하시는 전문 정보봇을 선택하여 구독하시면 정기 브리핑을 실시간으로 수신하실 수 있습니다.\n\n"
-            f"<b>[현재 운영 중인 전문 정보봇]</b>\n"
+            f"<b>[현재 운영 중인 6대 전문 정보봇]</b>\n"
             f"📈 <b>시황</b> (@{brief_un}): 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
             f"✈️ <b>여행</b> (@{travel_un}): 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
-            f"🎓 <b>입시</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n\n"
+            f"🎓 <b>입시</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n"
+            f"👵 <b>실버케어</b> (@{silver_un}): 부모님 맞춤 동사무소·보건소 복지 및 주간 효도 브리핑\n"
+            f"👶 <b>자녀</b> (@{kids_un}): 주말 아이 맞춤 나들이 추천 및 해열제·달빛병원 3초 가이드\n"
+            f"🏄 <b>욜로</b> (@{yolo_un}): 4대 성향별 1인 라이프·취미·혼여 큐레이션 및 실내 플랜 B\n\n"
             f"<i>※ 화이트 등급(무료)은 1개 봇, 그린 3개, 레드 5개, 블랙은 전체 봇을 이용하실 수 있습니다.</i>"
         )
         inline_keyboard = [
-            [{"text": f"📈 시황 바로가기 (@{brief_un})", "url": brief_link}],
-            [{"text": f"✈️ 여행 바로가기 (@{travel_un})", "url": travel_link}],
-            [{"text": f"🎓 입시 바로가기 (@{edu_un})", "url": edu_link}],
+            [{"text": f"📈 시황 바로가기 (@{brief_un})", "url": f"https://t.me/{brief_un}"}],
+            [{"text": f"✈️ 여행 바로가기 (@{travel_un})", "url": f"https://t.me/{travel_un}"}],
+            [{"text": f"🎓 입시 바로가기 (@{edu_un})", "url": f"https://t.me/{edu_un}"}],
+            [{"text": f"👵 실버케어 바로가기 (@{silver_un})", "url": f"https://t.me/{silver_un}"}],
+            [{"text": f"👶 자녀 바로가기 (@{kids_un})", "url": f"https://t.me/{kids_un}"}],
+            [{"text": f"🏄 욜로 바로가기 (@{yolo_un})", "url": f"https://t.me/{yolo_un}"}],
         ]
 
     else:
@@ -404,6 +578,79 @@ def send_bot_test_message(
         }
 
 
+def _resolve_market_db(db=None):
+    """Returns the underlying MarketBriefDatabase (delivery ledger) from a SubscriptionEngine or DB handle."""
+    if db is None:
+        return None
+    if hasattr(db, "acquire_batch_lease"):
+        return db
+    inner = getattr(db, "db", None)
+    if inner is not None and hasattr(inner, "acquire_batch_lease"):
+        return inner
+    return None
+
+
+def open_manual_broadcast_job(db, bot_id: str, chat_ids: List[str], topic: Optional[str] = None) -> Optional[str]:
+    """Creates a delivery_batch/delivery_job ledger entry for an admin manual broadcast.
+    Best-effort: ledger failures never block the actual dispatch. Returns job_id or None."""
+    market_db = _resolve_market_db(db)
+    if market_db is None or not chat_ids:
+        return None
+    try:
+        import uuid
+        from market_brief.storage.models import Recipient
+
+        now = datetime.now(KST)
+        batch_key = f"MANUAL:{bot_id}:{now.strftime('%Y%m%d%H%M%S')}:{uuid.uuid4().hex[:6]}"
+        acquired, _, job = market_db.acquire_batch_lease(
+            batch_key=batch_key,
+            topic=(topic or bot_id).strip().upper(),
+            kind="manual",
+            scheduled_date=now.date().isoformat(),
+            runner_id="admin_manual_broadcast",
+            force_reason=f"MANUAL_BROADCAST:{bot_id}",
+        )
+        if not acquired or job is None:
+            return None
+        market_db.snapshot_job_recipients(job.job_id, [Recipient(chat_id=str(c), name="") for c in chat_ids])
+        return job.job_id
+    except Exception as exc:
+        logger.warning(f"Manual broadcast ledger open failed for {bot_id}: {exc}")
+        return None
+
+
+def record_manual_broadcast_result(
+    db, job_id: Optional[str], chat_id: str, status: str,
+    provider_msg_id: Optional[str] = None, error_detail: Optional[str] = None,
+) -> None:
+    market_db = _resolve_market_db(db)
+    if market_db is None or not job_id:
+        return
+    try:
+        market_db.record_recipient_result(
+            job_id, str(chat_id), status,
+            provider_msg_id=str(provider_msg_id) if provider_msg_id else None,
+            error_detail=error_detail,
+        )
+    except Exception as exc:
+        logger.warning(f"Manual broadcast recipient record failed ({job_id}/{chat_id}): {exc}")
+
+
+def finish_manual_broadcast_job(db, job_id: Optional[str], total: int, success: int, fail: int, unknown: int = 0) -> None:
+    market_db = _resolve_market_db(db)
+    if market_db is None or not job_id:
+        return
+    try:
+        from market_brief.storage.models import JobFinalStatus
+
+        final_status = JobFinalStatus.SENT
+        if fail > 0 or unknown > 0:
+            final_status = JobFinalStatus.PARTIAL if success > 0 else JobFinalStatus.FAILED
+        market_db.complete_job(job_id, status=final_status, total=total, success=success, fail=fail, unknown=unknown)
+    except Exception as exc:
+        logger.warning(f"Manual broadcast ledger completion failed ({job_id}): {exc}")
+
+
 def send_bot_broadcast_message(
     bot_id: str,
     content_html: str,
@@ -437,6 +684,10 @@ def send_bot_broadcast_message(
             "message": f"봇 [{bot_id}]을 구독 중인 활성 유저가 없습니다.",
         }
 
+    chat_ids = [str(getattr(sub, "chat_id", None) or getattr(sub, "telegram_user_id", None)) for sub in subs]
+    topic = getattr(subs[0], "subscribed_topics", None) or bot_id
+    job_id = open_manual_broadcast_job(db, bot_id, chat_ids, topic=topic)
+
     try:
         from travel_brief.channels.telegram import TelegramChannel
         from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
@@ -444,40 +695,43 @@ def send_bot_broadcast_message(
         dispatcher = SafeTelegramDispatcher()
         sent = 0
         failed = 0
+        unknown = 0
 
-        for sub in subs:
-            chat_id = str(getattr(sub, "chat_id", None) or getattr(sub, "telegram_user_id", None))
-            payload: Dict[str, Any] = {
-                "chat_id": chat_id,
-                "text": content_html,
-                "parse_mode": "HTML",
-            }
-            if inline_keyboard and len(inline_keyboard) > 0:
-                payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-
+        for chat_id in chat_ids:
             try:
-                status, _, _ = dispatcher.send_text_to_recipient(tg=tg, chat_id=chat_id, text=content_html, parse_mode="HTML", reply_markup={"inline_keyboard": inline_keyboard} if inline_keyboard else None)
-                ok = (status == "SENT")
-                if ok:
+                status, msg_id, err = dispatcher.send_text_to_recipient(tg=tg, chat_id=chat_id, text=content_html, parse_mode="HTML", reply_markup={"inline_keyboard": inline_keyboard} if inline_keyboard else None)
+                if status == "SENT":
                     sent += 1
+                elif status == "UNKNOWN":
+                    unknown += 1
                 else:
                     failed += 1
-            except Exception:
+                record_manual_broadcast_result(db, job_id, chat_id, status, provider_msg_id=msg_id, error_detail=err)
+            except Exception as exc:
                 failed += 1
+                record_manual_broadcast_result(db, job_id, chat_id, "FAILED", error_detail=str(exc))
 
+        finish_manual_broadcast_job(db, job_id, total=len(subs), success=sent, fail=failed, unknown=unknown)
+        failed_total = failed + unknown
         return {
             "success": True,
             "bot_id": bot_id,
+            "job_id": job_id,
             "total_targets": len(subs),
             "sent_count": sent,
-            "failed_count": failed,
-            "message": f"🚀 총 {len(subs)}명 중 {sent}명에게 안전하게 발송을 완료했습니다. (실패: {failed}건)",
+            "failed_count": failed_total,
+            "message": f"🚀 총 {len(subs)}명 중 {sent}명에게 안전하게 발송을 완료했습니다. (실패: {failed_total}건)",
         }
     except Exception as e:
         logger.error(f"Broadcast failed for {bot_id}: {e}")
+        market_db = _resolve_market_db(db)
+        if market_db is not None and job_id:
+            try:
+                market_db.fail_job(job_id, str(e))
+            except Exception:
+                pass
         return {
             "success": False,
             "bot_id": bot_id,
             "error": f"브로드캐스트 발송 실패: {str(e)}",
         }
-

@@ -151,6 +151,10 @@ class MarketBriefDatabase:
                     FOREIGN KEY(job_id) REFERENCES delivery_jobs(job_id)
                 )"""
             )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_delivery_recipient_history
+                   ON delivery_job_recipients (chat_id, updated_at DESC)"""
+            )
 
             # 6. Dynamic System Settings & Versioning History
             db.execute(
@@ -283,6 +287,9 @@ class MarketBriefDatabase:
             env_menu_token = ""
             env_travel_token = ""
             env_edu_token = ""
+            env_silver_token = ""
+            env_kids_token = ""
+            env_yolo_token = ""
             env_p = Path(self.env_path) if self.env_path else None
             if env_p and env_p.exists():
                 try:
@@ -302,6 +309,12 @@ class MarketBriefDatabase:
                             env_travel_token = line.split("=", 1)[1].strip().strip('"').strip("'")
                         elif line.startswith("EDU_TELEGRAM_BOT_TOKEN=") or line.startswith("EDU_BOT_TOKEN=") or line.startswith("ADMISSION_TELEGRAM_BOT_TOKEN="):
                             env_edu_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("SILVER_TELEGRAM_BOT_TOKEN=") or line.startswith("SILVER_BOT_TOKEN="):
+                            env_silver_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("KIDS_TELEGRAM_BOT_TOKEN=") or line.startswith("KIDS_BOT_TOKEN="):
+                            env_kids_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        elif line.startswith("YOLO_TELEGRAM_BOT_TOKEN=") or line.startswith("YOLO_BOT_TOKEN="):
+                            env_yolo_token = line.split("=", 1)[1].strip().strip('"').strip("'")
                     row_count = db.execute("SELECT COUNT(*) FROM recipients").fetchone()[0]
                     if row_count == 0:
                         for line in env_lines:
@@ -336,7 +349,7 @@ class MarketBriefDatabase:
                     ),
                 )
 
-            # Seed Default Multi-Bot Catalog (1 Menu Portal + 3 Real Info Bots: 시황, 여행, 입시)
+            # Seed Default Multi-Bot Catalog (1 Menu Portal + 6 Real Info Bots: 시황, 여행, 입시, 실버케어, 자녀, 욜로)
             default_bots = [
                 (
                     "menu_bot",
@@ -390,6 +403,45 @@ class MarketBriefDatabase:
                     1,
                     3,
                 ),
+                (
+                    "silver_bot",
+                    BotType.INFO.value,
+                    "실버케어",
+                    "KwSilver_bot",
+                    env_silver_token,
+                    "건강·실버",
+                    "👵",
+                    "부모님 맞춤 동사무소·보건소 복지 혜택 및 주간 안심 효도 브리핑을 제공합니다.",
+                    "SILVER",
+                    1,
+                    4,
+                ),
+                (
+                    "kids_bot",
+                    BotType.INFO.value,
+                    "자녀",
+                    "KwKids_bot",
+                    env_kids_token,
+                    "육아·자녀",
+                    "👶",
+                    "주말 연령별 맞춤 나들이 체험/예약 D-Day 및 해열제·달빛병원 응급 가이드를 제공합니다.",
+                    "KIDS",
+                    1,
+                    5,
+                ),
+                (
+                    "yolo_bot",
+                    BotType.INFO.value,
+                    "욜로",
+                    "KwYolo_bot",
+                    env_yolo_token,
+                    "여가·라이프",
+                    "🏄",
+                    "나홀로 성향별 주말 핫플레이스, 액티비티 및 힐링 라이프스타일 큐레이션을 제공합니다.",
+                    "YOLO",
+                    1,
+                    6,
+                ),
             ]
 
             bot_count = db.execute("SELECT COUNT(*) FROM bots").fetchone()[0]
@@ -410,17 +462,13 @@ class MarketBriefDatabase:
                     if sub_count == 0:
                         db.execute("DELETE FROM bots WHERE bot_id = ?", (legacy_bot_id,))
 
-                # Migration: Ensure admission_bot is registered
-                adm_exists = db.execute(
-                    "SELECT COUNT(*) FROM bots WHERE bot_id = 'admission_bot'"
-                ).fetchone()[0]
-                if adm_exists == 0:
+                # Migration: Idempotently ensure all default bots are registered without overwriting existing rows
+                for b in default_bots:
                     db.execute(
-                        """INSERT INTO bots
+                        """INSERT OR IGNORE INTO bots
                            (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description, topic_code, is_active, sort_order)
-                           VALUES ('admission_bot', 'INFO', '입시', 'KwEduInfo_bot', ?, '입시·교육', '🎓',
-                                   '학년별 주간 대입·고입 큐레이션 및 학부모 설명회 티켓팅 오픈 알림을 제공합니다.', 'EDUCATION', 1, 3)""",
-                        (env_edu_token,),
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        b,
                     )
 
                 # Backfill verified usernames and missing tokens from .env
@@ -429,6 +477,9 @@ class MarketBriefDatabase:
                     ("brief_bot", "KwDailyMarketInfo_bot", env_brief_token),
                     ("travel_bot", "KwTravelLowPrice_bot", env_travel_token),
                     ("admission_bot", "KwEduInfo_bot", env_edu_token),
+                    ("silver_bot", "KwSilver_bot", env_silver_token),
+                    ("kids_bot", "KwKids_bot", env_kids_token),
+                    ("yolo_bot", "KwYolo_bot", env_yolo_token),
                 ]
                 for bid, un, tok in bot_updates:
                     db.execute(

@@ -210,6 +210,168 @@ class AdminApiTests(unittest.TestCase):
                     profile = sub_engine.get_user_profile("77777")
                     self.assertEqual(profile.get("full_name"), "홍길동")
 
+    def test_user_management_ui_alias_and_no_sync_button(self):
+        html = self.client.get("/").text
+        self.assertIn("유저 실명 (별칭) / ID", html)
+        self.assertIn('id="umUsername"', html)
+        self.assertIn("username: uname", html)
+        self.assertNotIn("syncTelegramNames", html)
+        self.assertNotIn("텔레그램 실명 동기화", html)
+
+    def test_platform_user_username_create_and_update(self):
+        res_post = self.client.post(
+            "/api/platform/users",
+            json={"telegram_user_id": "88888", "full_name": "홍길동", "username": "kildong", "tier": "WHITE"},
+        )
+        self.assertEqual(res_post.status_code, 200)
+        users = self.client.get("/api/platform/users").json()["users"]
+        user = next(u for u in users if u["telegram_user_id"] == "88888")
+        self.assertEqual(user["full_name"], "홍길동")
+        self.assertEqual(user["username"], "kildong")
+
+        res_put = self.client.put(
+            "/api/platform/users/88888",
+            json={"full_name": "홍길동", "username": "gildong2", "memo": ""},
+        )
+        self.assertEqual(res_put.status_code, 200)
+        users = self.client.get("/api/platform/users").json()["users"]
+        user = next(u for u in users if u["telegram_user_id"] == "88888")
+        self.assertEqual(user["username"], "gildong2")
+
+    def _audit_logs_for(self, user_id, action=None):
+        sub_engine = self.app.state.sub_engine
+        return sub_engine.list_audit_logs(user_id=user_id, action=action, limit=100)["logs"]
+
+    def test_user_update_audit_diff_logging(self):
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(telegram_user_id="55501", full_name="수신자", tier="WHITE")
+
+        res = self.client.put(
+            "/api/platform/users/55501",
+            json={"full_name": "홍길동", "username": "@kildong"},
+        )
+        self.assertEqual(res.status_code, 200)
+
+        logs = self._audit_logs_for("55501", action="USER_UPDATED")
+        self.assertEqual(len(logs), 1)
+        changes = logs[0]["detail"]["changes"]
+        self.assertEqual(changes["full_name"], {"from": "수신자", "to": "홍길동"})
+        self.assertEqual(changes["username"], {"from": "", "to": "kildong"})
+        self.assertNotIn("status", changes)
+        self.assertNotIn("memo", changes)
+        self.assertEqual(logs[0]["actor"], "ADMIN")
+
+    def test_user_update_no_diff_skips_audit(self):
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(telegram_user_id="55502", full_name="홍길동", username="kildong", tier="WHITE")
+
+        res = self.client.put(
+            "/api/platform/users/55502",
+            json={"full_name": "홍길동", "username": "kildong"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self._audit_logs_for("55502", action="USER_UPDATED"), [])
+
+        # A real change logs exactly once; repeating the same payload adds nothing.
+        self.client.put("/api/platform/users/55502", json={"memo": "VIP"})
+        self.client.put("/api/platform/users/55502", json={"memo": "VIP"})
+        logs = self._audit_logs_for("55502", action="USER_UPDATED")
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["detail"]["changes"], {"memo": {"from": "", "to": "VIP"}})
+
+    def test_audit_logs_api(self):
+        import os
+        from unittest.mock import patch
+
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(telegram_user_id="55503", full_name="김철수", tier="WHITE")
+        sub_engine.upsert_user(telegram_user_id="55504", full_name="이영희", tier="WHITE")
+        self.client.put("/api/platform/users/55503", json={"full_name": "김철수2"})
+
+        res = self.client.get("/api/platform/audit-logs")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("logs", data)
+        self.assertGreaterEqual(data["total"], 3)
+
+        res_user = self.client.get("/api/platform/audit-logs?user_id=55503")
+        user_logs = res_user.json()["logs"]
+        self.assertTrue(user_logs)
+        self.assertTrue(all(l["telegram_user_id"] == "55503" for l in user_logs))
+
+        res_action = self.client.get("/api/platform/audit-logs?action=USER_UPDATED")
+        action_data = res_action.json()
+        self.assertEqual(action_data["total"], 1)
+        self.assertEqual(action_data["logs"][0]["telegram_user_id"], "55503")
+        self.assertEqual(action_data["logs"][0]["user_name"], "김철수2")
+
+        res_q = self.client.get("/api/platform/audit-logs?q=이영희")
+        self.assertTrue(all(l["telegram_user_id"] == "55504" for l in res_q.json()["logs"]))
+
+        res_page = self.client.get("/api/platform/audit-logs?limit=1&offset=1")
+        page = res_page.json()
+        self.assertEqual(len(page["logs"]), 1)
+        self.assertEqual(page["total"], data["total"])
+
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            self.assertEqual(self.client.get("/api/platform/audit-logs").status_code, 401)
+            ok = self.client.get("/api/platform/audit-logs", headers={"X-Admin-Token": "secret_token_123"})
+            self.assertEqual(ok.status_code, 200)
+
+    def test_user_history_api(self):
+        import os
+        from unittest.mock import patch
+        from market_brief.briefing_service import (
+            finish_manual_broadcast_job,
+            open_manual_broadcast_job,
+            record_manual_broadcast_result,
+        )
+
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(telegram_user_id="55505", full_name="박민수", tier="WHITE")
+        self.client.put("/api/platform/users/55505", json={"full_name": "박민수2"})
+
+        # Manual broadcast ledger entry must surface in both dispatch history and per-user history
+        job_id = open_manual_broadcast_job(sub_engine, "brief_bot", ["55505", "55599"], topic="FINANCE")
+        self.assertIsNotNone(job_id)
+        record_manual_broadcast_result(sub_engine, job_id, "55505", "SENT", provider_msg_id="101")
+        record_manual_broadcast_result(sub_engine, job_id, "55599", "FAILED", error_detail="403 blocked")
+        finish_manual_broadcast_job(sub_engine, job_id, total=2, success=1, fail=1)
+
+        res = self.client.get("/api/platform/users/55505/history")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["user_id"], "55505")
+        actions = [l["action"] for l in data["audit_logs"]]
+        self.assertIn("USER_UPDATED", actions)
+        self.assertIn("USER_CREATED", actions)
+        self.assertEqual(len(data["delivery_history"]), 1)
+        h = data["delivery_history"][0]
+        self.assertEqual(h["job_id"], job_id)
+        self.assertEqual(h["recipient_status"], "SENT")
+        self.assertEqual(h["kind"], "manual")
+        self.assertEqual(h["topic"], "FINANCE")
+        self.assertEqual(h["job_status"], "PARTIAL")
+
+        jobs = self.client.get("/api/history?limit=50").json()
+        job = next(j for j in jobs if j["job_id"] == job_id)
+        self.assertEqual(job["kind"], "manual")
+        self.assertEqual(job["success_count"], 1)
+        self.assertEqual(job["fail_count"], 1)
+
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            self.assertEqual(self.client.get("/api/platform/users/55505/history").status_code, 401)
+
+    def test_history_center_ui_present(self):
+        html = self.client.get("/").text
+        self.assertIn('data-tab="history"', html)
+        self.assertIn('data-bnav="history"', html)
+        self.assertIn('id="pane-history"', html)
+        self.assertIn('id="subpane-dispatch"', html)
+        self.assertIn('id="subpane-audit"', html)
+        self.assertIn("openUserHistoryModal", html)
+        self.assertIn('id="userHistoryModal"', html)
+
     def test_healthz_endpoint(self):
         """Validates that /healthz returns 200 OK for Uptime ping monitors."""
         res = self.client.get("/healthz")
@@ -217,6 +379,60 @@ class AdminApiTests(unittest.TestCase):
         data = res.json()
         self.assertEqual(data.get("status"), "HEALTHY")
         self.assertIn("active_workers", data)
+
+    def test_six_info_bots_seeded_and_splash_badges(self):
+        """Validates that all 7 bots (menu_bot + 6 INFO bots) are seeded and splash badges include all 6."""
+        res = self.client.get("/api/platform/bots")
+        self.assertEqual(res.status_code, 200)
+        bots = res.json().get("bots", [])
+        bot_ids = [b["bot_id"] for b in bots]
+        for expected in ("menu_bot", "brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot"):
+            self.assertIn(expected, bot_ids)
+
+        by_id = {b["bot_id"]: b for b in bots}
+        self.assertEqual(by_id["silver_bot"]["telegram_username"], "KwSilver_bot")
+        self.assertEqual(by_id["kids_bot"]["telegram_username"], "KwKids_bot")
+        self.assertEqual(by_id["yolo_bot"]["telegram_username"], "KwYolo_bot")
+
+        html = self.client.get("/").text
+        for badge in ("📈 시황", "✈️ 여행", "🎓 입시", "👵 실버", "👶 자녀", "🏄 욜로"):
+            self.assertIn(badge, html)
+
+    def test_new_bots_briefing_preview_and_token_isolation(self):
+        """Validates briefing preview generation and token isolation for silver_bot, kids_bot, yolo_bot."""
+        import os
+        import re
+        from unittest.mock import patch
+        from market_brief.briefing_service import generate_bot_briefing, get_bot_presets, get_bot_token_and_chat
+        from yolo_brief.channels.telegram import YoloTelegramChannel
+
+        for bot_id in ("silver_bot", "kids_bot", "yolo_bot", "menu_bot"):
+            presets = get_bot_presets(bot_id)
+            self.assertGreaterEqual(len(presets), 1)
+            for p in presets:
+                res = generate_bot_briefing(bot_id, preset=p["id"], db=self.app.state.sub_engine)
+                content = res["content_html"]
+                self.assertTrue(content)
+                self.assertLessEqual(len(content), 3500)
+                vis = re.sub(r"<[^>]+>", "", content)
+                self.assertLessEqual(len(vis), 1800)
+
+        # Token isolation: TELEGRAM_BOT_TOKEN must NOT leak into silver/kids/yolo when their own token is empty
+        with patch("market_brief.briefing_service._get_env_val") as mock_env:
+            env_map = {
+                "TELEGRAM_BOT_TOKEN": "market_only_token",
+                "TELEGRAM_CHAT_ID": "99999",
+            }
+            mock_env.side_effect = lambda k, default="": env_map.get(k, default)
+            for bid in ("silver_bot", "kids_bot", "yolo_bot"):
+                with self.app.state.sub_engine.db._connect() as conn:
+                    conn.execute("UPDATE bots SET token = '' WHERE bot_id = ?", (bid,))
+                tok, _ = get_bot_token_and_chat(bid, db=self.app.state.sub_engine)
+                self.assertEqual(tok, "")
+
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "market_only_token", "YOLO_TELEGRAM_BOT_TOKEN": "", "YOLO_BOT_TOKEN": ""}, clear=False):
+            ch = YoloTelegramChannel(token=None, dry_run=True)
+            self.assertEqual(ch.token, "")
 
 
 if __name__ == "__main__":

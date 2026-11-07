@@ -411,3 +411,110 @@ def test_curator_get_events_by_category():
     assert [b.briefing_id for b in briefings] == ["brief_e1"]
     assert briefings[0].category == EventCategory.EXPO
     assert AICurator().get_events_by_category(EventCategory.EXPO, db=None) == []
+
+
+def test_onboarding_region_completion_sends_welcome_todo():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.upsert_subscriber(ParentUserProfile(chat_id="888", target_grade=TargetGrade.HIGH_3_N))
+    mock_channel = MagicMock(spec=TelegramChannel)
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("region:SEOUL"))
+
+    # Summary edit in place + persistent reply keyboard registration message
+    summary = mock_channel.edit_message_text.call_args[0][2]
+    assert "설정이 완료" in summary
+    mock_channel.send_message.assert_called_once()
+    assert "reply_markup" in mock_channel.send_message.call_args[1]
+
+    mock_channel.send.assert_called_once()
+    args, kwargs = mock_channel.send.call_args
+    chat_id, briefing = args
+    assert chat_id == "888"
+    assert briefing.briefing_type == BriefingType.WEEKLY_TODO
+    assert briefing.target_grade == TargetGrade.HIGH_3_N
+    assert briefing.silent is True
+    markup = kwargs["reply_markup"]
+    assert _all_callback_data(markup) == ["adm:hot", "adm:menu"]
+    assert db.has_dispatched(briefing.briefing_id, "888") is True
+
+    # Re-selecting region in the same ISO week does not resend the same briefing
+    bot.handle_update(_cb("region:ONLINE"))
+    mock_channel.send.assert_called_once()
+
+
+def test_onboarding_welcome_send_failure_is_not_logged():
+    db = AdmissionDatabase(db_path=":memory:")
+    mock_channel = MagicMock(spec=TelegramChannel)
+    mock_channel.send.side_effect = RuntimeError("network down")
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("region:ALL"))
+
+    briefing = AICurator().generate_weekly_todo_briefing(db.get_subscriber("888").target_grade)
+    assert db.has_dispatched(briefing.briefing_id, "888") is False
+
+
+def test_grade_change_offers_todo_preview_button():
+    db = AdmissionDatabase(db_path=":memory:")
+    mock_channel = MagicMock(spec=TelegramChannel)
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("grade:HIGH_1_2"))
+
+    markup = mock_channel.edit_message_text.call_args[1]["reply_markup"]
+    data = _all_callback_data(markup)
+    assert "adm:todo" in data
+    assert "region:SEOUL" in data
+
+
+def test_adm_hot_and_todo_callbacks_route():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.upsert_subscriber(ParentUserProfile(chat_id="888", target_grade=TargetGrade.MIDDLE))
+    mock_channel = MagicMock(spec=TelegramChannel)
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+    bot._cmd_hot_events = MagicMock()
+
+    bot.handle_update(_cb("adm:hot"))
+    bot._cmd_hot_events.assert_called_once_with("888")
+
+    mock_channel.reset_mock()
+    bot.handle_update(_cb("adm:todo"))
+    mock_channel.answer_callback_query.assert_called_once()
+    mock_channel.send.assert_called_once()
+    chat_id, briefing = mock_channel.send.call_args[0]
+    assert chat_id == "888"
+    assert briefing.briefing_type == BriefingType.WEEKLY_TODO
+    # Manual preview is not recorded as a scheduled dispatch
+    assert db.has_dispatched(briefing.briefing_id, "888") is False
+
+
+def test_send_reply_markup_overrides_booking_button():
+    sent = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=15):
+        sent.update(json.loads(req.data.decode("utf-8")))
+        return _Resp(b'{"ok": true, "result": {"message_id": 1}}')
+
+    channel = TelegramChannel("tok", opener=opener)
+    briefing = AdmissionBriefing(
+        briefing_id="b_markup",
+        briefing_type=BriefingType.TICKETING_ALERT,
+        target_grade=TargetGrade.MIDDLE,
+        headline="h",
+        summary_3lines=["a", "b", "c"],
+        booking_url="https://sdij.com/test",
+    )
+    custom = {"inline_keyboard": [[{"text": "x", "callback_data": "adm:hot"}]]}
+    channel.send("1", briefing, reply_markup=custom)
+    assert sent["reply_markup"] == custom
+
+    channel.send("1", briefing)
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://sdij.com/test"

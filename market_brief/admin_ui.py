@@ -575,6 +575,94 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       font-weight: 700;
     }
 
+    /* History Center (Dispatch & Audit) */
+    .hist-subtabs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      background: var(--surface-sub);
+      padding: 4px;
+      border-radius: 10px;
+      margin-bottom: 14px;
+    }
+    .hist-subtab-btn {
+      min-height: 44px;
+      min-width: 0;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 6px 8px;
+      overflow-wrap: anywhere;
+    }
+    .hist-subtab-btn.active { background: #fff; color: var(--primary); box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08); }
+    .hist-subpane { display: none; }
+    .hist-subpane.active { display: block; }
+    .hist-filter-bar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    #subpane-dispatch .hist-filter-bar { grid-template-columns: minmax(0, 1fr) auto; }
+    .hist-touch { min-height: 44px; min-width: 44px; }
+    .hist-close-btn { min-width: 44px; min-height: 44px; font-size: 16px; flex-shrink: 0; }
+    .hist-modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .hist-table td { overflow-wrap: anywhere; word-break: break-word; }
+    .hist-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border-dark);
+      background: var(--surface-sub);
+      color: #334155;
+      white-space: nowrap;
+    }
+    .hist-badge.ok { background: var(--success-soft); color: #047857; border-color: #a7f3d0; }
+    .hist-badge.warn { background: var(--warning-soft); color: #b45309; border-color: #fcd34d; }
+    .hist-badge.bad { background: var(--danger-soft); color: #b91c1c; border-color: #fecaca; }
+    .hist-badge.info { background: var(--primary-soft); color: #1d4ed8; border-color: #bfdbfe; }
+    .hist-diff-line { font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+    .hist-diff-from { color: #b91c1c; text-decoration: line-through; }
+    .hist-diff-to { color: #047857; font-weight: 700; }
+    .hist-pager {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .hist-card-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .hist-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #fff;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .hist-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+    .hist-meta { font-size: 11.5px; color: var(--text-muted); }
+
     /* Mobile Responsive Overrides */
     @media (max-width: 768px) {
       .desktop-only { display: none !important; }
@@ -999,6 +1087,52 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         grid-template-columns: 1fr 1fr !important;
         gap: 8px !important;
       }
+
+      /* History Center -> Mobile Card View (360px zero overflow) */
+      .hist-filter-bar,
+      #subpane-dispatch .hist-filter-bar {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .hist-table,
+      .hist-table thead,
+      .hist-table tbody,
+      .hist-table th,
+      .hist-table td,
+      .hist-table tr {
+        display: block;
+      }
+      .hist-table thead { display: none; }
+      .hist-table tr {
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        margin-bottom: 10px;
+        padding: 8px 12px;
+      }
+      .hist-table td {
+        display: grid;
+        grid-template-columns: 84px minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+        padding: 5px 0;
+        border: none;
+        border-bottom: 1px dashed #f1f5f9;
+        font-size: 13px;
+      }
+      .hist-table td:last-child { border-bottom: none; }
+      .hist-table td::before {
+        content: attr(data-label);
+        font-weight: 700;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      .hist-table td.empty-cell {
+        display: block !important;
+        text-align: center !important;
+      }
+      .hist-table td.empty-cell::before { display: none; }
+      .hist-table .btn { min-height: 44px; }
+      .user-table td.user-actions-cell .btn.user-history-btn { min-height: 44px; }
     }
 
     /* 🚀 Fullscreen App Splash & Cold-Start Loader */
@@ -1168,6 +1302,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="splash-pill">📈 시황</span>
         <span class="splash-pill">✈️ 여행</span>
         <span class="splash-pill">🎓 입시</span>
+        <span class="splash-pill">👵 실버</span>
+        <span class="splash-pill">👶 자녀</span>
+        <span class="splash-pill">🏄 욜로</span>
       </div>
       
       <div class="splash-spinner-wrap">
@@ -1221,6 +1358,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="tab-btn" data-tab="dashboard" onclick="switchTab('dashboard')">
       📊 3. 운영 현황
     </button>
+    <button class="tab-btn" data-tab="history" onclick="switchTab('history')">
+      📜 이력 센터
+    </button>
   </nav>
 
   <!-- Mobile Bottom Navigation Bar (App Navigation) -->
@@ -1236,6 +1376,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="bnav-btn" data-bnav="dashboard" onclick="switchTab('dashboard')">
       <span class="bnav-icon">📊</span>
       <span class="bnav-label">운영 현황</span>
+    </button>
+    <button class="bnav-btn" data-bnav="history" onclick="switchTab('history')">
+      <span class="bnav-icon">📜</span>
+      <span class="bnav-label">이력 센터</span>
     </button>
     <button class="bnav-btn" onclick="openSimModal()">
       <span class="bnav-icon">🧪</span>
@@ -1256,7 +1400,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             <p class="card-desc">각 유저의 등급(화이트 1개 / 그린 3개 / 레드 5개 / 블랙 무제한)을 드롭다운으로 즉시 변경하고, 사용 중인 봇 슬롯을 관리합니다.</p>
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button class="btn btn-outline" style="font-size:12.5px; padding:6px 12px;" onclick="syncTelegramNames()">🔄 텔레그램 실명 동기화</button>
             <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
           </div>
         </div>
@@ -1282,7 +1425,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           <table class="user-table">
             <thead>
               <tr>
-                <th>유저 이름 / 텔레그램 ID</th>
+                <th>유저 실명 (별칭) / ID</th>
                 <th>회원 등급 (원클릭 변경)</th>
                 <th>구독 중인 봇 (슬롯)</th>
                 <th>등급 유효기한</th>
@@ -1380,6 +1523,93 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         </div>
       </details>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TAB 4: HISTORY CENTER (DISPATCH & PLATFORM AUDIT)                   -->
+    <!-- =================================================================== -->
+    <section id="pane-history" class="tab-pane">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">📜 이력 센터 (발송 및 플랫폼 감사)</h2>
+            <p class="card-desc">정기·수동·긴급 봇 발송 결과와 유저 정보·등급·구독 변경 감사 이력을 한 곳에서 추적합니다.</p>
+          </div>
+        </div>
+
+        <div class="hist-subtabs">
+          <button class="hist-subtab-btn active" data-subpane="dispatch" onclick="switchHistorySubpane('dispatch')">📨 봇 발송 이력</button>
+          <button class="hist-subtab-btn" data-subpane="audit" onclick="switchHistorySubpane('audit')">👥 플랫폼 감사 이력</button>
+        </div>
+
+        <!-- Sub-pane: Dispatch History -->
+        <div id="subpane-dispatch" class="hist-subpane active">
+          <div class="hist-filter-bar">
+            <span style="font-size:12px; color:var(--text-muted);">최근 발송 50건</span>
+            <button class="btn btn-sm hist-touch" onclick="loadDispatchHistory()">🔃 새로고침</button>
+          </div>
+          <div class="table-wrap">
+            <table class="hist-table">
+              <thead>
+                <tr>
+                  <th>발송 일시</th>
+                  <th>발송 봇 / 토픽</th>
+                  <th>유형</th>
+                  <th>성공률 (성공/전체)</th>
+                  <th>상태</th>
+                  <th>상세</th>
+                </tr>
+              </thead>
+              <tbody id="dispatchHistoryBody">
+                <tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px;">불러오는 중...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Sub-pane: Platform Audit Logs -->
+        <div id="subpane-audit" class="hist-subpane">
+          <div class="hist-filter-bar">
+            <input type="text" id="auditSearch" class="form-input" placeholder="🔍 유저 ID, 실명, 별칭 검색..." oninput="debouncedLoadAuditLogs()" />
+            <select id="auditActionSel" class="form-select" onchange="loadAuditLogs()">
+              <option value="">전체 구분</option>
+              <option value="USER_UPDATED">USER_UPDATED (정보 수정)</option>
+              <option value="TIER_CHANGE">TIER_CHANGE (등급 변경)</option>
+              <option value="SUBSCRIBE">SUBSCRIBE (구독)</option>
+              <option value="UNSUBSCRIBE">UNSUBSCRIBE (구독 해지)</option>
+              <option value="SWAP">SWAP (봇 교체)</option>
+              <option value="UPGRADE_REQUESTED">UPGRADE_REQUESTED (등급 신청)</option>
+              <option value="QUOTA_REJECTED">QUOTA_REJECTED (한도 초과)</option>
+              <option value="TIER_EXPIRED">TIER_EXPIRED (등급 만료)</option>
+              <option value="USER_CREATED">USER_CREATED (유저 등록)</option>
+              <option value="USER_JOINED">USER_JOINED (유저 가입)</option>
+              <option value="USER_DELETED">USER_DELETED (유저 삭제)</option>
+            </select>
+            <button class="btn btn-sm hist-touch" onclick="loadAuditLogs()">🔃 새로고침</button>
+          </div>
+          <div class="table-wrap">
+            <table class="hist-table">
+              <thead>
+                <tr>
+                  <th>일시</th>
+                  <th>대상 유저</th>
+                  <th>구분</th>
+                  <th>변경 상세</th>
+                  <th>작업자</th>
+                </tr>
+              </thead>
+              <tbody id="auditHistoryBody">
+                <tr><td colspan="5" class="empty-cell" style="text-align:center; padding:28px;">불러오는 중...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="hist-pager">
+            <button class="btn btn-sm hist-touch" id="auditPrevBtn" onclick="pageAuditLogs(-1)">◀ 이전</button>
+            <span id="auditPageInfo" style="font-size:12px; color:var(--text-muted);"></span>
+            <button class="btn btn-sm hist-touch" id="auditNextBtn" onclick="pageAuditLogs(1)">다음 ▶</button>
+          </div>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -1551,15 +1781,19 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       <h3 style="margin:0 0 16px; font-size:17px;" id="userModalTitle">👤 유저 상세 관리</h3>
       <div class="form-grid-2col">
         <div class="form-group">
-          <label class="form-label">텔레그램 User ID</label>
-          <input type="text" id="umId" class="form-input" />
+          <label class="form-label">텔레그램 User ID <span style="color:var(--danger)">*</span></label>
+          <input type="text" id="umId" class="form-input" placeholder="숫자 ID (예: 12345678)" />
         </div>
         <div class="form-group">
-          <label class="form-label">이름 / 닉네임</label>
-          <input type="text" id="umName" class="form-input" />
+          <label class="form-label">실명 <span style="color:var(--danger)">*</span></label>
+          <input type="text" id="umName" class="form-input" placeholder="예: 홍길동" />
         </div>
       </div>
       <div class="form-grid-2col">
+        <div class="form-group">
+          <label class="form-label">별칭 (텔레그램 @username)</label>
+          <input type="text" id="umUsername" class="form-input" placeholder="예: @kildong (선택)" />
+        </div>
         <div class="form-group">
           <label class="form-label">회원 등급</label>
           <select id="umTier" class="form-select">
@@ -1569,14 +1803,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             <option value="BLACK">⚫ 블랙 (무제한)</option>
           </select>
         </div>
+      </div>
+      <div class="form-grid-2col">
         <div class="form-group">
           <label class="form-label">등급 만료일 (비워두면 무기한)</label>
           <input type="date" id="umExp" class="form-input" />
         </div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">관리자 메모</label>
-        <input type="text" id="umMemo" class="form-input" placeholder="메모 입력" />
+        <div class="form-group">
+          <label class="form-label">관리자 메모</label>
+          <input type="text" id="umMemo" class="form-input" placeholder="메모 입력" />
+        </div>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
         <button class="btn" onclick="closeModal('userModal')">취소</button>
@@ -1601,6 +1837,38 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <button class="btn" onclick="closeModal('addSubModal')">취소</button>
         <button class="btn btn-primary" onclick="confirmAddSub()">구독 추가</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: DISPATCH JOB RECIPIENT BREAKDOWN                               -->
+  <!-- ===================================================================== -->
+  <div class="modal-backdrop" id="jobDetailModal">
+    <div class="modal-box" style="max-width:620px;">
+      <div class="hist-modal-head">
+        <h3 style="margin:0; font-size:16px; min-width:0; overflow-wrap:anywhere;" id="jobDetailTitle">📨 발송 상세</h3>
+        <button class="btn btn-sm hist-close-btn" onclick="closeModal('jobDetailModal')" aria-label="닫기">✕</button>
+      </div>
+      <div id="jobDetailSummary" style="font-size:12.5px; color:var(--text-muted); margin-bottom:10px; overflow-wrap:anywhere;"></div>
+      <div id="jobDetailList" class="hist-card-list"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- MODAL: PER-USER HISTORY (AUDIT TIMELINE + DELIVERY HISTORY)           -->
+  <!-- ===================================================================== -->
+  <div class="modal-backdrop" id="userHistoryModal">
+    <div class="modal-box" style="max-width:620px;">
+      <div class="hist-modal-head">
+        <h3 style="margin:0; font-size:16px; min-width:0; overflow-wrap:anywhere;" id="userHistoryTitle">📜 유저 이력</h3>
+        <button class="btn btn-sm hist-close-btn" onclick="closeModal('userHistoryModal')" aria-label="닫기">✕</button>
+      </div>
+      <div class="hist-subtabs">
+        <button class="hist-subtab-btn uh-tab-btn active" data-uhtab="audit" onclick="switchUserHistoryTab('audit')">정보 &amp; 등급 변경 이력</button>
+        <button class="hist-subtab-btn uh-tab-btn" data-uhtab="delivery" onclick="switchUserHistoryTab('delivery')">메시지 수신 이력</button>
+      </div>
+      <div id="uhPaneAudit" class="hist-card-list"></div>
+      <div id="uhPaneDelivery" class="hist-card-list" style="display:none;"></div>
     </div>
   </div>
 
@@ -1657,6 +1925,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       if (tab === 'users') loadUsers();
       if (tab === 'bots') loadBots();
       if (tab === 'dashboard') loadDashboard();
+      if (tab === 'history') loadHistoryCenter();
     }
 
     function refreshCurrentTab() {
@@ -1738,17 +2007,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           const quickApproveBtn = pendingReq
             ? `<button class="btn btn-sm" style="background:#10b981; color:#fff; font-size:11px; font-weight:800; padding:3px 8px; margin-left:4px; border-radius:6px;" data-req-id="${pendingReq.id}" data-user-name="${esc(u.full_name)}" data-requested-tier="${esc(pendingReq.requested_tier)}" onclick="handleApproveBtnClick(this)">승인</button>`
             : '';
+          const cleanUname = (u.username || '').trim().replace(/^@/, '');
+          const aliasHtml = (cleanUname && cleanUname !== (u.full_name || '').trim())
+            ? ` <span style="font-weight:600; color:var(--text-muted); font-size:12.5px; margin-left:4px;">(@${esc(cleanUname)})</span>`
+            : '';
 
           return `
             <tr>
               <td data-label="회원 정보" class="user-header-td">
-                <div style="min-width:0; flex:1 1 auto; overflow-wrap:anywhere; word-break:break-all; padding-right:8px;">
+                <div style="min-width:0; flex:1 1 auto; overflow-wrap:anywhere; word-break:break-word; padding-right:8px;">
                   <div style="font-weight:800; font-size:14px; display:flex; align-items:center; flex-wrap:wrap;">
-                    ${esc(u.full_name)} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px; margin-left:4px;">[차단]</span>' : ''}
+                    ${esc(u.full_name)}${aliasHtml} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px; margin-left:4px;">[차단]</span>' : ''}
                     <span class="desktop-only">${pendingBadge}</span>
                   </div>
                   <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
-                    ID: <code>${esc(u.telegram_user_id)}</code> ${u.username ? `· @${esc(u.username)}` : ''}
+                    ID: <code>${esc(u.telegram_user_id)}</code>
                   </div>
                 </div>
                 <!-- 모바일 전용 우측 상단 등급 이모지 & 승인 퀵 버튼 -->
@@ -1791,6 +2064,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               <td data-label="관리" class="user-actions-cell">
                 <div style="display:flex; gap:6px;">
                   <button class="btn btn-sm" onclick="openEditUserModal('${esc(u.telegram_user_id)}')">수정</button>
+                  <button class="btn btn-sm user-history-btn" onclick="openUserHistoryModal('${esc(u.telegram_user_id)}')">📜 이력</button>
                   <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.telegram_user_id)}')">삭제</button>
                 </div>
               </td>
@@ -1954,22 +2228,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       rejectUpgradeRequest(id, userName);
     }
 
-    async function syncTelegramNames() {
-      if (!confirm("텔레그램 API(getChat)를 호출하여 등록된 모든 회원의 실제 프로필 실명과 @username을 일괄 동기화하시겠습니까?")) return;
-      try {
-        toast("🔄 텔레그램 실명 동기화 진행 중...");
-        const res = await req("/api/platform/users/sync-telegram-names", { method: "POST" });
-        if (res.success) {
-          toast(`✅ 총 ${res.synced_count}명의 텔레그램 프로필 실명이 성공적으로 동기화되었습니다!`);
-          await loadUsers();
-        } else {
-          alert("동기화 실패: " + (res.detail || "알 수 없는 오류"));
-        }
-      } catch (err) {
-        alert("동기화 오류: " + err.message);
-      }
-    }
-
     async function approveUpgradeRequest(requestId, userName, requestedTier) {
       if (!confirm(`[${userName}] 님의 ${requestedTier} 등급 업그레이드를 승인하시겠습니까?\n승인 시 유저 등급이 즉시 상향되고 텔레그램으로 완료 안내가 자동 발송됩니다.`)) {
         return;
@@ -2082,6 +2340,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('umId').value = '';
       document.getElementById('umId').disabled = false;
       document.getElementById('umName').value = '';
+      document.getElementById('umUsername').value = '';
       document.getElementById('umTier').value = 'WHITE';
       document.getElementById('umExp').value = '';
       document.getElementById('umMemo').value = '';
@@ -2095,6 +2354,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('umId').value = u.telegram_user_id;
       document.getElementById('umId').disabled = true;
       document.getElementById('umName').value = u.full_name || '';
+      document.getElementById('umUsername').value = u.username ? ('@' + u.username.replace(/^@/, '')) : '';
       document.getElementById('umTier').value = u.tier || 'WHITE';
       document.getElementById('umExp').value = u.tier_expires_at ? u.tier_expires_at.slice(0,10) : '';
       document.getElementById('umMemo').value = u.memo || '';
@@ -2104,6 +2364,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     async function saveUser() {
       const uid = document.getElementById('umId').value.trim();
       const name = document.getElementById('umName').value.trim();
+      const uname = document.getElementById('umUsername').value.trim().replace(/^@/, '');
       const tier = document.getElementById('umTier').value;
       const exp = document.getElementById('umExp').value || null;
       const memo = document.getElementById('umMemo').value.trim();
@@ -2116,12 +2377,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         if (!document.getElementById('umId').disabled) {
           await req('/api/platform/users', {
             method: 'POST',
-            body: { telegram_user_id: uid, full_name: name, tier, tier_expires_at: exp, memo }
+            body: { telegram_user_id: uid, full_name: name, username: uname, tier, tier_expires_at: exp, memo }
           });
         } else {
           await req(`/api/platform/users/${encodeURIComponent(uid)}`, {
             method: 'PUT',
-            body: { full_name: name, memo }
+            body: { full_name: name, username: uname, memo }
           });
           await req(`/api/platform/users/${encodeURIComponent(uid)}/tier`, {
             method: 'PUT',
@@ -2484,6 +2745,246 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           : '⚪ GITHUB_TOKEN 미설정';
       } catch (e) {
         toast('대시보드 로드 실패: ' + e.message);
+      }
+    }
+
+    // =========================================================================
+    // TAB 4: HISTORY CENTER (DISPATCH & PLATFORM AUDIT)
+    // =========================================================================
+    const HIST = { subpane: 'dispatch', auditOffset: 0, auditLimit: 30, auditTotal: 0 };
+    let auditSearchDebounce = null;
+
+    // delivery_* timestamps are stored as SQLite CURRENT_TIMESTAMP (UTC) -> render as KST
+    function utcToKst(s) {
+      if (!s) return '';
+      const d = new Date(String(s).replace(' ', 'T') + 'Z');
+      if (isNaN(d.getTime())) return String(s);
+      return new Date(d.getTime() + 9 * 3600000).toISOString().slice(0, 16).replace('T', ' ');
+    }
+
+    function dispatchKindLabel(kind, isForced) {
+      const k = String(kind || '').toLowerCase();
+      let label = esc(kind || '-');
+      let cls = '';
+      if (k === 'morning' || k === 'closing' || k === 'weekly' || k === 'regular') { label = '정기'; cls = 'ok'; }
+      else if (k === 'urgent') { label = '긴급'; cls = 'bad'; }
+      else if (k === 'manual') { label = '수동'; cls = 'info'; }
+      const forced = (isForced && k !== 'manual') ? ' <span class="hist-badge warn">강제</span>' : '';
+      return `<span class="hist-badge ${cls}">${label}</span>${forced}`;
+    }
+
+    function deliveryStatusBadge(status) {
+      const s = String(status || 'PENDING').toUpperCase();
+      const map = { SENT: ['ok', '✅ 성공'], PARTIAL: ['warn', '⚠️ 부분'], FAILED: ['bad', '❌ 실패'], UNKNOWN: ['warn', '❔ 불명'], PENDING: ['', '⏳ 대기'], RATE_LIMITED: ['warn', '⏱️ 제한'] };
+      const [cls, label] = map[s] || ['', esc(s)];
+      return `<span class="hist-badge ${cls}">${label}</span>`;
+    }
+
+    function auditActionBadge(action) {
+      const a = String(action || '').toUpperCase();
+      let cls = '';
+      if (a === 'USER_UPDATED' || a === 'TIER_CHANGE' || a === 'SWAP') cls = 'info';
+      else if (a === 'SUBSCRIBE' || a === 'USER_CREATED' || a === 'USER_JOINED') cls = 'ok';
+      else if (a === 'UNSUBSCRIBE' || a === 'USER_DELETED' || a === 'QUOTA_REJECTED' || a.indexOf('EXPIRED') >= 0 || a.indexOf('DOWNGRADE') >= 0) cls = 'bad';
+      else if (a.indexOf('UPGRADE') >= 0) cls = 'warn';
+      return `<span class="hist-badge ${cls}">${esc(a || '-')}</span>`;
+    }
+
+    const AUDIT_FIELD_LABELS = { full_name: '실명', username: '별칭', status: '상태', memo: '메모' };
+
+    function fmtDiffVal(field, v) {
+      const s = (v === null || v === undefined) ? '' : String(v);
+      if (field === 'username' && s) return '@' + s.replace(/^@/, '');
+      return s;
+    }
+
+    function formatAuditDetail(log) {
+      const d = log.detail;
+      if (d === null || d === undefined || d === '') return '<span class="hist-meta">-</span>';
+      if (typeof d !== 'object') return `<div class="hist-diff-line">${esc(d)}</div>`;
+
+      if (d.changes && typeof d.changes === 'object') {
+        const lines = Object.entries(d.changes).map(([field, ch]) => {
+          const label = esc(AUDIT_FIELD_LABELS[field] || field);
+          const from = fmtDiffVal(field, ch && ch.from);
+          const to = fmtDiffVal(field, ch && ch.to);
+          if (!from) return `<div class="hist-diff-line"><b>${label}:</b> <span class="hist-diff-to">"${esc(to)}"</span></div>`;
+          if (!to) return `<div class="hist-diff-line"><b>${label}:</b> <span class="hist-diff-from">"${esc(from)}"</span> ➔ <span class="hist-meta">(삭제)</span></div>`;
+          return `<div class="hist-diff-line"><b>${label}:</b> <span class="hist-diff-from">"${esc(from)}"</span> ➔ <span class="hist-diff-to">"${esc(to)}"</span></div>`;
+        });
+        return lines.join('') || '<span class="hist-meta">-</span>';
+      }
+
+      const parts = [];
+      if (d.old_tier !== undefined || d.new_tier !== undefined) {
+        parts.push(`<div class="hist-diff-line"><b>등급:</b> <span class="hist-diff-from">${esc(d.old_tier || '-')}</span> ➔ <span class="hist-diff-to">${esc(d.new_tier || '-')}</span></div>`);
+      }
+      Object.entries(d).forEach(([k, v]) => {
+        if (k === 'old_tier' || k === 'new_tier') return;
+        const val = (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v);
+        parts.push(`<div class="hist-diff-line"><span class="hist-meta">${esc(k)}:</span> ${esc(val.length > 120 ? val.slice(0, 120) + '…' : val)}</div>`);
+      });
+      if (log.bot_name) parts.unshift(`<div class="hist-diff-line"><b>봇:</b> ${esc(log.bot_name)}</div>`);
+      return parts.join('') || '<span class="hist-meta">-</span>';
+    }
+
+    function auditUserLabel(log) {
+      const name = log.user_name || log.telegram_user_id || '-';
+      const uname = (log.username || '').replace(/^@/, '');
+      const alias = (uname && uname !== name) ? ` <span class="hist-meta">(@${esc(uname)})</span>` : '';
+      return `<b>${esc(name)}</b>${alias}<div class="hist-meta"><code>${esc(log.telegram_user_id)}</code></div>`;
+    }
+
+    function loadHistoryCenter() {
+      switchHistorySubpane(HIST.subpane);
+    }
+
+    function switchHistorySubpane(sp) {
+      HIST.subpane = sp;
+      document.querySelectorAll('#pane-history .hist-subtab-btn').forEach(b => b.classList.toggle('active', b.dataset.subpane === sp));
+      document.querySelectorAll('#pane-history .hist-subpane').forEach(p => p.classList.toggle('active', p.id === `subpane-${sp}`));
+      if (sp === 'dispatch') loadDispatchHistory();
+      if (sp === 'audit') loadAuditLogs();
+    }
+
+    async function loadDispatchHistory() {
+      const tbody = document.getElementById('dispatchHistoryBody');
+      try {
+        const jobs = await req('/api/history?limit=50');
+        if (!Array.isArray(jobs) || jobs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">발송 이력이 없습니다.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = jobs.map(j => {
+          const total = Number(j.total_targets || 0);
+          const ok = Number(j.success_count || 0);
+          const pct = total > 0 ? Math.round((ok / total) * 100) : 0;
+          const bk = String(j.batch_key || '');
+          const manualBot = bk.indexOf('MANUAL:') === 0 ? bk.split(':')[1] : '';
+          return `
+            <tr>
+              <td data-label="발송 일시">${esc(utcToKst(j.finished_at || j.started_at))}</td>
+              <td data-label="봇 / 토픽"><b>${esc(manualBot || j.topic || '-')}</b>${manualBot ? ` <span class="hist-meta">${esc(j.topic || '')}</span>` : ''}</td>
+              <td data-label="유형">${dispatchKindLabel(j.kind, j.is_forced)}</td>
+              <td data-label="성공률"><b>${pct}%</b> <span class="hist-meta">(${ok}/${total})</span></td>
+              <td data-label="상태">${deliveryStatusBadge(j.status)}</td>
+              <td data-label="상세"><button class="btn btn-sm hist-touch" data-job-id="${esc(j.job_id)}" onclick="openJobDetail(this.dataset.jobId)">상세보기</button></td>
+            </tr>`;
+        }).join('');
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--danger);">발송 이력 로드 실패: ${esc(e.message)}</td></tr>`;
+      }
+    }
+
+    async function openJobDetail(jobId) {
+      document.getElementById('jobDetailTitle').textContent = `📨 발송 상세 · ${jobId}`;
+      document.getElementById('jobDetailSummary').textContent = '';
+      const list = document.getElementById('jobDetailList');
+      list.innerHTML = '<div class="hist-meta">불러오는 중...</div>';
+      document.getElementById('jobDetailModal').classList.add('open');
+      try {
+        const res = await req(`/api/history/${encodeURIComponent(jobId)}/details`);
+        const rows = res.recipients || [];
+        const cnt = { SENT: 0, FAILED: 0, OTHER: 0 };
+        rows.forEach(r => { const s = String(r.status || '').toUpperCase(); if (s === 'SENT') cnt.SENT++; else if (s === 'FAILED') cnt.FAILED++; else cnt.OTHER++; });
+        document.getElementById('jobDetailSummary').textContent = `총 ${rows.length}명 · 성공 ${cnt.SENT} · 실패 ${cnt.FAILED} · 기타 ${cnt.OTHER}`;
+        list.innerHTML = rows.map(r => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><b>${esc(r.name || '-')}</b> <span class="hist-meta"><code>${esc(r.chat_id)}</code></span></span>
+              ${deliveryStatusBadge(r.status)}
+            </div>
+            ${r.error_detail ? `<div class="hist-diff-line" style="color:var(--danger);">${esc(r.error_detail)}</div>` : ''}
+            <div class="hist-meta">${esc(utcToKst(r.updated_at))}</div>
+          </div>`).join('') || '<div class="hist-meta">수신자 스냅샷이 없습니다.</div>';
+      } catch (e) {
+        list.innerHTML = `<div style="color:var(--danger);">상세 로드 실패: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function debouncedLoadAuditLogs() {
+      clearTimeout(auditSearchDebounce);
+      auditSearchDebounce = setTimeout(() => { HIST.auditOffset = 0; loadAuditLogs(); }, 250);
+    }
+
+    function pageAuditLogs(dir) {
+      const next = HIST.auditOffset + dir * HIST.auditLimit;
+      if (next < 0 || next >= Math.max(HIST.auditTotal, 1)) return;
+      HIST.auditOffset = next;
+      loadAuditLogs();
+    }
+
+    async function loadAuditLogs() {
+      const tbody = document.getElementById('auditHistoryBody');
+      const p = new URLSearchParams();
+      const q = document.getElementById('auditSearch').value.trim();
+      const action = document.getElementById('auditActionSel').value;
+      if (q) p.set('q', q);
+      if (action) p.set('action', action);
+      p.set('limit', HIST.auditLimit);
+      p.set('offset', HIST.auditOffset);
+      try {
+        const res = await req('/api/platform/audit-logs?' + p.toString());
+        const logs = res.logs || [];
+        HIST.auditTotal = Number(res.total || 0);
+        const start = HIST.auditTotal === 0 ? 0 : HIST.auditOffset + 1;
+        document.getElementById('auditPageInfo').textContent = `${start}–${HIST.auditOffset + logs.length} / 총 ${HIST.auditTotal}건`;
+        document.getElementById('auditPrevBtn').disabled = HIST.auditOffset <= 0;
+        document.getElementById('auditNextBtn').disabled = HIST.auditOffset + HIST.auditLimit >= HIST.auditTotal;
+        if (logs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">해당 조건의 감사 이력이 없습니다.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = logs.map(l => `
+          <tr>
+            <td data-label="일시" style="white-space:nowrap;">${esc((l.logged_at || '').slice(0, 16))}</td>
+            <td data-label="대상 유저"><div>${auditUserLabel(l)}</div></td>
+            <td data-label="구분">${auditActionBadge(l.action)}</td>
+            <td data-label="변경 상세"><div>${formatAuditDetail(l)}</div></td>
+            <td data-label="작업자">${esc(l.actor || '-')}</td>
+          </tr>`).join('');
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty-cell" style="text-align:center; padding:28px; color:var(--danger);">감사 이력 로드 실패: ${esc(e.message)}</td></tr>`;
+      }
+    }
+
+    function switchUserHistoryTab(tab) {
+      document.querySelectorAll('#userHistoryModal .uh-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.uhtab === tab));
+      document.getElementById('uhPaneAudit').style.display = tab === 'audit' ? '' : 'none';
+      document.getElementById('uhPaneDelivery').style.display = tab === 'delivery' ? '' : 'none';
+    }
+
+    async function openUserHistoryModal(userId) {
+      const u = (S.users || []).find(x => String(x.telegram_user_id) === String(userId));
+      document.getElementById('userHistoryTitle').textContent = `📜 ${u ? (u.full_name || userId) : userId} 이력`;
+      const auditEl = document.getElementById('uhPaneAudit');
+      const delivEl = document.getElementById('uhPaneDelivery');
+      auditEl.innerHTML = '<div class="hist-meta">불러오는 중...</div>';
+      delivEl.innerHTML = '<div class="hist-meta">불러오는 중...</div>';
+      switchUserHistoryTab('audit');
+      document.getElementById('userHistoryModal').classList.add('open');
+      try {
+        const res = await req(`/api/platform/users/${encodeURIComponent(userId)}/history`);
+        auditEl.innerHTML = (res.audit_logs || []).map(l => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              ${auditActionBadge(l.action)}
+              <span class="hist-meta">${esc((l.logged_at || '').slice(0, 16))} · ${esc(l.actor || '-')}</span>
+            </div>
+            ${formatAuditDetail(l)}
+          </div>`).join('') || '<div class="hist-meta">정보·등급 변경 이력이 없습니다.</div>';
+        delivEl.innerHTML = (res.delivery_history || []).map(h => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><b>${esc(h.topic || '-')}</b> ${dispatchKindLabel(h.kind, h.is_forced)}</span>
+              ${deliveryStatusBadge(h.recipient_status)}
+            </div>
+            ${h.error_detail ? `<div class="hist-diff-line" style="color:var(--danger);">${esc(h.error_detail)}</div>` : ''}
+            <div class="hist-meta">${esc(utcToKst(h.finished_at || h.started_at || h.updated_at))} · <code>${esc(h.job_id)}</code></div>
+          </div>`).join('') || '<div class="hist-meta">메시지 수신 이력이 없습니다.</div>';
+      } catch (e) {
+        auditEl.innerHTML = `<div style="color:var(--danger);">이력 로드 실패: ${esc(e.message)}</div>`;
+        delivEl.innerHTML = '';
       }
     }
 

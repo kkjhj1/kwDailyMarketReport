@@ -134,9 +134,19 @@ class AICurator:
         events, _total = db.get_events_by_category(category, grade, reg, page=page, page_size=page_size)
         return [self.curate_event_briefing(e) for e in events]
 
-    def generate_weekly_todo_briefing(self, grade: TargetGrade, month: Optional[int] = None) -> AdmissionBriefing:
-        """Generates the weekly Sunday night briefing for the given grade, dynamically adapting to academic calendar."""
-        current_month = month if month is not None else datetime.now().month
+    def generate_weekly_todo_briefing(
+        self,
+        grade: TargetGrade,
+        month: Optional[int] = None,
+        dt: Optional[datetime] = None,
+    ) -> AdmissionBriefing:
+        """Generates the weekly Sunday night briefing for the given grade, dynamically adapting to academic calendar.
+
+        briefing_id is keyed by ISO year-week so an onboarding send blocks only that week's Sunday batch.
+        """
+        ref_dt = dt or datetime.now()
+        current_month = month if month is not None else ref_dt.month
+        iso_year, iso_week, _ = ref_dt.isocalendar()
 
         if grade == TargetGrade.HIGH_3_N:
             if current_month == 11:
@@ -239,7 +249,7 @@ class AICurator:
             }
 
         return AdmissionBriefing(
-            briefing_id=f"weekly_{grade.value}_{BriefingType.WEEKLY_TODO.value}_{current_month}m",
+            briefing_id=f"weekly_{grade.value}_{BriefingType.WEEKLY_TODO.value}_{iso_year}W{iso_week:02d}",
             briefing_type=BriefingType.WEEKLY_TODO,
             target_grade=grade,
             headline=data["headline"],

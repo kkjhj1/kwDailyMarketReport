@@ -17,9 +17,11 @@ Supports:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import html
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -132,11 +134,126 @@ class TelegramBotTransport:
             logger.debug(f"answerCallbackQuery ignored error: {exc}")
 
 
+COMMON_BRIEFING_BOTS: set[str] = {"brief_bot"}
+
+TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
+    "admission_bot": {
+        "prompt": "🎯 <b>[자녀 학년 선택]</b> 아래에서 대상을 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "MIDDLE", "label": "🌱 초·중등 (특목/자사고)", "short": "초·중등"},
+                {"code": "HIGH_1_2", "label": "🌿 고1·고2 (내신/학종)", "short": "고1·고2"},
+            ],
+            [
+                {"code": "HIGH_3_N", "label": "🔥 고3·N수 (대입 실전)", "short": "고3·N수"},
+                {"code": "ALL", "label": "🎓 전체 학년 공통", "short": "전체 학년"},
+            ],
+        ],
+    },
+    "edu_bot": {
+        "prompt": "🎯 <b>[자녀 학년 선택]</b> 아래에서 대상을 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "MIDDLE", "label": "🌱 초·중등 (특목/자사고)", "short": "초·중등"},
+                {"code": "HIGH_1_2", "label": "🌿 고1·고2 (내신/학종)", "short": "고1·고2"},
+            ],
+            [
+                {"code": "HIGH_3_N", "label": "🔥 고3·N수 (대입 실전)", "short": "고3·N수"},
+                {"code": "ALL", "label": "🎓 전체 학년 공통", "short": "전체 학년"},
+            ],
+        ],
+    },
+    "travel_bot": {
+        "prompt": "🎯 <b>[관심 여행지 선택]</b> 아래에서 여행지를 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "NRT", "label": "🇯🇵 도쿄", "short": "도쿄"},
+                {"code": "KIX", "label": "🇯🇵 오사카", "short": "오사카"},
+                {"code": "FUK", "label": "🇯🇵 후쿠오카", "short": "후쿠오카"},
+            ],
+            [
+                {"code": "TPE", "label": "🇹🇼 타이베이", "short": "타이베이"},
+                {"code": "DAD", "label": "🇻🇳 다낭", "short": "다낭"},
+                {"code": "BKK", "label": "🇹🇭 방콕", "short": "방콕"},
+            ],
+            [
+                {"code": "ALL", "label": "✈️ 전체 주말 특가 TOP 3", "short": "전체 특가 TOP 3"},
+            ],
+        ],
+    },
+    "silver_bot": {
+        "prompt": "🎯 <b>[부모님 세대 유형 선택]</b> 아래에서 대상을 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "ALONE", "label": "👵 독거 부모님 맞춤 복지", "short": "독거 부모님"},
+                {"code": "COUPLE", "label": "👴👵 노부부 세대 복지", "short": "노부부 세대"},
+            ],
+            [
+                {"code": "WITH_CHILD", "label": "🏠 자녀 동거 부모님 복지", "short": "자녀 동거"},
+                {"code": "ALL", "label": "💌 주간 효도 브리핑 전체", "short": "주간 효도 브리핑"},
+            ],
+        ],
+    },
+    "kids_bot": {
+        "prompt": "🎯 <b>[자녀 연령대 선택]</b> 아래에서 아이 연령대를 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "INFANT", "label": "🍼 영아 (0~3세)", "short": "0~3세 영아"},
+                {"code": "PRESCHOOL", "label": "🎈 유아 (4~7세)", "short": "4~7세 유아"},
+            ],
+            [
+                {"code": "ELEMENTARY_LOW", "label": "🎒 초등 저학년 (8~10세)", "short": "초등 저학년"},
+                {"code": "ALL", "label": "⏰ 예약 오픈 D-Day 전체", "short": "예약 D-Day"},
+            ],
+        ],
+    },
+    "yolo_bot": {
+        "prompt": "🎯 <b>[1인 라이프 성향 선택]</b> 아래에서 성향을 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+        "options": [
+            [
+                {"code": "ACTIVE_CHALLENGER", "label": "🧗 액티브 챌린저 (도전·운동)", "short": "액티브 챌린저"},
+                {"code": "URBAN_HIPSTER", "label": "🎨 어반 힙스터 (전시·공간)", "short": "어반 힙스터"},
+            ],
+            [
+                {"code": "GOURMET_NOMAD", "label": "🍷 고메 노마드 (미식·혼술)", "short": "고메 노마드"},
+                {"code": "COZY_HEALER", "label": "🍵 코지 힐러 (휴식·자연)", "short": "코지 힐러"},
+            ],
+        ],
+    },
+}
+
+
 class MultiBotInteractionRouter:
     """Pure, deterministic interaction router shared by live Telegram bots and the Admin Simulator."""
 
     def __init__(self, engine: SubscriptionEngine):
         self.engine = engine
+        self._delivered_initial_briefing: set[tuple[str, str]] = set()
+        self._user_targets: dict[tuple[str, str], str] = {}
+        self._briefing_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+    @staticmethod
+    def is_common_briefing_bot(bot_id: str) -> bool:
+        """Returns True if `bot_id` is a common broadcast bot (no target selection required)."""
+        return bot_id in COMMON_BRIEFING_BOTS
+
+    @staticmethod
+    def get_quick_callback_toast(callback_data: str | None) -> str:
+        """Computes immediate <0.1s callback acknowledgement text ([TG-04]) before DB/Briefing work."""
+        cb = (callback_data or "").strip()
+        if cb.startswith("info:target:"):
+            return "🎯 맞춤 대상이 선택되었습니다. [정보보기] 버튼을 눌러주세요!"
+        if cb.startswith("info:preview:"):
+            return "📋 직전 발송 최신 브리핑을 불러오는 중입니다..."
+        if cb.startswith("info:retarget:"):
+            return "🔄 대상 선택 메뉴를 불러옵니다."
+        if cb.startswith("info:sub:"):
+            return "🎉 구독 상태를 확인합니다..."
+        if cb.startswith("info:unsub:"):
+            return "👋 구독 해지 처리를 진행합니다..."
+        if cb.startswith("info:swap:"):
+            return "🔄 봇 교체 구독을 진행합니다..."
+        return ""
 
     def handle_interaction(
         self,
@@ -428,6 +545,412 @@ class MultiBotInteractionRouter:
     # Info Content Bot Handler (Requirements #2 & #4)
     # -------------------------------------------------------------------------
 
+    def _get_target_selection_config(self, bot: BotRecord) -> dict[str, Any]:
+        """Returns target selection configuration for Target-Selection Bots (Type B)."""
+        if bot.bot_id in TARGET_SELECTION_CONFIG:
+            return TARGET_SELECTION_CONFIG[bot.bot_id]
+        return {
+            "prompt": f"🎯 <b>[{html.escape(bot.name)} 맞춤 대상 선택]</b> 대상을 먼저 선택하시면 <b>[📋 직전 발송 정보 보기]</b> 버튼이 활성화됩니다.",
+            "options": [
+                [
+                    {"code": "ALL", "label": f"🎯 {bot.icon_emoji} {bot.name} 전체 대상 선택", "short": "전체 대상"},
+                ]
+            ],
+        }
+
+    def _build_target_selection_keyboard(
+        self, bot: BotRecord, uid: str, menu_uname: str
+    ) -> list[list[dict[str, Any]]]:
+        """Constructs Step 1 target-selection keyboard for Target-Selection Bots (Type B)."""
+        cfg = self._get_target_selection_config(bot)
+        kb: list[list[dict[str, Any]]] = []
+        selected_code = self._user_targets.get((uid, bot.bot_id))
+
+        for row in cfg["options"]:
+            btn_row: list[dict[str, Any]] = []
+            for opt in row:
+                code = opt["code"]
+                label = opt["label"]
+                prefix_mark = "✅ " if selected_code == code else ""
+                btn_row.append(
+                    {
+                        "text": f"{prefix_mark}{label}",
+                        "callback_data": f"info:target:{bot.bot_id}:{code}"[:64],
+                    }
+                )
+            kb.append(btn_row)
+
+        if selected_code:
+            short_lbl = self._resolve_target_short_label(bot, selected_code)
+            kb.append(
+                [
+                    {
+                        "text": f"📋 [{short_lbl}] 직전 발송 정보 보기",
+                        "callback_data": f"info:preview:{bot.bot_id}:{selected_code}"[:64],
+                    }
+                ]
+            )
+
+        kb.append([{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}])
+        if menu_uname:
+            kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+        return kb
+
+    def _resolve_target_short_label(self, bot: BotRecord, target_code: str) -> str:
+        cfg = self._get_target_selection_config(bot)
+        for row in cfg["options"]:
+            for opt in row:
+                if opt["code"] == target_code:
+                    return str(opt.get("short") or opt["label"])
+        return target_code or "맞춤"
+
+    def _resolve_target_full_label(self, bot: BotRecord, target_code: str) -> str:
+        cfg = self._get_target_selection_config(bot)
+        for row in cfg["options"]:
+            for opt in row:
+                if opt["code"] == target_code:
+                    return str(opt["label"])
+        return target_code or "전체 대상"
+
+    @staticmethod
+    def _enforce_tg01_limits(html_text: str) -> str:
+        """Strictly enforces [TG-01] limits: visible <= 1800 chars, HTML <= 3500 chars."""
+        import re
+
+        text_out = (html_text or "").strip()
+        if len(text_out) > 3450:
+            text_out = text_out[:3400].rsplit("\n", 1)[0] + "\n\n<i>... (상세 내용은 웹 리포트 참조)</i>"
+        visible = re.sub(r"<[^>]+>", "", text_out)
+        if len(visible) > 1780:
+            lines = text_out.splitlines()
+            kept: list[str] = []
+            vis_count = 0
+            for ln in lines:
+                ln_vis = len(re.sub(r"<[^>]+>", "", ln)) + 1
+                if vis_count + ln_vis > 1720:
+                    kept.append("<i>... (상세 내용은 하단 리포트 링크 참조)</i>")
+                    break
+                kept.append(ln)
+                vis_count += ln_vis
+            text_out = "\n".join(kept)
+        return text_out
+
+    def _build_target_briefing(
+        self, bot: BotRecord, target_code: str = "ALL", uid: str = "", menu_uname: str = ""
+    ) -> dict[str, Any]:
+        """Generates the most recently dispatched / current domain briefing for `bot` and `target_code`."""
+        import time
+
+        norm_target = (target_code or "ALL").strip().upper()
+        cache_key = (bot.bot_id, norm_target)
+        now_mono = time.monotonic()
+        cached = self._briefing_cache.get(cache_key)
+        if cached and (now_mono - cached[0]) < 30.0:
+            return cached[1]
+
+        content_html = ""
+        kb: list[list[dict[str, Any]]] = []
+
+        # Case 1: Common Broadcast Bot (brief_bot / 시황 브리핑)
+        if bot.bot_id == "brief_bot":
+            report_url = os.environ.get("REPORT_BASE_URL", "https://kkjhj1.github.io/kwDailyMarketReport/")
+            try:
+                from pathlib import Path
+                from zoneinfo import ZoneInfo
+                from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider
+                from market_brief.market_data.naver_provider import NewsItem
+                from market_brief.pipeline import DEFAULT_SYMBOLS
+                from market_brief.report_engine import BriefingBuilder
+                from market_brief.channels.telegram import format_telegram_html
+
+                root_dir = Path(__file__).resolve().parent.parent
+                fixture_prov = FixtureProvider(str(root_dir / "fixtures/market_snapshot.json"))
+                use_live = (
+                    os.environ.get("PYTEST_CURRENT_TEST") is None
+                    and os.environ.get("BRIEF_LIVE_ON_START", "0") == "1"
+                )
+                prov = CompositeMarketDataProvider(NaverFinanceProvider(), fixture_prov) if use_live else fixture_prov
+                quotes = prov.fetch(DEFAULT_SYMBOLS)
+
+                news: list[NewsItem] = []
+                try:
+                    raw_news = json.loads((root_dir / "fixtures/market_news.json").read_text(encoding="utf-8"))
+                    news = [NewsItem(**item) for item in raw_news[:5]]
+                except Exception:
+                    news = []
+
+                now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+                kind = "closing" if now_kst.hour >= 15 else "morning"
+                as_of_label = f"{now_kst.strftime('%Y-%m-%d %H:%M')} KST"
+                briefing = BriefingBuilder().build(
+                    quotes,
+                    kind=kind,
+                    as_of_label=as_of_label,
+                    report_url=report_url,
+                    news=news,
+                )
+                body_html = format_telegram_html(briefing)
+                header_banner = "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n━━━━━━━━━━━━━━━━━━\n"
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                kb = [
+                    [{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}],
+                    [{"text": "🔄 최신 시황 브리핑 다시 보기", "callback_data": "info:preview:brief_bot"}],
+                ]
+            except Exception as exc:
+                logger.warning("brief_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "📈 <b>주요 지수 및 환율 요약</b>\n"
+                    "• <b>KOSPI</b> / <b>S&amp;P 500</b> / <b>USD/KRW</b> 최신 장전·마감 시황 브리핑이 제공됩니다.\n"
+                    "• 매일 <b>06:30 모닝 시황</b>, <b>15:40 마감 시황</b> 및 장중 급등락 알림이 발송됩니다."
+                )
+                kb = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
+
+        # Case 2: Target-Selection Bot — Admission Bot (입시 나침반)
+        elif bot.bot_id in ("admission_bot", "edu_bot"):
+            admission_url = os.environ.get(
+                "ADMISSION_REPORT_URL",
+                "https://kkjhj1.github.io/kwDailyMarketReport/reports/admission_latest.html",
+            )
+            try:
+                from admission_brief.ai_curator import AICurator
+                from admission_brief.models import TargetGrade
+                from admission_brief.channels.telegram import format_admission_html
+
+                try:
+                    grade = TargetGrade(norm_target)
+                except ValueError:
+                    grade = TargetGrade.ALL
+
+                curator = AICurator()
+                briefing = curator.generate_weekly_todo_briefing(grade)
+                body_html = format_admission_html(briefing)
+                header_banner = (
+                    f"📋 <b>[직전 발송 맞춤 입시 브리핑 — {html.escape(grade.label)}]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                )
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                btn_url = briefing.booking_url or admission_url
+                kb = [
+                    [{"text": briefing.booking_button_text or "🌐 상세 입시 리포트 보기", "url": btn_url}],
+                    [
+                        {"text": "⚡ 핫 행사 TOP 3 보기", "callback_data": "adm:hot"},
+                        {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
+                    ],
+                    [{"text": "🔄 자녀 학년 다시 선택하기", "callback_data": f"info:retarget:{bot.bot_id}"}],
+                ]
+            except Exception as exc:
+                logger.warning("admission_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    f"📋 <b>[직전 발송 맞춤 입시 브리핑 ({html.escape(norm_target)})]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "🎓 선택한 학년에 맞춘 이번 주 필수 입시 체크리스트(To-Do) 및 주요 설명회 일정입니다."
+                )
+                kb = [[{"text": "🔄 자녀 학년 다시 선택하기", "callback_data": f"info:retarget:{bot.bot_id}"}]]
+
+        # Case 3: Target-Selection Bot — Travel Pathfinder (트래블 패스파인더)
+        elif bot.bot_id == "travel_bot":
+            travel_report_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
+            try:
+                from travel_brief.flight_engine import FlightEngine
+                from travel_brief.budget_calculator import BudgetCalculator
+                from travel_bot_runner import format_telegram_briefing, resolve_travel_report_url
+
+                travel_report_url = resolve_travel_report_url()
+                engine = FlightEngine(live_naver=False)
+                dest_filter = None if norm_target == "ALL" else norm_target
+                deals = engine.search_deals(dest_code=dest_filter, months_ahead=6)
+                if not deals and dest_filter is not None:
+                    deals = engine.search_deals(dest_code=None, months_ahead=6)
+                recs = BudgetCalculator.rank_recommendations(
+                    destinations=engine.destinations,
+                    deals=deals,
+                    top_n=3,
+                )
+                body_html = format_telegram_briefing(recs[:3], web_report_url=travel_report_url, engine=engine)
+                short_lbl = self._resolve_target_short_label(bot, norm_target)
+                header_banner = (
+                    f"✈️ <b>[직전 발송 맞춤 여행 특가 — {html.escape(short_lbl)}]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                )
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                kb = [
+                    [{"text": "📊 6개월 특가 웹 리포트 ↗", "url": travel_report_url}],
+                    [{"text": "🔄 관심 여행지 다시 선택하기", "callback_data": "info:retarget:travel_bot"}],
+                ]
+            except Exception as exc:
+                logger.warning("travel_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    f"✈️ <b>[직전 발송 맞춤 여행 특가 ({html.escape(norm_target)})]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "선택하신 여행지의 주말 3박 4일 왕복 항공권 및 숙박 가성비 특가 브리핑입니다."
+                )
+                kb = [[{"text": "🔄 관심 여행지 다시 선택하기", "callback_data": "info:retarget:travel_bot"}]]
+
+        # Case 4: Target-Selection Bot — SilverCare Bot (실버케어)
+        elif bot.bot_id == "silver_bot":
+            try:
+                from silver_care.storage.db import SilverCareDatabase
+                from silver_care.fixtures.seed_benefits import SEED_BENEFITS
+                from silver_care.models import ParentProfile, LivingType
+                from silver_care.channels.telegram_card import format_weekly_briefing, format_candidate_list
+
+                mem_db = SilverCareDatabase(":memory:")
+                mem_db.upsert_benefits(SEED_BENEFITS)
+                living_val = (
+                    norm_target
+                    if norm_target in {LivingType.ALONE.value, LivingType.COUPLE.value, LivingType.WITH_CHILD.value}
+                    else LivingType.ALONE.value
+                )
+                sample_parent = ParentProfile(
+                    id=1,
+                    chat_id=1,
+                    alias="부모님",
+                    birth_year=1952,
+                    sido_code="11",
+                    sigungu_name="송파구",
+                    living_type=living_val,
+                    is_pension_receiver=1,
+                    is_low_income=-1,
+                )
+                ref_year = datetime.now().year
+                matches = mem_db.match_for_parent(sample_parent, ref_year)
+                short_lbl = self._resolve_target_short_label(bot, norm_target)
+                if norm_target == "ALL":
+                    body_html = format_weekly_briefing(
+                        [(sample_parent, matches[:3])],
+                        bookmarked_titles=[],
+                        week_label="이번 주",
+                        ref_year=ref_year,
+                    )
+                else:
+                    body_html = format_candidate_list(sample_parent, matches, page=0, ref_year=ref_year)
+                mem_db.close()
+                header_banner = (
+                    f"👵 <b>[직전 발송 실버케어 브리핑 — {html.escape(short_lbl)}]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                )
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                kb = [[{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}]]
+            except Exception as exc:
+                logger.warning("silver_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    f"👵 <b>[직전 발송 실버케어 브리핑 ({html.escape(norm_target)})]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "선택하신 부모님 세대 유형에 맞춘 동사무소·보건소 복지 혜택 및 효도 안부 가이드입니다."
+                )
+                kb = [[{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}]]
+
+        # Case 5: Target-Selection Bot — Kids Compass Bot (자녀·키즈 나침반)
+        elif bot.bot_id == "kids_bot":
+            try:
+                from datetime import timedelta
+                from kids_compass.storage.db import KidsCompassDatabase
+                from kids_compass.collector import seed_all, recommend_weekend_picks
+                from kids_compass.models import AgeGroup
+                from kids_compass.channels.telegram import format_weekend_briefing_html, format_dday_alert_html
+
+                mem_db = KidsCompassDatabase(":memory:")
+                seed_all(mem_db)
+                short_lbl = self._resolve_target_short_label(bot, norm_target)
+                now_dt = datetime.now()
+                if norm_target == "ALL":
+                    events = mem_db.list_upcoming_bookings(
+                        now_dt.strftime("%Y-%m-%d %H:%M"),
+                        (now_dt + timedelta(days=14)).strftime("%Y-%m-%d %H:%M"),
+                    )
+                    body_html = format_dday_alert_html(events, now_dt)
+                else:
+                    try:
+                        age_grp = AgeGroup(norm_target)
+                    except ValueError:
+                        age_grp = AgeGroup.PRESCHOOL
+                    picks = recommend_weekend_picks(mem_db, age_grp, "서울", weather_rain=False)
+                    body_html = format_weekend_briefing_html(
+                        picks, age_grp, "☀️ 맑음 기준 · 야외+실내 균형 추천"
+                    )
+                mem_db.close()
+                header_banner = (
+                    f"👶 <b>[직전 발송 키즈 나침반 브리핑 — {html.escape(short_lbl)}]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                )
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                kb = [[{"text": "🔄 자녀 연령대 다시 선택하기", "callback_data": "info:retarget:kids_bot"}]]
+            except Exception as exc:
+                logger.warning("kids_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    f"👶 <b>[직전 발송 키즈 나침반 브리핑 ({html.escape(norm_target)})]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "선택하신 자녀 연령대에 맞춘 이번 주말 나들이 추천 및 예약 오픈 D-Day 안내입니다."
+                )
+                kb = [[{"text": "🔄 자녀 연령대 다시 선택하기", "callback_data": "info:retarget:kids_bot"}]]
+
+        # Case 6: Target-Selection Bot — YOLO Bot (욜로 1인 라이프)
+        elif bot.bot_id == "yolo_bot":
+            try:
+                from yolo_brief.storage.db import YoloDatabase
+                from yolo_brief.fixtures.seed_curations import SEED_CURATIONS
+                from yolo_brief.models import SoloArchetype, ProfileState, WeatherClass, WeatherSnapshot, YoloUserProfile
+                from yolo_brief.matching import match_curations
+                from yolo_brief.channels.telegram_card import render_curation_card
+
+                mem_db = YoloDatabase(":memory:")
+                mem_db.seed_curations(SEED_CURATIONS)
+                curations = mem_db.list_active_curations()
+                try:
+                    arc = SoloArchetype(norm_target)
+                except ValueError:
+                    arc = SoloArchetype.URBAN_HIPSTER
+                sample_user = YoloUserProfile(
+                    chat_id=uid or "preview_user",
+                    profile_state=ProfileState.ACTIVE,
+                    archetype=arc,
+                )
+                snap = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=20.0)
+                match = match_curations(sample_user, curations, snapshot=snap, ref_date=datetime.now().date())
+                body_html, _ = render_curation_card(sample_user, match)
+                mem_db.close()
+                short_lbl = self._resolve_target_short_label(bot, norm_target)
+                header_banner = (
+                    f"🏄 <b>[직전 발송 욜로봇 큐레이션 — {html.escape(short_lbl)}]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                )
+                content_html = self._enforce_tg01_limits(header_banner + body_html)
+                kb = [[{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}]]
+            except Exception as exc:
+                logger.warning("yolo_bot onboarding preview fallback: %s", exc)
+                content_html = (
+                    f"🏄 <b>[직전 발송 욜로봇 큐레이션 ({html.escape(norm_target)})]</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "선택하신 1인 라이프 성향에 맞춘 이번 주 솔로 인증 액티비티·전시·미식 큐레이션입니다."
+                )
+                kb = [[{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}]]
+
+        # Case 7: Other Info Bots
+        else:
+            try:
+                from market_brief.briefing_service import generate_bot_briefing
+
+                gen = generate_bot_briefing(bot.bot_id, db=self.engine)
+                content_html = self._enforce_tg01_limits(gen.get("content_html") or "")
+                kb = list(gen.get("inline_keyboard") or [])
+            except Exception:
+                content_html = (
+                    f"📋 <b>[{html.escape(bot.icon_emoji + ' ' + bot.name)}] 직전 발송 브리핑</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{html.escape(bot.description or '최신 맞춤 브리핑 정보입니다.')}"
+                )
+                kb = []
+            kb.append([{"text": "🔄 대상 다시 선택하기", "callback_data": f"info:retarget:{bot.bot_id}"[:64]}])
+
+        if menu_uname:
+            kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+
+        result = {"html": content_html, "inline_keyboard": kb}
+        self._briefing_cache[cache_key] = (now_mono, result)
+        return result
+
     def _handle_info_bot(
         self,
         bot: BotRecord,
@@ -445,6 +968,7 @@ class MultiBotInteractionRouter:
         # 1. Explicit Unsubscribe via command or inline button
         if clean_text in {"/stop", "/탈퇴", "/해지", "/구독취소", "/unsubscribe", "탈퇴", "구독취소"} or cb == f"info:unsub:{bot.bot_id}":
             res = self.engine.unsubscribe_bot(uid, bot.bot_id, actor="USER", reason="INFO_BOT_STOP")
+            self._delivered_initial_briefing.discard((uid, bot.bot_id))
             user = self.engine.get_user_profile(uid)
             slot_str = format_slot_usage(
                 res.get("used_slots", 0),
@@ -474,7 +998,68 @@ class MultiBotInteractionRouter:
                 "user_profile": user,
             }
 
-        # 2. Atomic One-Click Swap callback inside Info Bot (`info:swap:<old_bot>:<this_bot>`)
+        # 2. Target Selection Callback (`info:target:<bot_id>:<target_code>`) for Target-Selection Bots (Type B)
+        if cb.startswith("info:target:"):
+            parts = cb.split(":")
+            target_code = parts[3] if len(parts) >= 4 else "ALL"
+            self._user_targets[(uid, bot.bot_id)] = target_code
+
+            full_label = self._resolve_target_full_label(bot, target_code)
+            short_label = self._resolve_target_short_label(bot, target_code)
+            user = self.engine.get_user_profile(uid)
+            lines = [
+                f"✅ <b>[{html.escape(bot.icon_emoji + ' ' + bot.name)}] 맞춤 대상 선택 완료!</b>",
+                "━━━━━━━━━━━━━━━━━━",
+                f"🎯 <b>선택하신 대상:</b> <b>{html.escape(full_label)}</b>",
+                "",
+                "👇 아래 <b>[📋 직전 발송 정보 보기]</b> 버튼을 누르시면 구독 직전에 발송되었던 최신 맞춤 브리핑을 즉시 확인하실 수 있습니다!",
+            ]
+            kb = [
+                [
+                    {
+                        "text": f"📋 [{short_label}] 직전 발송 정보 보기",
+                        "callback_data": f"info:preview:{bot.bot_id}:{target_code}"[:64],
+                    }
+                ],
+                [
+                    {
+                        "text": "🔄 대상 다시 선택하기",
+                        "callback_data": f"info:retarget:{bot.bot_id}"[:64],
+                    }
+                ],
+                [{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}],
+            ]
+            if menu_uname:
+                kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+            return {
+                "bot_id": bot.bot_id,
+                "reply_html": "\n".join(lines),
+                "inline_keyboard": kb,
+                "callback_toast": f"🎯 [{short_label}] 선택 완료! 정보보기를 눌러주세요.",
+                "result_code": "TARGET_SELECTED",
+                "selected_target": target_code,
+                "user_profile": user,
+            }
+
+        # 3. Briefing Preview Callback (`info:preview:<bot_id>[:<target_code>]`)
+        if cb.startswith("info:preview:"):
+            parts = cb.split(":")
+            target_code = parts[3] if len(parts) >= 4 else self._user_targets.get((uid, bot.bot_id), "ALL")
+            user = self.engine.get_user_profile(uid)
+            brief_payload = self._build_target_briefing(
+                bot, target_code=target_code, uid=uid, menu_uname=menu_uname
+            )
+            return {
+                "bot_id": bot.bot_id,
+                "reply_html": brief_payload["html"],
+                "inline_keyboard": brief_payload["inline_keyboard"],
+                "callback_toast": "📋 직전 발송 최신 브리핑입니다!",
+                "result_code": "BRIEFING_PREVIEW",
+                "selected_target": target_code,
+                "user_profile": user,
+            }
+
+        # 4. Atomic One-Click Swap callback inside Info Bot (`info:swap:<old_bot>:<this_bot>`)
         if cb.startswith("info:swap:"):
             parts = cb.split(":")
             if len(parts) == 4:
@@ -485,6 +1070,7 @@ class MultiBotInteractionRouter:
                     res = {"success": False, "code": "STILL_OVER_QUOTA", "message": str(err)}
                 user = self.engine.get_user_profile(uid)
                 if res["success"]:
+                    self._delivered_initial_briefing.discard((uid, old_id))
                     slot_str = format_slot_usage(
                         res["used_slots"], res["max_slots"], res["tier"]["is_unlimited"]
                     )
@@ -496,13 +1082,29 @@ class MultiBotInteractionRouter:
                         "",
                         f"앞으로 <b>{html.escape(bot.name)}</b>의 핵심 정보를 빠르게 받아보실 수 있습니다.",
                     ]
-                    kb = [[{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}]]
-                    if menu_uname:
-                        kb.append([{"text": "🧭 메뉴봇(전체 봇 목록) 열기", "url": f"https://t.me/{menu_uname}"}])
+                    extra_messages: list[dict[str, Any]] = []
+                    if self.is_common_briefing_bot(bot.bot_id):
+                        lines.append("📢 <b>공통 브리핑 안내:</b> 직전에 발송되었던 최신 브리핑을 함께 보내드립니다.")
+                        brief_payload = self._build_target_briefing(bot, target_code="ALL", uid=uid, menu_uname=menu_uname)
+                        extra_messages.append(brief_payload)
+                        self._delivered_initial_briefing.add((uid, bot.bot_id))
+                        kb = [
+                            [{"text": "📊 직전 발송 최신 시황 브리핑 보기", "callback_data": f"info:preview:{bot.bot_id}"}],
+                            [{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}],
+                        ]
+                        if menu_uname:
+                            kb.append([{"text": "🧭 메뉴봇(전체 봇 목록) 열기", "url": f"https://t.me/{menu_uname}"}])
+                    else:
+                        cfg = self._get_target_selection_config(bot)
+                        lines.append("")
+                        lines.append(cfg["prompt"])
+                        kb = self._build_target_selection_keyboard(bot, uid, menu_uname)
+
                     return {
                         "bot_id": bot.bot_id,
                         "reply_html": "\n".join(lines),
                         "inline_keyboard": kb,
+                        "extra_messages": extra_messages,
                         "callback_toast": "✅ 기존 봇 탈퇴 및 신규 구독 전환 완료!",
                         "result_code": "SWAPPED",
                         "user_profile": user,
@@ -516,7 +1118,7 @@ class MultiBotInteractionRouter:
                     "user_profile": user,
                 }
 
-        # 3. Default on Info Bot (`/start`, `/구독`, `info:sub:...`, or any direct greeting/message):
+        # 5. Default on Info Bot (`/start`, `/구독`, `info:sub:...`, `info:retarget:...`, or any direct greeting/message):
         #    Verify tier quota & auto-subscribe if eligible! (Requirement #4)
         res = self.engine.attempt_subscribe(uid, bot.bot_id, full_name=full_name, username=username, actor="USER")
         user = self.engine.get_user_profile(uid)
@@ -558,17 +1160,44 @@ class MultiBotInteractionRouter:
             "━━━━━━━━━━━━━━━━━━",
             f"👤 <b>회원 등급:</b> {tier_icon} <b>{html.escape(tier_info['name'])}</b>",
             f"📊 <b>구독 현황:</b> <code>{html.escape(slot_str)}</code>",
-            "",
-            "💡 <i>구독을 해지(탈퇴)하시려면 언제든 <code>/stop</code>을 입력하거나 아래 버튼을 눌러주세요.</i>",
         ]
-        kb = [[{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}]]
-        if menu_uname:
-            kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+
+        extra_messages: list[dict[str, Any]] = []
+        if self.is_common_briefing_bot(bot.bot_id):
+            # Type A (Common Bot, e.g. brief_bot):
+            # Immediately deliver the most recent briefing upon entering (idempotent per session/subscription)
+            should_auto_send = (
+                res["code"] == "SUBSCRIBED"
+                or (uid, bot.bot_id) not in self._delivered_initial_briefing
+            )
+            lines.append("")
+            lines.append("📢 <b>공통 브리핑 안내:</b> 구독 직전에 발송되었던 최신 시황 브리핑을 즉시 확인하실 수 있습니다.")
+            lines.append("💡 <i>구독을 해지(탈퇴)하시려면 언제든 <code>/stop</code>을 입력하거나 아래 버튼을 눌러주세요.</i>")
+            if should_auto_send:
+                brief_payload = self._build_target_briefing(bot, target_code="ALL", uid=uid, menu_uname=menu_uname)
+                extra_messages.append(brief_payload)
+                self._delivered_initial_briefing.add((uid, bot.bot_id))
+
+            kb = [
+                [{"text": "📊 직전 발송 최신 시황 브리핑 보기", "callback_data": f"info:preview:{bot.bot_id}"}],
+                [{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}],
+            ]
+            if menu_uname:
+                kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+        else:
+            # Type B (Target-Selection Bot, e.g. admission_bot, travel_bot):
+            # Prompt target selection first -> once selected, user taps [직전 발송 정보 보기] button!
+            cfg = self._get_target_selection_config(bot)
+            lines.append("")
+            lines.append(cfg["prompt"])
+            lines.append("💡 <i>구독을 해지(탈퇴)하시려면 언제든 <code>/stop</code>을 입력하거나 아래 버튼을 눌러주세요.</i>")
+            kb = self._build_target_selection_keyboard(bot, uid, menu_uname)
 
         return {
             "bot_id": bot.bot_id,
             "reply_html": "\n".join(lines),
             "inline_keyboard": kb,
+            "extra_messages": extra_messages,
             "callback_toast": "🎉 구독이 완료되었습니다!" if (cb and res["code"] == "SUBSCRIBED") else None,
             "result_code": res["code"],
             "user_profile": user,
@@ -811,6 +1440,29 @@ class DynamicBotManager:
 
         return False, "not_travel_interactive_event"
 
+    def _dispatch_admission_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
+        """Dispatches domain-specific admission callbacks (`adm:`, `grade:`, `region:`, `menu:`) to AdmissionInteractiveBot."""
+        if "callback_query" not in item:
+            return False, "not_admission_callback"
+        cq = item["callback_query"]
+        cb_data = str(cq.get("data") or "")
+        if not cb_data.startswith(("adm:", "grade:", "region:", "menu:")):
+            return False, "not_admission_domain_callback"
+
+        try:
+            from admission_brief.channels.telegram import TelegramChannel as AdmTelegramChannel
+            from admission_brief.interactive_bot import AdmissionInteractiveBot
+            from admission_brief.storage.db import AdmissionDatabase
+        except ImportError:
+            return False, "admission_interactive_not_available"
+
+        adm_db_path = getattr(self.engine.db, "db_path", None) or ":memory:"
+        adm_db = AdmissionDatabase(db_path=str(adm_db_path))
+        adm_channel = AdmTelegramChannel(bot_token=bot_token, opener=opener)
+        adm_bot = AdmissionInteractiveBot(channel=adm_channel, db=adm_db)
+        adm_bot.handle_update(item)
+        return True, "admission_callback_handled"
+
     def sync_bot_updates_once(self, bot_id: str, opener=None, timeout: int = 1) -> dict[str, Any]:
         """Synchronously fetches pending Telegram updates for `bot_id`, routes them, and replies."""
         bot = self.engine.get_bot(bot_id)
@@ -854,6 +1506,13 @@ class DynamicBotManager:
                     events.append({"user_id": "travel", "type": "travel_integrated", "code": reason})
                     continue
 
+            if bot.bot_id in ("admission_bot", "edu_bot"):
+                handled, reason = self._dispatch_admission_bot_update(bot.token, item, opener=opener)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "admission", "type": "admission_integrated", "code": reason})
+                    continue
+
             if "callback_query" in item:
                 cq = item["callback_query"]
                 cq_id = str(cq.get("id", ""))
@@ -867,6 +1526,11 @@ class DynamicBotManager:
                 uname = sender.get("username") or ""
                 cb_data = cq.get("data") or ""
 
+                # [TG-04] Pre-emptive callback acknowledgement (<0.1s) before DB/Briefing work
+                if cq_id:
+                    quick_toast = self.router.get_quick_callback_toast(cb_data)
+                    transport.answer_callback(cq_id, text=quick_toast)
+
                 out = self.router.handle_interaction(
                     bot_id=bot.bot_id,
                     telegram_user_id=chat_id,
@@ -874,9 +1538,10 @@ class DynamicBotManager:
                     username=uname,
                     callback_data=cb_data,
                 )
-                if cq_id:
-                    transport.answer_callback(cq_id, text=out.get("callback_toast") or "")
                 transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+                for extra in out.get("extra_messages") or []:
+                    if extra.get("html"):
+                        transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
                 processed += 1
                 events.append({"user_id": chat_id, "type": "callback", "code": out["result_code"]})
 
@@ -904,6 +1569,9 @@ class DynamicBotManager:
                     text=text,
                 )
                 transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+                for extra in out.get("extra_messages") or []:
+                    if extra.get("html"):
+                        transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
                 processed += 1
                 events.append({"user_id": chat_id, "type": "message", "code": out["result_code"]})
 

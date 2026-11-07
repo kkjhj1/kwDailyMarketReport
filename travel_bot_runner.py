@@ -527,7 +527,23 @@ def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
                                 text="👋 여행 특가 구독이 해지되었습니다. 언제든 <code>/start</code>를 누르면 다시 받아보실 수 있습니다.",
                                 parse_mode="HTML",
                             )
-                        elif text in {"/start", "/구독", "안녕", "/여행", "/today", "/특가"}:
+                        elif text in {"/start", "/구독", "안녕"}:
+                            db.add_recipient(chat_id, name=sender_name, topic="TRAVEL")
+                            onboarding_html = (
+                                f"🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"🎯 <b>[1단계: 관심 여행지 선택]</b>\n"
+                                f"아래 버튼에서 원하시는 여행지를 선택하신 후 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르면 "
+                                f"구독 직전에 발송되었던 최신 주말 항공·숙박 특가를 즉시 확인하실 수 있습니다 👇"
+                            )
+                            dispatcher.send_text_to_recipient(
+                                tg=handler.tg,
+                                chat_id=chat_id,
+                                text=onboarding_html,
+                                parse_mode="HTML",
+                                reply_markup=handler.build_onboarding_keyboard(),
+                            )
+                        elif text in {"/여행", "/today", "/특가"}:
                             db.add_recipient(chat_id, name=sender_name, topic="TRAVEL")
                             # Offload welcome brief to worker pool so polling loop NEVER blocks (C-B)
                             handler.worker_pool.submit(_async_send_welcome, chat_id, sender_name)

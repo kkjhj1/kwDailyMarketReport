@@ -68,3 +68,36 @@ def test_dispatcher_handles_403_blocked_user():
     assert stats["success"] == 0
     assert stats["deactivated"] == 1
     assert db.has_dispatched("brief_403", "blocked_user") is False
+
+
+def test_weekday_onboarding_blocks_same_week_sunday_batch_only():
+    from datetime import datetime
+    from admission_brief.ai_curator import AICurator
+
+    db = AdmissionDatabase(db_path=":memory:")
+    db.upsert_subscriber(ParentUserProfile(chat_id="new_user", target_grade=TargetGrade.HIGH_3_N))
+    curator = AICurator()
+
+    # Onboarded on Wednesday 2026-11-04 (ISO 2026-W45)
+    welcome = curator.generate_weekly_todo_briefing(TargetGrade.HIGH_3_N, dt=datetime(2026, 11, 4, 14, 0))
+    assert welcome.briefing_id.endswith("_2026W45")
+    db.log_dispatch(welcome.briefing_id, "new_user", "SUCCESS")
+
+    # Sunday 2026-11-08 batch is still W45 -> duplicate blocked
+    sunday = curator.generate_weekly_todo_briefing(TargetGrade.HIGH_3_N, dt=datetime(2026, 11, 8, 21, 0))
+    assert sunday.briefing_id == welcome.briefing_id
+    assert db.has_dispatched(sunday.briefing_id, "new_user") is True
+
+    mock_channel = MagicMock(spec=TelegramChannel)
+    mock_channel.send.return_value = "msg_1"
+    dispatcher = SafeTelegramDispatcher(rate_limiter=TelegramRateLimiter(max_global_rate=1000.0, min_chat_interval=0.0))
+    stats = dispatcher.dispatch(channel=mock_channel, briefing=sunday, db=db)
+    assert stats["skipped"] == 1
+    mock_channel.send.assert_not_called()
+
+    # Next Sunday 2026-11-15 is W46 -> sent normally
+    next_sunday = curator.generate_weekly_todo_briefing(TargetGrade.HIGH_3_N, dt=datetime(2026, 11, 15, 21, 0))
+    assert next_sunday.briefing_id.endswith("_2026W46")
+    assert db.has_dispatched(next_sunday.briefing_id, "new_user") is False
+    stats = dispatcher.dispatch(channel=mock_channel, briefing=next_sunday, db=db)
+    assert stats["success"] == 1

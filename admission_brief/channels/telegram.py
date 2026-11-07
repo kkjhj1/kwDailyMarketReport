@@ -163,8 +163,12 @@ class TelegramChannel:
         recipient: str,
         briefing: AdmissionBriefing,
         disable_notification: Optional[bool] = None,
+        reply_markup: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Sends an AdmissionBriefing to recipient with optional ticketing inline button."""
+        """Sends an AdmissionBriefing to recipient with optional ticketing inline button.
+
+        An explicit reply_markup overrides the default booking_url button.
+        """
         text = format_admission_html(briefing)
         is_silent = briefing.silent if disable_notification is None else disable_notification
         body: dict[str, Any] = {
@@ -176,8 +180,10 @@ class TelegramChannel:
         if is_silent:
             body["disable_notification"] = True
 
+        if reply_markup is not None:
+            body["reply_markup"] = reply_markup
         # Attach ticketing button if valid URL is present
-        if briefing.booking_url and _is_valid_url(briefing.booking_url):
+        elif briefing.booking_url and _is_valid_url(briefing.booking_url):
             body["reply_markup"] = {
                 "inline_keyboard": [
                     [{"text": briefing.booking_button_text, "url": briefing.booking_url}]

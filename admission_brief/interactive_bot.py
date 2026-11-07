@@ -295,6 +295,27 @@ class AdmissionInteractiveBot:
         briefing.silent = True  # Silent push for regular digests
         self.channel.send(chat_id, briefing)
 
+    def _send_welcome_todo(self, chat_id: str, grade: TargetGrade) -> None:
+        """Sends this ISO week's To-Do right after onboarding and logs it so the Sunday batch skips it."""
+        briefing = self.curator.generate_weekly_todo_briefing(grade)
+        if self.db.has_dispatched(briefing.briefing_id, chat_id):
+            return
+        briefing.silent = True
+        welcome_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "⚡ 핫 행사 TOP 3", "callback_data": "adm:hot"},
+                    {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
+                ]
+            ]
+        }
+        try:
+            self.channel.send(chat_id, briefing, reply_markup=welcome_markup)
+        except Exception as e:
+            logger.warning("Welcome To-Do dispatch failed for %s: %s", chat_id, e)
+            return
+        self.db.log_dispatch(briefing.briefing_id, chat_id, "SUCCESS")
+
     def _cmd_hot_events(self, chat_id: str) -> None:
         """Presents top 3 hot events & breaking notices matching subscriber's profile."""
         profile = self.db.get_subscriber(chat_id)
@@ -482,12 +503,16 @@ class AdmissionInteractiveBot:
                     f"✅ <b>[{target_grade.badge}] 학년 설정 완료!</b>\n\n"
                     "👇 <b>[2단계] 희망하시는 설명회 지역 또는 온라인 전용 여부</b>를 선택해 주세요:"
                 )
+                markup = build_region_inline_keyboard()
+                markup["inline_keyboard"].append(
+                    [{"text": "📋 변경된 학년 To-Do 바로보기", "callback_data": "adm:todo"}]
+                )
                 if message_id:
                     self.channel.edit_message_text(
                         chat_id,
                         message_id,
                         next_step_text,
-                        reply_markup=build_region_inline_keyboard(),
+                        reply_markup=markup,
                     )
             except Exception as e:
                 logger.error("Failed to update grade: %s", e)
@@ -501,25 +526,39 @@ class AdmissionInteractiveBot:
                 self.db.update_subscriber_region(chat_id, target_region)
 
                 profile = self.db.get_subscriber(chat_id)
-                grade_label = profile.target_grade.label if profile else "전학년"
+                grade = profile.target_grade if profile else TargetGrade.ALL
                 final_text = (
                     "🎉 <b>모든 맞춤 설정이 완료되었습니다!</b>\n\n"
-                    f"▪ <b>자녀 학년</b>: {grade_label}\n"
-                    f"▪ <b>희망 지역</b>: {target_region.label}\n\n"
-                    "이제 화면 아래에 나타난 <b>[📋 이번 주 필수 To-Do]</b> 버튼을 탭해 보세요! 👇"
+                    f"▪ <b>자녀 학년</b>: {html.escape(grade.label)}\n"
+                    f"▪ <b>희망 지역</b>: {html.escape(target_region.label)}\n\n"
+                    "📋 아래 <b>[정보보기]</b> 버튼 및 자녀 맞춤 <b>이번 주 To-Do</b>를 바로 확인해 보세요 👇"
                 )
+                region_done_markup = {
+                    "inline_keyboard": [
+                        [{"text": "📋 직전 발송 맞춤 브리핑(To-Do) 정보보기", "callback_data": "adm:todo"}],
+                        [
+                            {"text": "⚡ 핫 행사 TOP 3 보기", "callback_data": "adm:hot"},
+                            {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
+                        ],
+                    ]
+                }
                 if message_id:
-                    self.channel.edit_message_text(chat_id, message_id, final_text)
-
-                # Send persistent bottom menu to user's chat!
-                self.channel.send_message(
-                    chat_id,
-                    "💡 화면 아래의 고정 메뉴 버튼을 탭하시면 언제든지 편하게 이용하실 수 있습니다:",
-                    reply_markup=build_persistent_reply_keyboard(),
-                )
+                    self.channel.edit_message_text(
+                        chat_id,
+                        message_id,
+                        final_text,
+                        reply_markup=region_done_markup,
+                    )
             except Exception as e:
                 logger.error("Failed to update region: %s", e)
                 self.channel.send_message(chat_id, "⚠️ 지역 설정 처리 중 오류가 발생했습니다. 다시 시도해 주세요.")
+            else:
+                self._send_welcome_todo(chat_id, grade)
+                self.channel.send_message(
+                    chat_id,
+                    "💡 언제든지 화면 아래의 고정 메뉴 버튼을 탭하여 다른 정보도 확인하실 수 있습니다:",
+                    reply_markup=build_persistent_reply_keyboard(),
+                )
 
         # 3. Settings Menu Navigation
         elif data == "menu:grade":
@@ -527,7 +566,13 @@ class AdmissionInteractiveBot:
         elif data == "menu:region":
             self._cmd_region(chat_id)
 
-        # 4. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
+        # 4. Welcome / preview shortcuts (manual requests are not logged as dispatches)
+        elif data == "adm:hot":
+            self._cmd_hot_events(chat_id)
+        elif data == "adm:todo":
+            self._cmd_todo(chat_id)
+
+        # 5. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
         elif data == "adm:menu":
             self._cmd_events_menu(chat_id, message_id)
         elif data.startswith("adm:cat:"):

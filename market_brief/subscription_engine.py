@@ -658,6 +658,18 @@ class SubscriptionEngine:
             )
             if new_name != existing["full_name"]:
                 conn.execute("UPDATE recipients SET name = ? WHERE chat_id = ?", (new_name, uid))
+
+            changes: dict[str, dict[str, Any]] = {}
+            for field, new_val, old_val in (
+                ("full_name", new_name, existing["full_name"] or ""),
+                ("username", new_uname, existing["username"] or ""),
+                ("status", new_status, existing["status"] or "ACTIVE"),
+                ("memo", new_memo, existing["memo"] or ""),
+            ):
+                if (new_val or "") != old_val:
+                    changes[field] = {"from": old_val, "to": new_val or ""}
+            if changes:
+                self._log_audit_in_tx(conn, uid, None, "USER_UPDATED", actor="ADMIN", detail={"changes": changes})
         return self.get_user_profile(uid) or {"telegram_user_id": uid}
 
     def _update_user_tier_in_tx(
@@ -1595,3 +1607,93 @@ class SubscriptionEngine:
             "bot_rankings": sorted(info_bots, key=lambda x: (-x["active_subscribers"], x["sort_order"])),
             "recent_audit_logs": audit_logs,
         }
+
+    # =========================================================================
+    # Audit Center: Platform Audit Logs & Per-User Delivery History
+    # =========================================================================
+
+    def list_audit_logs(
+        self,
+        user_id: str | None = None,
+        action: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        """Paginated audit log listing with optional exact user/action filters and fuzzy user search (`q`)."""
+        limit = max(1, min(int(limit or 50), 500))
+        offset = max(0, int(offset or 0))
+        where = ["1=1"]
+        params: list[Any] = []
+        if user_id and str(user_id).strip():
+            where.append("l.telegram_user_id = ?")
+            params.append(str(user_id).strip())
+        if action and str(action).strip():
+            where.append("l.action = ?")
+            params.append(str(action).strip().upper())
+        if q and str(q).strip():
+            like = f"%{str(q).strip().lstrip('@')}%"
+            where.append("(l.telegram_user_id LIKE ? OR u.full_name LIKE ? OR u.username LIKE ?)")
+            params.extend([like, like, like])
+        where_sql = " AND ".join(where)
+
+        with self._read_conn() as conn:
+            total = conn.execute(
+                f"""SELECT COUNT(*)
+                    FROM subscription_audit_logs l
+                    LEFT JOIN users u ON l.telegram_user_id = u.telegram_user_id
+                    WHERE {where_sql}""",
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""SELECT l.*, u.full_name, u.username, b.name AS bot_name, b.icon_emoji
+                    FROM subscription_audit_logs l
+                    LEFT JOIN users u ON l.telegram_user_id = u.telegram_user_id
+                    LEFT JOIN bots b ON l.bot_id = b.bot_id
+                    WHERE {where_sql}
+                    ORDER BY l.id DESC LIMIT ? OFFSET ?""",
+                [*params, limit, offset],
+            ).fetchall()
+
+        logs = []
+        for r in rows:
+            parsed_detail: Any = r["detail"]
+            if parsed_detail:
+                try:
+                    parsed_detail = json.loads(parsed_detail)
+                except Exception:
+                    pass
+            logs.append(
+                {
+                    "id": r["id"],
+                    "telegram_user_id": r["telegram_user_id"],
+                    "user_name": r["full_name"] or r["telegram_user_id"],
+                    "username": r["username"] or "",
+                    "bot_id": r["bot_id"],
+                    "bot_name": f"{r['icon_emoji'] or ''} {r['bot_name']}".strip() if r["bot_name"] else None,
+                    "action": r["action"],
+                    "actor": r["actor"],
+                    "detail": parsed_detail,
+                    "logged_at": r["logged_at"],
+                }
+            )
+        return {"logs": logs, "total": int(total or 0)}
+
+    def get_user_delivery_history(self, chat_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Recent delivery attempts (scheduled + manual broadcasts) targeted at a single chat_id."""
+        limit = max(1, min(int(limit or 20), 200))
+        with self._read_conn() as conn:
+            rows = conn.execute(
+                """SELECT
+                     jr.chat_id, jr.status AS recipient_status, jr.error_detail, jr.provider_msg_id, jr.updated_at,
+                     j.job_id, j.attempt_no, j.is_forced, j.status AS job_status, j.started_at, j.finished_at,
+                     b.topic, b.kind, b.scheduled_date
+                   FROM delivery_job_recipients jr
+                   JOIN delivery_jobs j ON j.job_id = jr.job_id
+                   JOIN delivery_batches b ON b.batch_key = j.batch_key
+                   WHERE jr.chat_id = ?
+                   ORDER BY COALESCE(j.finished_at, j.started_at, jr.updated_at) DESC
+                   LIMIT ?""",
+                (str(chat_id).strip(), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]

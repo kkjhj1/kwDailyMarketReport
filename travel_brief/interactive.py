@@ -36,6 +36,16 @@ CITY_CODE_ALIASES: dict[str, str] = {
     "OSA": "KIX",
 }
 
+CITY_LABELS: dict[str, str] = {
+    "NRT": "🇯🇵 도쿄",
+    "KIX": "🇯🇵 오사카",
+    "FUK": "🇯🇵 후쿠오카",
+    "TPE": "🇹🇼 타이베이",
+    "DAD": "🇻🇳 다낭",
+    "BKK": "🇹🇭 방콕",
+    "ALL": "✈️ 전체 주말 특가 TOP 3",
+}
+
 
 class UserCooldownManager:
     """Thread-safe cooldown and in-progress tracker using monotonic clocks."""
@@ -132,6 +142,57 @@ class TravelInteractiveHandler:
             ]
         }
 
+    def build_onboarding_keyboard(self) -> dict[str, Any]:
+        """Step 1 onboarding target-selection keyboard for new subscribers (64-byte safe `trv:s:<CITY>`)."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🇯🇵 도쿄", "callback_data": "trv:s:NRT"},
+                    {"text": "🇯🇵 오사카", "callback_data": "trv:s:KIX"},
+                    {"text": "🇯🇵 후쿠오카", "callback_data": "trv:s:FUK"},
+                ],
+                [
+                    {"text": "🇹🇼 타이베이", "callback_data": "trv:s:TPE"},
+                    {"text": "🇻🇳 다낭", "callback_data": "trv:s:DAD"},
+                    {"text": "🇹🇭 방콕", "callback_data": "trv:s:BKK"},
+                ],
+                [
+                    {"text": "✈️ 전체 주말 특가 TOP 3 선택", "callback_data": "trv:s:ALL"},
+                ],
+                [
+                    {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
+                ],
+            ]
+        }
+
+    def build_selected_target_keyboard(self, target_city: str = "ALL") -> dict[str, Any]:
+        """Step 2 keyboard shown right after target selection, exposing [📋 직전 발송 특가 정보 보기]."""
+        city_norm = CITY_CODE_ALIASES.get(target_city, target_city)
+        label = CITY_LABELS.get(city_norm, city_norm)
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": f"📋 [{label}] 직전 발송 특가 정보 보기",
+                        "callback_data": f"trv:q:{city_norm}"[:64],
+                    }
+                ],
+                [
+                    {"text": "🇯🇵 도쿄", "callback_data": "trv:s:NRT"},
+                    {"text": "🇯🇵 오사카", "callback_data": "trv:s:KIX"},
+                    {"text": "🇯🇵 후쿠오카", "callback_data": "trv:s:FUK"},
+                ],
+                [
+                    {"text": "🇹🇼 타이베이", "callback_data": "trv:s:TPE"},
+                    {"text": "🇻🇳 다낭", "callback_data": "trv:s:DAD"},
+                    {"text": "🇹🇭 방콕", "callback_data": "trv:s:BKK"},
+                ],
+                [
+                    {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
+                ],
+            ]
+        }
+
     def handle_callback_query(
         self,
         cq_id: str,
@@ -149,11 +210,41 @@ class TravelInteractiveHandler:
         user_id = str(from_user.get("id") or chat_id).strip()
         is_admin = user_id in self._admin_ids
 
-        # Parse command: e.g. "trv:q:NRT", "trv:r:ALL"
+        # Parse command: e.g. "trv:s:NRT", "trv:q:NRT", "trv:r:ALL"
         parts = callback_data.split(":")
         action = parts[1] if len(parts) > 1 else "q"
         target = parts[2] if len(parts) > 2 else "ALL"
         target_norm = CITY_CODE_ALIASES.get(target, target)
+
+        # Target-selection step (`trv:s:<CITY>`): acknowledge immediately & show [📋 직전 발송 특가 정보 보기] button
+        if action == "s":
+            city_label = CITY_LABELS.get(target_norm, target_norm)
+            try:
+                self.tg.answer_callback(
+                    cq_id,
+                    text=f"🎯 {city_label} 선택 완료! [직전 발송 특가 정보 보기] 버튼을 눌러주세요.",
+                    show_alert=False,
+                )
+            except Exception as exc:
+                logger.warning("answerCallbackQuery failed for %s: %s", cq_id, exc)
+
+            confirm_html = (
+                f"✅ <b>[트래블 패스파인더 맞춤 여행지 선택 완료]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>선택하신 여행지:</b> <b>{html.escape(city_label)}</b>\n\n"
+                f"👇 아래 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르시면 "
+                f"구독 직전에 발송되었던 최신 주말 항공·숙박 특가 브리핑을 즉시 확인하실 수 있습니다!"
+            )
+            markup = self.build_selected_target_keyboard(target_norm)
+            self.worker_pool.submit(
+                self._safe_edit_message,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=confirm_html,
+                reply_markup=markup,
+            )
+            return
+
         is_refresh = (action == "r")
 
         # 1. Evaluate cooldown & in-progress state

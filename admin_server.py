@@ -633,6 +633,25 @@ def create_admin_app(
         verify_admin_token(request)
         return {"success": sub_engine.delete_user(user_id)}
 
+    @app.get("/api/platform/users/{user_id}/history")
+    def get_platform_user_history(user_id: str, request: Request):
+        verify_admin_token(request)
+        uid = str(user_id).strip()
+        return {
+            "user_id": uid,
+            "audit_logs": sub_engine.list_audit_logs(user_id=uid, limit=30)["logs"],
+            "delivery_history": sub_engine.get_user_delivery_history(chat_id=uid, limit=20),
+        }
+
+    @app.get("/api/platform/audit-logs")
+    def list_platform_audit_logs(
+        request: Request, user_id: str = "", action: str = "", q: str = "", limit: int = 50, offset: int = 0
+    ):
+        verify_admin_token(request)
+        return sub_engine.list_audit_logs(
+            user_id=user_id or None, action=action or None, limit=limit, offset=offset, q=q or None
+        )
+
     @app.post("/api/platform/users/sync-telegram-names")
     def sync_telegram_profile_names(request: Request):
         verify_admin_token(request)
@@ -744,26 +763,40 @@ def create_admin_app(
         if not subscribers:
             raise HTTPException(status_code=400, detail=f"[{bot.name}]을 현재 구독 중인 활성 유저가 없습니다.")
 
+        from market_brief.briefing_service import (
+            finish_manual_broadcast_job,
+            open_manual_broadcast_job,
+            record_manual_broadcast_result,
+        )
+
         transport = TelegramBotTransport(bot.token)
         limiter = TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=1.0)
         sent = 0
         failed = 0
         errors = []
+        job_id = open_manual_broadcast_job(
+            sub_engine, req.bot_id, [r.chat_id for r in subscribers], topic=bot.topic_code or req.bot_id
+        )
 
         for r in subscribers:
             limiter.wait_before_send(r.chat_id)
             try:
                 transport.send_html(r.chat_id, req.message_html)
                 sent += 1
+                record_manual_broadcast_result(sub_engine, job_id, r.chat_id, "SENT")
             except Exception as exc:
                 failed += 1
                 err_str = str(exc)
                 errors.append({"chat_id": r.chat_id, "error": err_str})
+                record_manual_broadcast_result(sub_engine, job_id, r.chat_id, "FAILED", error_detail=err_str)
                 if "403" in err_str and "blocked" in err_str.lower():
                     sub_engine.unsubscribe_bot(r.chat_id, req.bot_id, actor="SYSTEM", reason="USER_BLOCKED_BOT")
 
+        finish_manual_broadcast_job(sub_engine, job_id, total=len(subscribers), success=sent, fail=failed)
+
         return {
             "success": True,
+            "job_id": job_id,
             "bot_id": req.bot_id,
             "total": len(subscribers),
             "sent": sent,
