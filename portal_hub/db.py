@@ -375,6 +375,109 @@ class PortalDatabase:
             conn.commit()
             return True, f"⚪ [{bot_type.title}] 구독이 해지되었습니다."
 
+    def atomic_swap_subscription(
+        self, user_id: int, old_bot_type: BotServiceType, new_bot_type: BotServiceType
+    ) -> tuple[bool, str]:
+        """Cancels old_bot and activates new_bot in a single transaction (slot count unchanged)."""
+        if old_bot_type == new_bot_type:
+            return False, "동일한 봇으로 교체할 수 없습니다."
+
+        uid_str = str(user_id).strip()
+        old_bid = old_bot_type.value
+        new_bid = new_bot_type.value
+        topic_map = {
+            "brief_bot": "FINANCE",
+            "travel_bot": "TRAVEL",
+            "admission_bot": "EDUCATION",
+            "silver_bot": "SILVER",
+            "kids_bot": "KIDS",
+            "yolo_bot": "YOLO",
+        }
+
+        with self._get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid_str,))
+            user_row = cur.fetchone()
+            if not user_row:
+                return False, "사용자를 찾을 수 없습니다."
+
+            cur.execute(
+                "SELECT id, status FROM subscriptions WHERE telegram_user_id = ? AND bot_id = ?",
+                (uid_str, old_bid),
+            )
+            old_row = cur.fetchone()
+            if not old_row or old_row["status"] != "ACTIVE":
+                return False, f"기존 구독 [{old_bot_type.title}]이(가) 활성 상태가 아닙니다."
+
+            cur.execute(
+                "SELECT id, status FROM subscriptions WHERE telegram_user_id = ? AND bot_id = ?",
+                (uid_str, new_bid),
+            )
+            new_row = cur.fetchone()
+            if new_row and new_row["status"] == "ACTIVE":
+                return False, f"이미 [{new_bot_type.title}]을(를) 구독 중입니다."
+
+            try:
+                # Guarded by status so a concurrent cancel turns into a rollback instead of a slot leak
+                cur.execute(
+                    """
+                    UPDATE subscriptions SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'ACTIVE'
+                    """,
+                    (old_row["id"],),
+                )
+                if cur.rowcount != 1:
+                    raise sqlite3.IntegrityError("old subscription changed concurrently")
+
+                if new_row:
+                    cur.execute(
+                        "UPDATE subscriptions SET status = 'ACTIVE', subscribed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (new_row["id"],),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO subscriptions (telegram_user_id, bot_id, status, subscribed_at)
+                        VALUES (?, ?, 'ACTIVE', CURRENT_TIMESTAMP)
+                        """,
+                        (uid_str, new_bid),
+                    )
+
+                # Sync legacy recipients table: drop old topic, add new topic
+                cur.execute("SELECT subscribed_topics FROM recipients WHERE chat_id = ?", (uid_str,))
+                existing_rec = cur.fetchone()
+                if existing_rec:
+                    topics = set(t.strip() for t in (existing_rec["subscribed_topics"] or "").split(",") if t.strip())
+                    if old_bid in topic_map:
+                        topics.discard(topic_map[old_bid])
+                    if new_bid in topic_map:
+                        topics.add(topic_map[new_bid])
+                    if topics:
+                        cur.execute(
+                            "UPDATE recipients SET is_active = 1, subscribed_topics = ?, inactivation_reason = NULL WHERE chat_id = ?",
+                            (",".join(sorted(topics)), uid_str),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE recipients SET is_active = 0, inactivation_reason = 'USER_UNSUB' WHERE chat_id = ?",
+                            (uid_str,),
+                        )
+                elif new_bid in topic_map:
+                    cur.execute(
+                        """
+                        INSERT INTO recipients (chat_id, name, channel, group_tag, subscribed_topics, is_active, created_at)
+                        VALUES (?, ?, 'TELEGRAM', 'GENERAL', ?, 1, CURRENT_TIMESTAMP)
+                        """,
+                        (uid_str, user_row["full_name"], topic_map[new_bid]),
+                    )
+
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                return False, "구독 교체 중 오류가 발생하여 변경 사항이 취소되었습니다."
+
+            return True, f"✅ [{old_bot_type.title}]에서 [{new_bot_type.title}](으)로 교체되었습니다."
+
     def toggle_subscription(
         self, user_id: int, bot_type: BotServiceType
     ) -> tuple[bool, bool, str]:

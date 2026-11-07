@@ -19,7 +19,9 @@ from portal_hub.db import PortalDatabase
 from portal_hub.interactive import (
     _get_admin_console_url,
     build_slot_gauge,
+    build_swap_callback_data,
     handle_callback_query,
+    render_catalog_all_view,
     render_category_home_view,
     render_category_view,
     render_help_view,
@@ -445,6 +447,259 @@ class PortalHubAdminAlertTests(unittest.TestCase):
         url = self._admin_sends()[0].kwargs["reply_markup"]["inline_keyboard"][0][0]["url"]
         self.assertIn("tab=users", url)
         self.assertIn("req_id=42", url)
+
+
+def _all_buttons(markup: dict) -> list[dict]:
+    return [b for row in markup["inline_keyboard"] for b in row]
+
+
+def _visible_len(text: str) -> int:
+    return len(re.sub(r"<[^>]+>", "", text))
+
+
+class PortalHubUxEnhancementTests(unittest.TestCase):
+    """Onboarding deep link, 1-click atomic swap, and 6-bot full catalog view."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_alerts.sqlite3"
+        self.mb_db = MarketBriefDatabase(db_path=str(self.db_path))
+        self.portal_db = PortalDatabase(self.db_path)
+        self.mock_client = MagicMock(spec=TelegramPortalClient)
+        self.mock_client.edit_message_text.return_value = True
+        self.uid = 90001
+        self.portal_db.get_or_create_user(self.uid, self.uid, first_name="UX테스터")
+
+    def tearDown(self):
+        del self.mb_db
+        del self.portal_db
+        gc.collect()
+        try:
+            self.tmp_dir.cleanup()
+        except PermissionError:
+            pass
+
+    def _click(self, data: str) -> None:
+        cq = {
+            "id": f"cq_{data}",
+            "from": {"id": self.uid, "first_name": "UX테스터"},
+            "message": {"message_id": 20, "chat": {"id": self.uid}},
+            "data": data,
+        }
+        handle_callback_query(cq, self.portal_db, self.mock_client)
+
+    def _recipient_topics(self) -> tuple[set[str], int]:
+        with self.portal_db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT subscribed_topics, is_active FROM recipients WHERE chat_id = ?", (str(self.uid),)
+            ).fetchone()
+        topics = {t.strip() for t in (row["subscribed_topics"] or "").split(",") if t.strip()}
+        return topics, int(row["is_active"])
+
+    # --- Priority 1: Deep link ---
+    def test_get_start_link_valid_and_invalid_handles(self):
+        with patch.dict(os.environ, {"TRAVEL_TELEGRAM_BOT_USERNAME": "@KwTravelLowPrice_bot"}):
+            self.assertEqual(
+                BotServiceType.TRAVEL.get_start_link(), "https://t.me/KwTravelLowPrice_bot?start=portal"
+            )
+            self.assertEqual(
+                BotServiceType.TRAVEL.get_start_link("swap"), "https://t.me/KwTravelLowPrice_bot?start=swap"
+            )
+        for bad in ("abc", "bad-handle!", "x" * 33, "한글봇이름입니다"):
+            with patch.dict(os.environ, {"TRAVEL_TELEGRAM_BOT_USERNAME": bad}):
+                self.assertIsNone(BotServiceType.TRAVEL.get_start_link(), bad)
+
+    def test_do_sub_success_renders_onboarding_card_with_deep_link(self):
+        self._click("sub:do_sub:travel_bot:cat:LIFE")
+        self.mock_client.answer_callback_query.assert_called_once_with("cq_sub:do_sub:travel_bot:cat:LIFE")
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.TRAVEL])
+
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertIn("구독 완료!", text)
+        self.assertIn("트래블 패스파인더", text)
+        rows = markup["inline_keyboard"]
+        self.assertEqual(rows[0][0]["url"], BotServiceType.TRAVEL.get_start_link())
+        self.assertIn("여행 특가 대화방 바로가기", rows[0][0]["text"])
+        cbs = [b.get("callback_data") for b in _all_buttons(markup)]
+        self.assertIn("nav:subs", cbs)
+        self.assertIn("nav:main", cbs)
+        self.assertIn("cat:view:LIFE", cbs)
+
+    def test_onboarding_omits_url_button_for_invalid_handle(self):
+        with patch.dict(os.environ, {"BRIEF_TELEGRAM_BOT_USERNAME": "bad handle"}):
+            self._click("sub:do_sub:brief_bot:subs")
+        markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertFalse(any("url" in b for b in _all_buttons(markup)))
+
+    def test_legacy_menu_sub_renders_onboarding_card(self):
+        self._click("menu:sub:yolo_bot")
+        self.assertIn("구독 완료!", self.mock_client.edit_message_text.call_args.args[2])
+
+    # --- Priority 2: Atomic swap ---
+    def test_quota_exceeded_offers_swap_buttons_within_64_bytes(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.ADMISSION)
+        self._click("sub:do_sub:brief_bot:subs")
+        self.mock_client.send_message.assert_called_once()
+        text = self.mock_client.send_message.call_args.args[1]
+        markup = self.mock_client.send_message.call_args.kwargs["reply_markup"]
+        self.assertIn("최대 1개까지 구독 가능", text)
+        cbs = [b["callback_data"] for b in _all_buttons(markup)]
+        self.assertIn("sub:swap:admission_bot:brief_bot:subs", cbs)
+        self.assertIn("support:upgrade_menu", cbs)
+        self.assertIn("nav:subs", cbs)
+        swap_btn = _all_buttons(markup)[0]
+        self.assertEqual(swap_btn["text"], "🔄 입시 정보 ➔ 시황 브리핑 교체")
+        for cb in cbs:
+            self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
+
+    def test_swap_callback_data_falls_back_when_context_too_long(self):
+        long_ctx = "search:" + "가" * 30
+        cb = build_swap_callback_data(BotServiceType.ADMISSION, BotServiceType.YOLO, long_ctx)
+        self.assertEqual(cb, "sub:swap:admission_bot:yolo_bot:subs")
+        for old in BotServiceType:
+            for new in BotServiceType:
+                cb = build_swap_callback_data(old, new, "cat:FINANCE")
+                self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
+
+    def test_atomic_swap_success_updates_subscriptions_and_recipients(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        ok, msg = self.portal_db.atomic_swap_subscription(self.uid, BotServiceType.BRIEF, BotServiceType.TRAVEL)
+        self.assertTrue(ok, msg)
+        self.assertIn("교체되었습니다", msg)
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertFalse(subs[BotServiceType.BRIEF])
+        self.assertTrue(subs[BotServiceType.TRAVEL])
+        topics, is_active = self._recipient_topics()
+        self.assertEqual(topics, {"TRAVEL"})
+        self.assertEqual(is_active, 1)
+        with self.portal_db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT cancelled_at FROM subscriptions WHERE telegram_user_id = ? AND bot_id = 'brief_bot'",
+                (str(self.uid),),
+            ).fetchone()
+        self.assertIsNotNone(row["cancelled_at"])
+
+        # Swap back reactivates the existing (CANCELLED) row instead of inserting a duplicate
+        ok, _ = self.portal_db.atomic_swap_subscription(self.uid, BotServiceType.TRAVEL, BotServiceType.BRIEF)
+        self.assertTrue(ok)
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertTrue(subs[BotServiceType.BRIEF])
+        self.assertFalse(subs[BotServiceType.TRAVEL])
+        self.assertEqual(self._recipient_topics()[0], {"FINANCE"})
+
+    def test_atomic_swap_guard_failures(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        cases = [
+            (self.uid, BotServiceType.BRIEF, BotServiceType.BRIEF, "동일한 봇"),
+            (99999999, BotServiceType.BRIEF, BotServiceType.TRAVEL, "사용자를 찾을 수 없습니다"),
+            (self.uid, BotServiceType.KIDS, BotServiceType.TRAVEL, "활성 상태가 아닙니다"),
+        ]
+        for uid, old, new, expected in cases:
+            ok, msg = self.portal_db.atomic_swap_subscription(uid, old, new)
+            self.assertFalse(ok)
+            self.assertIn(expected, msg)
+
+        self.portal_db.set_user_tier(self.uid, UserTier.GREEN)
+        self.portal_db.subscribe(self.uid, BotServiceType.TRAVEL)
+        ok, msg = self.portal_db.atomic_swap_subscription(self.uid, BotServiceType.BRIEF, BotServiceType.TRAVEL)
+        self.assertFalse(ok)
+        self.assertIn("이미", msg)
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertTrue(subs[BotServiceType.BRIEF], "Failed swap must not cancel the old subscription")
+        self.assertTrue(subs[BotServiceType.TRAVEL])
+
+    def test_atomic_swap_rolls_back_on_db_error(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        with self.portal_db._get_conn() as conn:
+            conn.execute("DROP TABLE recipients")
+            conn.commit()
+        ok, msg = self.portal_db.atomic_swap_subscription(self.uid, BotServiceType.BRIEF, BotServiceType.TRAVEL)
+        self.assertFalse(ok)
+        self.assertIn("취소", msg)
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertTrue(subs[BotServiceType.BRIEF], "Rollback must keep the old subscription ACTIVE")
+        self.assertFalse(subs[BotServiceType.TRAVEL], "Rollback must not leave the new subscription ACTIVE")
+
+    def test_sub_swap_callback_success_and_failure(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        self._click("sub:swap:brief_bot:kids_bot:all")
+        self.mock_client.answer_callback_query.assert_called_once_with("cq_sub:swap:brief_bot:kids_bot:all")
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertIn("교체되었습니다", text)
+        self.assertEqual(markup["inline_keyboard"][0][0]["url"], BotServiceType.KIDS.get_start_link())
+        cbs = [b.get("callback_data") for b in _all_buttons(markup)]
+        self.assertIn("nav:subs", cbs)
+        self.assertIn("nav:main", cbs)
+        self.assertIn("cat:all", cbs)
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.KIDS])
+
+        # Replaying the same (now stale) button fails safely
+        self.mock_client.reset_mock()
+        self._click("sub:swap:brief_bot:kids_bot:all")
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertIn("구독 교체 실패", text)
+        self.assertEqual([b.get("callback_data") for b in _all_buttons(markup)], ["nav:subs"])
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertEqual(sum(1 for v in subs.values() if v), 1)
+
+    # --- Priority 3: Full catalog ---
+    def test_catalog_all_view_render_and_limits(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="<b>x</b>", tier=UserTier.GREEN)
+        subs = {b: False for b in BotServiceType}
+        subs[BotServiceType.TRAVEL] = True
+        text, markup = render_catalog_all_view(user, subs)
+        order = [text.index(b.short_name) for b in (
+            BotServiceType.BRIEF, BotServiceType.ADMISSION, BotServiceType.TRAVEL,
+            BotServiceType.SILVER, BotServiceType.KIDS, BotServiceType.YOLO,
+        )]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(text.count("[🟢 구독중]"), 1)
+        self.assertEqual(text.count("[⚪ 미구독]"), 5)
+        cbs = [b.get("callback_data") for b in _all_buttons(markup) if "callback_data" in b]
+        self.assertIn("sub:ask_unsub:travel_bot:all", cbs)
+        self.assertIn("sub:do_sub:brief_bot:all", cbs)
+        for nav in ("cat:home", "nav:subs", "nav:main"):
+            self.assertIn(nav, cbs)
+        self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 6)
+        for cb in cbs:
+            self.assertLessEqual(len(cb.encode("utf-8")), 64)
+        self.assertLessEqual(len(text), 3500)
+        self.assertLessEqual(_visible_len(text), 1800)
+
+    def test_cat_all_and_nav_catalog_routing_and_entry_buttons(self):
+        for data in ("cat:all", "nav:catalog"):
+            self.mock_client.reset_mock()
+            self._click(data)
+            self.mock_client.answer_callback_query.assert_called_once_with(f"cq_{data}")
+            self.assertIn("6개 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
+
+        user = UserProfile(user_id=1, chat_id=1, first_name="t")
+        for _, markup in (render_main_menu(user), render_category_home_view()):
+            self.assertIn("cat:all", [b.get("callback_data") for b in _all_buttons(markup)])
+
+    def test_catalog_in_place_unsubscribe_confirmation(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.SILVER)
+        self._click("sub:ask_unsub:silver_bot:all")
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+        self.assertIn("6개 봇 한눈에 보기", text)
+        self.assertIn("구독을 정말 해지하시겠습니까", text)
+        cbs = [b.get("callback_data") for b in _all_buttons(markup)]
+        self.assertIn("sub:do_unsub:silver_bot:all", cbs)
+        self.assertIn("sub:cancel_unsub:all", cbs)
+
+        self.mock_client.reset_mock()
+        self._click("sub:cancel_unsub:all")
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.SILVER])
+        self.assertIn("6개 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
+
+        self.mock_client.reset_mock()
+        self._click("sub:do_unsub:silver_bot:all")
+        self.assertFalse(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.SILVER])
+        self.assertIn("6개 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
 
 
 if __name__ == "__main__":

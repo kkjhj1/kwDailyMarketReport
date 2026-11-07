@@ -107,6 +107,9 @@ def render_main_menu(user: UserProfile) -> tuple[str, dict[str, Any]]:
                 {"text": "💼 업무 / 생산성", "callback_data": "cat:view:BIZ"},
             ],
             [
+                {"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"},
+            ],
+            [
                 {"text": "📋 내 구독 센터 (6대 봇 원클릭 설정)", "callback_data": "nav:subs"},
             ],
             [
@@ -277,10 +280,165 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
             {"text": "💼 업무 / 생산성", "callback_data": "cat:view:BIZ"},
         ],
         [
+            {"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"},
+        ],
+        [
             {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
+
+
+CATALOG_ALL_ORDER = (
+    BotServiceType.BRIEF,
+    BotServiceType.ADMISSION,
+    BotServiceType.TRAVEL,
+    BotServiceType.SILVER,
+    BotServiceType.KIDS,
+    BotServiceType.YOLO,
+)
+
+CALLBACK_DATA_MAX_BYTES = 64
+
+
+def render_catalog_all_view(
+    user: UserProfile,
+    subs: dict[BotServiceType, bool],
+    confirming_bot_id: Optional[str] = None,
+) -> tuple[str, dict[str, Any]]:
+    """Renders all 6 bots on one screen with subscription badges and 1-tap subscribe/manage buttons."""
+    active_count = sum(1 for v in subs.values() if v)
+    lines = [
+        "📋 <b>6개 봇 한눈에 보기</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📊 <b>구독 슬롯</b>: <b>{build_slot_gauge(active_count, user.tier)}</b>",
+    ]
+
+    if confirming_bot_id:
+        target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_bot_id)
+        lines.append(f"\n⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
+        lines.append("<i>아래 [🔴 해지 확정] 또는 [🔙 취소]를 터치하세요.</i>")
+
+    lines.append("")
+    for i, b in enumerate(CATALOG_ALL_ORDER, 1):
+        status_chip = "[🟢 구독중]" if subs.get(b, False) else "[⚪ 미구독]"
+        lines.append(f"<b>{i}. {b.icon} {html.escape(b.short_name)}</b> {status_chip}")
+        lines.append(f"   • {html.escape(b.one_line_desc)}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    keyboard = []
+    for b in CATALOG_ALL_ORDER:
+        if confirming_bot_id == b.value:
+            keyboard.append([
+                {"text": "🔴 네, 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:all"},
+                {"text": "🔙 취소 (구독 유지)", "callback_data": "sub:cancel_unsub:all"},
+            ])
+            continue
+
+        if subs.get(b, False):
+            row = [{"text": "🟢 구독중 (해지)", "callback_data": f"sub:ask_unsub:{b.value}:all"}]
+        else:
+            row = [{"text": "➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:all"}]
+        deep_link = b.get_start_link()
+        if deep_link:
+            row.append({"text": f"{b.short_name} 이동 🔗", "url": deep_link})
+        keyboard.append(row)
+
+    keyboard.extend([
+        [
+            {"text": "📂 카테고리별 보기", "callback_data": "cat:home"},
+            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+        ],
+        [
+            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+        ],
+    ])
+    return "\n".join(lines), {"inline_keyboard": keyboard}
+
+
+def _context_return_buttons(bot_type: BotServiceType, context_str: str) -> list[dict[str, Any]]:
+    """Returns a 'back to where you came from' button for catalog/category contexts."""
+    if context_str == "all":
+        return [{"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"}]
+    if context_str.startswith("cat:"):
+        return [{"text": "📂 카테고리 보기", "callback_data": f"cat:view:{bot_type.category.value}"}]
+    return []
+
+
+def _onboarding_keyboard(bot_type: BotServiceType, context_str: str) -> dict[str, Any]:
+    """Deep link into the bot's chat room + subs/home (+ optional context return) buttons."""
+    keyboard = []
+    deep_link = bot_type.get_start_link()
+    if deep_link:
+        keyboard.append([{"text": f"🚀 {bot_type.short_name} 대화방 바로가기", "url": deep_link}])
+    keyboard.append([
+        {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+        {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+    ])
+    back_row = _context_return_buttons(bot_type, context_str)
+    if back_row:
+        keyboard.append(back_row)
+    return {"inline_keyboard": keyboard}
+
+
+def render_subscribe_onboarding_view(
+    bot_type: BotServiceType, context_str: str = "subs"
+) -> tuple[str, dict[str, Any]]:
+    """Renders subscription-complete card with a 1-tap deep link into the bot's chat room."""
+    text = (
+        f"🎉 <b>{html.escape(bot_type.title)} 구독 완료!</b>\n\n"
+        f"지금 바로 대화방으로 이동하여 알림을 시작해보세요."
+    )
+    return text, _onboarding_keyboard(bot_type, context_str)
+
+
+def build_swap_callback_data(old_bot: BotServiceType, new_bot: BotServiceType, context_str: str) -> str:
+    """Builds `sub:swap:<old>:<new>:<ctx>`, falling back to ctx `subs` if it would exceed 64 bytes."""
+    data = f"sub:swap:{old_bot.value}:{new_bot.value}:{context_str}"
+    if len(data.encode("utf-8")) > CALLBACK_DATA_MAX_BYTES:
+        data = f"sub:swap:{old_bot.value}:{new_bot.value}:subs"
+    return data
+
+
+def render_quota_swap_view(
+    bot_type: BotServiceType,
+    swappable_bots: list[BotServiceType],
+    reason: str,
+    context_str: str = "subs",
+) -> tuple[str, dict[str, Any]]:
+    """Renders over-quota notice with 1-click swap buttons for each currently active bot."""
+    text = html.escape(reason)
+    if swappable_bots:
+        text += (
+            f"\n\n🔄 <b>기존 구독을 [{html.escape(bot_type.short_name)}](으)로 바로 교체할 수 있습니다.</b>\n"
+            f"<i>교체할 봇을 선택해 주세요.</i>"
+        )
+    keyboard = [
+        [{
+            "text": f"🔄 {old_b.short_name} ➔ {bot_type.short_name} 교체",
+            "callback_data": build_swap_callback_data(old_b, bot_type, context_str),
+        }]
+        for old_b in swappable_bots
+    ]
+    keyboard.append([{"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"}])
+    keyboard.append([{"text": "🔙 돌아가기", "callback_data": "nav:subs"}])
+    return text, {"inline_keyboard": keyboard}
+
+
+def render_swap_result_view(
+    ok: bool, msg: str, new_bot: BotServiceType, context_str: str = "subs"
+) -> tuple[str, dict[str, Any]]:
+    """Renders swap success (with deep link onboarding) or the failure reason."""
+    if not ok:
+        text = f"⚠️ <b>구독 교체 실패</b>\n\n{html.escape(msg)}"
+        return text, {"inline_keyboard": [[{"text": "📋 내 구독 센터", "callback_data": "nav:subs"}]]}
+
+    text = (
+        f"🔄 <b>{html.escape(msg)}</b>\n\n"
+        f"지금 바로 대화방으로 이동하여 알림을 시작해보세요."
+    )
+    return text, _onboarding_keyboard(new_bot, context_str)
 
 
 def render_search_results_view(
@@ -680,6 +838,12 @@ def handle_callback_query(
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
+    if data in ("cat:all", "nav:catalog"):
+        subs = db.get_user_subscriptions(user_id)
+        text, markup = render_catalog_all_view(user, subs)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
     # Compatibility: menu:bot:<bot_id>
     if data.startswith("menu:bot:"):
         bot_raw = data.split(":", 2)[2]
@@ -716,8 +880,7 @@ def handle_callback_query(
             client.send_message(chat_id, msg, reply_markup=quota_markup)
             return
 
-        subs = db.get_user_subscriptions(user_id)
-        text, markup = render_category_view(bot_type.category, user, subs)
+        text, markup = render_subscribe_onboarding_view(bot_type, f"cat:{bot_type.category.value}")
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
@@ -879,6 +1042,8 @@ def handle_callback_query(
             query = context_str.split(":", 1)[1]
             matched = db.search_bots(query)
             text, markup = render_search_results_view(query, matched, user, subs, confirming_bot_id=bot_raw)
+        elif context_str == "all":
+            text, markup = render_catalog_all_view(user, subs, confirming_bot_id=bot_raw)
         else:
             text, markup = render_subscription_view(user, subs, confirming_bot_id=bot_raw)
 
@@ -901,6 +1066,8 @@ def handle_callback_query(
             query = context_str.split(":", 1)[1]
             matched = db.search_bots(query)
             text, markup = render_search_results_view(query, matched, user, subs)
+        elif context_str == "all":
+            text, markup = render_catalog_all_view(user, subs)
         else:
             text, markup = render_subscription_view(user, subs)
 
@@ -932,6 +1099,8 @@ def handle_callback_query(
             query = context_str.split(":", 1)[1]
             matched = db.search_bots(query)
             text, markup = render_search_results_view(query, matched, user, subs)
+        elif context_str == "all":
+            text, markup = render_catalog_all_view(user, subs)
         else:
             text, markup = render_subscription_view(user, subs)
 
@@ -951,32 +1120,31 @@ def handle_callback_query(
 
         ok, msg = db.subscribe(user_id, bot_type)
         if not ok:
-            # Over quota prompt with 1-click Upgrade / Manage buttons
-            quota_markup = {
-                "inline_keyboard": [
-                    [
-                        {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
-                        {"text": "📋 내 구독 관리", "callback_data": "nav:subs"},
-                    ]
-                ]
-            }
-            client.send_message(chat_id, msg, reply_markup=quota_markup)
+            # Over quota prompt with 1-click Swap / Upgrade / Back buttons
+            subs = db.get_user_subscriptions(user_id)
+            swappable_bots = [b for b in BotServiceType if subs.get(b, False) and b != bot_type]
+            text, markup = render_quota_swap_view(bot_type, swappable_bots, msg, context_str)
+            client.send_message(chat_id, text, reply_markup=markup)
             return
 
-        subs = db.get_user_subscriptions(user_id)
-        if context_str.startswith("cat:"):
-            cat_code = context_str.split(":", 1)[1]
-            try:
-                cat_enum = BotCategory(cat_code)
-            except ValueError:
-                cat_enum = bot_type.category
-            text, markup = render_category_view(cat_enum, user, subs)
-        elif context_str.startswith("search:"):
-            query = context_str.split(":", 1)[1]
-            matched = db.search_bots(query)
-            text, markup = render_search_results_view(query, matched, user, subs)
-        else:
-            text, markup = render_subscription_view(user, subs)
+        text, markup = render_subscribe_onboarding_view(bot_type, context_str)
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
 
+    # 8. 1-Click Atomic Swap (over-quota)
+    # Format: `sub:swap:<old_bot_id>:<new_bot_id>:<context>`
+    if data.startswith("sub:swap:"):
+        parts = data.split(":")
+        if len(parts) < 4:
+            return
+        context_str = ":".join(parts[4:]) if len(parts) > 4 else "subs"
+        try:
+            old_bot = BotServiceType(parts[2])
+            new_bot = BotServiceType(parts[3])
+        except ValueError:
+            return
+
+        ok, msg = db.atomic_swap_subscription(user_id, old_bot, new_bot)
+        text, markup = render_swap_result_view(ok, msg, new_bot, context_str)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return

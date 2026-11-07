@@ -4,6 +4,7 @@ Includes BotCategory for scalable 20-30 bot discovery and search keyword tags.
 """
 from __future__ import annotations
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -185,6 +186,13 @@ class BotServiceType(str, Enum):
         }
         raw = handles.get(self, "")
         return raw.strip().lstrip("@")
+
+    def get_start_link(self, payload: str = "portal") -> Optional[str]:
+        """Returns the t.me deep link for this bot, or None when the handle is not a valid Telegram username."""
+        handle = self.telegram_handle
+        if not re.match(r"^[a-zA-Z0-9_]{5,32}$", handle):
+            return None
+        return f"https://t.me/{handle}?start={payload}"
 
 
 @dataclass
