@@ -2197,6 +2197,50 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       searchDebounce = setTimeout(loadUsers, 200);
     }
 
+    function updateTierFilterCounts(counts) {
+      if (!counts) return;
+      const btnAll = document.querySelector('.filter-btn[data-tier=""]');
+      if (btnAll) btnAll.innerHTML = `전체 (${counts.ALL || 0})<span class="desktop-only"> 보기</span>`;
+      const btnWhite = document.querySelector('.filter-btn[data-tier="WHITE"]');
+      if (btnWhite) btnWhite.innerHTML = `⚪ 화이트 (${counts.WHITE || 0})<span class="desktop-only"> (1슬롯)</span>`;
+      const btnGreen = document.querySelector('.filter-btn[data-tier="GREEN"]');
+      if (btnGreen) btnGreen.innerHTML = `🟢 그린 (${counts.GREEN || 0})<span class="desktop-only"> (3슬롯)</span>`;
+      const btnRed = document.querySelector('.filter-btn[data-tier="RED"]');
+      if (btnRed) btnRed.innerHTML = `🔴 레드 (${counts.RED || 0})<span class="desktop-only"> (5슬롯)</span>`;
+      const btnBlack = document.querySelector('.filter-btn[data-tier="BLACK"]');
+      if (btnBlack) btnBlack.innerHTML = `⚫ 블랙 (${counts.BLACK || 0})<span class="desktop-only"> (무제한)</span>`;
+    }
+
+    async function handleBatchApproveClick(count) {
+      if (!confirm(`대기 중인 ${count}건의 등급 업그레이드 신청을 모두 승인하시겠습니까?\n(회원 등급이 즉시 갱신되며 각 회원에게 텔레그램 축하 알림이 발송됩니다)`)) {
+        return;
+      }
+      toast('⏳ 등급 업그레이드 일괄 승인 처리 중...');
+      try {
+        const res = await req('/api/platform/upgrade-requests/batch-approve', { method: 'POST' });
+        toast(`✅ 총 ${res.approved_count || 0}건 등업 일괄 승인 완료!`);
+        await loadUsers();
+      } catch (e) {
+        toast('❌ 일괄 승인 실패: ' + e.message);
+      }
+    }
+
+    async function dispatchBotToUser(userId, botId, botName, userName) {
+      if (!confirm(`[${userName}] 님에게 [${botName}] 최신 브리핑을 1:1로 즉시 개별 발송하시겠습니까?`)) {
+        return;
+      }
+      toast(`⏳ [${userName}] 님에게 [${botName}] 발송 중...`);
+      try {
+        await req(`/api/platform/users/${encodeURIComponent(userId)}/dispatch-bot`, {
+          method: 'POST',
+          body: { bot_id: botId }
+        });
+        toast(`✅ [${userName}] 님에게 [${botName}] 브리핑 발송 완료!`);
+      } catch (e) {
+        toast(`❌ 발송 실패: ` + e.message);
+      }
+    }
+
     function toggleUserAccordion(userId, forceOpen) {
       const item = document.querySelector(`[data-user-card-id="${userId}"]`);
       if (!item) return;
@@ -2253,6 +2297,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         S.bots = bRes.bots || [];
         S.upgradeRequests = reqRes.requests || [];
 
+        updateTierFilterCounts(uRes.tier_counts);
         renderUpgradeRequests(S.upgradeRequests);
 
         const container = document.getElementById('userAccordionContainer');
@@ -2277,8 +2322,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             : '';
 
           const botChips = (u.active_subscriptions || []).map(s => `
-            <span class="bot-chip">
-              ${esc(s.icon_emoji)} ${esc(s.bot_name)}
+            <span class="bot-chip" style="display:inline-flex; align-items:center; gap:4px;">
+              <span>${esc(s.icon_emoji)} ${esc(s.bot_name)}</span>
+              <button class="btn btn-sm" style="background:#2563eb; color:#fff; border:none; padding:1px 6px; font-size:10.5px; font-weight:700; border-radius:4px; margin-left:2px;" title="이 유저에게 최신 브리핑 즉시 1:1 발송" onclick="event.stopPropagation(); dispatchBotToUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}', '${esc(u.full_name)}')">🚀 발송</button>
               <span class="bot-chip-del" title="탈퇴 처리" onclick="event.stopPropagation(); unsubUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}')">✕</span>
             </span>
           `).join('');
@@ -2415,7 +2461,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                 <span style="font-weight:800; font-size:15px; color:#92400e;">등급 업그레이드 신청 대기</span>
                 <span class="pill" style="background:#f59e0b; color:#fff; font-size:11px; padding:2px 8px; font-weight:800;">${pending.length}건 대기</span>
               </div>
-              <span style="font-size:12px; color:#b45309;">👉 <b>[승인]</b> 클릭 시 등급이 즉시 변경되고 텔레그램으로 완료 축하 알림이 발송됩니다.</span>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <button class="btn btn-sm" style="background:#059669; color:#fff; border-color:#047857; font-weight:800; padding:5px 12px; border-radius:6px; font-size:12px; box-shadow:0 2px 6px rgba(5, 150, 105, 0.2);" onclick="handleBatchApproveClick(${pending.length})">⚡ ${pending.length}건 전체 일괄 승인</button>
+                <span style="font-size:12px; color:#b45309;">👉 클릭 시 등급 즉시 변경 및 축하 알림 발송</span>
+              </div>
             </div>
             <div style="display:flex; flex-direction:column; gap:8px;">
               ${pending.map(r => {

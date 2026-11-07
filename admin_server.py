@@ -36,6 +36,7 @@ from market_brief.briefing_scheduler import InternalBriefingScheduler
 from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
 from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
+from market_brief.briefing_service import generate_bot_briefing, send_bot_test_message
 from market_brief.subscription_engine import SubscriptionEngine
 
 try:

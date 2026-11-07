@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from fastapi.testclient import TestClient
 
+import os
+from unittest.mock import patch
 from admin_server import create_admin_app
 
 
@@ -445,6 +447,82 @@ class AdminApiTests(unittest.TestCase):
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "market_only_token", "YOLO_TELEGRAM_BOT_TOKEN": "", "YOLO_BOT_TOKEN": ""}, clear=False):
             ch = YoloTelegramChannel(token=None, dry_run=True)
             self.assertEqual(ch.token, "")
+
+
+    def test_tier_counts_in_users_api(self):
+        res = self.client.get("/api/platform/users")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("tier_counts", data)
+        counts = data["tier_counts"]
+        self.assertIn("ALL", counts)
+        self.assertIn("WHITE", counts)
+        self.assertIn("GREEN", counts)
+        self.assertIn("RED", counts)
+        self.assertIn("BLACK", counts)
+        self.assertEqual(counts["ALL"], len(data["users"]))
+
+    def test_batch_approve_upgrade_requests(self):
+        sub_engine = self.app.state.sub_engine
+        # 1. Create two users
+        sub_engine.upsert_user("batch_u1", "배치유저1", tier="WHITE")
+        sub_engine.upsert_user("batch_u2", "배치유저2", tier="WHITE")
+
+        # 2. Insert two pending requests
+        with sub_engine.db._connect() as conn:
+            conn.execute(
+                "INSERT INTO upgrade_requests (telegram_user_id, current_tier, requested_tier, status) VALUES (?, 'WHITE', 'GREEN', 'PENDING')",
+                ("batch_u1",)
+            )
+            conn.execute(
+                "INSERT INTO upgrade_requests (telegram_user_id, current_tier, requested_tier, status) VALUES (?, 'WHITE', 'RED', 'PENDING')",
+                ("batch_u2",)
+            )
+
+        # 3. Call batch approve
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            res = self.client.post(
+                "/api/platform/upgrade-requests/batch-approve",
+                headers={"X-Admin-Token": "secret_token_123"}
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertTrue(data.get("success"))
+            self.assertGreaterEqual(data.get("approved_count", 0), 2)
+
+            # Verify actual tier upgrades
+            p1 = sub_engine.get_user_profile("batch_u1")
+            p2 = sub_engine.get_user_profile("batch_u2")
+            self.assertEqual(p1["tier"], "GREEN")
+            self.assertEqual(p2["tier"], "RED")
+
+    def test_dispatch_bot_to_user_guard_and_success(self):
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user("disp_u1", "발송유저1", tier="WHITE")
+        # Subscribe to brief_bot
+        sub_engine.attempt_subscribe(telegram_user_id="disp_u1", bot_id="brief_bot", actor="ADMIN")
+
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            # Test 1: Subscribed bot dispatch
+            with patch("admin_server.send_bot_test_message", return_value={"success": True, "message_id": 12345}):
+                res = self.client.post(
+                    "/api/platform/users/disp_u1/dispatch-bot",
+                    json={"bot_id": "brief_bot"},
+                    headers={"X-Admin-Token": "secret_token_123"}
+                )
+                self.assertEqual(res.status_code, 200)
+                data = res.json()
+                self.assertTrue(data.get("success"))
+                self.assertEqual(data.get("bot_id"), "brief_bot")
+
+            # Test 2: Unsubscribed bot dispatch should fail with 400
+            res_fail = self.client.post(
+                "/api/platform/users/disp_u1/dispatch-bot",
+                json={"bot_id": "travel_bot"},
+                headers={"X-Admin-Token": "secret_token_123"}
+            )
+            self.assertEqual(res_fail.status_code, 400)
+            self.assertIn("구독하고 있지 않습니다", res_fail.json().get("detail", ""))
 
 
 if __name__ == "__main__":

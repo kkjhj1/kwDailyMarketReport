@@ -105,15 +105,15 @@ def render_main_menu(
     markup = {
         "inline_keyboard": [
             [
-                {"text": "📋 전체 봇 둘러보고 구독하기", "callback_data": "cat:all"},
+                {"text": "📋 전체 봇 둘러보기", "callback_data": "cat:all"},
             ],
             [
-                {"text": "⚙️ 내 구독 관리", "callback_data": "nav:subs"},
-                {"text": "💎 내 등급 혜택", "callback_data": "nav:tiers"},
+                {"text": "📋 구독 관리", "callback_data": "nav:subs"},
+                {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
             ],
             [
-                {"text": "💬 고객센터 / 문의", "callback_data": "support:home"},
-                {"text": "❓ 이용 도움말", "callback_data": "nav:help"},
+                {"text": "💬 고객센터", "callback_data": "support:home"},
+                {"text": "❓ 이용안내", "callback_data": "nav:help"},
             ],
         ]
     }
@@ -121,9 +121,12 @@ def render_main_menu(
 
 
 def render_subscription_view(
-    user: UserProfile, subs: dict[BotServiceType, bool], confirming_bot_id: Optional[str] = None
+    user: UserProfile,
+    subs: dict[BotServiceType, bool],
+    confirming_bot_id: Optional[str] = None,
+    confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Renders Subscription Dashboard with In-Place Unsubscribe Confirmation."""
+    """Renders Subscription Dashboard with In-Place Subscribe/Unsubscribe Confirmation."""
     name = html.escape(user.first_name or user.username or "회원")
     active_count = sum(1 for v in subs.values() if v)
     gauge_display = build_slot_gauge(active_count, user.tier)
@@ -134,7 +137,14 @@ def render_subscription_view(
         target_name = target_bot.short_name if target_bot else confirming_bot_id
         notice_part = (
             f"\n⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>\n"
-            f"<i>아래의 [🔴 해지 확정] 또는 [🔙 취소]를 선택해 주세요.</i>\n"
+            f"<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>\n"
+        )
+    elif confirming_sub_bot_id:
+        target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
+        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        notice_part = (
+            f"\n⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>\n"
+            f"<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>\n"
         )
 
     text = (
@@ -144,47 +154,42 @@ def render_subscription_view(
         f"📊 <b>구독 슬롯</b>: <b>{gauge_display}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
         f"{notice_part}\n"
-        f"💡 <i>버튼을 누르면 즉시 구독 신청되거나 해지 확인 단계가 진행됩니다.</i>"
+        f"💡 <i>버튼을 누르면 2단계 확인 후 구독 또는 해지가 진행됩니다.</i>"
     )
 
     keyboard = []
     for bot in BotServiceType:
         is_subbed = subs.get(bot, False)
+        deep_link_url = bot.get_start_link() or f"https://t.me/{bot.telegram_handle}?start=portal"
 
         if confirming_bot_id == bot.value:
-            # Expanded In-Place Confirmation Buttons
             keyboard.append([
-                {"text": f"⚠️ [{bot.short_name}] 해지 재확인", "callback_data": "noop"},
+                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{bot.value}:subs"},
+                {"text": "↩️ 취소", "callback_data": "sub:cancel_unsub:subs"},
             ])
+        elif confirming_sub_bot_id == bot.value:
             keyboard.append([
-                {"text": "🔴 네, 해지 확정", "callback_data": f"sub:do_unsub:{bot.value}:subs"},
-                {"text": "🔙 취소 (구독 유지)", "callback_data": f"sub:cancel_unsub:subs"},
+                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{bot.value}:subs"},
+                {"text": "↩️ 취소", "callback_data": "sub:cancel_sub:subs"},
             ])
         else:
-            deep_link_url = f"https://t.me/{bot.telegram_handle}?start=portal"
-            tok = f"bot_{bot.value.replace('_bot', '')}"
-            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-            move_btn = build_gate_button(tok, f"{bot.short_name} 이동 🔗")
             if is_subbed:
-                btn_text = f"🟢 구독중  │  {bot.icon} {bot.short_name}"
-                keyboard.append([
-                    {"text": btn_text, "callback_data": f"sub:ask_unsub:{bot.value}:subs"},
-                    move_btn,
-                ])
+                action_btn = {"text": f"🟢 {bot.short_name}", "callback_data": f"sub:ask_unsub:{bot.value}:subs"}
             else:
-                btn_text = f"⚪ 미구독  │  {bot.icon} {bot.short_name}"
-                keyboard.append([
-                    {"text": btn_text, "callback_data": f"sub:do_sub:{bot.value}:subs"},
-                    move_btn,
-                ])
+                action_btn = {"text": f"➕ {bot.short_name}", "callback_data": f"sub:ask_sub:{bot.value}:subs"}
+
+            keyboard.append([
+                action_btn,
+                {"text": "🚀 대화방", "url": deep_link_url},
+            ])
 
     keyboard.extend([
         [
-            {"text": "📂 카테고리 둘러보기", "callback_data": "cat:home"},
+            {"text": "📂 카테고리", "callback_data": "cat:home"},
             {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ])
 
@@ -196,8 +201,9 @@ def render_category_view(
     user: UserProfile,
     subs: dict[BotServiceType, bool],
     confirming_bot_id: Optional[str] = None,
+    confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Renders 3-item Compact Chip View for selected category with In-Place Unsubscribe Confirmation."""
+    """Renders 3-item Compact Chip View for selected category with In-Place Confirmation."""
     bots = [b for b in BotServiceType if b.category == category]
 
     lines = [
@@ -209,7 +215,12 @@ def render_category_view(
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
         target_name = target_bot.short_name if target_bot else confirming_bot_id
         lines.append(f"⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
-        lines.append(f"<i>아래 [🔴 해지 확정] 또는 [🔙 취소]를 터치하세요.</i>\n")
+        lines.append("<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
+    elif confirming_sub_bot_id:
+        target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
+        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        lines.append(f"⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>")
+        lines.append("<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
 
     if not bots:
         lines.append("<i>현재 준비 중인 카테고리입니다. 신규 봇이 곧 출시됩니다!</i>")
@@ -226,22 +237,27 @@ def render_category_view(
     keyboard = []
     for b in bots:
         is_sub = subs.get(b, False)
-        deep_link_url = f"https://t.me/{b.telegram_handle}?start=portal"
+        deep_link_url = b.get_start_link() or f"https://t.me/{b.telegram_handle}?start=portal"
 
         if confirming_bot_id == b.value:
             keyboard.append([
-                {"text": "🔴 네, 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:cat:{category.value}"},
-                {"text": "🔙 취소 (구독 유지)", "callback_data": f"sub:cancel_unsub:cat:{category.value}"},
+                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:cat:{category.value}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_unsub:cat:{category.value}"},
+            ])
+        elif confirming_sub_bot_id == b.value:
+            keyboard.append([
+                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{b.value}:cat:{category.value}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:cat:{category.value}"},
             ])
         else:
             if is_sub:
-                action_btn = {"text": f"🟢 구독중 (해지)", "callback_data": f"sub:ask_unsub:{b.value}:cat:{category.value}"}
+                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:cat:{category.value}"}
             else:
-                action_btn = {"text": f"➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:cat:{category.value}"}
+                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:cat:{category.value}"}
 
             tok = f"bot_{b.value.replace('_bot', '')}"
             GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-            move_btn = build_gate_button(tok, f"{b.short_name} 이동 🔗")
+            move_btn = build_gate_button(tok, "🚀 대화방")
 
             keyboard.append([
                 action_btn,
@@ -250,11 +266,11 @@ def render_category_view(
 
     keyboard.extend([
         [
-            {"text": "📂 다른 카테고리", "callback_data": "cat:home"},
-            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+            {"text": "📂 카테고리", "callback_data": "cat:home"},
+            {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ])
 
@@ -275,18 +291,18 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
     )
     keyboard = [
         [
-            {"text": "💰 금융 / 재테크", "callback_data": "cat:view:FINANCE"},
-            {"text": "🎓 교육 / 입시", "callback_data": "cat:view:EDU"},
+            {"text": "💰 금융/재테크", "callback_data": "cat:view:FINANCE"},
+            {"text": "🎓 교육/입시", "callback_data": "cat:view:EDU"},
         ],
         [
-            {"text": "✈️ 라이프 / 여가", "callback_data": "cat:view:LIFE"},
-            {"text": "💼 업무 / 생산성", "callback_data": "cat:view:BIZ"},
+            {"text": "✈️ 라이프/여가", "callback_data": "cat:view:LIFE"},
+            {"text": "💼 업무/생산성", "callback_data": "cat:view:BIZ"},
         ],
         [
-            {"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"},
+            {"text": "📋 전체 봇 둘러보기", "callback_data": "cat:all"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -308,8 +324,9 @@ def render_catalog_all_view(
     user: UserProfile,
     subs: dict[BotServiceType, bool],
     confirming_bot_id: Optional[str] = None,
+    confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Renders all 6 bots on one screen with subscription badges and 1-tap subscribe/manage buttons."""
+    """Renders all 6 bots on one screen with subscription badges and 2-step confirmation buttons."""
     active_count = sum(1 for v in subs.values() if v)
     lines = [
         "📋 <b>6개 봇 한눈에 보기</b>",
@@ -321,7 +338,12 @@ def render_catalog_all_view(
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
         target_name = html.escape(target_bot.short_name if target_bot else confirming_bot_id)
         lines.append(f"\n⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
-        lines.append("<i>아래 [🔴 해지 확정] 또는 [🔙 취소]를 터치하세요.</i>")
+        lines.append("<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 터치하세요.</i>")
+    elif confirming_sub_bot_id:
+        target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_sub_bot_id)
+        lines.append(f"\n⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>")
+        lines.append("<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 터치하세요.</i>")
 
     lines.append("")
     for i, b in enumerate(CATALOG_ALL_ORDER, 1):
@@ -334,27 +356,33 @@ def render_catalog_all_view(
     for b in CATALOG_ALL_ORDER:
         if confirming_bot_id == b.value:
             keyboard.append([
-                {"text": "🔴 네, 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:all"},
-                {"text": "🔙 취소 (구독 유지)", "callback_data": "sub:cancel_unsub:all"},
+                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:all"},
+                {"text": "↩️ 취소", "callback_data": "sub:cancel_unsub:all"},
+            ])
+            continue
+        elif confirming_sub_bot_id == b.value:
+            keyboard.append([
+                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{b.value}:all"},
+                {"text": "↩️ 취소", "callback_data": "sub:cancel_sub:all"},
             ])
             continue
 
         if subs.get(b, False):
-            row = [{"text": "🟢 구독중 (해지)", "callback_data": f"sub:ask_unsub:{b.value}:all"}]
+            row = [{"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:all"}]
         else:
-            row = [{"text": "➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:all"}]
+            row = [{"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:all"}]
         deep_link = b.get_start_link()
         if deep_link:
-            row.append({"text": f"{b.short_name} 이동 🔗", "url": deep_link})
+            row.append({"text": "🚀 대화방", "url": deep_link})
         keyboard.append(row)
 
     keyboard.extend([
         [
-            {"text": "📂 카테고리별 보기", "callback_data": "cat:home"},
-            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+            {"text": "📂 카테고리", "callback_data": "cat:home"},
+            {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ])
     return "\n".join(lines), {"inline_keyboard": keyboard}
@@ -363,9 +391,9 @@ def render_catalog_all_view(
 def _context_return_buttons(bot_type: BotServiceType, context_str: str) -> list[dict[str, Any]]:
     """Returns a 'back to where you came from' button for catalog/category contexts."""
     if context_str == "all":
-        return [{"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"}]
+        return [{"text": "📋 6대 봇 목록", "callback_data": "cat:all"}]
     if context_str.startswith("cat:"):
-        return [{"text": "📂 카테고리 보기", "callback_data": f"cat:view:{bot_type.category.value}"}]
+        return [{"text": "📂 카테고리", "callback_data": f"cat:view:{bot_type.category.value}"}]
     return []
 
 
@@ -376,8 +404,8 @@ def _onboarding_keyboard(bot_type: BotServiceType, context_str: str) -> dict[str
     if deep_link:
         keyboard.append([{"text": f"🚀 {bot_type.short_name} 대화방 바로가기", "url": deep_link}])
     keyboard.append([
-        {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
-        {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+        {"text": "📋 구독 관리", "callback_data": "nav:subs"},
+        {"text": "🏠 홈으로", "callback_data": "nav:main"},
     ])
     back_row = _context_return_buttons(bot_type, context_str)
     if back_row:

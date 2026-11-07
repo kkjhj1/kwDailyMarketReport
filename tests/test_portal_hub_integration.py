@@ -660,7 +660,7 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertEqual(text.count("[⚪ 미구독]"), 5)
         cbs = [b.get("callback_data") for b in _all_buttons(markup) if "callback_data" in b]
         self.assertIn("sub:ask_unsub:travel_bot:all", cbs)
-        self.assertIn("sub:do_sub:brief_bot:all", cbs)
+        self.assertIn("sub:ask_sub:brief_bot:all", cbs)
         for nav in ("cat:home", "nav:subs", "nav:main"):
             self.assertIn(nav, cbs)
         self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 6)
