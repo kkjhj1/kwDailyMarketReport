@@ -832,7 +832,10 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
-                kb = [[{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}]]
+                kb = [
+                    [{"text": "👵 실버케어 복지 상세 메뉴 열기", "callback_data": "SC:m"}],
+                    [{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}],
+                ]
             except Exception as exc:
                 logger.warning("silver_bot onboarding preview fallback: %s", exc)
                 content_html = (
@@ -840,7 +843,10 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                     "선택하신 부모님 세대 유형에 맞춘 동사무소·보건소 복지 혜택 및 효도 안부 가이드입니다."
                 )
-                kb = [[{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}]]
+                kb = [
+                    [{"text": "👵 실버케어 복지 상세 메뉴 열기", "callback_data": "SC:m"}],
+                    [{"text": "🔄 부모님 세대 유형 다시 선택하기", "callback_data": "info:retarget:silver_bot"}],
+                ]
 
         # Case 5: Target-Selection Bot — Kids Compass Bot (자녀·키즈 나침반)
         elif bot.bot_id == "kids_bot":
@@ -876,7 +882,16 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
-                kb = [[{"text": "🔄 자녀 연령대 다시 선택하기", "callback_data": "info:retarget:kids_bot"}]]
+                kb = [
+                    [
+                        {"text": "🌡️ 해열제 계산기", "callback_data": "k:fv:m"},
+                        {"text": "🏥 야간 소아과", "callback_data": "k:hp:m"},
+                    ],
+                    [
+                        {"text": "🍼 키즈 전체 메뉴", "callback_data": "k:home"},
+                        {"text": "🔄 연령대 다시 선택", "callback_data": "info:retarget:kids_bot"},
+                    ],
+                ]
             except Exception as exc:
                 logger.warning("kids_bot onboarding preview fallback: %s", exc)
                 content_html = (
@@ -884,7 +899,10 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                     "선택하신 자녀 연령대에 맞춘 이번 주말 나들이 추천 및 예약 오픈 D-Day 안내입니다."
                 )
-                kb = [[{"text": "🔄 자녀 연령대 다시 선택하기", "callback_data": "info:retarget:kids_bot"}]]
+                kb = [
+                    [{"text": "🍼 키즈 전체 메뉴", "callback_data": "k:home"}],
+                    [{"text": "🔄 자녀 연령대 다시 선택하기", "callback_data": "info:retarget:kids_bot"}],
+                ]
 
         # Case 6: Target-Selection Bot — YOLO Bot (욜로 1인 라이프)
         elif bot.bot_id == "yolo_bot":
@@ -917,7 +935,13 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
-                kb = [[{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}]]
+                kb = [
+                    [
+                        {"text": "☔ 비올 때 실내 대안", "callback_data": "yolo:view:rain"},
+                        {"text": "⚙️ 욜로 상세 설정", "callback_data": "yolo:menu"},
+                    ],
+                    [{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}],
+                ]
             except Exception as exc:
                 logger.warning("yolo_bot onboarding preview fallback: %s", exc)
                 content_html = (
@@ -925,7 +949,10 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                     "선택하신 1인 라이프 성향에 맞춘 이번 주 솔로 인증 액티비티·전시·미식 큐레이션입니다."
                 )
-                kb = [[{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}]]
+                kb = [
+                    [{"text": "⚙️ 욜로 상세 설정", "callback_data": "yolo:menu"}],
+                    [{"text": "🔄 1인 라이프 성향 다시 선택하기", "callback_data": "info:retarget:yolo_bot"}],
+                ]
 
         # Case 7: Other Info Bots
         else:
@@ -1287,6 +1314,7 @@ class DynamicBotManager:
             from portal_hub import PortalDatabase, TelegramPortalClient, handle_callback_query
             from portal_hub.interactive import (
                 USER_STATES,
+                send_admin_new_user_alert,
                 render_main_menu,
                 render_subscription_view,
                 render_category_home_view,
@@ -1328,6 +1356,8 @@ class DynamicBotManager:
                 username=user_info.get("username"),
                 first_name=user_info.get("first_name"),
             )
+            if getattr(user, "is_new", False) is True:
+                send_admin_new_user_alert(portal_client, user)
 
             action = match_menu_action(text)
             is_menu_action = action is not None
@@ -1475,6 +1505,144 @@ class DynamicBotManager:
         adm_bot.handle_update(item)
         return True, "admission_callback_handled"
 
+    def _dispatch_silver_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
+        """Dispatches domain-specific SilverCare callbacks (`SC:`) and commands to SilverCareInteractiveBot."""
+        try:
+            from pathlib import Path
+            from silver_care.channels.telegram import SilverTelegramChannel
+            from silver_care.fixtures.seed_benefits import SEED_BENEFITS
+            from silver_care.interactive import SilverCareInteractiveBot
+            from silver_care.storage.db import SilverCareDatabase
+        except ImportError:
+            return False, "silver_interactive_not_available"
+
+        base_path = getattr(self.engine.db, "db_path", None)
+        sc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("silver_care.sqlite3"))
+        sc_db = SilverCareDatabase(sc_db_path)
+        try:
+            if sc_db.count_benefits() == 0:
+                sc_db.upsert_benefits(SEED_BENEFITS)
+
+            if "callback_query" in item:
+                cq = item["callback_query"]
+                cb_data = str(cq.get("data") or "")
+                if cb_data.startswith("SC:"):
+                    sc_channel = SilverTelegramChannel(bot_token=bot_token, opener=opener)
+                    sc_bot = SilverCareInteractiveBot(channel=sc_channel, db=sc_db)
+                    sc_bot.handle_update(item)
+                    return True, "silver_callback_handled"
+                return False, "not_silver_domain_callback"
+
+            if "message" in item:
+                msg = item["message"]
+                text = (msg.get("text") or "").strip()
+                chat_id_raw = (msg.get("chat") or {}).get("id")
+                cmd = text.split()[0].lower().split("@")[0] if text else ""
+                draft = sc_db.get_draft(int(chat_id_raw)) if str(chat_id_raw or "").lstrip("-").isdigit() else {}
+                if cmd in ("/parents", "/bookmarks", "/help") or (draft.get("step") == "sigungu" and text and not text.startswith("/")):
+                    sc_channel = SilverTelegramChannel(bot_token=bot_token, opener=opener)
+                    sc_bot = SilverCareInteractiveBot(channel=sc_channel, db=sc_db)
+                    sc_bot.handle_update(item)
+                    return True, "silver_message_handled"
+            return False, "not_silver_interactive_event"
+        finally:
+            if sc_db_path != ":memory:":
+                sc_db.close()
+
+    def _dispatch_kids_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
+        """Dispatches domain-specific Kids Compass callbacks (`k:`) and commands to KidsCompassInteractiveBot."""
+        try:
+            from pathlib import Path
+            from kids_compass.channels.telegram import KidsTelegramChannel
+            from kids_compass.collector import seed_all
+            from kids_compass.interactive_bot import KidsCompassInteractiveBot
+            from kids_compass.storage.db import KidsCompassDatabase
+        except ImportError:
+            return False, "kids_interactive_not_available"
+
+        base_path = getattr(self.engine.db, "db_path", None)
+        kc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("kids_compass.sqlite3"))
+        kc_db = KidsCompassDatabase(kc_db_path)
+        try:
+            seed_all(kc_db)
+            if "callback_query" in item:
+                cq = item["callback_query"]
+                cb_data = str(cq.get("data") or "")
+                if cb_data.startswith("k:"):
+                    kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
+                    kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)
+                    kc_bot.handle_update(item)
+                    return True, "kids_callback_handled"
+                return False, "not_kids_domain_callback"
+
+            if "message" in item:
+                msg = item["message"]
+                text = (msg.get("text") or "").strip()
+                cmd = text.split()[0].lower().split("@")[0] if text else ""
+                if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help"):
+                    kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
+                    kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)
+                    kc_bot.handle_update(item)
+                    return True, "kids_message_handled"
+            return False, "not_kids_interactive_event"
+        finally:
+            if kc_db_path != ":memory:":
+                kc_db.close()
+
+    def _dispatch_yolo_bot_update(self, bot_token: str, item: dict[str, Any]) -> tuple[bool, str]:
+        """Dispatches domain-specific YOLO Bot callbacks (`yolo:`) and commands to YoloInteractiveBot."""
+        try:
+            from pathlib import Path
+            from yolo_brief.channels.telegram import YoloTelegramChannel
+            from yolo_brief.fixtures.seed_curations import SEED_CURATIONS
+            from yolo_brief.interactive import YoloInteractiveBot
+            from yolo_brief.models import SoloArchetype
+            from yolo_brief.storage.db import YoloDatabase
+        except ImportError:
+            return False, "yolo_interactive_not_available"
+
+        base_path = getattr(self.engine.db, "db_path", None)
+        yolo_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("yolo_brief.sqlite3"))
+        yolo_db = YoloDatabase(yolo_db_path)
+        try:
+            yolo_db.seed_curations(SEED_CURATIONS)
+            if "callback_query" in item:
+                cq = item["callback_query"]
+                cb_data = str(cq.get("data") or "")
+                if cb_data.startswith("yolo:"):
+                    sender = cq.get("from", {}) or {}
+                    msg = cq.get("message", {}) or {}
+                    chat = msg.get("chat", {}) or sender
+                    chat_id = str(chat.get("id") or sender.get("id") or "")
+                    if chat_id:
+                        sel_arc = self.router._selected_targets.get((chat_id, "yolo_bot"))
+                        if sel_arc and sel_arc != "ALL":
+                            try:
+                                yolo_db.set_user_archetype(chat_id, SoloArchetype(sel_arc))
+                            except ValueError:
+                                pass
+                        elif yolo_db.get_user(chat_id) is None or yolo_db.get_user(chat_id).archetype is None:
+                            yolo_db.set_user_archetype(chat_id, SoloArchetype.URBAN_HIPSTER)
+                    yolo_channel = YoloTelegramChannel(token=bot_token)
+                    yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
+                    yolo_bot.handle_update(item)
+                    return True, "yolo_callback_handled"
+                return False, "not_yolo_domain_callback"
+
+            if "message" in item:
+                msg = item["message"]
+                text = (msg.get("text") or "").strip()
+                cmd = text.split()[0].lower().split("@")[0] if text else ""
+                if cmd in ("/weekend", "/yolo", "/help"):
+                    yolo_channel = YoloTelegramChannel(token=bot_token)
+                    yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
+                    yolo_bot.handle_update(item)
+                    return True, "yolo_message_handled"
+            return False, "not_yolo_interactive_event"
+        finally:
+            if yolo_db_path != ":memory:":
+                yolo_db.close()
+
     def sync_bot_updates_once(self, bot_id: str, opener=None, timeout: int = 1) -> dict[str, Any]:
         """Synchronously fetches pending Telegram updates for `bot_id`, routes them, and replies."""
         bot = self.engine.get_bot(bot_id)
@@ -1523,6 +1691,27 @@ class DynamicBotManager:
                 if handled:
                     processed += 1
                     events.append({"user_id": "admission", "type": "admission_integrated", "code": reason})
+                    continue
+
+            if bot.bot_id == "silver_bot":
+                handled, reason = self._dispatch_silver_bot_update(bot.token, item, opener=opener)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "silver", "type": "silver_integrated", "code": reason})
+                    continue
+
+            if bot.bot_id == "kids_bot":
+                handled, reason = self._dispatch_kids_bot_update(bot.token, item, opener=opener)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "kids", "type": "kids_integrated", "code": reason})
+                    continue
+
+            if bot.bot_id == "yolo_bot":
+                handled, reason = self._dispatch_yolo_bot_update(bot.token, item)
+                if handled:
+                    processed += 1
+                    events.append({"user_id": "yolo", "type": "yolo_integrated", "code": reason})
                     continue
 
             if "callback_query" in item:

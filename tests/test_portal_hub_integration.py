@@ -2,12 +2,13 @@
 Verifies complete subscription connection across alerts.sqlite3, brief_bot, travel_bot, and admission_bot.
 """
 import gc
+import os
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -25,6 +26,8 @@ from portal_hub.interactive import (
     render_search_results_view,
     render_subscription_view,
     render_tier_benefits_view,
+    send_admin_new_user_alert,
+    send_admin_tier_upgrade_alert,
 )
 from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
 from portal_hub.telegram import TelegramPortalClient
@@ -291,6 +294,133 @@ class PortalHubSubscriptionIntegrationTests(unittest.TestCase):
             cnt = cur.fetchone()["cnt"]
             self.assertEqual(cnt, 3)
             self.assertGreaterEqual(cnt, user.tier.max_slots, "Slot quota strictly reached")
+
+
+ADMIN_CHAT = "999000"
+ADMIN_ENV = {"PORTAL_ADMIN_CHAT_ID": ADMIN_CHAT, "ADMIN_CONSOLE_URL": "http://admin.test:8002/"}
+
+
+class PortalHubAdminAlertTests(unittest.TestCase):
+    """Real-time admin alerts: new signup (one-shot) and tier upgrade requests (DUPLICATE suppressed)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_alerts.sqlite3"
+        self.mb_db = MarketBriefDatabase(db_path=str(self.db_path))
+        self.portal_db = PortalDatabase(self.db_path)
+        self.mock_client = MagicMock(spec=TelegramPortalClient)
+        self.env_patch = patch.dict(os.environ, ADMIN_ENV)
+        self.env_patch.start()
+
+    def tearDown(self):
+        self.env_patch.stop()
+        del self.mb_db
+        del self.portal_db
+        gc.collect()
+        try:
+            self.tmp_dir.cleanup()
+        except PermissionError:
+            pass
+
+    def _admin_sends(self) -> list:
+        return [c for c in self.mock_client.send_message.call_args_list if str(c.args[0]) == ADMIN_CHAT]
+
+    def _click(self, uid: int, data: str) -> None:
+        cq = {
+            "id": f"cq_{data}",
+            "from": {"id": uid, "first_name": "<b>해커</b>", "username": "new_user"},
+            "message": {"message_id": 10, "chat": {"id": uid}},
+            "data": data,
+        }
+        handle_callback_query(cq, self.portal_db, self.mock_client)
+
+    def test_new_user_flag_and_single_admin_alert(self):
+        uid = 70001
+        self._click(uid, "nav:main")
+        sends = self._admin_sends()
+        self.assertEqual(len(sends), 1)
+        text = sends[0].args[1]
+        self.assertIn("신규 회원 가입 알림", text)
+        self.assertIn("&lt;b&gt;해커&lt;/b&gt;", text)
+        self.assertNotIn("<b>해커</b>", text)
+        self.assertIn(str(uid), text)
+        self.assertLessEqual(len(text), 3500)
+
+        # Re-entry by the same user: no longer new, no additional alert
+        self.mock_client.reset_mock()
+        user = self.portal_db.get_or_create_user(uid, uid)
+        self.assertFalse(user.is_new)
+        self._click(uid, "nav:main")
+        self.assertEqual(len(self._admin_sends()), 0)
+
+    def test_get_or_create_user_is_new_flag(self):
+        first = self.portal_db.get_or_create_user(70002, 70002, first_name="첫방문")
+        second = self.portal_db.get_or_create_user(70002, 70002, first_name="첫방문")
+        self.assertTrue(first.is_new)
+        self.assertFalse(second.is_new)
+        self.assertFalse(UserProfile(user_id=1, chat_id=1).is_new)
+
+    def test_request_tier_upgrade_status_codes(self):
+        uid = 70003
+        self.portal_db.get_or_create_user(uid, uid)
+        req_id, s1 = self.portal_db.request_tier_upgrade(uid, "GREEN")
+        req_id2, s2 = self.portal_db.request_tier_upgrade(uid, "GREEN")
+        req_id3, s3 = self.portal_db.request_tier_upgrade(uid, "RED")
+        self.assertEqual((s1, s2, s3), ("CREATED", "DUPLICATE", "CHANGED"))
+        self.assertEqual(req_id, req_id2)
+        self.assertEqual(req_id, req_id3)
+        # Legacy `is_updated` truthiness preserved
+        self.assertFalse(s1)
+        self.assertTrue(s3)
+
+    def test_upgrade_alerts_created_duplicate_changed(self):
+        uid = 70004
+        self.portal_db.get_or_create_user(uid, uid)  # pre-register so signup alert is out of scope
+
+        self._click(uid, "support:req_tier:GREEN")
+        sends = self._admin_sends()
+        self.assertEqual(len(sends), 1)
+        self.assertIn("회원 등업 신청 접수", sends[0].args[1])
+        markup = sends[0].kwargs["reply_markup"]
+        self.assertEqual(markup["inline_keyboard"][0][0]["url"], "http://admin.test:8002/")
+
+        self.mock_client.reset_mock()
+        self._click(uid, "support:req_tier:GREEN")
+        self.assertEqual(len(self._admin_sends()), 0)
+        user_text = self.mock_client.edit_message_text.call_args.args[2]
+        self.assertIn("이미 신청이 접수되어 운영팀 심사 대기 중입니다", user_text)
+
+        self.mock_client.reset_mock()
+        self._click(uid, "support:req_tier:RED")
+        sends = self._admin_sends()
+        self.assertEqual(len(sends), 1)
+        self.assertIn("회원 등업 신청 변경", sends[0].args[1])
+
+        pending = self.portal_db.get_pending_upgrade_requests()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["requested_tier"], "RED")
+
+    def test_admin_alert_network_failure_is_fail_open(self):
+        uid = 70005
+
+        def flaky_send(chat_id, text, reply_markup=None, **kwargs):
+            if str(chat_id) == ADMIN_CHAT:
+                raise RuntimeError("Telegram API sendMessage failed: timeout")
+            return {"ok": True}
+
+        self.mock_client.send_message.side_effect = flaky_send
+        # New user + upgrade request both hit the failing admin channel without breaking the user flow
+        self._click(uid, "support:req_tier:GREEN")
+        self.mock_client.edit_message_text.assert_called_once()
+        self.assertIn("등급 업그레이드 신청 완료", self.mock_client.edit_message_text.call_args.args[2])
+        self.assertEqual(len(self.portal_db.get_pending_upgrade_requests()), 1)
+
+    def test_no_admin_chat_configured_skips_alerts(self):
+        with patch.dict(os.environ, {}, clear=True):
+            user = UserProfile(user_id=1, chat_id=1, first_name="x", is_new=True)
+            self.assertFalse(send_admin_new_user_alert(self.mock_client, user))
+            self.assertFalse(send_admin_tier_upgrade_alert(self.mock_client, user, "GREEN", "CREATED"))
+        self.mock_client.send_message.assert_not_called()
 
 
 if __name__ == "__main__":

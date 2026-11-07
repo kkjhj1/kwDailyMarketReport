@@ -198,3 +198,5 @@ class UserProfile:
     status: str = "ACTIVE"
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     updated_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # True only on the call that INSERTed this user (drives one-shot admin signup alert)
+    is_new: bool = False

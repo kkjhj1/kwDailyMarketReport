@@ -13,6 +13,22 @@ from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "alerts.sqlite3"
 
 
+class UpgradeRequestStatus(str):
+    """Status code returned by request_tier_upgrade: CREATED / CHANGED / DUPLICATE.
+
+    Compares equal to its plain string code. bool() keeps the legacy `is_updated`
+    meaning (True when an existing PENDING request was found) so callers that still
+    unpack `(req_id, is_updated)` keep working.
+    """
+
+    CREATED = "CREATED"
+    CHANGED = "CHANGED"
+    DUPLICATE = "DUPLICATE"
+
+    def __bool__(self) -> bool:
+        return str(self) != self.CREATED
+
+
 class PortalDatabase:
     """Thread-safe SQLite database adapter for alerts.sqlite3."""
 
@@ -177,6 +193,7 @@ class PortalDatabase:
                 first_name=name_to_use,
                 tier=UserTier.WHITE,
                 status="ACTIVE",
+                is_new=True,
             )
 
     def set_user_tier(self, user_id: int, tier: UserTier) -> bool:
@@ -407,8 +424,12 @@ class PortalDatabase:
 
     def request_tier_upgrade(
         self, user_id: int, requested_tier: str, memo: str = ""
-    ) -> tuple[int, bool]:
-        """Records an upgrade request from a user. Validates tier, updates existing pending request or creates new."""
+    ) -> tuple[int, UpgradeRequestStatus]:
+        """Records an upgrade request from a user. Validates tier, updates existing pending request or creates new.
+
+        Returns (req_id, status): CREATED (new PENDING row), CHANGED (pending row's
+        requested tier changed) or DUPLICATE (same tier re-requested; row untouched).
+        """
         uid_str = str(user_id).strip()
         req_t = requested_tier.strip().upper()
         allowed_tiers = {"GREEN", "RED", "BLACK"}
@@ -428,12 +449,14 @@ class PortalDatabase:
                 raise ValueError(f"현재 등급({curr_tier}) 이상의 등급으로만 신청 가능합니다.")
 
             cur.execute(
-                "SELECT id FROM upgrade_requests WHERE telegram_user_id = ? AND status = 'PENDING'",
+                "SELECT id, requested_tier FROM upgrade_requests WHERE telegram_user_id = ? AND status = 'PENDING'",
                 (uid_str,),
             )
             existing = cur.fetchone()
             if existing:
                 req_id = int(existing["id"])
+                if str(existing["requested_tier"] or "").strip().upper() == req_t:
+                    return req_id, UpgradeRequestStatus(UpgradeRequestStatus.DUPLICATE)
                 cur.execute(
                     """UPDATE upgrade_requests
                        SET requested_tier = ?, current_tier = ?, requested_at = ?, memo = ?
@@ -441,7 +464,7 @@ class PortalDatabase:
                     (req_t, curr_tier, now_str, memo, req_id),
                 )
                 conn.commit()
-                return req_id, True
+                return req_id, UpgradeRequestStatus(UpgradeRequestStatus.CHANGED)
             else:
                 cur.execute(
                     """INSERT INTO upgrade_requests
@@ -451,7 +474,7 @@ class PortalDatabase:
                 )
                 req_id = int(cur.lastrowid)
                 conn.commit()
-                return req_id, False
+                return req_id, UpgradeRequestStatus(UpgradeRequestStatus.CREATED)
 
     def get_pending_upgrade_requests(self) -> list[dict[str, Any]]:
         """Returns all pending upgrade requests with user details."""

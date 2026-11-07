@@ -10,6 +10,7 @@ from datetime import datetime
 import html
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from portal_hub.db import PortalDatabase
@@ -484,6 +485,103 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
 
 
 # ============================================================
+# Real-time Admin Alerts (New Signup / Tier Upgrade Request) — Fail-Open
+# ============================================================
+
+ADMIN_ALERT_MAX_VISIBLE = 1800
+ADMIN_ALERT_MAX_HTML = 3500
+
+
+def _get_admin_chat_id() -> str:
+    """Resolves admin alert chat: PORTAL_ADMIN_CHAT_ID -> PORTAL_TELEGRAM_CHAT_ID -> TELEGRAM_CHAT_ID."""
+    for key in ("PORTAL_ADMIN_CHAT_ID", "PORTAL_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _get_admin_console_url() -> str:
+    return os.environ.get("ADMIN_CONSOLE_URL", "http://161.33.196.211:8002/").strip()
+
+
+def _admin_user_labels(user: UserProfile) -> tuple[str, str]:
+    """Returns (escaped name, escaped @handle) truncated to keep alerts within [TG-01]."""
+    name = html.escape((user.first_name or user.username or "회원")[:40])
+    handle = html.escape(f"@{user.username[:40]}") if user.username else "핸들 없음"
+    return name, handle
+
+
+def _within_tg_limits(text: str) -> bool:
+    visible = re.sub(r"<[^>]+>", "", text)
+    return len(visible) <= ADMIN_ALERT_MAX_VISIBLE and len(text) <= ADMIN_ALERT_MAX_HTML
+
+
+def send_admin_new_user_alert(
+    client: TelegramPortalClient, user: UserProfile, source: str = "🧭 통합 안내 메뉴봇"
+) -> bool:
+    """Notifies the admin chat of a first-time signup. Never raises (Fail-Open)."""
+    admin_chat = _get_admin_chat_id()
+    if not admin_chat:
+        return False
+    try:
+        name, handle = _admin_user_labels(user)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = (
+            f"👋 <b>[신규 회원 가입 알림]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 회원명: <b>{name}</b> ({handle})\n"
+            f"• 유저 ID: <code>{html.escape(str(user.user_id))}</code>\n"
+            f"• 기본 등급: {html.escape(user.tier.badge)}\n"
+            f"• 유입 채널: {html.escape(source[:60])}\n"
+            f"• 가입 일시: <code>{now_str}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        if not _within_tg_limits(text):
+            logger.warning("New-user admin alert exceeds TG limits for %s; skipped", user.user_id)
+            return False
+        client.send_message(admin_chat, text)
+        return True
+    except Exception as err:
+        logger.warning("Failed to send new-user admin alert for %s: %s", user.user_id, err)
+        return False
+
+
+def send_admin_tier_upgrade_alert(
+    client: TelegramPortalClient, user: UserProfile, requested_tier: str, status_code: str
+) -> bool:
+    """Notifies the admin chat of a CREATED/CHANGED upgrade request. DUPLICATE is suppressed. Never raises."""
+    if status_code not in ("CREATED", "CHANGED"):
+        return False
+    admin_chat = _get_admin_chat_id()
+    if not admin_chat:
+        return False
+    try:
+        name, handle = _admin_user_labels(user)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = "💎 [회원 등업 신청 접수]" if status_code == "CREATED" else "🔄 [회원 등업 신청 변경]"
+        text = (
+            f"<b>{title}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 신청자: <b>{name}</b> ({handle})\n"
+            f"• 유저 ID: <code>{html.escape(str(user.user_id))}</code>\n"
+            f"• 현재 등급: {html.escape(user.tier.badge)}\n"
+            f"• 희망 등급: <b>{html.escape(str(requested_tier)[:20])}</b>\n"
+            f"• 접수 시각: <code>{now_str}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        if not _within_tg_limits(text):
+            logger.warning("Upgrade admin alert exceeds TG limits for %s; skipped", user.user_id)
+            return False
+        markup = {"inline_keyboard": [[{"text": "🌐 관리자 콘솔 바로가기", "url": _get_admin_console_url()}]]}
+        client.send_message(admin_chat, text, reply_markup=markup)
+        return True
+    except Exception as err:
+        logger.warning("Failed to send upgrade admin alert for %s: %s", user.user_id, err)
+        return False
+
+
+# ============================================================
 # Callback Query Router (Instant Spinner Stop + In-Place Safety)
 # ============================================================
 
@@ -540,6 +638,8 @@ def handle_callback_query(
         username=from_user.get("username"),
         first_name=from_user.get("first_name"),
     )
+    if getattr(user, "is_new", False) is True:
+        send_admin_new_user_alert(client, user)
 
     # 2. Main Navigation (with full backwards compatibility for menu:home, menu:my_subs, menu:tiers)
     if data in ("nav:main", "menu:home", "home"):
@@ -675,7 +775,7 @@ def handle_callback_query(
 
         # 1. Store upgrade request in alerts.sqlite3 database (viewed and approved in Admin Web Console)
         try:
-            req_id, is_updated = db.request_tier_upgrade(user_id, req_tier)
+            req_id, status_code = db.request_tier_upgrade(user_id, req_tier)
         except ValueError as ve:
             client.answer_callback_query(cq_id, str(ve), show_alert=True)
             return
@@ -684,16 +784,25 @@ def handle_callback_query(
             client.answer_callback_query(cq_id, "신청 처리 중 오류가 발생했습니다.", show_alert=True)
             return
 
-        # 2. Reply to user with clean in-place success notice (No admin spam sent to chat)
-        done_text = (
-            f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n"
-            f"• 접수 일시: <code>{now_str}</code>\n\n"
-            f"운영팀 관리자 페이지로 신청서가 안전하게 접수되었습니다. 🫡\n"
-            f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
+        # 2. Reply to user with clean in-place notice
+        if status_code == "DUPLICATE":
+            done_text = (
+                f"🫡 <b>이미 신청이 접수되어 운영팀 심사 대기 중입니다!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n\n"
+                f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            done_text = (
+                f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n"
+                f"• 접수 일시: <code>{now_str}</code>\n\n"
+                f"운영팀 관리자 페이지로 신청서가 안전하게 접수되었습니다. 🫡\n"
+                f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
         done_markup = {
             "inline_keyboard": [
                 [
@@ -703,6 +812,9 @@ def handle_callback_query(
             ]
         }
         _safe_edit_or_send(client, chat_id, message_id, done_text, done_markup)
+
+        # 3. Notify admin after the user's screen is updated (DUPLICATE suppressed, Fail-Open)
+        send_admin_tier_upgrade_alert(client, user, req_tier, status_code)
         return
 
     # Legacy Telegram admin button handler: defuse and direct to Admin Web Console

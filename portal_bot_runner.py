@@ -52,7 +52,12 @@ from portal_hub import (
     render_subscription_view,
     render_tier_benefits_view,
 )
-from portal_hub.interactive import USER_STATES, build_persistent_reply_keyboard, build_slot_gauge
+from portal_hub.interactive import (
+    USER_STATES,
+    build_persistent_reply_keyboard,
+    build_slot_gauge,
+    send_admin_new_user_alert,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,6 +263,8 @@ def run_polling(token: str) -> None:
                         username=user_info.get("username"),
                         first_name=user_info.get("first_name"),
                     )
+                    if getattr(user, "is_new", False) is True:
+                        send_admin_new_user_alert(client, user)
 
                     clean_text = text.lower()
                     action = match_menu_action(text)
