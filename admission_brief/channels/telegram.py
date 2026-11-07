@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,18 @@ def _is_valid_url(url: str | None) -> bool:
     return bool(host and "." in host and host not in {"localhost", "127.0.0.1"})
 
 
+TG_MAX_HTML_LEN = 3500       # [TG-01] HTML 원문 상한
+TG_MAX_VISIBLE_LEN = 1800    # [TG-01] 태그 제외 가시 텍스트 상한
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def measure_message(html_text: str) -> tuple[int, int]:
+    """Returns (raw HTML length, visible text length after stripping tags and unescaping entities)."""
+    visible = html.unescape(_TAG_RE.sub("", html_text))
+    return len(html_text), len(visible)
+
+
 def format_admission_html(briefing: AdmissionBriefing) -> str:
     """Formats an AdmissionBriefing into a high-clarity HTML message for parents."""
     icon = briefing.briefing_type.icon
@@ -38,9 +51,10 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     grade_badge = briefing.target_grade.badge
     region_badge = " 💻 [온라인]" if briefing.is_online_live else (f" {briefing.target_region.badge}" if briefing.target_region != TargetRegion.ALL else "")
     urgency_badge = " 🚨 <b>[실시간 긴급 속보]</b>" if (briefing.urgency == "BREAKING" or briefing.briefing_type == BriefingType.BREAKING_NEWS) else ""
+    category_badge = f" {briefing.category.badge}" if briefing.category else ""
 
     lines = [
-        f"{icon} <b>[{html.escape(type_title)}]</b>{urgency_badge} {grade_badge}{region_badge}",
+        f"{icon} <b>[{html.escape(type_title)}]</b>{urgency_badge}{category_badge} {grade_badge}{region_badge}",
         f"🕒 기준: <code>{html.escape(briefing.as_of)}</code>",
         f"📌 <b>{html.escape(briefing.headline)}</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -79,7 +93,14 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("<i>에듀브리프 (EduBrief) 입시 인텔리전스</i>")
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    html_len, visible_len = measure_message(text)
+    if html_len > TG_MAX_HTML_LEN or visible_len > TG_MAX_VISIBLE_LEN:
+        logger.warning(
+            "[TG-01] Admission message over limit (html=%d, visible=%d): %s",
+            html_len, visible_len, briefing.briefing_id,
+        )
+    return text
 
 
 class TelegramChannel:
@@ -126,6 +147,7 @@ class TelegramChannel:
                 {"command": "todo", "description": "📋 이번 주 필수 To-Do"},
                 {"command": "hot", "description": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
                 {"command": "fact", "description": "💡 1분 입시 팩트체크 (So-What)"},
+                {"command": "events", "description": "🎪 설명회·박람회 전체보기"},
                 {"command": "settings", "description": "⚙️ 학년 및 관심지역 설정"},
                 {"command": "help", "description": "❓ 이용 도움말"},
             ]
@@ -208,6 +230,9 @@ class TelegramChannel:
             res = self._api_call("editMessageText", body)
             return bool(res.get("ok"))
         except Exception as e:
+            # Same content re-tapped: the screen is already correct, so treat as success
+            if "message is not modified" in str(e):
+                return True
             logger.warning("edit_message_text failed: %s", e)
             return False
 

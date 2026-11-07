@@ -10,9 +10,12 @@ from datetime import datetime
 from typing import Any, Optional
 
 from admission_brief.ai_curator import AICurator
-from admission_brief.channels.telegram import TelegramChannel
+from admission_brief.channels.telegram import TelegramChannel, _is_valid_url
 from admission_brief.models import (
     AdmissionBriefing,
+    AdmissionEvent,
+    BriefingType,
+    EventCategory,
     ParentUserProfile,
     TargetGrade,
     TargetRegion,
@@ -20,6 +23,16 @@ from admission_brief.models import (
 from admission_brief.storage.db import AdmissionDatabase
 
 logger = logging.getLogger(__name__)
+
+EVENTS_PAGE_SIZE = 3
+
+# callback_data short codes (adm:cat:<CODE>:<PAGE>) — ASCII only, well under 64 bytes
+CATEGORY_CODES: dict[str, EventCategory] = {
+    "EXPO": EventCategory.EXPO,
+    "BRIEF": EventCategory.BRIEFING,
+    "SEMI": EventCategory.SEMINAR,
+}
+CATEGORY_TO_CODE: dict[EventCategory, str] = {v: k for k, v in CATEGORY_CODES.items()}
 
 
 def build_persistent_reply_keyboard() -> dict[str, Any]:
@@ -32,6 +45,7 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
             ],
             [
                 {"text": "💡 1분 입시 팩트체크 (So-What)"},
+                {"text": "🎪 설명회·박람회 전체보기"},
             ],
             [
                 {"text": "🎓 학년/지역 설정"},
@@ -41,6 +55,65 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
         "resize_keyboard": True,
         "is_persistent": True,
     }
+
+
+def build_events_category_keyboard() -> dict[str, Any]:
+    """Builds inline keyboard for the three event categories."""
+    return {
+        "inline_keyboard": [
+            [{"text": f"{EventCategory.EXPO.icon} {EventCategory.EXPO.title}", "callback_data": "adm:cat:EXPO:0"}],
+            [{"text": f"{EventCategory.BRIEFING.icon} {EventCategory.BRIEFING.title}", "callback_data": "adm:cat:BRIEF:0"}],
+            [{"text": f"{EventCategory.SEMINAR.icon} {EventCategory.SEMINAR.title}", "callback_data": "adm:cat:SEMI:0"}],
+        ]
+    }
+
+
+def build_events_page_keyboard(category: EventCategory, page: int, total: int) -> dict[str, Any]:
+    """Builds prev/next pager and back-to-categories buttons for an event list page."""
+    code = CATEGORY_TO_CODE[category]
+    last_page = max(0, (total - 1) // EVENTS_PAGE_SIZE)
+    nav_row = []
+    if page > 0:
+        nav_row.append({"text": "◀ 이전", "callback_data": f"adm:cat:{code}:{page - 1}"})
+    if page < last_page:
+        nav_row.append({"text": "다음 ▶", "callback_data": f"adm:cat:{code}:{page + 1}"})
+    rows = [nav_row] if nav_row else []
+    rows.append([{"text": "🏛 카테고리 목록", "callback_data": "adm:menu"}])
+    return {"inline_keyboard": rows}
+
+
+def format_events_page_html(
+    category: EventCategory,
+    events: list[AdmissionEvent],
+    page: int,
+    total: int,
+    grade: TargetGrade,
+    region: TargetRegion,
+) -> str:
+    """Formats one page of event cards (1 line = 1 fact; details live behind the link)."""
+    total_pages = max(1, (total + EVENTS_PAGE_SIZE - 1) // EVENTS_PAGE_SIZE)
+    lines = [
+        f"{category.icon} <b>{html.escape(category.title)}</b> · {page + 1}/{total_pages}쪽",
+        f"🎯 필터: <b>{html.escape(grade.label)}</b> · {html.escape(region.label)}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if not events:
+        lines.append("현재 조건에 맞는 예정 행사가 없습니다.")
+        lines.append("🎓 학년/지역 설정을 바꾸거나 다른 카테고리를 확인해 주세요.")
+    for idx, ev in enumerate(events, page * EVENTS_PAGE_SIZE + 1):
+        place = "💻 온라인 생중계" if ev.is_online_live else ev.target_region.badge
+        lines.append(f"<b>{idx}. {html.escape(ev.title)}</b>")
+        lines.append(f"🗓 <b>{html.escape(ev.event_date_str)}</b>")
+        lines.append(f"🏢 {html.escape(ev.organizer)} · {html.escape(place)}")
+        if ev.is_first_come:
+            lines.append("⚡ <b>선착순 마감</b>")
+        link = ev.booking_url or ev.source_url
+        if link and _is_valid_url(link):
+            lines.append(f"🔗 <a href=\"{html.escape(link)}\">신청·상세 보기</a>")
+        lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"<i>총 {total}건 · 지난 행사는 자동 제외됩니다</i>")
+    return "\n".join(lines)
 
 
 def build_grade_inline_keyboard() -> dict[str, Any]:
@@ -133,9 +206,14 @@ class AdmissionInteractiveBot:
         clean_text = text.strip()
         if clean_text.startswith("/start"):
             self._cmd_start(chat_id, first_name)
+        elif (
+            clean_text.startswith("/events") or "박람회" in clean_text or "설명회" in clean_text
+            or "세미나" in clean_text or "행사 전체" in clean_text
+        ):
+            self._cmd_events_menu(chat_id)
         elif clean_text.startswith("/todo") or "할일" in clean_text or "투두" in clean_text or "이번 주" in clean_text or "체크리스트" in clean_text:
             self._cmd_todo(chat_id)
-        elif clean_text.startswith("/hot") or "속보" in clean_text or "핫 행사" in clean_text or "행사" in clean_text or "설명회" in clean_text or "요약" in clean_text or clean_text.startswith("/recap"):
+        elif clean_text.startswith("/hot") or "속보" in clean_text or "핫 행사" in clean_text or "행사" in clean_text or "요약" in clean_text or clean_text.startswith("/recap"):
             self._cmd_hot_events(chat_id)
         elif clean_text.startswith("/fact") or "팩트" in clean_text or "소왓" in clean_text or "so-what" in clean_text.lower() or "인사이트" in clean_text:
             self._cmd_factcheck(chat_id)
@@ -282,6 +360,7 @@ class AdmissionInteractiveBot:
             "▪ <b>📋 이번 주 필수 To-Do</b>: 내 아이 학년별 이번 주 꼭 실천해야 할 3가지\n"
             "▪ <b>⚡ 긴급 속보 & 핫 행사 TOP 3</b>: 실시간 정책 발표 및 선착순 마감 임박 행사\n"
             "▪ <b>💡 1분 입시 팩트체크</b>: 교육부 발표 및 대입 개편안의 실질 득실 (So-What)\n"
+            "▪ <b>🎪 설명회·박람회 전체보기</b>: 박람회·대형 설명회·테마 세미나 카테고리별 일정\n"
             "▪ <b>🎓 학년/지역 설정</b>: 중등/고1·2/고3 및 서울·경기·온라인 맞춤 필터링\n\n"
             "🏛 <i>모든 정보는 교육부, 대교협, 교육청 등 100% 공인 출처에 기반합니다.</i>"
         )
@@ -291,10 +370,89 @@ class AdmissionInteractiveBot:
             reply_markup=build_persistent_reply_keyboard(),
         )
 
+    def _cmd_events_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
+        """Presents the three event categories (박람회 / 대형설명회 / 테마세미나)."""
+        profile = self.db.get_subscriber(chat_id)
+        grade = profile.target_grade if profile else TargetGrade.ALL
+        region = profile.target_region if profile else TargetRegion.ALL
+        text = (
+            "🎪 <b>설명회·박람회 전체보기</b>\n\n"
+            f"🎯 맞춤 필터: <b>{html.escape(grade.label)}</b> · {html.escape(region.label)}\n\n"
+            "👇 보고 싶은 행사 유형을 탭해 주세요:"
+        )
+        markup = build_events_category_keyboard()
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
+
+    def _show_events_page(self, chat_id: str, message_id: Optional[int], code: str, page_str: str) -> None:
+        """Renders one page (3 cards) of a category's upcoming events in place."""
+        category = CATEGORY_CODES.get(code)
+        if category is None:
+            self._cmd_events_menu(chat_id, message_id)
+            return
+        try:
+            page = max(0, int(page_str))
+        except ValueError:
+            page = 0
+
+        profile = self.db.get_subscriber(chat_id)
+        grade = profile.target_grade if profile else TargetGrade.ALL
+        region = profile.target_region if profile else TargetRegion.ALL
+
+        events, total = self.db.get_events_by_category(
+            category, grade, region, page=page, page_size=EVENTS_PAGE_SIZE
+        )
+        last_page = max(0, (total - 1) // EVENTS_PAGE_SIZE)
+        if page > last_page:
+            # Stale pager button (events expired since render) → clamp to last page
+            page = last_page
+            events, total = self.db.get_events_by_category(
+                category, grade, region, page=page, page_size=EVENTS_PAGE_SIZE
+            )
+
+        text = format_events_page_html(category, events, page, total, grade, region)
+        self._safe_edit_or_send(chat_id, message_id, text, build_events_page_keyboard(category, page, total))
+
+    def _safe_edit_or_send(
+        self,
+        chat_id: str,
+        message_id: Optional[int],
+        text: str,
+        reply_markup: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Edits the message in place; falls back to a new message when editing is impossible.
+        ('message is not modified' is treated as success by TelegramChannel.edit_message_text.)
+        """
+        if message_id and self.channel.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup):
+            return
+        self.channel.send_message(chat_id, text, reply_markup=reply_markup)
+
+    @staticmethod
+    def _callback_toast(data: str) -> str:
+        """Computes the callback toast text without touching the DB (so the ack can go out first)."""
+        try:
+            if data.startswith("grade:"):
+                return f"✅ {TargetGrade(data.split(':', 1)[1]).label} 설정 완료!"
+            if data.startswith("region:"):
+                return f"✅ {TargetRegion(data.split(':', 1)[1]).label} 설정 완료!"
+        except ValueError:
+            return "⚠️ 알 수 없는 선택입니다."
+        return ""
+
     def _handle_callback_query(self, cb: dict[str, Any]) -> None:
-        """Processes inline button clicks (grade and region selection)."""
+        """Processes inline button clicks (grade/region selection, event category browsing)."""
         cb_id = cb["id"]
         data = cb.get("data", "")
+
+        # [TG-04] Acknowledge first to clear the loading spinner before any DB work
+        toast = self._callback_toast(data)
+        if toast:
+            self.channel.answer_callback_query(cb_id, text=toast)
+        else:
+            self.channel.answer_callback_query(cb_id)
+
         msg = cb.get("message") or {}
         chat = msg.get("chat") or {}
         chat_id = str(chat.get("id") or cb.get("from", {}).get("id") or "")
@@ -320,8 +478,6 @@ class AdmissionInteractiveBot:
                 target_grade = TargetGrade(grade_val)
                 self.db.update_subscriber_grade(chat_id, target_grade)
 
-                self.channel.answer_callback_query(cb_id, text=f"✅ {target_grade.label} 설정 완료!")
-
                 next_step_text = (
                     f"✅ <b>[{target_grade.badge}] 학년 설정 완료!</b>\n\n"
                     "👇 <b>[2단계] 희망하시는 설명회 지역 또는 온라인 전용 여부</b>를 선택해 주세요:"
@@ -335,7 +491,7 @@ class AdmissionInteractiveBot:
                     )
             except Exception as e:
                 logger.error("Failed to update grade: %s", e)
-                self.channel.answer_callback_query(cb_id, text="설정 처리 중 오류가 발생했습니다.")
+                self.channel.send_message(chat_id, "⚠️ 학년 설정 처리 중 오류가 발생했습니다. 다시 시도해 주세요.")
 
         # 2. Region selection
         elif data.startswith("region:"):
@@ -343,8 +499,6 @@ class AdmissionInteractiveBot:
             try:
                 target_region = TargetRegion(region_val)
                 self.db.update_subscriber_region(chat_id, target_region)
-
-                self.channel.answer_callback_query(cb_id, text=f"✅ {target_region.label} 설정 완료!")
 
                 profile = self.db.get_subscriber(chat_id)
                 grade_label = profile.target_grade.label if profile else "전학년"
@@ -360,20 +514,27 @@ class AdmissionInteractiveBot:
                 # Send persistent bottom menu to user's chat!
                 self.channel.send_message(
                     chat_id,
-                    "💡 화면 아래의 고정 메뉴 버튼을 탭하시면いつでも 편하게 이용하실 수 있습니다:",
+                    "💡 화면 아래의 고정 메뉴 버튼을 탭하시면 언제든지 편하게 이용하실 수 있습니다:",
                     reply_markup=build_persistent_reply_keyboard(),
                 )
             except Exception as e:
                 logger.error("Failed to update region: %s", e)
-                self.channel.answer_callback_query(cb_id, text="지역 설정 중 오류가 발생했습니다.")
+                self.channel.send_message(chat_id, "⚠️ 지역 설정 처리 중 오류가 발생했습니다. 다시 시도해 주세요.")
 
         # 3. Settings Menu Navigation
         elif data == "menu:grade":
-            self.channel.answer_callback_query(cb_id)
             self._cmd_grade(chat_id)
         elif data == "menu:region":
-            self.channel.answer_callback_query(cb_id)
             self._cmd_region(chat_id)
+
+        # 4. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
+        elif data == "adm:menu":
+            self._cmd_events_menu(chat_id, message_id)
+        elif data.startswith("adm:cat:"):
+            parts = data.split(":")
+            code = parts[2] if len(parts) > 2 else ""
+            page_str = parts[3] if len(parts) > 3 else "0"
+            self._show_events_page(chat_id, message_id, code, page_str)
 
     def poll_once(self, offset: int = 0) -> int:
         """Polls updates once and returns new offset."""
