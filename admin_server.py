@@ -1363,7 +1363,7 @@ def create_admin_app(
             max_budget: int | None = None,
             live_naver: bool = False,
         ):
-            eff_live = bool(live_naver or (not env_path and os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1"))
+            eff_live = bool(live_naver or (not env_path and os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0"))
             f_engine = FlightEngine(live_naver=eff_live)
             all_deals = f_engine.search_deals(dest_code=dest_code, months_ahead=6)
             recommendations = BudgetCalculator.rank_recommendations(

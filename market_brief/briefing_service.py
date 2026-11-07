@@ -242,7 +242,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             from travel_brief.ai_prompts import AIPromptGenerator
             from travel_bot_runner import format_telegram_briefing, resolve_travel_report_url
 
-            live_flag = os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1"
+            live_flag = os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0"
             engine = FlightEngine(live_naver=live_flag)
             all_deals = engine.search_deals(months_ahead=6)
             recommendations = BudgetCalculator.rank_recommendations(

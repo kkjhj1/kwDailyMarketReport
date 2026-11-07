@@ -758,7 +758,8 @@ class MultiBotInteractionRouter:
                 from travel_bot_runner import format_telegram_briefing, resolve_travel_report_url
 
                 travel_report_url = resolve_travel_report_url()
-                engine = FlightEngine(live_naver=False)
+                live_flag = os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0"
+                engine = FlightEngine(live_naver=live_flag)
                 dest_filter = None if norm_target == "ALL" else norm_target
                 deals = engine.search_deals(dest_code=dest_filter, months_ahead=6)
                 if not deals and dest_filter is not None:
@@ -768,6 +769,14 @@ class MultiBotInteractionRouter:
                     deals=deals,
                     top_n=3,
                 )
+                if live_flag and recs:
+                    engine.ensure_deals_sse_verified([r.best_deal for r in recs])
+                    deals = engine.search_deals(dest_code=dest_filter, months_ahead=6)
+                    recs = BudgetCalculator.rank_recommendations(
+                        destinations=engine.destinations,
+                        deals=deals,
+                        top_n=3,
+                    )
                 body_html = format_telegram_briefing(recs[:3], web_report_url=travel_report_url, engine=engine)
                 short_lbl = self._resolve_target_short_label(bot, norm_target)
                 header_banner = (
