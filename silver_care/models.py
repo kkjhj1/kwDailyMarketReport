@@ -128,6 +128,18 @@ class SilverBenefit:
     detail_guide: str
     phone_script: str
     parent_msg_template: str
+    # 고밀도 실전 필드 (기본값 → 기존 DB 행·호출부 하위호환). DB 스키마에는 저장하지 않고 시드/웹 리포트 전용.
+    documents: list[dict[str, str]] = field(default_factory=list)  # [{"name", "issuer", "required"}]
+    application_steps: list[str] = field(default_factory=list)
+    rejection_response: str = ""   # 반려 시 법령·지침 근거 대응 대본
+    warning_notes: list[str] = field(default_factory=list)
+    source_url: str = ""           # 공식 공고/정보 누리집 (https 만)
+    source_agency: str = ""        # 소관기관
+    verified_at: str = "2026-11-01"  # 최종 팩트체크 기준일
+
+    @property
+    def has_field_guide(self) -> bool:
+        return bool(self.documents and self.application_steps and self.rejection_response)
 
     def __post_init__(self) -> None:
         # Fail fast on typos in seed data / DB rows

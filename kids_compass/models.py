@@ -172,6 +172,7 @@ class ExperienceItem:
     booking_url: str
     booking_open_rule: str
     key_points: str
+    operating_hours: str = ""  # 예: "10:00~18:00 (입장마감 17:00 · 매주 월 휴관)"
 
 
 @dataclass

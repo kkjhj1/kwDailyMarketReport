@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from market_brief.link_gate import GATE_REGISTRY, build_gate_button
+
 logger = logging.getLogger("briefing_service")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -222,12 +224,14 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             content_html = format_telegram_html(briefing)
             kind_kr = {"morning": "모닝 시황", "closing": "마감 시황", "urgent": "긴급 변동성"}.get(briefing.kind, briefing.kind.upper())
             title = f"[{kind_kr}] {briefing.headline} ({as_of_label})"
-            inline_keyboard = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
+            GATE_REGISTRY.update_preset_url("bf_rep", report_url)
+            inline_keyboard = [[build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")]]
         except Exception as e:
             logger.error(f"Error generating brief_bot briefing: {e}", exc_info=True)
             title = f"📊 [시황] {now_str}"
             content_html = f"<b>📊 [시황]</b>\n<i>{now_str} KST</i>\n\n데이터 수집 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": "📊 웹 리포트 보러가기", "url": report_url}]]
+            GATE_REGISTRY.update_preset_url("bf_rep", report_url)
+            inline_keyboard = [[build_gate_button("bf_rep", "📊 웹 리포트 보러가기")]]
 
     # =========================================================================
     # 2. TRAVEL BOT (여행 특가 & AI 추천) -> FlightEngine / BudgetCalculator
@@ -285,22 +289,27 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                     f"  • 비자/팁: {_html.escape(dest.visa_info, quote=False)} ({_html.escape(dest.tips, quote=False)})\n\n"
                     f"💡 <i>ChatGPT 맞춤 코스 생성을 통해 최적 3박 4일 동선을 3초 만에 확인하세요.</i>"
                 )
+                GATE_REGISTRY.update_preset_url("trv_rep", travel_report_url)
+                tok_gpt = GATE_REGISTRY.register_dynamic(chatgpt_link, "ChatGPT 3박4일 추천 일정", "AI가 맞춤 생성한 여행 동선 및 일정표로 이동합니다.", "travel:home")
+                tok_nv = GATE_REGISTRY.register_dynamic(naver_flight, "네이버 항공권 실시간 조회", "선택하신 노선의 네이버 항공권 실시간 예약 페이지로 이동합니다.", "travel:home")
                 inline_keyboard = [
-                    [{"text": "🤖 ChatGPT 3박4일 일정 짜기", "url": chatgpt_link}],
-                    [{"text": "🔍 네이버 항공권 실시간 확인", "url": naver_flight}],
-                    [{"text": "📊 6개월 최저가 히트맵 전체보기", "url": travel_report_url}],
+                    [build_gate_button(tok_gpt, "🤖 ChatGPT 3박4일 일정 짜기")],
+                    [build_gate_button(tok_nv, "🔍 네이버 항공권 실시간 확인")],
+                    [build_gate_button("trv_rep", "📊 6개월 최저가 히트맵 전체보기")],
                 ]
             else:
                 title = f"✈️ [주말 해외여행 6개월 특가 TOP 3] {now_str}"
                 content_html = format_telegram_briefing(recommendations, web_report_url=travel_report_url, engine=engine)
+                GATE_REGISTRY.update_preset_url("trv_rep", travel_report_url)
                 inline_keyboard = [
-                    [{"text": "📊 6개월 최저가 히트맵 전체보기", "url": travel_report_url}]
+                    [build_gate_button("trv_rep", "📊 6개월 최저가 히트맵 전체보기")]
                 ]
         except Exception as e:
             logger.error(f"Error generating travel_bot briefing: {e}", exc_info=True)
             title = f"✈️ [여행 특가 브리핑] {now_str}"
             content_html = f"<b>✈️ [여행 특가 브리핑]</b>\n<i>{now_str}</i>\n\n여행 데이터 생성 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": "🏖️ 트래블 리포트 확인", "url": travel_report_url}]]
+            GATE_REGISTRY.update_preset_url("trv_rep", travel_report_url)
+            inline_keyboard = [[build_gate_button("trv_rep", "🏖️ 트래블 리포트 확인")]]
 
     # =========================================================================
     # 3. ADMISSION BOT (입시 & 교육 큐레이션) -> AdmissionDatabase / AICurator
@@ -335,12 +344,15 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             content_html = format_admission_html(briefing)
             btn_text = briefing.booking_button_text or "🌐 상세 안내 확인하기"
             btn_url = briefing.booking_url or admission_url
-            inline_keyboard = [[{"text": btn_text, "url": btn_url}]]
+            GATE_REGISTRY.update_preset_url("adm_rep", admission_url)
+            tok_adm = GATE_REGISTRY.register_dynamic(btn_url, btn_text, "선착순 티켓팅 및 설명회 공식 접수 사이트로 이동합니다.", "admission:home")
+            inline_keyboard = [[build_gate_button(tok_adm, btn_text)]]
         except Exception as e:
             logger.error(f"Error generating admission_bot briefing: {e}", exc_info=True)
             title = f"🎓 [입시 교육 브리핑] {now_str}"
             content_html = f"<b>🎓 [입시 교육 브리핑]</b>\n<i>{now_str}</i>\n\n입시 큐레이션 생성 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": "📅 입시 캘린더 확인", "url": admission_url}]]
+            GATE_REGISTRY.update_preset_url("adm_rep", admission_url)
+            inline_keyboard = [[build_gate_button("adm_rep", "📅 입시 캘린더 확인")]]
 
     # =========================================================================
     # 4. SILVER BOT (실버케어 부모님 복지 비서) -> SilverCareDatabase(:memory:)
@@ -381,12 +393,14 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                     ref_year=now_kst.year,
                 )
             mem_db.close()
-            inline_keyboard = [[{"text": f"👵 실버케어 봇에서 내 부모님 혜택 찾기 (@{silver_un})", "url": silver_link}]]
+            GATE_REGISTRY.update_preset_url("bot_silver", silver_link)
+            inline_keyboard = [[build_gate_button("bot_silver", f"👵 실버케어 봇에서 내 부모님 혜택 찾기 (@{silver_un})")]]
         except Exception as e:
             logger.error(f"Error generating silver_bot briefing: {e}", exc_info=True)
             title = f"👵 [실버케어 브리핑] {now_str}"
             content_html = f"<b>👵 [실버케어 브리핑]</b>\n<i>{now_str}</i>\n\n실버케어 데이터 생성 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": f"👵 실버케어 바로가기 (@{silver_un})", "url": silver_link}]]
+            GATE_REGISTRY.update_preset_url("bot_silver", silver_link)
+            inline_keyboard = [[build_gate_button("bot_silver", f"👵 실버케어 바로가기 (@{silver_un})")]]
 
     # =========================================================================
     # 5. KIDS BOT (자녀·키즈 나침반) -> KidsCompassDatabase(:memory:)
@@ -418,12 +432,14 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
                     "☀️ 맑음 기준 · 야외+실내 균형 추천",
                 )
             mem_db.close()
-            inline_keyboard = [[{"text": f"👶 키즈봇에서 해열제·달빛병원·나들이 보기 (@{kids_un})", "url": kids_link}]]
+            GATE_REGISTRY.update_preset_url("bot_kids", kids_link)
+            inline_keyboard = [[build_gate_button("bot_kids", f"👶 키즈봇에서 해열제·달빛병원·나들이 보기 (@{kids_un})")]]
         except Exception as e:
             logger.error(f"Error generating kids_bot briefing: {e}", exc_info=True)
             title = f"👶 [키즈 나침반 브리핑] {now_str}"
             content_html = f"<b>👶 [키즈 나침반 브리핑]</b>\n<i>{now_str}</i>\n\n키즈 나침반 데이터 생성 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": f"👶 키즈봇 바로가기 (@{kids_un})", "url": kids_link}]]
+            GATE_REGISTRY.update_preset_url("bot_kids", kids_link)
+            inline_keyboard = [[build_gate_button("bot_kids", f"👶 키즈봇 바로가기 (@{kids_un})")]]
 
     # =========================================================================
     # 6. YOLO BOT (욜로 1인 라이프 큐레이션) -> YoloDatabase(:memory:)
@@ -470,12 +486,14 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             match = match_curations(sample_user, curations, snapshot=snap, ref_date=now_kst.date())
             content_html, _ = render_curation_card(sample_user, match)
             mem_db.close()
-            inline_keyboard = [[{"text": f"🏄 욜로봇에서 내 성향 맞춤 추천받기 (@{yolo_un})", "url": yolo_link}]]
+            GATE_REGISTRY.update_preset_url("bot_yolo", yolo_link)
+            inline_keyboard = [[build_gate_button("bot_yolo", f"🏄 욜로봇에서 내 성향 맞춤 추천받기 (@{yolo_un})")]]
         except Exception as e:
             logger.error(f"Error generating yolo_bot briefing: {e}", exc_info=True)
             title = f"🏄 [욜로봇 브리핑] {now_str}"
             content_html = f"<b>🏄 [욜로봇 브리핑]</b>\n<i>{now_str}</i>\n\n욜로 큐레이션 데이터 생성 중 오류: {html.escape(str(e))}"
-            inline_keyboard = [[{"text": f"🏄 욜로봇 바로가기 (@{yolo_un})", "url": yolo_link}]]
+            GATE_REGISTRY.update_preset_url("bot_yolo", yolo_link)
+            inline_keyboard = [[build_gate_button("bot_yolo", f"🏄 욜로봇 바로가기 (@{yolo_un})")]]
 
     # =========================================================================
     # 7. MENU BOT (통합 포털) -> .env usernames & telegram links (6대 정보봇)
@@ -501,13 +519,19 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             f"🏄 <b>욜로</b> (@{yolo_un}): 4대 성향별 1인 라이프·취미·혼여 큐레이션 및 실내 플랜 B\n\n"
             f"<i>※ 화이트 등급(무료)은 1개 봇, 그린 3개, 레드 5개, 블랙은 전체 봇을 이용하실 수 있습니다.</i>"
         )
+        GATE_REGISTRY.update_preset_url("bot_brief", f"https://t.me/{brief_un}")
+        GATE_REGISTRY.update_preset_url("bot_travel", f"https://t.me/{travel_un}")
+        GATE_REGISTRY.update_preset_url("bot_admission", f"https://t.me/{edu_un}")
+        GATE_REGISTRY.update_preset_url("bot_silver", f"https://t.me/{silver_un}")
+        GATE_REGISTRY.update_preset_url("bot_kids", f"https://t.me/{kids_un}")
+        GATE_REGISTRY.update_preset_url("bot_yolo", f"https://t.me/{yolo_un}")
         inline_keyboard = [
-            [{"text": f"📈 시황 바로가기 (@{brief_un})", "url": f"https://t.me/{brief_un}"}],
-            [{"text": f"✈️ 여행 바로가기 (@{travel_un})", "url": f"https://t.me/{travel_un}"}],
-            [{"text": f"🎓 입시 바로가기 (@{edu_un})", "url": f"https://t.me/{edu_un}"}],
-            [{"text": f"👵 실버케어 바로가기 (@{silver_un})", "url": f"https://t.me/{silver_un}"}],
-            [{"text": f"👶 자녀 바로가기 (@{kids_un})", "url": f"https://t.me/{kids_un}"}],
-            [{"text": f"🏄 욜로 바로가기 (@{yolo_un})", "url": f"https://t.me/{yolo_un}"}],
+            [build_gate_button("bot_brief", f"📈 시황 바로가기 (@{brief_un})")],
+            [build_gate_button("bot_travel", f"✈️ 여행 바로가기 (@{travel_un})")],
+            [build_gate_button("bot_admission", f"🎓 입시 바로가기 (@{edu_un})")],
+            [build_gate_button("bot_silver", f"👵 실버케어 바로가기 (@{silver_un})")],
+            [build_gate_button("bot_kids", f"👶 자녀 바로가기 (@{kids_un})")],
+            [build_gate_button("bot_yolo", f"🏄 욜로 바로가기 (@{yolo_un})")],
         ]
 
     else:

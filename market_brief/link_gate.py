@@ -95,6 +95,20 @@ class LinkGateRegistry:
                 description="공식 예매 및 세부 정보 페이지로 이동합니다.",
                 restore_route="yolo:home",
             ),
+            LinkTarget(
+                token="sil_rep",
+                target_name="부모님 복지 상세 리포트",
+                dest_url="https://kkjhj1.github.io/kwDailyMarketReport/reports/silver_latest.html",
+                description="부모님 맞춤 복지 혜택과 지자체 지원금 상세 안내 웹 리포트로 이동합니다.",
+                restore_route="silver:home",
+            ),
+            LinkTarget(
+                token="bot_menu",
+                target_name="🧭 통합 메뉴봇 대화방",
+                dest_url="https://t.me/KwMenu_bot?start=from_sub",
+                description="전체 정보봇 구독 관리 및 통합 대시보드 봇으로 이동합니다.",
+                restore_route="portal:menu",
+            ),
             # Bot Deep-links (Telegram app-to-app routing)
             LinkTarget(
                 token="bot_brief",

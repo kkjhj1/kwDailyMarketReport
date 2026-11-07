@@ -149,6 +149,7 @@ def run_dispatch_weekly(db: SilverCareDatabase, token: str, dry_run: bool) -> in
 def main() -> None:
     parser = argparse.ArgumentParser(description="SilverCare (실버케어) Telegram Bot Runner")
     parser.add_argument("--demo", action="store_true", help="Token-free console demo (in-memory DB, no file writes)")
+    parser.add_argument("--web-report", action="store_true", help="Generate reports/silver_latest.html web report")
     parser.add_argument("--seed-sample", action="store_true", help="Seed fact-checked benefits into SQLite")
     parser.add_argument("--poll", action="store_true", help="Start interactive long-polling bot")
     parser.add_argument("--dispatch-weekly", action="store_true", help="Send the weekly 효도 briefing (Sun 20:00)")
@@ -158,6 +159,11 @@ def main() -> None:
 
     if args.demo:
         run_demo()
+        return
+    if args.web_report:
+        from silver_care.web_report import generate_silver_web_report
+        out = generate_silver_web_report(SEED_BENEFITS, BASE_DIR / "reports" / "silver_latest.html")
+        print(f"✅ Generated SilverCare web report: {out}")
         return
     if not (args.seed_sample or args.poll or args.dispatch_weekly):
         parser.print_help()

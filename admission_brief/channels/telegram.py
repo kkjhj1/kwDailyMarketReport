@@ -161,6 +161,68 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
     return text
 
 
+SHARE_BOT_HANDLE = "@KwEduInfo_bot"
+SHARE_FIELD_MAX = 160  # 고정 슬림 템플릿: 필드별 상한 (항목 삭제 없이 길이만 고정)
+
+
+def _clip(text: str, limit: int = SHARE_FIELD_MAX) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def format_kakao_share_html(plain_text: str) -> str:
+    """Wraps plain share text in a one-tap-copy <code> block (Telegram copies <code> on tap)."""
+    text = (
+        "📲 <b>카카오톡 원터치 복사 카드</b>\n"
+        "<i>👇 회색 박스를 <b>한 번 탭</b>하면 텍스트가 자동 복사됩니다:</i>\n\n"
+        f"<code>{html.escape(plain_text.strip())}\n\n출처: 에듀브리프 봇 ({SHARE_BOT_HANDLE})</code>"
+    )
+    html_len, visible_len = measure_message(text)
+    if html_len > TG_MAX_HTML_LEN or visible_len > TG_MAX_VISIBLE_LEN:
+        logger.warning("[TG-01] Share card over limit (html=%d, visible=%d)", html_len, visible_len)
+    return text
+
+
+def build_glossary_share_text(entry: Any) -> str:
+    """Plain-text share body for a GlossaryEntry."""
+    return "\n".join([
+        f"[에듀브리프 입시사전: {entry.term}]",
+        f"💡 개념: {entry.definition}",
+        f"🎯 학부모 득실: {entry.impact}",
+        f"⚠️ 주의사항: {entry.caution}",
+    ])
+
+
+def build_briefing_share_text(briefing: AdmissionBriefing) -> str:
+    """Plain-text share body for a briefing (e.g. weekly To-Do): headline, 3 points, so-what, to-dos."""
+    lines = [f"[에듀브리프 {_clip(briefing.briefing_type.title, 30)}] {_clip(briefing.headline)}"]
+    for i, pt in enumerate(briefing.summary_3lines[:3], 1):
+        lines.append(f"{i}. {_clip(pt)}")
+    if briefing.so_what:
+        lines.append(f"💡 {_clip(briefing.so_what, 240)}")
+    for item in briefing.action_todos[:3]:
+        lines.append(f"✅ {_clip(item)}")
+    return "\n".join(lines)
+
+
+def build_event_share_text(event: AdmissionEvent) -> str:
+    """Plain-text share body for an event card: title, date, organizer/place, link."""
+    place = "온라인 생중계" if event.is_online_live else event.target_region.label
+    lines = [
+        f"[에듀브리프 행사] {_clip(event.title)}",
+        f"🗓 일시: {_clip(event.event_date_str, 40)}",
+        f"🏢 주최: {_clip(event.organizer, 60)} · {_clip(place, 40)}",
+    ]
+    if event.is_first_come:
+        lines.append("⚡ 선착순 마감")
+    if event.so_what:
+        lines.append(f"💡 {_clip(event.so_what, 240)}")
+    link = event.booking_url or event.source_url
+    if link and _is_valid_url(link):
+        lines.append(f"🔗 {_clip(link, 300)}")
+    return "\n".join(lines)
+
+
 class TelegramChannel:
     """Telegram Bot API communication channel."""
 

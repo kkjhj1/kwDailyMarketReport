@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS kids_experiences (
     booking_url TEXT NOT NULL DEFAULT '',
     booking_open_rule TEXT NOT NULL DEFAULT '',
     key_points TEXT NOT NULL DEFAULT '',
+    operating_hours TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS kids_booking_events (
@@ -138,7 +139,13 @@ class KidsCompassDatabase:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(kids_experiences)").fetchall()}
+        if "operating_hours" not in cols:
+            self.conn.execute("ALTER TABLE kids_experiences ADD COLUMN operating_hours TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         self.conn.close()
@@ -300,8 +307,8 @@ class KidsCompassDatabase:
                 """INSERT INTO kids_experiences
                    (exp_id, title, age_group, category, region_sido, region_sigungu, venue_name, fee_type, fee_detail,
                     is_indoor, stroller_accessible, nursing_room, booking_required, booking_url, booking_open_rule,
-                    key_points, is_active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    key_points, operating_hours, is_active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(exp_id) DO UPDATE SET
                     title=excluded.title, age_group=excluded.age_group, category=excluded.category,
                     region_sido=excluded.region_sido, region_sigungu=excluded.region_sigungu,
@@ -309,10 +316,11 @@ class KidsCompassDatabase:
                     is_indoor=excluded.is_indoor, stroller_accessible=excluded.stroller_accessible,
                     nursing_room=excluded.nursing_room, booking_required=excluded.booking_required,
                     booking_url=excluded.booking_url, booking_open_rule=excluded.booking_open_rule,
-                    key_points=excluded.key_points""",
+                    key_points=excluded.key_points, operating_hours=excluded.operating_hours""",
                 (e.exp_id, e.title, e.age_group.value, e.category.value, e.region_sido, e.region_sigungu,
                  e.venue_name, e.fee_type, e.fee_detail, int(e.is_indoor), int(e.stroller_accessible),
-                 int(e.nursing_room), int(e.booking_required), e.booking_url, e.booking_open_rule, e.key_points),
+                 int(e.nursing_room), int(e.booking_required), e.booking_url, e.booking_open_rule, e.key_points,
+                 e.operating_hours),
             )
             n += 1
         self.conn.commit()
@@ -328,6 +336,7 @@ class KidsCompassDatabase:
             stroller_accessible=bool(r["stroller_accessible"]), nursing_room=bool(r["nursing_room"]),
             booking_required=bool(r["booking_required"]), booking_url=r["booking_url"],
             booking_open_rule=r["booking_open_rule"], key_points=r["key_points"],
+            operating_hours=r["operating_hours"] if "operating_hours" in r.keys() else "",
         )
 
     def list_experiences(

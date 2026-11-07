@@ -41,9 +41,36 @@ def _exp(exp_id: str, title: str, age: AgeGroup, cat: ExperienceCategory, sido: 
         exp_id=exp_id, title=title, age_group=age, category=cat, region_sido=sido, region_sigungu=sigungu,
         venue_name=venue, fee_type=fee_type, fee_detail=fee_detail, is_indoor=indoor, stroller_accessible=stroller,
         nursing_room=nursing, booking_required=booking, booking_url=naver_search(f"{venue} 예약"),
-        booking_open_rule=open_rule, key_points=key_points,
+        booking_open_rule=open_rule, key_points=key_points, operating_hours=OPERATING_HOURS.get(exp_id, ""),
     )
 
+
+# 운영시간·휴관일 (🕘 필수 표출). Seasonal/holiday changes happen — the card footer says to check the official notice.
+OPERATING_HOURS: dict[str, str] = {
+    "nmk_kids": "10:00~17:50 (1일 5회차 예약제 · 매주 월 휴관)",
+    "kidscafe_ttuk": "09:30~17:30 (3회차 운영 · 매주 월 휴관)",
+    "kidscafe_mokdong": "09:30~17:30 (3회차 운영 · 매주 월 휴관)",
+    "botanic_park": "09:30~18:00 (동절기 17:00 · 매주 월 휴관 · 열린숲 상시)",
+    "gg_kids_nest": "10:00~17:30 (회차제 · 매주 월 휴관)",
+    "gwangnaru_119": "09:00~17:00 (회차제 3회 운영 · 매주 월 휴관)",
+    "boramae_safety": "09:00~17:00 (회차제 운영 · 매주 월 휴관)",
+    "seoulforest_insect": "10:00~17:00 (입장마감 16:30 · 매주 월 휴관)",
+    "ncsm_kids": "09:30~17:30 (입장마감 16:30 · 매주 월 휴관)",
+    "forest_namsan": "상시 개방 (연중무휴 · 일몰 시까지 권장)",
+    "forest_dream": "상시 개방 (공원 24시간 · 유아숲 일몰 시까지)",
+    "forest_dream_free": "상시 개방 (숲해설은 평일 사전예약제)",
+    "grandpark_zoo": "05:00~22:00 (동물원 10:00~17:00 · 연중무휴)",
+    "bok_money": "10:00~17:00 (입장마감 16:30 · 매주 월 휴관)",
+    "krx_finance": "09:30~17:00 (주말 프로그램 사전예약 · 공휴일 휴관)",
+    "gwacheon_planet": "09:30~17:30 (입장마감 16:30 · 매주 월 휴관)",
+    "robot_ai_dobong": "09:30~17:30 (입장마감 16:30 · 매주 월 휴관)",
+    "childrens_grand_park": "05:00~22:00 (동물원 10:00~17:00 · 연중무휴)",
+    "worldcup_park": "상시 개방 (하늘공원은 일몰 무렵 폐장 · 월별 상이)",
+    "nmk_main": "10:00~18:00 (수·토 21:00까지 · 1/1, 설·추석 휴관)",
+    "preg_botanic": "09:30~18:00 (열린숲 잔디마당 24시간 무료)",
+    "preg_kna": "09:00~18:00 (동절기 17:00 · 매주 일·월 휴관 · 사전예약제)",
+    "preg_namsan": "상시 개방 (연중무휴 · 야외 산책로)",
+}
 
 A, C = AgeGroup, ExperienceCategory
 SEED_EXPERIENCES: list[ExperienceItem] = [

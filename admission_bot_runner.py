@@ -207,6 +207,23 @@ def run_demo() -> None:
             }
         })
 
+    # Phase B: Glossary & One-Touch Share Walkthrough
+    bot.handle_update({"message": {"chat": chat, "text": "📖 1초 입시용어 사전"}})
+    bot.handle_update({
+        "callback_query": {
+            "id": "demo_cb_gl",
+            "data": "adm:gl:NAPCHI",
+            "message": {"message_id": 1002, "chat": chat},
+        }
+    })
+    bot.handle_update({
+        "callback_query": {
+            "id": "demo_cb_sh",
+            "data": "adm:sh:gl:NAPCHI",
+            "message": {"message_id": 1002, "chat": chat},
+        }
+    })
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Admission Briefing Telegram Bot Runner")

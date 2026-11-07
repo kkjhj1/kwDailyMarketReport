@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS silver_benefits (
     detail_guide TEXT NOT NULL,
     phone_script TEXT NOT NULL,
     parent_msg_template TEXT NOT NULL,
+    extra_json TEXT NOT NULL DEFAULT '{}',
     is_active INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL
 );
@@ -92,6 +93,10 @@ class SilverCareDatabase:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            try:
+                self._conn.execute("ALTER TABLE silver_benefits ADD COLUMN extra_json TEXT NOT NULL DEFAULT '{}'")
+            except Exception:
+                pass
             self._conn.commit()
 
     def close(self) -> None:
@@ -109,13 +114,24 @@ class SilverCareDatabase:
 
     # ── Benefits ──────────────────────────────────────────────
     def upsert_benefits(self, benefits: Iterable[SilverBenefit]) -> int:
+        def _extra(b: SilverBenefit) -> str:
+            return json.dumps({
+                "documents": b.documents,
+                "application_steps": b.application_steps,
+                "rejection_response": b.rejection_response,
+                "warning_notes": b.warning_notes,
+                "source_url": b.source_url,
+                "source_agency": b.source_agency,
+                "verified_at": b.verified_at,
+            }, ensure_ascii=False)
+
         rows = [
-            tuple(int(v) if isinstance(v, bool) else v for v in (getattr(b, c) for c in _BENEFIT_COLS)) + (_now(),)
+            tuple(int(v) if isinstance(v, bool) else v for v in (getattr(b, c) for c in _BENEFIT_COLS)) + (_extra(b), _now())
             for b in benefits
         ]
-        cols = ", ".join(_BENEFIT_COLS)
-        marks = ", ".join("?" for _ in _BENEFIT_COLS)
-        updates = ", ".join(f"{c}=excluded.{c}" for c in _BENEFIT_COLS if c != "id")
+        cols = ", ".join(_BENEFIT_COLS) + ", extra_json"
+        marks = ", ".join("?" for _ in range(len(_BENEFIT_COLS) + 1))
+        updates = ", ".join(f"{c}=excluded.{c}" for c in _BENEFIT_COLS if c != "id") + ", extra_json=excluded.extra_json"
         with self._lock:
             self._conn.executemany(
                 f"INSERT INTO silver_benefits ({cols}, updated_at) VALUES ({marks}, ?) "
@@ -130,6 +146,21 @@ class SilverCareDatabase:
         data = {c: row[c] for c in _BENEFIT_COLS}
         data["is_pre_approval_required"] = bool(data["is_pre_approval_required"])
         data["requires_prescription"] = bool(data["requires_prescription"])
+        if "extra_json" in row.keys() and row["extra_json"]:
+            try:
+                extra = json.loads(row["extra_json"])
+                if isinstance(extra, dict):
+                    data.update({
+                        "documents": extra.get("documents", []),
+                        "application_steps": extra.get("application_steps", []),
+                        "rejection_response": extra.get("rejection_response", ""),
+                        "warning_notes": extra.get("warning_notes", []),
+                        "source_url": extra.get("source_url", ""),
+                        "source_agency": extra.get("source_agency", ""),
+                        "verified_at": extra.get("verified_at", "2026-11-01"),
+                    })
+            except Exception:
+                pass
         return SilverBenefit(**data)
 
     def list_benefits(self, active_only: bool = True) -> list[SilverBenefit]:

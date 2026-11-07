@@ -256,6 +256,45 @@ def test_hospital_card_has_phone_warning_and_verified_date(db):
         assert h.last_verified_at and h.last_verified_at in text
 
 
+def test_every_seed_has_operating_hours_and_cards_show_them(db):
+    assert all(e.operating_hours.strip() for e in SEED_EXPERIENCES)
+    picks = recommend_weekend_picks(db, AgeGroup.PRESCHOOL, "서울", is_dispatch=True)
+    assert picks and all(p.operating_hours for p in picks)  # round-tripped through SQLite
+    text = format_weekend_briefing_html(picks, AgeGroup.PRESCHOOL, "맑음", walk_in=True)
+    for p in picks:
+        assert f"🕘 {p.operating_hours}" in text
+    preg = format_pregnancy_html(None, PREGNANCY_BENEFITS, db.list_experiences(AgeGroup.PREGNANCY), FIXED_NOW.date())
+    assert "🕘" in preg
+    from dataclasses import replace
+    assert "🕘" not in format_weekend_briefing_html([replace(picks[0], operating_hours="")], AgeGroup.PRESCHOOL, "x")
+    evil = replace(picks[0], operating_hours="<b>10:00</b> & 휴관")
+    assert "&lt;b&gt;10:00&lt;/b&gt; &amp; 휴관" in format_weekend_briefing_html([evil], AgeGroup.PRESCHOOL, "x")
+
+
+def test_operating_hours_migration_on_legacy_db(tmp_path):
+    import sqlite3
+    path = tmp_path / "legacy.sqlite3"
+    legacy = sqlite3.connect(path)
+    legacy.execute("""CREATE TABLE kids_experiences (exp_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+        age_group TEXT NOT NULL, category TEXT NOT NULL, region_sido TEXT NOT NULL,
+        region_sigungu TEXT NOT NULL DEFAULT '', venue_name TEXT NOT NULL DEFAULT '',
+        fee_type TEXT NOT NULL DEFAULT '', fee_detail TEXT NOT NULL DEFAULT '',
+        is_indoor INTEGER NOT NULL DEFAULT 1, stroller_accessible INTEGER NOT NULL DEFAULT 0,
+        nursing_room INTEGER NOT NULL DEFAULT 0, booking_required INTEGER NOT NULL DEFAULT 0,
+        booking_url TEXT NOT NULL DEFAULT '', booking_open_rule TEXT NOT NULL DEFAULT '',
+        key_points TEXT NOT NULL DEFAULT '', is_active INTEGER NOT NULL DEFAULT 1)""")
+    legacy.execute("INSERT INTO kids_experiences (exp_id, title, age_group, category, region_sido) "
+                   "VALUES ('old', '옛 장소', 'ALL', 'PLAY', '서울')")
+    legacy.commit()
+    legacy.close()
+    d = KidsCompassDatabase(path)
+    assert d.get_experience("old").operating_hours == ""
+    d.upsert_experiences(SEED_EXPERIENCES[:1])
+    assert d.get_experience(SEED_EXPERIENCES[0].exp_id).operating_hours == SEED_EXPERIENCES[0].operating_hours
+    d.close()
+    KidsCompassDatabase(path).close()  # re-open is idempotent
+
+
 # ── storage ───────────────────────────────────────────────────
 def test_schema_tables_indexes_and_fk(db):
     names = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master").fetchall()}

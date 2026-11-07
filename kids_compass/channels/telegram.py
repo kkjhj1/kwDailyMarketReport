@@ -113,8 +113,10 @@ def _exp_line(n: int, e: ExperienceItem, walk_in: bool = False) -> list[str]:
     lines = [
         f"<b>{n}. {esc(e.title)}</b>",
         f"📍 {esc(e.region_sido)} {esc(e.region_sigungu)} · 💳 {esc(e.fee_detail)}",
-        f"✨ {esc(e.key_points)}",
     ]
+    if e.operating_hours:
+        lines.append(f"🕘 {esc(e.operating_hours)}")
+    lines.append(f"✨ {esc(e.key_points)}")
     if walk_in:
         lines.append(esc(WALK_IN_TIPS.get(e.exp_id, DEFAULT_WALK_IN_TIP)))
     lines.append(f"{' '.join(tags)} · {link('안내' if walk_in else '예약·안내', e.booking_url)}")

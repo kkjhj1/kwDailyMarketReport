@@ -115,9 +115,13 @@ def build_list_keyboard(parent: ParentProfile, matches: list, page: int) -> dict
     return _kb(rows)
 
 
-def build_detail_keyboard(pid: int, bid: int, page: int, bookmarked: bool) -> dict[str, Any]:
+def build_detail_keyboard(
+    pid: int, bid: int, page: int, bookmarked: bool, report_url: str = ""
+) -> dict[str, Any]:
+    url = report_url or "https://kkjhj1.github.io/kwDailyMarketReport/reports/silver_latest.html"
     return _kb([
         [_btn("📞 통화 대본", cb("t", pid, bid, page)), _btn("💌 카톡 전송문", cb("k", pid, bid, page))],
+        [{"text": "📊 부모님 복지 상세 리포트 ↗", "url": url}],
         [_btn("⭐ 찜 해제" if bookmarked else "⭐ 찜하기", cb("b", pid, bid, page))],
         [_btn("◀ 목록", cb("L", pid, page)), _btn("🏠 메뉴", cb("m"))],
     ])

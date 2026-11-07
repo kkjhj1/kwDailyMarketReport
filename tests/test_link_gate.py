@@ -32,6 +32,7 @@ class TestLinkGateSystem(unittest.TestCase):
         expected_tokens = [
             "bf_rep", "trv_rep", "trv_nv", "trv_gpt",
             "adm_rep", "adm_bk", "yolo_mag", "yolo_act",
+            "sil_rep", "bot_menu",
             "bot_brief", "bot_travel", "bot_admission",
             "bot_silver", "bot_kids", "bot_yolo",
         ]

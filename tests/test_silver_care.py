@@ -473,3 +473,76 @@ def test_demo_runs_without_file_writes(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "통화 대본" in out and "강원 원주시" in out
     assert list(tmp_path.iterdir()) == []
+
+
+# ── Step 1: High-Density Field Guides & Web Report Tests ───────
+class TestStep1FieldGuides:
+    def test_top10_field_guides_present(self):
+        guides = [b for b in SEED_BENEFITS if b.has_field_guide]
+        assert len(guides) == 10
+        expected_ids = {1, 2, 3, 5, 7, 8, 10, 13, 14, 25}
+        assert {b.id for b in guides} == expected_ids
+
+    def test_field_guide_structure(self):
+        for b in SEED_BENEFITS:
+            if not b.has_field_guide:
+                continue
+            assert len(b.documents) >= 1
+            for doc in b.documents:
+                assert "name" in doc and "issuer" in doc and "required" in doc
+            assert len(b.application_steps) >= 3
+            assert len(b.rejection_response) > 10
+            if b.source_url:
+                assert b.source_url.startswith("https://")
+
+    def test_knee_surgery_strict_pre_approval_warning(self):
+        knee = BY_ID[5]
+        assert knee.is_pre_approval_required is True
+        assert any("수술 전" in w for w in knee.warning_notes)
+        assert "소급" in knee.rejection_response or "승인" in knee.rejection_response
+
+    def test_database_preserves_field_guides(self, db):
+        knee = db.get_benefit(5)
+        assert knee is not None
+        assert knee.has_field_guide is True
+        assert len(knee.documents) >= 1
+        assert len(knee.application_steps) >= 3
+        assert len(knee.warning_notes) >= 1
+
+
+class TestWebReport:
+    def test_generate_web_report(self, tmp_path):
+        from silver_care.web_report import generate_silver_web_report
+        out_path = tmp_path / "reports" / "silver_latest.html"
+        res = generate_silver_web_report(SEED_BENEFITS, out_path)
+        assert res.exists()
+        content = res.read_text(encoding="utf-8")
+
+        # HTML validity & responsiveness
+        assert "<!DOCTYPE html>" in content
+        assert '<meta name="viewport" content="width=device-width, initial-scale=1.0' in content
+        assert "2026 대한민국" in content
+        assert "부모님 복지 대백과" in content
+
+        # 10 core guides rendered
+        for gid in [1, 2, 3, 5, 7, 8, 10, 13, 14, 25]:
+            assert f'id="benefit-{gid}"' in content
+
+        # PII-Zero Invariant: No user personal data, chat IDs, or private tokens
+        for forbidden in ["chat_id", "7820975792", "SILVER_TELEGRAM_BOT_TOKEN", "bot_token"]:
+            assert forbidden not in content
+
+        # All URLs are HTTPS
+        import re
+        urls = re.findall(r'href="(http[^"]+)"', content)
+        for u in urls:
+            assert u.startswith("https://"), f"Non-HTTPS URL found: {u}"
+
+    def test_detail_keyboard_has_web_report_button(self):
+        kb = build_detail_keyboard(pid=1, bid=5, page=0, bookmarked=False)
+        buttons = [b for row in kb["inline_keyboard"] for b in row]
+        url_btns = [b for b in buttons if "url" in b]
+        assert len(url_btns) == 1
+        assert "silver_latest.html" in url_btns[0]["url"]
+        assert "상세 리포트" in url_btns[0]["text"]
+

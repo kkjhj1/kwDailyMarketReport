@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>실버케어 2026 대한민국 부모님 복지 대백과</title>
+  <meta name="description" content="자녀가 대신 챙기는 2026년 시니어·부모님 생활밀착형 복지 혜택 및 실전 신청 가이드">
+  <meta name="theme-color" content="#1a365d">
+  <style>
+    :root {
+      --primary: #1e3a8a;
+      --primary-light: #3b82f6;
+      --primary-soft: #eff6ff;
+      --success: #15803d;
+      --success-bg: #f0fdf4;
+      --warning: #b45309;
+      --warning-bg: #fffbeb;
+      --danger: #b91c1c;
+      --danger-bg: #fef2f2;
+      --text-main: #1f2937;
+      --text-muted: #6b7280;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --radius: 14px;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      line-height: 1.6;
+      font-size: 15px;
+      overflow-x: hidden;
+      padding-bottom: 60px;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);
+      color: #ffffff;
+      padding: 24px 20px;
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+      box-shadow: 0 4px 12px rgba(30, 58, 138, 0.15);
+    }
+    .header-badge {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.2);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: 0.5px;
+    }
+    .header h1 {
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1.3;
+      margin-bottom: 8px;
+    }
+    .header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+    .header-meta {
+      margin-top: 12px;
+      font-size: 12px;
+      opacity: 0.75;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      padding-top: 10px;
+    }
+
+    /* Stat Cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      padding: 12px;
+      border-radius: 12px;
+      text-align: center;
+      border: 1px solid var(--border);
+    }
+    .stat-num {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--primary);
+    }
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    /* Section Title */
+    .section-title {
+      font-size: 18px;
+      font-weight: 800;
+      margin: 24px 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #0f172a;
+    }
+    .section-title span.badge {
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 700;
+    }
+
+    /* Accordion Guide Cards */
+    .guide-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 14px;
+      overflow: hidden;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
+      transition: border-color 0.2s;
+    }
+    .guide-card:focus-within, .guide-card:hover {
+      border-color: var(--primary-light);
+    }
+    .guide-header {
+      padding: 16px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      user-select: none;
+    }
+    .guide-title-wrap {
+      flex: 1;
+      padding-right: 12px;
+    }
+    .guide-category {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--primary);
+      margin-bottom: 4px;
+      display: inline-block;
+    }
+    .guide-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.35;
+    }
+    .guide-amount {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--danger);
+      margin-top: 4px;
+    }
+    .guide-arrow {
+      font-size: 16px;
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+      min-width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .guide-card.open .guide-arrow {
+      transform: rotate(180deg);
+    }
+
+    /* Accordion Body */
+    .guide-body {
+      display: none;
+      padding: 0 16px 16px;
+      border-top: 1px solid var(--border);
+      background: #fafafa;
+    }
+    .guide-card.open .guide-body {
+      display: block;
+    }
+
+    /* Key Meta Badges */
+    .meta-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 14px 0;
+    }
+    .meta-tag {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 12px;
+      color: #374151;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Steps */
+    .step-list {
+      list-style: none;
+      margin: 14px 0;
+      counter-reset: step-counter;
+    }
+    .step-item {
+      position: relative;
+      padding-left: 32px;
+      margin-bottom: 10px;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .step-item::before {
+      counter-increment: step-counter;
+      content: counter(step-counter);
+      position: absolute;
+      left: 0;
+      top: 1px;
+      width: 22px;
+      height: 22px;
+      background: var(--primary);
+      color: #ffffff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    /* Document Table */
+    .doc-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      background: #ffffff;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .doc-table th {
+      background: #f1f5f9;
+      color: #475569;
+      text-align: left;
+      padding: 8px 10px;
+      font-weight: 600;
+    }
+    .doc-table td {
+      padding: 8px 10px;
+      border-top: 1px solid #f1f5f9;
+      color: #334155;
+    }
+    .req-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .req-badge.must {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .req-badge.opt {
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    /* Rejection Callout */
+    .rejection-box {
+      background: var(--warning-bg);
+      border-left: 4px solid var(--warning);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 14px;
+      margin: 12px 0;
+      font-size: 13.5px;
+    }
+    .rejection-title {
+      font-weight: 800;
+      color: var(--warning);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+    }
+
+    /* Warning Callout */
+    .warning-box {
+      background: var(--danger-bg);
+      border-left: 4px solid var(--danger);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 14px;
+      margin: 12px 0;
+      font-size: 13.5px;
+      color: #7f1d1d;
+    }
+
+    /* Action Buttons */
+    .action-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .btn {
+      min-height: 44px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: background-color 0.2s;
+    }
+    .btn-tel {
+      background: var(--primary-soft);
+      color: var(--primary);
+      border: 1px solid #bfdbfe;
+    }
+    .btn-tel:hover {
+      background: #dbeafe;
+    }
+    .btn-copy {
+      background: #fef08a;
+      color: #854d0e;
+      border: 1px solid #fde047;
+    }
+    .btn-copy:hover {
+      background: #fde047;
+    }
+    .btn-source {
+      grid-column: span 2;
+      background: #ffffff;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      font-weight: 500;
+      font-size: 12px;
+    }
+
+    /* Catalog Table */
+    .catalog-list {
+      background: var(--card-bg);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+    .catalog-item {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .catalog-item:last-child {
+      border-bottom: none;
+    }
+    .catalog-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .catalog-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .catalog-amount {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--primary);
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: #111827;
+      color: #ffffff;
+      padding: 10px 20px;
+      border-radius: 30px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      transition: transform 0.25s ease-out;
+      z-index: 9999;
+      pointer-events: none;
+    }
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Footer */
+    .footer {
+      margin-top: 32px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.6;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="header-badge">👵 실버케어 v2.0 공식 가이드</div>
+      <h1>2026 대한민국<br>부모님 복지 대백과</h1>
+      <p>동사무소·보건소 혜택, 자녀가 대신 신청해서 챙겨드려요</p>
+      <div class="header-meta">
+        <span>기준: 2026년 정부 지침 팩트체크</span>
+        <span>갱신: 2026년 11월 07일</span>
+      </div>
+    </header>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-num">10개</div>
+        <div class="stat-label">실전 집중 가이드</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">31개</div>
+        <div class="stat-label">전국/지자체 카탈로그</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">300만+</div>
+        <div class="stat-label">평균 수혜 금액(연)</div>
+      </div>
+    </div>
+
+    <!-- 10대 핵심 실전 가이드 -->
+    <div class="section-title">
+      🎯 10대 핵심 복지 실전 가이드
+      <span class="badge">필수 확인</span>
+    </div>
+
+    <div class="guide-card" id="benefit-1">
+      <div class="guide-header" onclick="toggleGuide(1)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 65세 이상</span>
+          <h2 class="guide-title">임플란트 건강보험</h2>
+          <div class="guide-amount">평생 2개 · 본인부담 30%</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 건강보험 적용 치과</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">치과에서 건강보험 임플란트로 등록하면 적용돼요. 평생 2개 한도라 어느 치아에 쓸지 상담 후 결정하세요.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 치과 방문하여 파노라마 X-ray 촬영 및 잔존 치아 확인</li><li class="step-item">2단계: 치과에서 국민건강보험공단 요양기관정보마당 전산으로 사전 등록</li><li class="step-item">3단계: 식립(1단계·2단계) 및 보철물(3단계) 장착 (단계별 본인부담 30% 수납)</li><li class="step-item">4단계: 시술 완료 후 3개월간 유지관리(무상 또는 정기점검)</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>신분증(주민등록증·운전면허증)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>건강보험 임플란트 등록신청서</strong></td>
+              <td>치과 작성(원내 비치)</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>완전 무치악(치아가 1개도 없는 상태)인 경우 건강보험 임플란트가 아닌 완전틀니 급여 대상이므로, 부분틀니 또는 틀니 급여로 신청하세요.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>평생 2개 한도(부분무치악 대상). 완전 무치악은 대상 제외.</li><li>골이식(뼈이식) 비용은 비급여로 별도 발생할 수 있습니다.</li><li>병원 이동(중도 변경) 시 기존 단계 비용 환급이 어려우므로 신중한 치과 선택 필수.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 건강보험 적용 치과</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 만 65세 넘으셔서 임플란트 2개까지 건강보험 돼요. 비용 30%만 내시면 돼요!\n\n✔ 임플란트 건강보험\n✔ 평생 2개 · 본인부담 30%\n✔ 문의: 건강보험 적용 치과\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.nhis.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-2">
+      <div class="guide-header" onclick="toggleGuide(2)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 65세 이상</span>
+          <h2 class="guide-title">노인 틀니 건강보험</h2>
+          <div class="guide-amount">7년에 1회 · 본인부담 30%</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 건강보험 적용 치과</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">완전·부분 틀니 모두 7년에 1회 건강보험 적용. 치과에서 등록 후 제작해요.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 치과 방문 진찰 및 완전/부분 틀니 대상 여부 진단</li><li class="step-item">2단계: 치과에서 건강보험공단 전산에 틀니 대상자 사전 등록</li><li class="step-item">3단계: 본뜨기 및 임시틀니 제작 거쳐 최종 틀니 장착(본인부담 30%)</li><li class="step-item">4단계: 장착 후 3개월간 6회까지 무상 진료/조정</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>신분증(주민등록증·운전면허증)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>건강보험 틀니 등록신청서</strong></td>
+              <td>치과 작성(원내 비치)</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>제작 후 7년 이내에는 원칙적으로 재제작 급여가 불가하나, 구강 구조 급격 변화 등 의학적 소견이 있으면 공단 심사를 거쳐 재제작이 가능합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>동일 부위 7년 이내 1회 원칙(완전틀니/부분틀니 각각 적용).</li><li>귀금속(금 등) 사용 시 비급여 차액이 발생할 수 있습니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 건강보험 적용 치과</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 틀니도 7년에 한 번 건강보험 돼요. 비용 30%만 내시면 돼요.\n\n✔ 노인 틀니 건강보험\n✔ 7년에 1회 · 본인부담 30%\n✔ 문의: 건강보험 적용 치과\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.nhis.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-3">
+      <div class="guide-header" onclick="toggleGuide(3)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 65세 이상</span>
+          <h2 class="guide-title">폐렴구균 무료 예방접종</h2>
+          <div class="guide-amount">1회 무료 접종</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 보건소·지정의료기관</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">만 65세 이상 평생 1회 무료(PPSV23). 신분증 들고 보건소나 지정 병의원 방문.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 질병관리청 예방접종도우미(nip.kdca.go.kr) 또는 1339로 지정 위탁의료기관 확인</li><li class="step-item">2단계: 가까운 보건소 또는 지정 병의원에 유선으로 백신 재고 확인</li><li class="step-item">3단계: 신분증 지참하여 당일 예진표 작성 및 접종(무료)</li><li class="step-item">4단계: 접종 후 15~30분간 대기실에서 이상반응 관찰 후 귀가</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>신분증(주민등록증 또는 운전면허증)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>이전에 65세 이후 PPSV23(다당질) 백신을 이미 맞으셨다면 무료 재접종이 불가합니다. 65세 이전에 맞으셨다면 5년 경과 후 무료 접종이 가능합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>국가무료접종 백신은 23가 다당질(PPSV23) 1회입니다(13가/15가는 비급여).</li><li>감기, 고열 등 급성 감염 질환이 있는 경우 회복 후 접종하세요.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 보건소·지정의료기관</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 폐렴 예방주사 한 번 무료예요. 신분증만 들고 보건소 가시면 돼요.\n\n✔ 폐렴구균 무료 예방접종\n✔ 1회 무료 접종\n✔ 문의: 보건소·지정의료기관\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://nip.kdca.go.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-5">
+      <div class="guide-header" onclick="toggleGuide(5)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 60세 이상</span>
+          <h2 class="guide-title">무릎 인공관절 수술비 지원</h2>
+          <div class="guide-amount">한쪽 최대 120만원 실비</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 보건소 (노인의료나눔재단)</span>
+          <span class="meta-tag">🗓 상시 (예산 소진 시 마감)</span>
+          <span class="meta-tag" style="color:var(--danger);font-weight:700;">🚨 사전승인 필수</span>
+          <span class="meta-tag">📄 진단서·처방전 필요</span>
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">기초수급·차상위·한부모 어르신 대상. 반드시 수술 전에 보건소 신청·승인 후 수술해야 지원돼요.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 정형외과에서 만 60세 이상 무릎 인공관절 적응증(말기 퇴행성관절염) 진단서 발급</li><li class="step-item">2단계: [필수] 수술 날짜 잡기 전 주민등록상 주소지 보건소에 신청서 및 서류 제출</li><li class="step-item">3단계: 보건소 및 노인의료나눔재단 적격 심사(통상 1~2주 소요) 및 승인 통보 수령</li><li class="step-item">4단계: 승인 통보 후 수술 진행, 재단에서 의료기관으로 수술비 직접 지급(한쪽 최대 120만원)</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>수술비 지원 신청서</strong></td>
+              <td>관할 보건소 비치</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>진단서(또는 소견서) 및 X-ray 판독 소견서</strong></td>
+              <td>정형외과 병의원</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>기초생활수급자 증명서 또는 차상위계층 확인서</strong></td>
+              <td>정부24 또는 주민센터</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>주민등록등본</strong></td>
+              <td>정부24 또는 주민센터</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>수술을 이미 받으셨거나 사전 승인 없이 입원하신 경우 노인의료나눔재단 업무지침상 소급 지급이 절대 불가합니다. 반드시 지원 승인 통보 후 수술을 진행하셔야 합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>🚨 [절대 주의] 반드시 수술 전 보건소 신청 및 승인이 완료되어야 합니다! 수술 후 영수증 청구는 100% 반려됩니다.</li><li>지원 범위: 본인부담금 중 검사비, 진료비, 수술비(한쪽 120만원, 양쪽 240만원 한도).</li><li>간병비, 상급병실 차액, 제증명 발급비는 본인 부담입니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 보건소 (노인의료나눔재단)</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 무릎 수술 전에 보건소에 먼저 신청하면 한쪽 120만원까지 지원돼요. 수술 날짜 잡기 전에 꼭 신청해요!\n\n✔ 무릎 인공관절 수술비 지원\n✔ 한쪽 최대 120만원 실비\n✔ 문의: 보건소 (노인의료나눔재단)\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.knumf.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-7">
+      <div class="guide-header" onclick="toggleGuide(7)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 60세 이상</span>
+          <h2 class="guide-title">치매 조기검진</h2>
+          <div class="guide-amount">선별검사 무료</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 치매안심센터 (보건소)</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">만 60세 이상 치매 선별검사 무료. 이상 소견 시 진단검사 비용도 소득기준에 따라 지원.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 관할 치매안심센터 방문 또는 전화 예약(1899-9988)</li><li class="step-item">2단계: 인지선별검사(CIST) 무료 실시(약 15~20분 소요)</li><li class="step-item">3단계: 선별검사 저하 판정 시 협약병원 정밀진단검사·감별검사 의뢰(비용 소득기준 지원)</li><li class="step-item">4단계: 치매 진단 및 중위소득 120% 이하 충족 시 치매치료관리비(월 3만원/연 36만원) 신청</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>신분증(주민등록증·운전면허증)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>(치료관리비 신청 시) 치매치료제 처방전 및 약제비 영수증</strong></td>
+              <td>병의원 및 약국</td>
+              <td><span class="req-badge opt">치료비 신청 시</span></td>
+            </tr>
+            <tr>
+              <td><strong>(치료관리비 신청 시) 본인 명의 통장사본</strong></td>
+              <td>금융기관</td>
+              <td><span class="req-badge opt">치료비 신청 시</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>선별검사에서 정상 범위가 나왔더라도 본인·가족이 인지 저하를 강하게 호소할 경우 신경심리검사 상담 연계가 가능합니다. 치료관리비는 상병코드(F00~F03, G30)와 치매약 복용 여부가 확인되어야 합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>치매치료관리비(약제비 월 3만원)는 자동 지급되지 않으며 진단서/처방전 지참하여 치매안심센터에 별도 신청해야 합니다.</li><li>지자체에 따라 배회감지기(GPS) 무료 보급 및 기저귀 등 조호물품도 지원됩니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 치매안심센터 (보건소)</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 보건소 치매안심센터에서 기억력 검사 무료로 해줘요. 건강 체크 겸 한번 가봐요.\n\n✔ 치매 조기검진\n✔ 선별검사 무료\n✔ 문의: 치매안심센터 (보건소)\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.nid.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-8">
+      <div class="guide-header" onclick="toggleGuide(8)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 65세 이상</span>
+          <h2 class="guide-title">노인장기요양 등급 신청</h2>
+          <div class="guide-amount">등급 시 방문요양 등 85% 지원</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 국민건강보험공단 (1577-1000)</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          <span class="meta-tag">📄 진단서·처방전 필요</span>
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">혼자 일상생활이 어려우면 등급 신청. 공단 방문조사 후 의사소견서 제출해 등급 판정.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 국민건강보험공단 노인장기요양보험 운영센터(1577-1000) 방문·우편·팩스·온라인 신청</li><li class="step-item">2단계: 공단 간호사·사회복지사 직원이 부모님 댁 직접 방문하여 52개 항목 신체·인지상태 조사</li><li class="step-item">3단계: 공단에서 소견서 발급 통보서 수령 후 병원 방문하여 &#x27;장기요양용 의사소견서&#x27; 발급·제출</li><li class="step-item">4단계: 등급판정위원회 심의 후 1~5등급 또는 인지지원등급 결정 통보 및 장기요양인정서 수령</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>장기요양인정신청서</strong></td>
+              <td>국민건강보험공단 지사 또는 홈페이지</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>신청인(대리인) 신분증 및 가족관계증명서</strong></td>
+              <td>본인 지참 / 정부24</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>장기요양용 의사소견서</strong></td>
+              <td>병의원(공단 지정 통보 후 발급)</td>
+              <td><span class="req-badge opt">공단 안내 후</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>만 65세 미만이어도 노인성 질병(치매, 뇌혈관질환, 파킨슨병 등)이 명시된 진단서가 있으면 신청 가능합니다. 등급 외 판정 시 90일 이내 공단에 이의신청(재심사)을 제기할 수 있습니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>방문조사 시 평소 상태를 솔직하게 보여주셔야 합니다(자녀가 대신 도와주면 경증으로 오판정될 수 있음).</li><li>등급 판정(1~5등급)을 받으면 주야간보호·방문요양 이용료의 85%가 국비 지원(본인부담 15%)됩니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <a href="tel:1577" class="btn btn-tel">📞 국민건강보험공단 (1577-1000) 통화</a>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 요양 등급 받으면 요양보호사가 집으로 와서 도와드려요. 제가 신청할게요.\n\n✔ 노인장기요양 등급 신청\n✔ 등급 시 방문요양 등 85% 지원\n✔ 문의: 국민건강보험공단 (1577-1000)\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.longtermcare.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-10">
+      <div class="guide-header" onclick="toggleGuide(10)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🏥 의료 · 만 60세 이상</span>
+          <h2 class="guide-title">어르신 안마바우처</h2>
+          <div class="guide-amount">회당 본인부담 약 4천원</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 주민센터 (지역사회서비스)</span>
+          <span class="meta-tag">🗓 지자체별 모집</span>
+          
+          <span class="meta-tag">📄 진단서·처방전 필요</span>
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">근골격계·신경계 질환 진단서 필수. 시각장애인 안마사가 월 4회 안팎 방문·시술.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 병의원에서 근골격계(M, S코드), 신경계(G코드), 순환계(I코드) 질환명·코드 기재된 진단서/소견서 발급</li><li class="step-item">2단계: 주소지 동주민센터 복지팀에 바우처 집중 모집 기간(보통 매년 1~2월, 연중 추가모집) 확인</li><li class="step-item">3단계: 신청서 및 서류 제출 → 소득(중위소득 140% 이하 또는 기초연금 수급) 및 질환 심사</li><li class="step-item">4단계: 선정 통보 후 국민행복카드 수령 → 관내 시각장애인 안마원 예약(월 4회, 회당 본인부담 약 4,000원)</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>지역사회서비스 투자사업 신청서</strong></td>
+              <td>동주민센터 비치</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>신분증 및 건강보험료 납부확인서</strong></td>
+              <td>본인 지참 / 국민건강보험공단</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>의사 진단서·소견서·처방전 중 1부</strong></td>
+              <td>정형외과·신경과·내과·한의원</td>
+              <td><span class="req-badge must">필수 (질병코드 필히 명시)</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>진단서에 질병분류코드(G, M, I 또는 당뇨 E10~E14)가 누락되면 접수가 반려됩니다. 의사선생님께 &#x27;안마바우처 제출용으로 질병코드가 필요하다&#x27;고 미리 말씀하세요.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>지자체별 선착순 예산 사업이므로 연초(1~2월) 모집 첫날 신청하는 것이 가장 유리합니다.</li><li>1회 선정 시 10개월간 지원되며, 1인당 평생 또는 격년 제한이 있을 수 있습니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 주민센터 (지역사회서비스)</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 진단서 있으면 안마를 회당 4천원 정도에 받을 수 있어요.\n\n✔ 어르신 안마바우처\n✔ 회당 본인부담 약 4천원\n✔ 문의: 주민센터 (지역사회서비스)\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.socialservice.or.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-13">
+      <div class="guide-header" onclick="toggleGuide(13)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">💰 소득·감면 · 만 65세 이상</span>
+          <h2 class="guide-title">기초연금</h2>
+          <div class="guide-amount">단독 월 최대 349,700원 · 부부 559,520원</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 주민센터·국민연금공단 (1355)</span>
+          <span class="meta-tag">🗓 만 65세 생일 1개월 전부터</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">소득·재산 하위 70% 대상(2026년 기준액). 자동지급이 아니라 신청해야 받아요.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 만 65세 생일이 속한 달의 1개월 전부터 주소지 무관 전국 주민센터 또는 국민연금공단 지사 방문</li><li class="step-item">2단계: 금융정보 제공동의서 작성(부부 가구는 배우자 동의 필수) 및 신청서 제출</li><li class="step-item">3단계: 시군구청에서 소득·부동산·금융재산 조사(소득인정액 산정, 약 30~60일 소요)</li><li class="step-item">4단계: 적격 판정 시 매월 25일 통장으로 입금(2026년 단독 최대 349,700원, 부부 559,520원)</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>사회보장급여 제공(변경) 신청서</strong></td>
+              <td>동주민센터 또는 복지로 온라인</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>소득·재산 신고서 및 금융정보등 제공동의서</strong></td>
+              <td>동주민센터 또는 복지로</td>
+              <td><span class="req-badge must">필수 (부부 모두 서명)</span></td>
+            </tr>
+            <tr>
+              <td><strong>부모님 통장사본(수급 희망 계좌)</strong></td>
+              <td>금융기관</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>자녀 대리 신청 시: 위임장 및 대리인·부모님 신분증</strong></td>
+              <td>주민센터 비치 / 정부24</td>
+              <td><span class="req-badge opt">대리 시</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>소득·재산 초과로 탈락하더라도 반드시 &#x27;수급희망 이력관리제&#x27;를 함께 신청해 두세요. 향후 기준액이 상향되거나 재산이 변동될 때 공단에서 직권으로 재신청을 안내해 줍니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>가만히 계시면 국가에서 알아서 주지 않습니다. 반드시 본인 또는 자녀가 직접 신청해야 수령 가능합니다.</li><li>신청일이 속한 달부터 소급 지급되므로, 만 65세 생일 1개월 전에 미리 접수하세요.</li><li>고급 자동차(3,000cc 이상 또는 4천만원 이상)나 골프회원권 보유 시 전액 기본재산 공제 없이 월 100% 소득 환산되어 탈락할 수 있습니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <a href="tel:1355" class="btn btn-tel">📞 주민센터·국민연금공단 (1355) 통화</a>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 기초연금은 신청해야 나와요. 제가 주민센터에 확인해볼게요.\n\n✔ 기초연금\n✔ 단독 월 최대 349,700원 · 부부 559,520원\n✔ 문의: 주민센터·국민연금공단 (1355)\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://basicpension.mohw.go.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-14">
+      <div class="guide-header" onclick="toggleGuide(14)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">💰 소득·감면 · 만 65세 이상</span>
+          <h2 class="guide-title">통신비 복지감면</h2>
+          <div class="guide-amount">월 최대 12,100원 감면 (부가세 포함)</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 주민센터·통신사 고객센터</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">기초연금 수급자 휴대폰 요금 감면. 수급 확정 후 통신사 또는 주민센터에 신청.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 부모님 기초연금 수급 자격 확정 여부 확인</li><li class="step-item">2단계: 이동통신사 고객센터(휴대폰 114) 또는 관할 동주민센터 복지팀 방문</li><li class="step-item">3단계: 기초연금 수급자 복지감면 신청(주민센터에서 기초연금 신청 시 동시 신청 가능)</li><li class="step-item">4단계: 다음 달 휴대폰 요금 청구서부터 월 최대 12,100원(부가세 포함) 자동 차감 확인</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>신분증(주민등록증·운전면허증)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>기초연금 수급자 확인서 (선택: 전산 조회 가능)</strong></td>
+              <td>정부24 또는 주민센터</td>
+              <td><span class="req-badge opt">전산 불가 시</span></td>
+            </tr>
+            <tr>
+              <td><strong>자녀 대리 신청 시: 가족관계증명서 및 위임장</strong></td>
+              <td>정부24</td>
+              <td><span class="req-badge opt">대리 시</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>알뜰폰(MVNO) 이용자는 정부 복지감면 대상에서 제외됩니다. 3대 통신사(SKT, KT, LGU+) 가입자만 감면 적용됩니다. 이미 다른 복지할인(유공자/장애인)을 받고 있다면 중복 감면은 불가합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>월 청구 요금이 22,000원 이상일 때 최대 12,100원이 감면되며, 22,000원 미만인 경우 기본료 감면율(50%)이 적용됩니다.</li><li>명의가 자녀 명의로 되어 있으면 혜택을 못 받으므로, 부모님 본인 명의로 회선을 변경해야 합니다.</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 주민센터·통신사 고객센터</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 휴대폰 요금 매달 최대 1만2천원 깎아줘요. 제가 신청해둘게요.\n\n✔ 통신비 복지감면\n✔ 월 최대 12,100원 감면 (부가세 포함)\n✔ 문의: 주민센터·통신사 고객센터\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.bokjiro.go.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="guide-card" id="benefit-25">
+      <div class="guide-header" onclick="toggleGuide(25)">
+        <div class="guide-title-wrap">
+          <span class="guide-category">🤝 돌봄·생활 · 만 65세 이상</span>
+          <h2 class="guide-title">노인맞춤돌봄서비스</h2>
+          <div class="guide-amount">안부확인·가사·외출동행 무료</div>
+        </div>
+        <div class="guide-arrow">▼</div>
+      </div>
+      <div class="guide-body">
+        <div class="meta-tags">
+          <span class="meta-tag">🏛 주민센터</span>
+          <span class="meta-tag">🗓 상시</span>
+          
+          
+        </div>
+
+        <p style="font-size:14px; color:#374151; margin-bottom:12px;">돌봄이 필요한 기초연금 수급 어르신 대상. 생활지원사가 정기 방문·안부전화.</p>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">📋 신청 절차 4단계</h4>
+        <ol class="step-list"><li class="step-item">1단계: 부모님 주민등록상 주소지 읍면동 주민센터 복지팀 방문 또는 전화 신청</li><li class="step-item">2단계: 전담 사회복지사가 부모님 댁을 방문하여 신체기능·인지·생활환경 조사</li><li class="step-item">3단계: 시군구 승인 및 일반돌봄(주 1~2회 방문·전화) 또는 중점돌봄(주 16시간 이상 가사·동행) 판정</li><li class="step-item">4단계: 담당 생활지원사 배정 후 정기 방문 안부 확인, 병원 동행, 가사 지원 개시(전액 무료)</li></ol>
+
+        <h4 style="font-size:14px; font-weight:700; margin-top:14px; color:#1e293b;">🎒 자녀 대리신청 준비 서류</h4>
+        <table class="doc-table">
+          <thead>
+            <tr><th>서류명</th><th>발급처</th><th>구분</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>노인맞춤돌봄서비스 신청서</strong></td>
+              <td>동주민센터 비치</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>신청인 신분증 (대리인 신분증 및 위임장)</strong></td>
+              <td>본인 지참</td>
+              <td><span class="req-badge must">필수</span></td>
+            </tr>
+            <tr>
+              <td><strong>소견서·진단서 (건강상태 확인 필요 시)</strong></td>
+              <td>병의원</td>
+              <td><span class="req-badge opt">선택</span></td>
+            </tr></tbody>
+        </table>
+
+        
+        <div class="rejection-box">
+          <div class="rejection-title">⚠️ 담당 공무원이 거절하거나 안 된다고 할 때</div>
+          <p>노인장기요양보험 등급자(1~5등급)나 가사간병 방문지원 이용자는 유사 중복 사업으로 신청이 제한됩니다. 장기요양 등급이 없는 돌봄 취약 어르신에게 적합합니다.</p>
+        </div>
+        
+            <div class="warning-box">
+              <strong style="display:block; margin-bottom:4px;">🚨 필수 주의사항</strong>
+              <ul style="padding-left:18px; margin:0;"><li>독거노인뿐만 아니라 고령 부부 가구 또는 조손 가구도 신청 가능합니다.</li><li>돌봄 대상자 전액 국비 무료 지원(이용료 없음).</li></ul>
+            </div>
+
+        <div class="action-group">
+          <span class="btn btn-tel" style="opacity:0.7">🏛 주민센터</span>
+          <button class="btn btn-copy" onclick="copyKakao(this, `엄마, 정기적으로 선생님이 찾아와서 말벗도 되고 도와드린대요.\n\n✔ 노인맞춤돌봄서비스\n✔ 안부확인·가사·외출동행 무료\n✔ 문의: 주민센터\n\n신청은 제가 도와드릴게요 💕`)">💌 카톡 문구 복사</button>
+          <a href="https://www.mohw.go.kr" target="_blank" rel="noopener noreferrer" class="btn btn-source">🌐 공식 공고·누리집 원문 확인 ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">
+      📚 전체 31개 복지 카탈로그
+      <span class="badge">전국 공통 및 지자체</span>
+    </div>
+    <div class="catalog-list">
+
+      <div style="background:#f1f5f9; padding:8px 16px; font-size:13px; font-weight:700; color:#475569;">
+        🏥 의료 (10개)
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">임플란트 건강보험</div>
+          <div class="catalog-sub">만 65세 이상 · 건강보험 적용 치과 · [전국]</div>
+        </div>
+        <div class="catalog-amount">평생 2개 · 본인부담 30%</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인 틀니 건강보험</div>
+          <div class="catalog-sub">만 65세 이상 · 건강보험 적용 치과 · [전국]</div>
+        </div>
+        <div class="catalog-amount">7년에 1회 · 본인부담 30%</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">폐렴구균 무료 예방접종</div>
+          <div class="catalog-sub">만 65세 이상 · 보건소·지정의료기관 · [전국]</div>
+        </div>
+        <div class="catalog-amount">1회 무료 접종</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">인플루엔자 무료 예방접종</div>
+          <div class="catalog-sub">만 65세 이상 · 보건소·지정의료기관 · [전국]</div>
+        </div>
+        <div class="catalog-amount">매년 1회 무료 접종</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">무릎 인공관절 수술비 지원</div>
+          <div class="catalog-sub">만 60세 이상 · 보건소 (노인의료나눔재단) · [전국]</div>
+        </div>
+        <div class="catalog-amount">한쪽 최대 120만원 실비</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인 개안수술 지원</div>
+          <div class="catalog-sub">만 60세 이상 · 보건소 (노인의료나눔재단) · [전국]</div>
+        </div>
+        <div class="catalog-amount">백내장 등 수술비 본인부담 지원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">치매 조기검진</div>
+          <div class="catalog-sub">만 60세 이상 · 치매안심센터 (보건소) · [전국]</div>
+        </div>
+        <div class="catalog-amount">선별검사 무료</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인장기요양 등급 신청</div>
+          <div class="catalog-sub">만 65세 이상 · 국민건강보험공단 (1577-1000) · [전국]</div>
+        </div>
+        <div class="catalog-amount">등급 시 방문요양 등 85% 지원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">어르신 대상포진 접종 지원</div>
+          <div class="catalog-sub">만 65세 이상 · 보건소 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">무료 또는 비용 일부 지원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">어르신 안마바우처</div>
+          <div class="catalog-sub">만 60세 이상 · 주민센터 (지역사회서비스) · [지자체]</div>
+        </div>
+        <div class="catalog-amount">회당 본인부담 약 4천원</div>
+      </div>
+
+      <div style="background:#f1f5f9; padding:8px 16px; font-size:13px; font-weight:700; color:#475569;">
+        💰 소득·감면 (8개)
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">기초연금</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터·국민연금공단 (1355) · [전국]</div>
+        </div>
+        <div class="catalog-amount">단독 월 최대 349,700원 · 부부 559,520원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">통신비 복지감면</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터·통신사 고객센터 · [전국]</div>
+        </div>
+        <div class="catalog-amount">월 최대 12,100원 감면 (부가세 포함)</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인일자리 공익활동형</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터·시니어클럽·노인복지관 · [전국]</div>
+        </div>
+        <div class="catalog-amount">월 30시간 · 29만원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인일자리 사회서비스형</div>
+          <div class="catalog-sub">만 65세 이상 · 시니어클럽·노인복지관 · [전국]</div>
+        </div>
+        <div class="catalog-amount">월 60시간 · 76만원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">주택연금</div>
+          <div class="catalog-sub">만 55세 이상 · 한국주택금융공사 (1688-8114) · [전국]</div>
+        </div>
+        <div class="catalog-amount">평생 매월 연금 (공시가 12억 이하)</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">농지연금</div>
+          <div class="catalog-sub">만 60세 이상 · 한국농어촌공사 (1577-7770) · [전국]</div>
+        </div>
+        <div class="catalog-amount">농지 담보 매월 연금</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">고령운전자 면허 자진반납</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터·경찰서 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">교통카드 10~30만원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">장수수당</div>
+          <div class="catalog-sub">만 80세 이상 · 주민센터 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">지자체별 정액 지급</div>
+      </div>
+
+      <div style="background:#f1f5f9; padding:8px 16px; font-size:13px; font-weight:700; color:#475569;">
+        🏠 주거·안전 (4개)
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">독거노인 응급안전안심서비스</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터 · [전국]</div>
+        </div>
+        <div class="catalog-amount">화재·가스·활동감지 센서 무료설치</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">에너지바우처</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터 · [전국]</div>
+        </div>
+        <div class="catalog-amount">냉·난방비 바우처 지원</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">낙상방지 안전손잡이 설치</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터·지자체 주택과 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">안전손잡이·미끄럼방지 무료설치</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">어르신 이불빨래방</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">이불 수거·세탁·배달 무료</div>
+      </div>
+
+      <div style="background:#f1f5f9; padding:8px 16px; font-size:13px; font-weight:700; color:#475569;">
+        🤝 돌봄·생활 (9개)
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">서울 병원 안심동행</div>
+          <div class="catalog-sub">만 60세 이상 · 서울시 병원안심동행 (120) · [지자체]</div>
+        </div>
+        <div class="catalog-amount">시간당 5,000원 (저소득 무료)</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">경기 병원 동행 서비스</div>
+          <div class="catalog-sub">만 60세 이상 · 시군청·주민센터 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">시군별 상이 (시간당 약 5천원)</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">노인맞춤돌봄서비스</div>
+          <div class="catalog-sub">만 65세 이상 · 주민센터 · [전국]</div>
+        </div>
+        <div class="catalog-amount">안부확인·가사·외출동행 무료</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">지하철 경로우대 무임승차</div>
+          <div class="catalog-sub">만 65세 이상 · 역 교통카드 발급기·주민센터 · [전국]</div>
+        </div>
+        <div class="catalog-amount">도시철도 무료</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">KTX·열차 경로할인</div>
+          <div class="catalog-sub">만 65세 이상 · 코레일 역·앱 (1544-7788) · [전국]</div>
+        </div>
+        <div class="catalog-amount">주중 30% 할인</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">고궁·국공립시설 경로우대</div>
+          <div class="catalog-sub">만 65세 이상 · 각 시설 매표소 · [전국]</div>
+        </div>
+        <div class="catalog-amount">입장료 무료·할인</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">100원 효도택시</div>
+          <div class="catalog-sub">만 65세 이상 · 군청·읍면사무소 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">1회 100~1,000원 이용</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">경로식당 무료급식</div>
+          <div class="catalog-sub">만 60세 이상 · 주민센터·노인복지관 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">점심 무료 제공</div>
+      </div>
+
+      <div class="catalog-item">
+        <div>
+          <div class="catalog-title">공공체육시설 경로할인</div>
+          <div class="catalog-sub">만 65세 이상 · 구민체육센터 · [지자체]</div>
+        </div>
+        <div class="catalog-amount">이용료 50% 안팎 할인</div>
+      </div>
+
+    </div>
+
+    <footer class="footer">
+      <p>👵 <strong>실버케어 (SilverCare) 부모님 복지 비서</strong></p>
+      <p style="margin-top:6px;">본 리포트는 보건복지부, 국민건강보험공단, 국민연금공단 등 공식 지침을 기반으로 제작된 대국민 정보입니다.<br>
+      개인 식별 정보(PII)는 일체 수집·저장하거나 리포트에 포함하지 않습니다.</p>
+      <p style="margin-top:8px; opacity:0.6;">© 2026 Multi-Bot Intelligence Platform. All rights reserved.</p>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast">카톡 문구가 복사되었습니다!</div>
+
+  <script>
+    function toggleGuide(id) {
+      const card = document.getElementById('benefit-' + id);
+      if (card) {
+        card.classList.toggle('open');
+      }
+    }
+
+    function copyKakao(btn, text) {
+      const decoded = text.replace(/\\n/g, '\n');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(decoded).then(() => {
+          showToast();
+        }).catch(() => {
+          fallbackCopy(decoded);
+        });
+      } else {
+        fallbackCopy(decoded);
+      }
+    }
+
+    function fallbackCopy(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        showToast();
+      } catch (err) {
+        alert('복사에 실패했습니다. 직접 복사해주세요.');
+      }
+      document.body.removeChild(ta);
+    }
+
+    function showToast() {
+      const toast = document.getElementById('toast');
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2000);
+    }
+
+    // Auto-open first guide for preview
+    document.addEventListener('DOMContentLoaded', () => {
+      const first = document.querySelector('.guide-card');
+      if (first) {
+        first.classList.add('open');
+      }
+    });
+  </script>
+</body>
+</html>

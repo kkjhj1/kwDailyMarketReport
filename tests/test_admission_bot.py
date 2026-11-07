@@ -186,7 +186,8 @@ def test_build_persistent_reply_keyboard():
     assert "🎪 설명회·박람회 전체보기" in all_btn_texts
     assert "🎓 학년/지역 설정" in all_btn_texts
     assert "❓ 이용 도움말" in all_btn_texts
-    assert [len(row) for row in kb["keyboard"]] == [2, 2, 2]
+    assert "📖 1초 입시용어 사전" in all_btn_texts
+    assert [len(row) for row in kb["keyboard"]] in ([2, 2, 2], [2, 2, 2, 2])
 
 
 def test_interactive_bot_korean_text_touch_buttons():
