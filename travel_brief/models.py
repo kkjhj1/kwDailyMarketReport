@@ -25,6 +25,7 @@ class DestinationMeta:
     recommended_hotel_features: str = ""
     flight_min_floor_krw: int = 0
     airlines: list[str] = field(default_factory=list)
+    hotel_budget_segment: str = "3성급 가성비 비즈니스 호텔"
 
     def is_best_month(self, month: int) -> bool:
         return month in self.best_months
@@ -174,6 +175,7 @@ class FlightDeal:
     exact_ret_time: str = ""
     exact_ret_arr_time: str = ""
     next_day_arrival: bool = False
+    freshness: Literal["FRESH", "STALE"] = "FRESH"
 
     def __post_init__(self):
         if self.exact_dep_time and (
@@ -227,20 +229,44 @@ class FlightDeal:
         return self.data_source in ("LIVE_SSE", "LIVE_PG")
 
     @property
+    def is_stale(self) -> bool:
+        return self.freshness == "STALE"
+
+    @property
     def exact_price_str(self) -> str:
-        if self.data_source in ("LIVE_SSE", "LIVE_PG"):
+        if self.data_source == "LIVE_SSE":
             return f"{self.price_krw:,}원~"
+        if self.data_source == "LIVE_PG":
+            return f"약 {round_man(self.price_krw)}만 원 (최근 시세)"
         return self.price_band_str
+
+    @property
+    def short_price_str(self) -> str:
+        """Compact price for matrix cells / one-line summaries (no source wording)."""
+        if self.data_source == "LIVE_SSE":
+            return f"{self.price_krw:,}원~"
+        if self.data_source == "LIVE_PG":
+            return f"약 {round_man(self.price_krw)}만 원"
+        return self.price_band_compact_str
+
+    @property
+    def source_badge(self) -> str:
+        """Honest data-source label; STALE (cache fallback) is always disclosed."""
+        label = {
+            "LIVE_SSE": "🟢 네이버 실시간 관측",
+            "LIVE_PG": "🟡 가격그래프 최근값",
+        }.get(self.data_source, "⚪ 오프라인 추정치")
+        return f"{label} · ⏳ 캐시" if self.is_stale else label
 
     @property
     def live_payment_note(self) -> str:
         if self.data_source == "LIVE_SSE":
             if self.general_fare_krw > self.price_krw:
-                return f"카드혜택가 · 일반결제 {self.general_fare_krw:,}원"
-            return "모든 결제수단 동일가"
+                return f"네이버 실시간 관측 최저가 · 일반결제 {self.general_fare_krw:,}원 (결제 단계 변동 가능)"
+            return "네이버 실시간 관측 최저가 (결제 단계 변동 가능)"
         if self.data_source == "LIVE_PG":
-            return "최근 검색 직항 캐시"
-        return "유류세 포함 예상 밴드"
+            return "가격그래프 최근값 (결제 단계 변동 가능)"
+        return "예상 밴드 (오프라인 추정치)"
 
     @property
     def popular_banner_note(self) -> str:
@@ -295,6 +321,7 @@ class BudgetBreakdown:
     meal_transit_total_krw: int  # daily_meal_transit * days
     total_per_person_krw: int
     estimated_for_two_krw: int  # 2인 기준 (항공*2 + 호텔1실 + 식비*2)
+    hotel_night_krw: int = 0  # 1박 숙소 예산 (invariant: hotel_night_krw * nights == hotel_total_krw)
 
     @classmethod
     def calculate(
@@ -324,6 +351,7 @@ class BudgetBreakdown:
             meal_transit_total_krw=meal_total,
             total_per_person_krw=total_one,
             estimated_for_two_krw=total_two,
+            hotel_night_krw=effective_hotel_night,
         )
 
 
@@ -337,3 +365,14 @@ class TravelRecommendation:
     summary_reason: str
     naver_flight_url: str = ""
     hotel_search_url: str = ""
+
+
+@dataclass
+class TravelSnapshot:
+    """Single immutable data basis shared by the Telegram message and the web report of one run."""
+    snapshot_id: str
+    generated_at: str  # "YYYY-MM-DD HH:MM" KST
+    version_tag: str   # "YYYYMMDDHHMM" (cache-busting `?v=` query)
+    recommendations: list[TravelRecommendation]
+    monthly_matrix: dict  # {dest_code: {"YYYY-MM": FlightDeal}}
+    monthly_picks: dict   # {"YYYY-MM": (DestinationMeta, FlightDeal)}

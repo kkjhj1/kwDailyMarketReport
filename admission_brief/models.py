@@ -98,6 +98,40 @@ class BriefingType(str, Enum):
         return titles.get(self.value, self.value)
 
 
+class EventCategory(str, Enum):
+    """Event menu category (orthogonal to BriefingType, which is the dispatch content type)."""
+    EXPO = "EXPO"           # 공공·대학 대입 박람회
+    BRIEFING = "BRIEFING"   # 5대 대형 입시기관 설명회
+    SEMINAR = "SEMINAR"     # 테마별 전략 세미나
+
+    @property
+    def icon(self) -> str:
+        icons = {
+            "EXPO": "🎪",
+            "BRIEFING": "📢",
+            "SEMINAR": "💡",
+        }
+        return icons.get(self.value, "📌")
+
+    @property
+    def badge(self) -> str:
+        badges = {
+            "EXPO": "🎪 [대입박람회]",
+            "BRIEFING": "📢 [대형설명회]",
+            "SEMINAR": "💡 [테마세미나]",
+        }
+        return badges.get(self.value, "📌")
+
+    @property
+    def title(self) -> str:
+        titles = {
+            "EXPO": "공공·대학 대입 박람회",
+            "BRIEFING": "5대 대형 입시기관 설명회",
+            "SEMINAR": "테마별 전략 세미나",
+        }
+        return titles.get(self.value, self.value)
+
+
 @dataclass
 class AdmissionEvent:
     """Metadata for an admission seminar, fair, or test event."""
@@ -120,6 +154,8 @@ class AdmissionEvent:
     source_name: str = "공식 오피셜"         # 정보 출처 (예: 교육부, 서울시교육청, EBSi, 대교협)
     source_url: Optional[str] = None        # 원문 공문/기사/모집요강 URL
     urgency: str = "NORMAL"                 # 긴급도 ("NORMAL", "BREAKING", "HIGH")
+    category: EventCategory = EventCategory.BRIEFING  # 행사 메뉴 분류 (박람회/설명회/세미나)
+    expires_at: Optional[datetime] = None   # 노출 만료 시각 (None이면 event_date_str 기준)
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -143,6 +179,8 @@ class AdmissionEvent:
             "source_name": self.source_name,
             "source_url": self.source_url,
             "urgency": self.urgency,
+            "category": self.category.value,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "created_at": self.created_at.isoformat(),
         }
 
@@ -166,6 +204,7 @@ class AdmissionBriefing:
     source_name: str = "공식 오피셜"
     source_url: Optional[str] = None
     urgency: str = "NORMAL"                 # "NORMAL", "BREAKING", "HIGH"
+    category: Optional[EventCategory] = None  # 행사 기반 브리핑만 설정 (To-Do/팩트체크는 None)
     as_of: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
     def is_match_user(

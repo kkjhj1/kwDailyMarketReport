@@ -65,6 +65,7 @@ class FlightEngine:
                 recommended_hotel_features=item.get("recommended_hotel_features", ""),
                 flight_min_floor_krw=item.get("flight_min_floor_krw", 0),
                 airlines=item.get("airlines", []),
+                hotel_budget_segment=item.get("hotel_budget_segment", "3성급 가성비 비즈니스 호텔"),
             )
             self.destinations[meta.code] = meta
 

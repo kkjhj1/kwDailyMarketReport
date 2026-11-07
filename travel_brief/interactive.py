@@ -127,7 +127,7 @@ class TravelInteractiveHandler:
                     {"text": "🇹🇭 방콕", "callback_data": "trv:q:BKK"},
                 ],
                 [
-                    {"text": "📊 6개월 실시간 웹 리포트 ↗", "url": self.report_url},
+                    {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
                 ],
             ]
         }

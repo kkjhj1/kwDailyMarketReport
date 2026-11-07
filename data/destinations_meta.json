@@ -30,6 +30,7 @@
       "에어서울"
     ],
     "hotel_night_avg_krw": 85000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 55000,
     "currency": "JPY",
     "tips": "지하철 1일권(640엔), 하카타 라멘, 유후인 온천 당일치기 추천",
@@ -70,6 +71,7 @@
       "에어서울"
     ],
     "hotel_night_avg_krw": 130000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 65000,
     "currency": "JPY",
     "tips": "스이카/파스모 교통카드 필수, 나리타 익스프레스 왕복권 할인 이용",
@@ -110,6 +112,7 @@
       "에어서울"
     ],
     "hotel_night_avg_krw": 110000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 60000,
     "currency": "JPY",
     "tips": "라피트 특급 열차 사전 예매, 교토 당일치기 한큐 패스 추천",
@@ -150,6 +153,7 @@
       "에어서울"
     ],
     "hotel_night_avg_krw": 60000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
     "tips": "그랩(Grab) 앱 필수, 호이안 야시장 코코넛 배 체험 추천",
@@ -190,6 +194,7 @@
       "에어서울"
     ],
     "hotel_night_avg_krw": 65000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 35000,
     "currency": "VND",
     "tips": "가성비 오션뷰 리조트 특화, 해산물 거리 야시장 추천",
@@ -230,6 +235,7 @@
       "에어프레미아"
     ],
     "hotel_night_avg_krw": 85000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 40000,
     "currency": "THB",
     "tips": "GLN(모바일 해외결제) 사용 편리, 루프탑 바 및 야시장 문화 특화",
@@ -270,6 +276,7 @@
       "에어부산"
     ],
     "hotel_night_avg_krw": 95000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 45000,
     "currency": "TWD",
     "tips": "이지카드(교통카드) 필수, 스펀 풍등 & 지우펀 일일투어 추천",
@@ -309,6 +316,7 @@
       "티웨이항공"
     ],
     "hotel_night_avg_krw": 240000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 90000,
     "currency": "USD",
     "tips": "렌터카 필수(한국 운전면허증으로 운전 가능), 쇼핑 면세 혜택",
@@ -347,6 +355,7 @@
       "대한항공"
     ],
     "hotel_night_avg_krw": 120000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 45000,
     "currency": "IDR",
     "tips": "전자도착비자(e-VOA) 사전 신청 권장, 우붓 힐링 + 꾸따 서핑 분할 숙박",
@@ -386,6 +395,7 @@
       "아시아나항공"
     ],
     "hotel_night_avg_krw": 210000,
+    "hotel_budget_segment": "3성급 가성비 비즈니스 호텔",
     "daily_meal_transit_krw": 70000,
     "currency": "SGD",
     "tips": "치안 최상, 해외결제 신용카드로 대중교통 태그 승차 가능",

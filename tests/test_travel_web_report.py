@@ -14,7 +14,7 @@ class TravelWebReportTests(unittest.TestCase):
         self.assertGreater(len(html), 10000)
 
         # 1. Header & Title
-        self.assertIn("✈️ 주말 해외여행 6개월 특가 & 예산 브리핑", html)
+        self.assertIn("✈️ 주말 해외여행 6개월 특가 & 예산 나침반", html)
         self.assertIn("Weekend Travel Intelligence Engine", html)
 
         # 2. Strict Deletion: Source Transparency Card should NOT be in HTML

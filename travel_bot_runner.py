@@ -39,11 +39,18 @@ if env_file.exists():
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
-from travel_brief.models import DestinationMeta, FlightDeal, TravelRecommendation, reconcile_man_breakdown, round_man
+from travel_brief.models import (
+    DestinationMeta,
+    FlightDeal,
+    TravelRecommendation,
+    TravelSnapshot,
+    reconcile_man_breakdown,
+    round_man,
+)
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
-from travel_brief.web_report import WebReportGenerator
+from travel_brief.web_report import WebReportGenerator, build_travel_snapshot
 from travel_brief.storage.db import TravelBriefDatabase
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
@@ -88,25 +95,26 @@ def format_telegram_briefing(
     recommendations: list[TravelRecommendation],
     web_report_url: str = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html",
     engine: Optional[FlightEngine] = None,
+    snapshot: Optional[TravelSnapshot] = None,
 ) -> str:
     """Format mobile-optimized Telegram message with concise hierarchy and <=4096 single-message guarantee."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_str = snapshot.generated_at if snapshot else datetime.now().strftime("%Y-%m-%d %H:%M")
     is_live_mode = any(r.best_deal.is_live for r in recommendations[:3])
     if is_live_mode:
         header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 실시간 특가 브리핑]</b>",
+            "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>",
             f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
-            "💡 <i>항공권: '가격 낮은 순' 1위 실측가 (상단 배너 제외)</i>",
-            "💡 <i>숙소: 3~4성급 기준예산 (객실 타입별 실시간 요금 상이)</i>",
+            "💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>",
+            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
             "──────────────────",
             "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>",
         ]
     else:
         header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 특가 브리핑]</b>",
+            "✈️ <b>[주말 해외여행 6개월 특가 나침반]</b>",
             f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드",
             "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>",
-            "💡 <i>숙소: 3~4성급 기준예산 (객실 타입별 실시간 요금 상이)</i>",
+            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
             "──────────────────",
             "🔥 <b>이번 주 가성비 BEST TOP 3</b>",
         ]
@@ -156,7 +164,7 @@ def format_telegram_briefing(
             if deal.data_source == "LIVE_SSE":
                 fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · {html.escape(deal.live_payment_note)})"
             elif deal.data_source == "LIVE_PG":
-                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({html.escape(deal.price_band_str)} · 직항 캐시)"
+                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · 최근 가격그래프)"
             else:
                 airline_disp_off = safe_airline if "직항" in safe_airline else f"{safe_airline} 직항"
                 fare_line = f"  • 항공: <b>{html.escape(deal.price_band_str)}</b> ({airline_disp_off} · 유류세 포함)"
@@ -181,7 +189,8 @@ def format_telegram_briefing(
 
             visa_short = dest.visa_info.split("(")[0].strip() if dest.visa_info else "무비자"
             sched_lines.extend([
-                f"  • 숙소: <b>{hotel_name_str}</b>{hotel_grade_str} (3박 기준예산 약 {h_man}만{hotel_feat_str})",
+                f"  • 숙소 예산: <b>{html.escape(dest.hotel_budget_segment)}</b> 3박 약 {h_man}만 원",
+                f"    └ 추천 호텔: {hotel_name_str}{hotel_grade_str} (실제 요금 링크 확인)",
                 f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
                 f"    └ 2인 동행 시: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1인당 {share_1p}만)",
                 f"  • 참고: {html.escape(visa_short)}{tip_str}",
@@ -209,34 +218,38 @@ def format_telegram_briefing(
         return "\n".join(lines)
 
     # Build concise, readable 6-month monthly best value summary directly in Telegram
-    f_engine = engine or FlightEngine()
-    matrix = f_engine.get_6month_matrix()
-    all_months = sorted({m for d_map in matrix.values() for m in d_map.keys()})
-    monthly_picks: list[tuple[str, DestinationMeta, FlightDeal]] = []
-    if all_months:
-        used_dests: set[str] = set()
-        for m in all_months[:6]:
-            candidates = []
-            for d_code, d_map in matrix.items():
-                m_deal = d_map.get(m)
-                d_meta = f_engine.destinations.get(d_code)
-                if m_deal and d_meta:
-                    eval_rec = BudgetCalculator.evaluate_deal(d_meta, m_deal)
-                    candidates.append((eval_rec.recommendation_score, -m_deal.price_krw, d_meta, m_deal))
-            if not candidates:
-                continue
-            candidates.sort(reverse=True)
-            chosen = next((c for c in candidates if c[2].code not in used_dests), candidates[0])
-            _, _, c_dest, c_deal = chosen
-            used_dests.add(c_dest.code)
-            monthly_picks.append((m, c_dest, c_deal))
+    if snapshot and snapshot.monthly_picks:
+        monthly_picks = [(m, d_meta, deal) for m, (d_meta, deal) in snapshot.monthly_picks.items()]
+        all_months = [m for m, _, _ in monthly_picks]
+    else:
+        f_engine = engine or FlightEngine()
+        matrix = f_engine.get_6month_matrix()
+        all_months = sorted({m for d_map in matrix.values() for m in d_map.keys()})
+        monthly_picks: list[tuple[str, DestinationMeta, FlightDeal]] = []
+        if all_months:
+            used_dests: set[str] = set()
+            for m in all_months[:6]:
+                candidates = []
+                for d_code, d_map in matrix.items():
+                    m_deal = d_map.get(m)
+                    d_meta = f_engine.destinations.get(d_code)
+                    if m_deal and d_meta:
+                        eval_rec = BudgetCalculator.evaluate_deal(d_meta, m_deal)
+                        candidates.append((eval_rec.recommendation_score, -m_deal.price_krw, d_meta, m_deal))
+                if not candidates:
+                    continue
+                candidates.sort(reverse=True)
+                chosen = next((c for c in candidates if c[2].code not in used_dests), candidates[0])
+                _, _, c_dest, c_deal = chosen
+                used_dests.add(c_dest.code)
+                monthly_picks.append((m, c_dest, c_deal))
 
-        if f_engine.live_naver and monthly_picks:
-            verified_m_deals = f_engine.ensure_deals_sse_verified([p[2] for p in monthly_picks])
-            monthly_picks = [
-                (m, d_meta, v_deal)
-                for (m, d_meta, _), v_deal in zip(monthly_picks, verified_m_deals)
-            ]
+            if f_engine.live_naver and monthly_picks:
+                verified_m_deals = f_engine.ensure_deals_sse_verified([p[2] for p in monthly_picks])
+                monthly_picks = [
+                    (m, d_meta, v_deal)
+                    for (m, d_meta, _), v_deal in zip(monthly_picks, verified_m_deals)
+                ]
 
     for top_lim, banner_opt, m_air_opt, m_lim in (
         (3, True, True, 6),
@@ -290,25 +303,11 @@ def run_briefing(
     engine = FlightEngine(live_naver=effective_live)
     print(f"Loaded {len(engine.destinations)} destinations metadata.")
 
-    # 1. Warm cache & get Top Recommendations first
-    all_deals = engine.search_deals(dest_code=dest_code, months_ahead=6)
-    recommendations = BudgetCalculator.rank_recommendations(
-        destinations=engine.destinations,
-        deals=all_deals,
-        max_budget_per_person=max_budget,
-        top_n=5,
-    )
-    if effective_live and recommendations:
-        upgraded = engine.ensure_deals_sse_verified([r.best_deal for r in recommendations])
-        all_deals = engine.search_deals(dest_code=dest_code, months_ahead=6)
-        recommendations = BudgetCalculator.rank_recommendations(
-            destinations=engine.destinations,
-            deals=all_deals,
-            max_budget_per_person=max_budget,
-            top_n=5,
-        )
+    # 1. Warm cache & build Single Snapshot (Single Source of Truth)
+    snapshot = build_travel_snapshot(engine, dest_code=dest_code, max_budget=max_budget, top_n=5)
+    recommendations = snapshot.recommendations
 
-    # 2. Generate Web Reports (reuses singleflight memory cache in 0.00s!)
+    # 2. Generate Web Reports (from the exact same snapshot!)
     if output_dir is not None:
         travel_reports_dir = Path(output_dir)
     elif demo or dry_run:
@@ -317,7 +316,7 @@ def run_briefing(
         travel_reports_dir = BASE_DIR / "reports" / "travel"
     travel_reports_dir.mkdir(parents=True, exist_ok=True)
     report_gen = WebReportGenerator(engine=engine)
-    dated_file, latest_file = report_gen.save_reports(output_dir=travel_reports_dir)
+    dated_file, latest_file = report_gen.save_reports(output_dir=travel_reports_dir, snapshot=snapshot)
 
     # Also save a top-level travel_latest.html for easy GitHub Pages routing
     if output_dir is None and not demo and not dry_run:
@@ -336,9 +335,12 @@ def run_briefing(
         disp_p = r.best_deal.exact_price_str if r.best_deal.is_live else r.best_deal.price_band_str
         print(f"  - {r.destination.name} ({disp_p} [{r.best_deal.data_source}], 1인 약 {round_man(r.budget.total_per_person_krw)}만)")
 
-    # 3. Format Telegram Message
+    # 3. Format Telegram Message (with version query param to prevent browser cache mismatch)
     report_link = web_report_url or resolve_travel_report_url()
-    msg_text = format_telegram_briefing(recommendations, web_report_url=report_link, engine=engine)
+    versioned_report_link = f"{report_link}?v={snapshot.version_tag}"
+    msg_text = format_telegram_briefing(
+        recommendations, web_report_url=versioned_report_link, engine=engine, snapshot=snapshot
+    )
 
     if dry_run:
         print("\n" + "=" * 30 + " [DRY RUN PREVIEW] " + "=" * 30)

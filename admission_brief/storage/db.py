@@ -12,6 +12,7 @@ from typing import Optional
 from admission_brief.models import (
     AdmissionEvent,
     BriefingType,
+    EventCategory,
     ParentUserProfile,
     TargetGrade,
     TargetRegion,
@@ -106,6 +107,14 @@ class AdmissionDatabase:
                 pass
             try:
                 cursor.execute("ALTER TABLE admission_events ADD COLUMN urgency TEXT NOT NULL DEFAULT 'NORMAL'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_events ADD COLUMN category TEXT NOT NULL DEFAULT 'BRIEFING'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_events ADD COLUMN expires_at TEXT")
             except sqlite3.OperationalError:
                 pass
 
@@ -285,6 +294,8 @@ class AdmissionDatabase:
             source_name=r["source_name"] if "source_name" in keys else "공식 오피셜",
             source_url=r["source_url"] if "source_url" in keys else None,
             urgency=r["urgency"] if "urgency" in keys else "NORMAL",
+            category=EventCategory(r["category"]) if "category" in keys and r["category"] else EventCategory.BRIEFING,
+            expires_at=datetime.fromisoformat(r["expires_at"]) if "expires_at" in keys and r["expires_at"] else None,
             created_at=datetime.fromisoformat(r["created_at"]),
         )
 
@@ -298,15 +309,19 @@ class AdmissionDatabase:
                     event_id, title, organizer, target_grade, target_region, is_online_live,
                     event_type, event_date_str, booking_opens_at, is_first_come, booking_url,
                     summary_3lines_json, so_what, action_todos_json, pdf_attachment_path,
-                    credibility_score, source_name, source_url, urgency, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?)
+                    credibility_score, source_name, source_url, urgency, category, expires_at,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?)
                 ON CONFLICT(event_id) DO UPDATE SET
                     title = excluded.title,
                     organizer = excluded.organizer,
                     target_grade = excluded.target_grade,
                     target_region = excluded.target_region,
                     is_online_live = excluded.is_online_live,
+                    event_type = excluded.event_type,
+                    event_date_str = excluded.event_date_str,
                     booking_opens_at = excluded.booking_opens_at,
+                    is_first_come = excluded.is_first_come,
                     booking_url = excluded.booking_url,
                     summary_3lines_json = excluded.summary_3lines_json,
                     so_what = excluded.so_what,
@@ -315,7 +330,9 @@ class AdmissionDatabase:
                     credibility_score = excluded.credibility_score,
                     source_name = excluded.source_name,
                     source_url = excluded.source_url,
-                    urgency = excluded.urgency
+                    urgency = excluded.urgency,
+                    category = excluded.category,
+                    expires_at = excluded.expires_at
                 """,
                 (
                     event.event_id,
@@ -337,6 +354,8 @@ class AdmissionDatabase:
                     event.source_name,
                     event.source_url,
                     event.urgency,
+                    event.category.value,
+                    event.expires_at.isoformat() if event.expires_at else None,
                     event.created_at.isoformat(),
                 ),
             )
@@ -382,19 +401,7 @@ class AdmissionDatabase:
     ) -> list[AdmissionEvent]:
         """Returns top N urgent or upcoming admission events matching grade & region."""
         all_events = self.list_all_events()
-        matched = []
-        for ev in all_events:
-            grade_match = (grade == TargetGrade.ALL) or (ev.target_grade == TargetGrade.ALL) or (ev.target_grade == grade)
-            if not grade_match:
-                continue
-            if region == TargetRegion.ALL:
-                region_match = True
-            elif region == TargetRegion.ONLINE:
-                region_match = ev.is_online_live or (ev.target_region == TargetRegion.ONLINE)
-            else:
-                region_match = ev.is_online_live or (ev.target_region == TargetRegion.ALL) or (ev.target_region == region)
-            if region_match:
-                matched.append(ev)
+        matched = [ev for ev in all_events if self._matches_profile(ev, grade, region)]
 
         def sort_key(e: AdmissionEvent):
             urgency_rank = 0 if e.urgency == "BREAKING" else (1 if e.urgency == "HIGH" else 2)
@@ -402,6 +409,81 @@ class AdmissionDatabase:
 
         matched.sort(key=sort_key)
         return matched[:limit]
+
+    @staticmethod
+    def _matches_profile(ev: AdmissionEvent, grade: TargetGrade, region: TargetRegion) -> bool:
+        """Grade/region matching shared by hot-event and category listings."""
+        grade_match = (grade == TargetGrade.ALL) or (ev.target_grade == TargetGrade.ALL) or (ev.target_grade == grade)
+        if not grade_match:
+            return False
+        if region == TargetRegion.ALL:
+            return True
+        if region == TargetRegion.ONLINE:
+            return ev.is_online_live or (ev.target_region == TargetRegion.ONLINE)
+        return ev.is_online_live or (ev.target_region == TargetRegion.ALL) or (ev.target_region == region)
+
+    @staticmethod
+    def _parse_event_date(event_date_str: str) -> Optional[datetime]:
+        """Parses 'YYYY-MM-DD[ HH:MM]' prefix; returns None for undated strings (e.g. TBA notices)."""
+        try:
+            return datetime.strptime((event_date_str or "").strip()[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    @classmethod
+    def _is_expired(cls, ev: AdmissionEvent, now: datetime) -> bool:
+        """expires_at takes precedence; otherwise an event dated before today is expired."""
+        if ev.expires_at is not None:
+            return ev.expires_at < now
+        ev_date = cls._parse_event_date(ev.event_date_str)
+        return ev_date is not None and ev_date.date() < now.date()
+
+    def get_events_by_category(
+        self,
+        category: EventCategory,
+        grade: TargetGrade = TargetGrade.ALL,
+        region: TargetRegion = TargetRegion.ALL,
+        page: int = 0,
+        page_size: int = 3,
+        now: Optional[datetime] = None,
+    ) -> tuple[list[AdmissionEvent], int]:
+        """Returns (page of upcoming events in category matching grade/region, total matched count).
+
+        Policy notices / breaking news / weekly digests are not attendable events and are excluded.
+        """
+        now = now or datetime.now()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM admission_events
+                WHERE category = ? AND event_type NOT IN (?, ?, ?)
+                """,
+                (
+                    category.value,
+                    BriefingType.POLICY_TRANSLATE.value,
+                    BriefingType.BREAKING_NEWS.value,
+                    BriefingType.WEEKLY_TODO.value,
+                ),
+            )
+            rows = cursor.fetchall()
+
+        matched = []
+        for r in rows:
+            ev = self._row_to_event(r)
+            if self._is_expired(ev, now) or not self._matches_profile(ev, grade, region):
+                continue
+            matched.append(ev)
+
+        def sort_key(e: AdmissionEvent):
+            ev_date = self._parse_event_date(e.event_date_str)
+            # Dated events chronologically first, undated (TBA) after, then higher credibility
+            return (ev_date is None, ev_date or datetime.max, e.event_date_str, -e.credibility_score)
+
+        matched.sort(key=sort_key)
+        total = len(matched)
+        start = max(0, page) * max(1, page_size)
+        return matched[start:start + max(1, page_size)], total
 
     # --- Dispatch Log Methods ---
 

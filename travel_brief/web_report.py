@@ -11,7 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from travel_brief.models import DestinationMeta, FlightDeal, TravelRecommendation, reconcile_man_breakdown, round_man
+from travel_brief.models import (
+    DestinationMeta,
+    FlightDeal,
+    TravelRecommendation,
+    TravelSnapshot,
+    reconcile_man_breakdown,
+    round_man,
+)
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
@@ -49,7 +56,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑 (실시간 항공·호텔 검증형)</title>
+  <title>✈️ 주말 해외여행 6개월 특가 & 예산 나침반 (네이버 실시간 관측형)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -1118,12 +1125,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="container">
     <header>
       <div class="badge badge-normal">Weekend Travel Intelligence Engine</div>
-      <h1>✈️ 주말 해외여행 6개월 특가 & 예산 브리핑</h1>
-      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 실속 주말 일정 · 100% 실시간 검증형</p>
+      <h1>✈️ 주말 해외여행 6개월 특가 & 예산 나침반</h1>
+      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 실속 주말 일정 · 네이버 실시간 관측형</p>
       <div class="meta-bar">
         <div class="meta-item"><span>📅 기준 일시:</span> <strong><!-- GENERATED_AT --></strong></div>
         <div class="meta-item"><span>🎯 분석 대상:</span> <strong>인기 10대 근거리 해외 여행지</strong></div>
         <div class="meta-item"><span>🔍 실시간 연동:</span> <strong>네이버 항공권 & 네이버 호텔</strong></div>
+        <div class="meta-item"><span>⚠️ 유의사항:</span> <strong>실시간 잔여석에 따라 결제 단계에서 변동 가능</strong></div>
       </div>
     </header>
 
@@ -1321,39 +1329,85 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+def build_travel_snapshot(
+    engine: FlightEngine,
+    dest_code: Optional[str] = None,
+    max_budget: Optional[int] = None,
+    top_n: int = 3,
+) -> TravelSnapshot:
+    """Builds a single immutable TravelSnapshot shared by Telegram and Web reports."""
+    now_dt = datetime.now()
+    generated_at = now_dt.strftime("%Y-%m-%d %H:%M")
+    version_tag = now_dt.strftime("%Y%m%d%H%M")
+    snapshot_id = f"snap_{now_dt.strftime('%Y%m%d_%H%M%S')}"
+
+    all_destinations = engine.destinations
+    all_deals = engine.search_deals(dest_code=dest_code, months_ahead=6)
+    top_recs = BudgetCalculator.rank_recommendations(
+        destinations=all_destinations,
+        deals=all_deals,
+        max_budget_per_person=max_budget,
+        top_n=top_n,
+    )
+    matrix = engine.get_6month_matrix()
+    all_months = sorted(list({m for d in matrix.values() for m in d.keys()}))
+
+    if engine.live_naver and matrix:
+        hero_deals = [r.best_deal for r in top_recs]
+        hero_deals.extend(min(dm.values(), key=lambda x: x.price_krw) for dm in matrix.values() if dm)
+        for m_key in all_months[:6]:
+            m_cands = [
+                (BudgetCalculator.evaluate_deal(all_destinations[dc], dm[m_key]).recommendation_score, -dm[m_key].price_krw, dm[m_key])
+                for dc, dm in matrix.items() if m_key in dm and dc in all_destinations
+            ]
+            if m_cands:
+                m_cands.sort(reverse=True)
+                hero_deals.append(m_cands[0][2])
+        if any(d.data_source == "LIVE_PG" for d in hero_deals):
+            engine.ensure_deals_sse_verified(hero_deals)
+            all_deals = engine.search_deals(dest_code=dest_code, months_ahead=6)
+            top_recs = BudgetCalculator.rank_recommendations(
+                destinations=all_destinations,
+                deals=all_deals,
+                max_budget_per_person=max_budget,
+                top_n=top_n,
+            )
+            matrix = engine.get_6month_matrix()
+
+    monthly_picks = {}
+    for m in all_months[:6]:
+        cands = [
+            (BudgetCalculator.evaluate_deal(all_destinations[dc], dm[m]).recommendation_score, -dm[m].price_krw, dc, dm[m])
+            for dc, dm in matrix.items() if m in dm and dc in all_destinations
+        ]
+        if cands:
+            cands.sort(reverse=True)
+            _, _, best_dc, best_deal = cands[0]
+            monthly_picks[m] = (all_destinations[best_dc], best_deal)
+
+    return TravelSnapshot(
+        snapshot_id=snapshot_id,
+        generated_at=generated_at,
+        version_tag=version_tag,
+        recommendations=top_recs,
+        monthly_matrix=matrix,
+        monthly_picks=monthly_picks,
+    )
+
+
 class WebReportGenerator:
     def __init__(self, engine: Optional[FlightEngine] = None):
         self.engine = engine or FlightEngine()
 
-    def generate_html_report(self) -> str:
+    def generate_html_report(self, snapshot: Optional[TravelSnapshot] = None) -> str:
         all_destinations = self.engine.destinations
-        all_deals = self.engine.search_deals(months_ahead=6)
+        if snapshot is None:
+            snapshot = build_travel_snapshot(self.engine, top_n=3)
 
-        # Top 3 recommendations
-        top_recs = BudgetCalculator.rank_recommendations(
-            destinations=all_destinations, deals=all_deals, top_n=3
-        )
-
-        # 6-Month Matrix
-        matrix = self.engine.get_6month_matrix()
-        # Extract unique sorted months
+        top_recs = snapshot.recommendations
+        matrix = snapshot.monthly_matrix
+        now_str = snapshot.generated_at
         all_months = sorted(list({m for d in matrix.values() for m in d.keys()}))
-        if self.engine.live_naver and matrix:
-            hero_deals = [r.best_deal for r in top_recs]
-            hero_deals.extend(min(dm.values(), key=lambda x: x.price_krw) for dm in matrix.values() if dm)
-            for m_key in all_months[:6]:
-                m_cands = [
-                    (BudgetCalculator.evaluate_deal(all_destinations[dc], dm[m_key]).recommendation_score, -dm[m_key].price_krw, dm[m_key])
-                    for dc, dm in matrix.items() if m_key in dm and dc in all_destinations
-                ]
-                if m_cands:
-                    m_cands.sort(reverse=True)
-                    hero_deals.append(m_cands[0][2])
-            if any(d.data_source == "LIVE_PG" for d in hero_deals):
-                self.engine.ensure_deals_sse_verified(hero_deals)
-                all_deals = self.engine.search_deals(months_ahead=6)
-                top_recs = BudgetCalculator.rank_recommendations(destinations=all_destinations, deals=all_deals, top_n=3)
-                matrix = self.engine.get_6month_matrix()
 
         # Prompts data dictionary for interactive modal
         prompts_dict = {}
@@ -1430,11 +1484,14 @@ class WebReportGenerator:
           <div class="hotel-curation-box">
             <div class="hotel-title-line">
               <span class="hotel-icon">🏨</span>
-              <strong>{hotel_name}</strong>
-              <span class="hotel-grade-badge">{hotel_grade}</span>
+              <strong>숙박 예산: {html.escape(dest.hotel_budget_segment)}</strong>
             </div>
             <div class="hotel-feature-line">
-              └ 3박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만) · {hotel_features}
+              └ 3박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만)
+            </div>
+            <div class="hotel-ref-line" style="margin-top:0.35rem; font-size:0.83rem; color:#94a3b8;">
+              📍 추천 참고 호텔: <strong style="color:#f8fafc;">{hotel_name}</strong> <span class="hotel-grade-badge">{hotel_grade}</span> · {hotel_features}
+              <div style="font-size:0.76rem; color:#64748b; margin-top:0.15rem;">(※ 추천 호텔의 실제 객실 요금은 [🏨 호텔요금 ↗] 링크에서 실시간 확인)</div>
             </div>
           </div>
           <div class="budget-summary-box">
@@ -1452,6 +1509,9 @@ class WebReportGenerator:
           <div class="visa-tips-box">
             <strong>📌 비자 & 로컬 팁:</strong> {html.escape(dest.visa_info)} · {html.escape(dest.tips)}
           </div>
+        </div>
+        <div style="font-size:0.78rem; color:#38bdf8; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.22); border-radius:8px; padding:0.4rem 0.65rem; margin-bottom:0.75rem;">
+          💡 <strong>팁:</strong> 네이버 항공권 첫 화면 최상단의 스폰서 항공사 배너 아래에 있는 <strong>[1위 최저가]</strong>를 확인하세요.
         </div>
         <div class="action-buttons-group">
           <a class="act-btn btn-flight" href="{html.escape(rec.naver_flight_url, quote=True)}" target="_blank" rel="noopener noreferrer">
@@ -1675,7 +1735,7 @@ class WebReportGenerator:
           <div class="dest-detail-line"><strong>비자 규정:</strong> {html.escape(dest.visa_info)}</div>
           <div class="dest-detail-line"><strong>☀️ 최적 시즌:</strong> {best_m_str}</div>
           <div class="dest-detail-line"><strong>🌧️ 기상 주의:</strong> {caution_m_str} ({html.escape(dest.caution_note)})</div>
-          <div class="dest-detail-line"><strong>🏨 추천 숙소:</strong> {rec_hotel} (1박 기준예산 약 {hotel_night_man}만 원)</div>
+          <div class="dest-detail-line"><strong>🏨 숙소 예산:</strong> {html.escape(dest.hotel_budget_segment)} 1박 약 {hotel_night_man}만 원 · <strong>추천 호텔:</strong> {rec_hotel} (실제 요금 링크 확인)</div>
           <div class="dest-detail-line"><strong>🍽️ 일일 생활경비:</strong> 약 {daily_man}만 원 (식비+대중교통)</div>
           <div class="dest-detail-line" style="margin-top: 0.6rem; color: #cbd5e1; background: rgba(255,255,255,0.03); padding: 0.5rem; border-radius: 6px;">💡 {html.escape(dest.tips)}</div>
         </div>
@@ -1683,7 +1743,6 @@ class WebReportGenerator:
             dest_cards.append(card)
 
         # Fill template with clean replace
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         rendered = (
             HTML_TEMPLATE.replace("<!-- GENERATED_AT -->", now_str)
             .replace("<!-- TOP_CARDS_HTML -->", "\n".join(top_cards_html))
@@ -1696,7 +1755,11 @@ class WebReportGenerator:
         )
         return rendered
 
-    def save_reports(self, output_dir: Optional[str | Path] = None) -> tuple[Path, Path]:
+    def save_reports(
+        self,
+        output_dir: Optional[str | Path] = None,
+        snapshot: Optional[TravelSnapshot] = None,
+    ) -> tuple[Path, Path]:
         if output_dir is None:
             output_dir = Path(__file__).resolve().parent.parent / "reports"
         out_path = Path(output_dir)
@@ -1706,7 +1769,7 @@ class WebReportGenerator:
         dated_file = out_path / f"travel_briefing_{now_tag}.html"
         latest_file = out_path / "latest.html"
 
-        content = self.generate_html_report()
+        content = self.generate_html_report(snapshot=snapshot)
         dated_file.write_text(content, encoding="utf-8")
         latest_file.write_text(content, encoding="utf-8")
 

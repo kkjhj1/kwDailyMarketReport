@@ -12,6 +12,7 @@ from admission_brief.models import (
     AdmissionBriefing,
     AdmissionEvent,
     BriefingType,
+    EventCategory,
     TargetGrade,
 )
 
@@ -113,7 +114,25 @@ class AICurator:
             source_name=event.source_name,
             source_url=event.source_url,
             urgency=event.urgency,
+            category=event.category,
         )
+
+    def get_events_by_category(
+        self,
+        category: EventCategory,
+        grade: TargetGrade = TargetGrade.ALL,
+        region: Any = None,
+        db: Optional[Any] = None,
+        page: int = 0,
+        page_size: int = 3,
+    ) -> list[AdmissionBriefing]:
+        """Retrieves a page of upcoming events in the given category as parent-ready briefings."""
+        if db is None:
+            return []
+        from admission_brief.models import TargetRegion
+        reg = region if isinstance(region, TargetRegion) else TargetRegion.ALL
+        events, _total = db.get_events_by_category(category, grade, reg, page=page, page_size=page_size)
+        return [self.curate_event_briefing(e) for e in events]
 
     def generate_weekly_todo_briefing(self, grade: TargetGrade, month: Optional[int] = None) -> AdmissionBriefing:
         """Generates the weekly Sunday night briefing for the given grade, dynamically adapting to academic calendar."""

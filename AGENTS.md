@@ -48,20 +48,23 @@
   - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
   - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.
 
-## 4. 멀티 AI 4단계 바톤터치 파이프라인 (Multi-AI Pipeline)
+## 4. 멀티 AI 2단계 강제 파이프라인 (Two-Phase Multi-AI Protocol)
 
-### 4.1 2단계 분리형 게이트 및 위험도별 라우팅 규약 (Two-Phase Multi-AI Protocol)
+### 4.1 위험도별 라우팅 및 게이트 원칙
 - **L0 (문구, 주석, 오타, 마크다운)**: Gemini 단독 처리 (외부 호출 전면 금지, 토큰 소모 0%).
 - **L1 (단일 파일 국소 버그, 단일 테스트 보완)**: GPT 설계 생략, Gemini ➔ Claude(Write Lease) 직행 구현.
 - **L2/L3 (비즈니스 로직, 메시지 템플릿, 웹 UI, DB 스키마, 기획안 리팩토링, 대규모 리팩토링)**:
-  - **[Phase 1: 기획·아키텍처 자율 감사 단계 (Non-Destructive / Read-Only)]**:
-    1. **Gemini (요구정리)**: 사용자 요청 및 자연어 의도 분석, 1차 타겟 명세/초안(Draft) 작성.
-    2. **GPT (수석 기획·설계 감사 - codex CLI)**: 1차 초안을 바탕으로 금융 산식, UI/UX, 불변조건, 엣지케이스 전문 감사 및 리팩토링 설계를 **사용자 승인 대기 없이 즉시 자동 실행** (`-s read-only`).
-    3. **Gemini (계획서 확정 및 보고)**: GPT 감사 결과를 반영하여 **「GPT 감사가 완료된 확정 계획서(Artifact)」**를 생성하여 사용자에게 보고.
-  - **[Phase 2: 구현 착수 게이트 (Destructive / Two-Phase Gate [AUTH-01])]**:
-    4. **사용자 승인 게이트**: 완성된 계획서를 확인한 사용자의 명시적 `"개발진행하라"` 확인 후 구현 착수.
-    5. **Claude (시니어 구현 - claude CLI)**: Single-Writer Lease 권한을 부여받아 실제 코드 작성 및 단위 테스트 실행.
-    6. **Gemini (최종 판결 & 통합)**: git diff 기계적 신선 대조(Fresh Read) 및 7대 수칙 검증 후 최종 통합 완료.
+  - **[Phase 1: 기획·아키텍처 자율 선행 감사 (Non-Destructive)]**:
+    1. **Gemini (요구정리)**: 사용자 요청 분석, 1차 명세 및 `scratch/handoff_to_gpt.md` 작성.
+    2. **GPT (수석 감사관 - codex CLI)**: 산식·DB·상태·불변조건·UI/UX 감사를 **사용자 승인 대기 없이 즉시 자동 실행** (`-s read-only`).
+    3. **Fail-Closed 원칙**: GPT 감사가 누락되거나 실패하면 L2/L3 계획 승인 요청을 할 수 없다 (`AUDIT_INCOMPLETE`).
+    4. **Gemini (계획서 확정 및 보고)**: GPT 감사가 반영된 **「확정 계획서(Artifact)」**를 생성하여 사용자에게 보고.
+  - **[Phase 2: 실제 개발 착수 게이트 (Destructive / Two-Phase Gate [AUTH-01])]**:
+    5. **사용자 승인 게이트**: 최신 GPT 감사 계획서에 대한 사용자의 명시적 `"개발진행하라"` 확인 후 착수.
+    6. **Gemini 코딩 절대 락(Lock)**: Phase 2 진입 즉시 Gemini의 모든 파일 수정 도구(`edit_file`, `write_file`) 및 쉘 파일 수정 명령 호출을 물리적으로 엄금한다.
+    7. **Claude (시니어 구현 - claude CLI)**: Single-Writer Lease 권한을 부여받아 실제 코드 작성 및 단위 테스트 실행.
+    8. **Claude 실패 시 대체 금지**: Claude 구현 실패 시 Gemini가 코딩을 가로채지 못하며, `IMPLEMENTATION_FAILED` 또는 `BLOCKED` 상태로 사용자에게 즉각 보고한다.
+    9. **Gemini (최종 판결 & 통합)**: git diff 기계적 신선 대조(Fresh Read) 및 7대 수칙 검증 후 최종 통합 완료.
 
 ### 4.2 외부 에이전트 CLI 실행 표준 및 Handoff 규약
 
@@ -79,9 +82,9 @@ Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --too
   - `allowed_paths`에 명시된 파일만 수정하며, `forbidden_paths`(.env, *.sqlite3, reports/)는 절대 수정 금지.
   - 수정 직후 스스로 `python -m py_compile` 및 관련 `pytest` 통과 확인 후 결과 요약 제출.
   - 완료 시 변경 내역과 함께 **"설계와 달라진 점(Drift Self-Report)"**을 필수 제출.
-  - Claude 작업 중 Gemini는 파일 수정을 중단하고 대기 (Single-Writer Lease).
+  - Claude 작업 중 Gemini는 파일 수정을 일체 중단하고 대기 (Single-Writer Lease).
 
 ### 4.3 Git 상태 동기화 및 최종 판결 (Fresh Read & Anti-Drift)
 - 작업 착수 전 `git rev-parse HEAD` 및 `git status --short`로 기준점을 고정한다.
 - Claude 작업 반환 즉시 Gemini는 실제 `git diff`를 통해 변경분을 신선하게 대조(Fresh Read)하고, 7대 수칙(`[TG-01]`~`[TG-07]`) 및 불변조건 준수 여부를 최종 판정하여 통합한다.
-- **비상 안전핀**: 로컬 개발(L0~L2)은 타임아웃/쿼터 소진 시 `[외부 작업 생략: 사유]`를 보고하고 진행(Fail-Open)하되, 배포 및 운영 DB 마이그레이션(L3)은 외부 감사가 누락된 경우 즉시 작업을 중단(Fail-Closed)한다.
+- **Fail-Closed**: L3 배포 및 운영 DB 마이그레이션은 외부 감사가 누락되거나 테스트가 실패한 경우 즉시 작업을 중단한다.

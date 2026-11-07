@@ -92,6 +92,11 @@ _IN_FLIGHT: dict[tuple[str, int], concurrent.futures.Future] = {}
 _FAIL_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
 
 
+def _tag_stale(deals: Iterable[FlightDeal]) -> list[FlightDeal]:
+    """Returns copies flagged `freshness="STALE"` so stale-cache fallbacks are disclosed honestly."""
+    return [d if d.freshness == "STALE" else dataclasses.replace(d, freshness="STALE") for d in deals]
+
+
 def _format_hhmm(raw: str) -> str:
     s = (raw or "").strip().replace(":", "")
     if len(s) == 4 and s.isdigit():
@@ -550,9 +555,9 @@ class NaverFlightLiveClient:
                 logger.info("Circuit breaker active for %s (reason: %s); attempting stale fallback.", mem_key, fail_entry[1])
                 disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
                 if disk_stale:
-                    return list(disk_stale)
+                    return _tag_stale(disk_stale)
                 if cached:
-                    return list(cached[1])
+                    return _tag_stale(cached[1])
                 return []
 
             # Single-Flight Leader vs Follower assignment
@@ -578,10 +583,10 @@ class NaverFlightLiveClient:
             with _CACHE_LOCK:
                 cached = _MEM_CACHE.get(mem_key)
                 if cached:
-                    return list(cached[1])
+                    return _tag_stale(cached[1])
             disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
             if disk_stale:
-                return list(disk_stale)
+                return _tag_stale(disk_stale)
             return []
 
         # Leader execution path: perform network I/O strictly outside the lock
@@ -615,13 +620,14 @@ class NaverFlightLiveClient:
         with _CACHE_LOCK:
             cached = _MEM_CACHE.get(mem_key)
             if cached:
-                return list(cached[1])
+                return _tag_stale(cached[1])
         disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
         if disk_stale:
             logger.warning("Using emergency stale live cache (<12h) due to upstream outage.")
+            stale_tagged = _tag_stale(disk_stale)
             with _CACHE_LOCK:
-                _MEM_CACHE[mem_key] = (time.time(), disk_stale)
-            return list(disk_stale)
+                _MEM_CACHE[mem_key] = (time.time(), stale_tagged)
+            return list(stale_tagged)
 
         return []
 
