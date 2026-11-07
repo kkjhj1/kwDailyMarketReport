@@ -511,7 +511,11 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
 
     def test_do_sub_success_renders_onboarding_card_with_deep_link(self):
         self._click("sub:do_sub:travel_bot:cat:LIFE")
-        self.mock_client.answer_callback_query.assert_called_once_with("cq_sub:do_sub:travel_bot:cat:LIFE")
+        self.mock_client.answer_callback_query.assert_called_once_with(
+            "cq_sub:do_sub:travel_bot:cat:LIFE",
+            "🎉 [여행 특가] 알림 구독이 완료되었습니다!",
+            show_alert=True,
+        )
         self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.TRAVEL])
 
         text = self.mock_client.edit_message_text.call_args.args[2]
@@ -540,6 +544,11 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
     def test_quota_exceeded_offers_swap_buttons_within_64_bytes(self):
         self.portal_db.subscribe(self.uid, BotServiceType.ADMISSION)
         self._click("sub:do_sub:brief_bot:subs")
+        self.mock_client.answer_callback_query.assert_called_once_with(
+            "cq_sub:do_sub:brief_bot:subs",
+            "⚠️ 구독 슬롯 초과!\n기존 구독을 교체하거나 등급을 업그레이드해 주세요.",
+            show_alert=True,
+        )
         self.mock_client.send_message.assert_called_once()
         text = self.mock_client.send_message.call_args.args[1]
         markup = self.mock_client.send_message.call_args.kwargs["reply_markup"]
@@ -549,7 +558,7 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("support:upgrade_menu", cbs)
         self.assertIn("nav:subs", cbs)
         swap_btn = _all_buttons(markup)[0]
-        self.assertEqual(swap_btn["text"], "🔄 입시 정보 ➔ 시황 브리핑 교체")
+        self.assertEqual(swap_btn["text"], "🔄 입시 정보 ➔ 시황 브리핑")
         for cb in cbs:
             self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
 
@@ -624,7 +633,11 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
     def test_sub_swap_callback_success_and_failure(self):
         self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
         self._click("sub:swap:brief_bot:kids_bot:all")
-        self.mock_client.answer_callback_query.assert_called_once_with("cq_sub:swap:brief_bot:kids_bot:all")
+        self.mock_client.answer_callback_query.assert_called_once_with(
+            "cq_sub:swap:brief_bot:kids_bot:all",
+            "✅ [시황 브리핑] ➔ [키즈 나침반] 교체가 완료되었습니다!",
+            show_alert=True,
+        )
         text = self.mock_client.edit_message_text.call_args.args[2]
         markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
         self.assertIn("교체되었습니다", text)
@@ -635,9 +648,10 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("cat:all", cbs)
         self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.KIDS])
 
-        # Replaying the same (now stale) button fails safely
+        # Replaying the same (now stale) button fails safely with modal alert
         self.mock_client.reset_mock()
         self._click("sub:swap:brief_bot:kids_bot:all")
+        self.assertTrue(self.mock_client.answer_callback_query.call_args.kwargs.get("show_alert"))
         text = self.mock_client.edit_message_text.call_args.args[2]
         markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
         self.assertIn("구독 교체 실패", text)
@@ -698,8 +712,82 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
 
         self.mock_client.reset_mock()
         self._click("sub:do_unsub:silver_bot:all")
+        self.mock_client.answer_callback_query.assert_called_once_with(
+            "cq_sub:do_unsub:silver_bot:all",
+            "⚪ [부모님 복지] 구독이 정상적으로 해지되었습니다.",
+            show_alert=True,
+        )
         self.assertFalse(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.SILVER])
         self.assertIn("6개 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
+
+    def test_2step_subscribe_confirmation_across_all_contexts(self):
+        """Verify sub:ask_sub -> sub:cancel_sub / sub:do_sub across subs, cat, all, and search contexts."""
+        contexts = [
+            ("subs", "알림을 구독하시겠습니까"),
+            ("cat:FINANCE", "알림을 구독하시겠습니까"),
+            ("all", "알림을 구독하시겠습니까"),
+            ("search:시황", "알림을 구독하시겠습니까"),
+        ]
+        for ctx, expected_prompt in contexts:
+            self.mock_client.reset_mock()
+            self._click(f"sub:ask_sub:brief_bot:{ctx}")
+            text = self.mock_client.edit_message_text.call_args.args[2]
+            markup = self.mock_client.edit_message_text.call_args.kwargs["reply_markup"]
+            self.assertIn(expected_prompt, text)
+            cbs = [b.get("callback_data") for b in _all_buttons(markup) if "callback_data" in b]
+            self.assertIn(f"sub:do_sub:brief_bot:{ctx}", cbs)
+            self.assertIn(f"sub:cancel_sub:{ctx}", cbs)
+
+            # Cancel restores view without subscribing
+            self.mock_client.reset_mock()
+            self._click(f"sub:cancel_sub:{ctx}")
+            self.assertFalse(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.BRIEF])
+            text_after = self.mock_client.edit_message_text.call_args.args[2]
+            self.assertNotIn(expected_prompt, text_after)
+
+    def test_mobile_360px_2column_button_width_bounds(self):
+        """Ensure every 2-column button across all Portal Hub views has <= 7 Korean/ASCII characters."""
+        from portal_hub.interactive import (
+            render_inquiry_prompt_view,
+            render_support_center_view,
+            render_upgrade_request_view,
+        )
+        user = UserProfile(user_id=1, chat_id=1, first_name="테스터", tier=UserTier.GREEN)
+        subs = {b: False for b in BotServiceType}
+        subs[BotServiceType.BRIEF] = True
+
+        views = [
+            render_main_menu(user, subs),
+            render_subscription_view(user, subs),
+            render_subscription_view(user, subs, confirming_bot_id="brief_bot"),
+            render_subscription_view(user, subs, confirming_sub_bot_id="travel_bot"),
+            render_category_view(BotCategory.FINANCE, user, subs),
+            render_category_view(BotCategory.FINANCE, user, subs, confirming_bot_id="brief_bot"),
+            render_category_view(BotCategory.LIFE, user, subs, confirming_sub_bot_id="travel_bot"),
+            render_category_home_view(),
+            render_catalog_all_view(user, subs),
+            render_catalog_all_view(user, subs, confirming_bot_id="brief_bot"),
+            render_catalog_all_view(user, subs, confirming_sub_bot_id="travel_bot"),
+            render_search_results_view("시황", [BotServiceType.BRIEF], user, subs),
+            render_search_results_view("시황", [BotServiceType.BRIEF], user, subs, confirming_bot_id="brief_bot"),
+            render_search_results_view("시황", [BotServiceType.BRIEF], user, subs, confirming_sub_bot_id="brief_bot"),
+            render_tier_benefits_view(user),
+            render_support_center_view(user),
+            render_upgrade_request_view(user),
+            render_inquiry_prompt_view(user),
+            render_help_view(),
+        ]
+        for _, markup in views:
+            for row in markup["inline_keyboard"]:
+                if len(row) >= 2:
+                    for btn in row:
+                        # Count Korean/ASCII alphanumeric characters (excluding emoji and spaces)
+                        core_chars = re.findall(r"[가-힣A-Za-z0-9/]", btn["text"])
+                        self.assertLessEqual(
+                            len(core_chars),
+                            7,
+                            f"2-column button '{btn['text']}' has {len(core_chars)} core chars (>7), risking '...' truncation on 360px mobile!",
+                        )
 
     def test_main_menu_personalized_active_subs_chip_and_3row_layout(self):
         user = UserProfile(user_id=1, chat_id=1, first_name="테스터")

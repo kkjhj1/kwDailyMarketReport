@@ -459,13 +459,13 @@ def render_quota_swap_view(
         )
     keyboard = [
         [{
-            "text": f"🔄 {old_b.short_name} ➔ {bot_type.short_name} 교체",
+            "text": f"🔄 {old_b.short_name} ➔ {bot_type.short_name}",
             "callback_data": build_swap_callback_data(old_b, bot_type, context_str),
         }]
         for old_b in swappable_bots
     ]
-    keyboard.append([{"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"}])
-    keyboard.append([{"text": "🔙 돌아가기", "callback_data": "nav:subs"}])
+    keyboard.append([{"text": "💎 등급 업그레이드", "callback_data": "support:upgrade_menu"}])
+    keyboard.append([{"text": "↩️ 돌아가기", "callback_data": "nav:subs"}])
     return text, {"inline_keyboard": keyboard}
 
 
@@ -475,7 +475,7 @@ def render_swap_result_view(
     """Renders swap success (with deep link onboarding) or the failure reason."""
     if not ok:
         text = f"⚠️ <b>구독 교체 실패</b>\n\n{html.escape(msg)}"
-        return text, {"inline_keyboard": [[{"text": "📋 내 구독 센터", "callback_data": "nav:subs"}]]}
+        return text, {"inline_keyboard": [[{"text": "📋 구독 관리", "callback_data": "nav:subs"}]]}
 
     text = (
         f"🔄 <b>{html.escape(msg)}</b>\n\n"
@@ -490,8 +490,9 @@ def render_search_results_view(
     user: UserProfile,
     subs: dict[BotServiceType, bool],
     confirming_bot_id: Optional[str] = None,
+    confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Renders instant keyword search results with In-Place Unsubscribe Confirmation."""
+    """Renders instant keyword search results with In-Place Subscription/Unsubscription Confirmation."""
     clean_q = html.escape(query.strip())
     lines = [
         f"🔍 <b>'{clean_q}' 검색 결과 (총 {len(matched_bots)}건)</b>",
@@ -502,7 +503,12 @@ def render_search_results_view(
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
         target_name = target_bot.short_name if target_bot else confirming_bot_id
         lines.append(f"⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
-        lines.append(f"<i>아래 [🔴 해지 확정] 또는 [🔙 취소]를 터치하세요.</i>\n")
+        lines.append("<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
+    elif confirming_sub_bot_id:
+        target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
+        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        lines.append(f"⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>")
+        lines.append("<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
 
     if not matched_bots:
         lines.append(f"'{clean_q}'와(과) 일치하는 봇을 찾지 못했습니다. 😢\n")
@@ -519,22 +525,27 @@ def render_search_results_view(
     keyboard = []
     for b in matched_bots:
         is_sub = subs.get(b, False)
-        deep_link_url = f"https://t.me/{b.telegram_handle}?start=portal"
+        deep_link_url = b.get_start_link() or f"https://t.me/{b.telegram_handle}?start=portal"
 
         if confirming_bot_id == b.value:
             keyboard.append([
-                {"text": "🔴 네, 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:search:{clean_q}"},
-                {"text": "🔙 취소 (구독 유지)", "callback_data": f"sub:cancel_unsub:search:{clean_q}"},
+                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:search:{clean_q}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_unsub:search:{clean_q}"},
+            ])
+        elif confirming_sub_bot_id == b.value:
+            keyboard.append([
+                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{b.value}:search:{clean_q}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:search:{clean_q}"},
             ])
         else:
             if is_sub:
-                action_btn = {"text": f"🟢 구독중 (해지)", "callback_data": f"sub:ask_unsub:{b.value}:search:{clean_q}"}
+                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:search:{clean_q}"}
             else:
-                action_btn = {"text": f"➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:search:{clean_q}"}
+                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:search:{clean_q}"}
 
             tok = f"bot_{b.value.replace('_bot', '')}"
             GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-            move_btn = build_gate_button(tok, f"{b.short_name} 이동 🔗")
+            move_btn = build_gate_button(tok, "🚀 대화방")
 
             keyboard.append([
                 action_btn,
@@ -543,11 +554,11 @@ def render_search_results_view(
 
     keyboard.extend([
         [
-            {"text": "📂 카테고리 둘러보기", "callback_data": "cat:home"},
-            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+            {"text": "📂 카테고리", "callback_data": "cat:home"},
+            {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ])
 
@@ -584,8 +595,8 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
             {"text": "💬 관리자 문의 & 등급 신청", "callback_data": "support:home"},
         ],
         [
-            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "📋 구독 관리", "callback_data": "nav:subs"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -606,14 +617,14 @@ def render_support_center_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     )
     keyboard = [
         [
-            {"text": "💎 등급 업그레이드 신청 (원클릭)", "callback_data": "support:upgrade_menu"},
+            {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
         ],
         [
-            {"text": "✉️ 1:1 문의사항 작성하기", "callback_data": "support:write_inquiry"},
+            {"text": "✉️ 1:1 문의사항 작성", "callback_data": "support:write_inquiry"},
         ],
         [
-            {"text": "❓ 자주 묻는 질문(FAQ)", "callback_data": "nav:help"},
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "❓ 이용안내", "callback_data": "nav:help"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -640,8 +651,8 @@ def render_upgrade_request_view(user: UserProfile) -> tuple[str, dict[str, Any]]
             {"text": "⚫ 블랙 VIP 신청 (무제한)", "callback_data": "support:req_tier:BLACK"},
         ],
         [
-            {"text": "🔙 고객센터 홈", "callback_data": "support:home"},
-            {"text": "🏠 메인 홈", "callback_data": "nav:main"},
+            {"text": "💬 고객센터", "callback_data": "support:home"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -659,7 +670,7 @@ def render_inquiry_prompt_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     )
     keyboard = [
         [
-            {"text": "🔙 작성 취소 (고객센터 홈)", "callback_data": "support:home"},
+            {"text": "↩️ 작성 취소", "callback_data": "support:home"},
         ]
     ]
     return text, {"inline_keyboard": keyboard}
@@ -680,11 +691,11 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
     )
     keyboard = [
         [
-            {"text": "💬 1:1 고객센터 문의", "callback_data": "support:home"},
-            {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
+            {"text": "💬 고객센터", "callback_data": "support:home"},
+            {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+            {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -835,8 +846,9 @@ def handle_callback_query(
     message_id = msg.get("message_id")
     data = cq.get("data", "")
 
-    # 1. Stop button loading spinner immediately (except sub:toggle and adm which send popup text or verify auth)
-    if not data.startswith("sub:toggle:") and not data.startswith("adm:"):
+    # 1. Stop button loading spinner immediately (except modal alerts: sub:toggle, adm, sub:do_sub, sub:do_unsub, sub:swap, support:req_tier)
+    MODAL_ACTIONS = ("sub:toggle:", "adm:", "sub:do_sub:", "sub:do_unsub:", "sub:swap:", "support:req_tier:")
+    if not any(data.startswith(prefix) for prefix in MODAL_ACTIONS):
         client.answer_callback_query(cq_id)
 
     # 0. Link Confirmation Gate Intercept
@@ -936,8 +948,8 @@ def handle_callback_query(
             quota_markup = {
                 "inline_keyboard": [
                     [
-                        {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
-                        {"text": "📋 내 구독 관리", "callback_data": "nav:subs"},
+                        {"text": "💎 업그레이드", "callback_data": "support:upgrade_menu"},
+                        {"text": "📋 구독 관리", "callback_data": "nav:subs"},
                     ]
                 ]
             }
@@ -1028,8 +1040,11 @@ def handle_callback_query(
             client.answer_callback_query(cq_id, "신청 처리 중 오류가 발생했습니다.", show_alert=True)
             return
 
-        # 2. Reply to user with clean in-place notice
+        # 2. Reply to user with modal popup + clean in-place notice
         if status_code == "DUPLICATE":
+            client.answer_callback_query(
+                cq_id, f"ℹ️ 이미 [{req_tier}] 등급 신청이 접수되어 심사 대기 중입니다.", show_alert=True
+            )
             done_text = (
                 f"🫡 <b>이미 신청이 접수되어 운영팀 심사 대기 중입니다!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1038,6 +1053,9 @@ def handle_callback_query(
                 f"━━━━━━━━━━━━━━━━━━━━"
             )
         else:
+            client.answer_callback_query(
+                cq_id, f"🎉 [{req_tier}] 등급 업그레이드 신청이 접수되었습니다!", show_alert=True
+            )
             done_text = (
                 f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1050,8 +1068,8 @@ def handle_callback_query(
         done_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "📋 내 구독 센터", "callback_data": "nav:subs"},
-                    {"text": "🏠 메인 홈으로", "callback_data": "nav:main"},
+                    {"text": "📋 구독 관리", "callback_data": "nav:subs"},
+                    {"text": "🏠 홈으로", "callback_data": "nav:main"},
                 ]
             ]
         }
@@ -1087,7 +1105,58 @@ def handle_callback_query(
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 
-    # 4. In-Place Accidental Click Prevention - Step 1: Expand Confirmation Buttons
+    # 4-A. In-Place Accidental Click Prevention - Step 1 for Subscribe: Expand Confirmation Buttons
+    # Format: `sub:ask_sub:<bot_id>:<context>`
+    if data.startswith("sub:ask_sub:"):
+        parts = data.split(":")
+        bot_raw = parts[2]
+        context_str = ":".join(parts[3:]) if len(parts) > 3 else "subs"
+
+        subs = db.get_user_subscriptions(user_id)
+        if context_str.startswith("cat:"):
+            cat_code = context_str.split(":", 1)[1]
+            try:
+                cat_enum = BotCategory(cat_code)
+            except ValueError:
+                cat_enum = BotCategory.FINANCE
+            text, markup = render_category_view(cat_enum, user, subs, confirming_sub_bot_id=bot_raw)
+        elif context_str.startswith("search:"):
+            query = context_str.split(":", 1)[1]
+            matched = db.search_bots(query)
+            text, markup = render_search_results_view(query, matched, user, subs, confirming_sub_bot_id=bot_raw)
+        elif context_str == "all":
+            text, markup = render_catalog_all_view(user, subs, confirming_sub_bot_id=bot_raw)
+        else:
+            text, markup = render_subscription_view(user, subs, confirming_sub_bot_id=bot_raw)
+
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # 4-B. In-Place Accidental Click Prevention - Cancel Subscribe
+    # Format: `sub:cancel_sub:<context>`
+    if data.startswith("sub:cancel_sub:"):
+        context_str = data.split(":", 2)[2] if len(data.split(":")) > 2 else "subs"
+        subs = db.get_user_subscriptions(user_id)
+        if context_str.startswith("cat:"):
+            cat_code = context_str.split(":", 1)[1]
+            try:
+                cat_enum = BotCategory(cat_code)
+            except ValueError:
+                cat_enum = BotCategory.FINANCE
+            text, markup = render_category_view(cat_enum, user, subs)
+        elif context_str.startswith("search:"):
+            query = context_str.split(":", 1)[1]
+            matched = db.search_bots(query)
+            text, markup = render_search_results_view(query, matched, user, subs)
+        elif context_str == "all":
+            text, markup = render_catalog_all_view(user, subs)
+        else:
+            text, markup = render_subscription_view(user, subs)
+
+        _safe_edit_or_send(client, chat_id, message_id, text, markup)
+        return
+
+    # 4-C. In-Place Accidental Click Prevention - Step 1 for Unsubscribe: Expand Confirmation Buttons
     # Format: `sub:ask_unsub:<bot_id>:<context>`
     if data.startswith("sub:ask_unsub:"):
         parts = data.split(":")
@@ -1147,10 +1216,17 @@ def handle_callback_query(
         try:
             bot_type = BotServiceType(bot_raw)
         except ValueError:
+            client.answer_callback_query(cq_id)
             return
 
         ok, msg = db.unsubscribe(user_id, bot_type)
         subs = db.get_user_subscriptions(user_id)
+
+        client.answer_callback_query(
+            cq_id,
+            f"⚪ [{bot_type.short_name}] 구독이 정상적으로 해지되었습니다.",
+            show_alert=True,
+        )
 
         if context_str.startswith("cat:"):
             cat_code = context_str.split(":", 1)[1]
@@ -1180,16 +1256,28 @@ def handle_callback_query(
         try:
             bot_type = BotServiceType(bot_raw)
         except ValueError:
+            client.answer_callback_query(cq_id)
             return
 
         ok, msg = db.subscribe(user_id, bot_type)
         if not ok:
+            client.answer_callback_query(
+                cq_id,
+                "⚠️ 구독 슬롯 초과!\n기존 구독을 교체하거나 등급을 업그레이드해 주세요.",
+                show_alert=True,
+            )
             # Over quota prompt with 1-click Swap / Upgrade / Back buttons
             subs = db.get_user_subscriptions(user_id)
             swappable_bots = [b for b in BotServiceType if subs.get(b, False) and b != bot_type]
             text, markup = render_quota_swap_view(bot_type, swappable_bots, msg, context_str)
             client.send_message(chat_id, text, reply_markup=markup)
             return
+
+        client.answer_callback_query(
+            cq_id,
+            f"🎉 [{bot_type.short_name}] 알림 구독이 완료되었습니다!",
+            show_alert=True,
+        )
 
         text, markup = render_subscribe_onboarding_view(bot_type, context_str)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
@@ -1200,15 +1288,30 @@ def handle_callback_query(
     if data.startswith("sub:swap:"):
         parts = data.split(":")
         if len(parts) < 4:
+            client.answer_callback_query(cq_id)
             return
         context_str = ":".join(parts[4:]) if len(parts) > 4 else "subs"
         try:
             old_bot = BotServiceType(parts[2])
             new_bot = BotServiceType(parts[3])
         except ValueError:
+            client.answer_callback_query(cq_id)
             return
 
         ok, msg = db.atomic_swap_subscription(user_id, old_bot, new_bot)
+        if ok:
+            client.answer_callback_query(
+                cq_id,
+                f"✅ [{old_bot.short_name}] ➔ [{new_bot.short_name}] 교체가 완료되었습니다!",
+                show_alert=True,
+            )
+        else:
+            client.answer_callback_query(
+                cq_id,
+                f"⚠️ 교체 실패: {msg}",
+                show_alert=True,
+            )
+
         text, markup = render_swap_result_view(ok, msg, new_bot, context_str)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
