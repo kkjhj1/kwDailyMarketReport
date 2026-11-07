@@ -20,6 +20,9 @@ MAX_VISIBLE_CHARS = 1800
 MAX_HTML_CHARS = 3500
 MAX_CALLBACK_BYTES = 64
 
+WEB_MAGAZINE_URL = "https://kkjhj1.github.io/kwDailyMarketReport/yolo_latest.html"
+WEB_MAGAZINE_BUTTON_TEXT = "🌐 감성 사진 & 나홀로 풀코스 매거진 보기"
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _NUMBER_BADGES = ("1️⃣", "2️⃣", "3️⃣")
 
@@ -191,7 +194,12 @@ def render_curation_card(
             slim_lines.append(f'🔗 <a href="{safe_url}">상세 웹 리포트 보기</a>')
         full_html = "\n".join(slim_lines)
 
-    return full_html, build_main_keyboard(user)
+    # v2.0: 1행에 웹 매거진 URL 버튼 (URL 버튼은 callback_data 없음)
+    keyboard = build_main_keyboard(user)
+    keyboard["inline_keyboard"].insert(
+        0, [{"text": WEB_MAGAZINE_BUTTON_TEXT, "url": WEB_MAGAZINE_URL}]
+    )
+    return full_html, keyboard
 
 
 def render_unsub_confirm_card() -> tuple[str, dict[str, Any]]:

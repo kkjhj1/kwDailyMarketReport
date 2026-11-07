@@ -7,6 +7,7 @@ from typing import Optional
 
 
 class AgeGroup(str, Enum):
+    PREGNANCY = "PREGNANCY"
     INFANT = "INFANT"
     PRESCHOOL = "PRESCHOOL"
     ELEMENTARY = "ELEMENTARY"
@@ -15,9 +16,10 @@ class AgeGroup(str, Enum):
     @property
     def label(self) -> str:
         return {
-            AgeGroup.INFANT: "👶 0~3세 (영유아/유아차)",
-            AgeGroup.PRESCHOOL: "👦 4~7세 (유치부/오감체험)",
-            AgeGroup.ELEMENTARY: "🧑 8~13세 (초등부/배움·경제)",
+            AgeGroup.PREGNANCY: "🤰 임신기 (예비부모 / 태교·바우처)",
+            AgeGroup.INFANT: "👶 0~3세 (영유아 / 유아차·수유실·해열제)",
+            AgeGroup.PRESCHOOL: "👦 4~7세 (유치부 / 현장직행 오감놀이터)",
+            AgeGroup.ELEMENTARY: "🧑 8~13세 (초등부 / 교과체험·경제교실)",
             AgeGroup.ALL: "👨‍👩‍👧 전 연령",
         }[self]
 
@@ -67,9 +69,10 @@ def months_between(birth: date, today: date) -> int:
 
 
 def age_group_for_months(months: int) -> AgeGroup:
-    if months < 36:
+    """0~47개월 = 만 0~3세, 48~95개월 = 만 4~7세, 96개월~ = 만 8세 이상. A born child is never PREGNANCY."""
+    if months < 48:
         return AgeGroup.INFANT
-    if months < 84:
+    if months < 96:
         return AgeGroup.PRESCHOOL
     return AgeGroup.ELEMENTARY
 
@@ -88,6 +91,33 @@ class ChildProfile:
 
     def age_group(self, today: Optional[date] = None) -> AgeGroup:
         return age_group_for_months(self.age_months(today))
+
+
+@dataclass
+class PregnancyProfile:
+    """Expecting parent — kept apart from ChildProfile so it never reaches the fever calculator."""
+    telegram_user_id: str
+    nickname: str  # 태명
+    due_date: str  # 출산예정일 YYYY-MM-DD
+    created_at: str = ""
+
+    def days_left(self, today: Optional[date] = None) -> int:
+        return (date.fromisoformat(self.due_date) - (today or date.today())).days
+
+    def dday(self, today: Optional[date] = None) -> str:
+        days = self.days_left(today)
+        if days > 0:
+            return f"D-{days}"
+        return "D-DAY" if days == 0 else f"D+{-days}"
+
+
+@dataclass
+class PregnancyBenefit:
+    benefit_id: str
+    title: str
+    amount: str
+    detail: str
+    url: str
 
 
 @dataclass

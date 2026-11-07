@@ -490,6 +490,24 @@ class YoloDatabase:
                 ).fetchall()
                 if not arc_rows or not tag_rows:
                     continue
+                gallery_rows = conn.execute(
+                    "SELECT url, alt FROM yolo_curation_gallery WHERE curation_id = ? ORDER BY sort_order ASC",
+                    (cid,),
+                ).fetchall()
+                timeline_rows = conn.execute(
+                    """
+                    SELECT time_label, spot_name, description FROM yolo_curation_timelines
+                    WHERE curation_id = ? ORDER BY sort_order ASC
+                    """,
+                    (cid,),
+                ).fetchall()
+                budget_rows = conn.execute(
+                    """
+                    SELECT item_name, cost_krw, category FROM yolo_curation_budgets
+                    WHERE curation_id = ? ORDER BY sort_order ASC
+                    """,
+                    (cid,),
+                ).fetchall()
                 result.append(
                     YoloCuration(
                         id=cid,
@@ -509,6 +527,30 @@ class YoloDatabase:
                         priority=int(r["priority"]),
                         is_active=bool(r["is_active"]),
                         emoji=str(r["emoji"]),
+                        hero_image_url=str(r["hero_image_url"] or ""),
+                        hero_image_alt=str(r["hero_image_alt"] or ""),
+                        gallery_images=tuple(
+                            GalleryImage(url=str(g["url"]), alt=str(g["alt"])) for g in gallery_rows
+                        ),
+                        timeline=tuple(
+                            TimelineEntry(
+                                time=str(t["time_label"]),
+                                spot=str(t["spot_name"]),
+                                desc=str(t["description"]),
+                            )
+                            for t in timeline_rows
+                        ),
+                        budget_breakdown=tuple(
+                            BudgetLine(
+                                item=str(b["item_name"]),
+                                cost_krw=int(b["cost_krw"]),
+                                category=str(b["category"]),
+                            )
+                            for b in budget_rows
+                        ),
+                        solo_secrets=str(r["solo_secrets"] or ""),
+                        map_naver_url=str(r["map_naver_url"] or ""),
+                        map_kakao_url=str(r["map_kakao_url"] or ""),
                     )
                 )
             return result

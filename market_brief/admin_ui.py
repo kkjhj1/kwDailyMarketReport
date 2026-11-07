@@ -575,6 +575,94 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       font-weight: 700;
     }
 
+    /* Pending Upgrade Badges (Desktop Tab & Mobile Bottom Nav) */
+    .tab-badge,
+    .bnav-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 5px;
+      border-radius: 9px;
+      background: #ef4444;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      box-sizing: border-box;
+    }
+    .tab-badge {
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .bnav-btn {
+      position: relative;
+    }
+    .bnav-badge {
+      position: absolute;
+      top: 4px;
+      left: calc(50% + 6px);
+      min-width: 16px;
+      height: 16px;
+      font-size: 10px;
+      border: 1.5px solid #fff;
+    }
+
+    /* Deep-link Gold Pulse Highlight (3s) */
+    @keyframes pulseGold {
+      0%   { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+      25%  { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.4); }
+      50%  { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0.15); }
+      75%  { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.4); }
+      100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+    }
+    .req-card-highlight {
+      animation: pulseGold 1s ease-in-out 3;
+      border-color: #f59e0b !important;
+    }
+
+    /* 7-Bot Traffic Light & Scheduler Countdown Strip */
+    .bot-health-strip {
+      background: #1e293b;
+      color: #e2e8f0;
+      padding: 6px 28px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px 12px;
+      font-size: 12px;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .bot-traffic-lights {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      min-width: 0;
+    }
+    .bot-light-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .bot-light-chip.down {
+      background: rgba(239, 68, 68, 0.18);
+      color: #fecaca;
+    }
+    .scheduler-timer-wrap {
+      font-weight: 700;
+      color: #fde68a;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
     /* History Center (Dispatch & Audit) */
     .hist-subtabs {
       display: grid;
@@ -739,6 +827,15 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
       .header-actions .btn .btn-text {
         display: none !important;
+      }
+
+      .bot-health-strip {
+        padding: 5px 12px;
+        font-size: 11px;
+        max-width: 100vw;
+      }
+      .bot-light-chip {
+        padding: 2px 5px;
       }
 
       /* Hide Desktop Top Tab Bar on Mobile */
@@ -1347,10 +1444,18 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </header>
 
+  <!-- 7-Bot Traffic Lights & Scheduler Countdown -->
+  <div id="botHealthStrip" class="bot-health-strip">
+    <div id="botTrafficLights" class="bot-traffic-lights">
+      <span class="bot-light-chip">⏳ 봇 상태 확인 중...</span>
+    </div>
+    <div id="schedulerTimer" class="scheduler-timer-wrap">⏰ 다음 발송: 확인 중...</div>
+  </div>
+
   <!-- 3 Core Tabs -->
   <nav class="tab-bar">
     <button class="tab-btn active" data-tab="users" onclick="switchTab('users')">
-      👥 1. 유저 &amp; 등급 관리
+      👥 1. 유저 &amp; 등급 관리<span id="userPendingBadge" class="tab-badge" style="display:none;"></span>
     </button>
     <button class="tab-btn" data-tab="bots" onclick="switchTab('bots')">
       🤖 2. 봇 목록 &amp; 메시지 발송
@@ -1368,6 +1473,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="bnav-btn active" data-bnav="users" onclick="switchTab('users')">
       <span class="bnav-icon">👥</span>
       <span class="bnav-label">유저 관리</span>
+      <span id="bnavPendingBadge" class="bnav-badge" style="display:none;"></span>
     </button>
     <button class="bnav-btn" data-bnav="bots" onclick="switchTab('bots')">
       <span class="bnav-icon">🤖</span>
@@ -1922,10 +2028,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
       document.querySelectorAll('.bnav-btn').forEach(b => b.classList.toggle('active', b.dataset.bnav === tab));
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `pane-${tab}`));
-      if (tab === 'users') loadUsers();
-      if (tab === 'bots') loadBots();
-      if (tab === 'dashboard') loadDashboard();
-      if (tab === 'history') loadHistoryCenter();
+      if (tab === 'users') return loadUsers();
+      if (tab === 'bots') return loadBots();
+      if (tab === 'dashboard') return loadDashboard();
+      if (tab === 'history') return loadHistoryCenter();
     }
 
     function refreshCurrentTab() {
@@ -2085,6 +2191,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       const allReqs = requests || [];
       const pending = allReqs.filter(r => r.status === 'PENDING');
       const history = allReqs.filter(r => r.status !== 'PENDING');
+      updatePendingBadges(pending.length);
 
       const tierColors = {
         WHITE: { bg: '#f1f5f9', fg: '#475569' },
@@ -2116,7 +2223,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               ${pending.map(r => {
                 const reqColor = tierColors[r.requested_tier] || { bg: '#ecfdf5', fg: '#047857' };
                 return `
-                  <div style="background:#ffffff; border:1px solid #fde68a; border-radius:8px; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                  <div data-req-card-id="${esc(r.id)}" style="background:#ffffff; border:1px solid #fde68a; border-radius:8px; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                     <div>
                       <div style="display:flex; align-items:center; gap:6px;">
                         <span style="font-weight:800; font-size:14.5px;">${esc(r.full_name)}</span>
@@ -3152,9 +3259,169 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    // =========================================================================
+    // PENDING UPGRADE BADGES
+    // =========================================================================
+    function updatePendingBadges(count) {
+      ['userPendingBadge', 'bnavPendingBadge'].forEach(id => {
+        const badge = document.getElementById(id);
+        if (!badge) return;
+        if (count > 0) {
+          badge.textContent = count > 99 ? '99+' : String(count);
+          badge.style.display = 'inline-flex';
+        } else {
+          badge.textContent = '';
+          badge.style.display = 'none';
+        }
+      });
+    }
+
+    // =========================================================================
+    // TELEGRAM DEEP-LINK (?tab=users&req_id=123)
+    // =========================================================================
+    const DEEPLINK_TABS = ['users', 'bots', 'dashboard', 'history'];
+
+    function highlightRequestCard(reqId) {
+      const safeId = String(reqId).replace(/[^0-9A-Za-z_-]/g, '');
+      if (!safeId) return;
+      let card = document.querySelector('[data-req-card-id="' + safeId + '"]');
+      if (!card) {
+        const btn = document.querySelector('[data-req-id="' + safeId + '"]');
+        card = btn ? (btn.closest('[data-req-card-id]') || btn.closest('tr') || btn) : null;
+      }
+      if (!card) {
+        toast('ℹ️ 해당 등업 신청은 이미 처리되었거나 찾을 수 없습니다.');
+        return;
+      }
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.remove('req-card-highlight');
+      void card.offsetWidth;
+      card.classList.add('req-card-highlight');
+      setTimeout(() => card.classList.remove('req-card-highlight'), 3000);
+    }
+
+    async function applyDeepLink() {
+      const params = new URLSearchParams(window.location.search);
+      let tab = (params.get('tab') || '').toLowerCase();
+      const reqId = params.get('req_id');
+      if (tab === 'upgrade' || (!tab && reqId)) tab = 'users';
+      if (!DEEPLINK_TABS.includes(tab)) tab = 'users';
+
+      // Strip one-shot deep-link params so a manual refresh doesn't re-trigger the highlight
+      if (params.has('tab') || params.has('req_id')) {
+        params.delete('tab');
+        params.delete('req_id');
+        const qs = params.toString();
+        try {
+          window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
+        } catch (e) { /* ignore */ }
+      }
+
+      await switchTab(tab);
+      if (tab === 'users' && reqId) highlightRequestCard(reqId);
+    }
+
+    // =========================================================================
+    // 7-BOT TRAFFIC LIGHTS & SCHEDULER COUNTDOWN
+    // =========================================================================
+    const HEALTH_BOTS = [
+      { ids: ['menu_bot'], label: '🧭 메뉴' },
+      { ids: ['brief_bot'], label: '📈 시황' },
+      { ids: ['travel_bot'], label: '✈️ 여행' },
+      { ids: ['admission_bot', 'edu_bot'], label: '🎓 입시' },
+      { ids: ['silver_bot'], label: '👵 실버' },
+      { ids: ['kids_bot'], label: '👶 자녀' },
+      { ids: ['yolo_bot'], label: '🏄 욜로' },
+    ];
+    const HEALTH_POLL_MS = 20000;
+    const WEEKDAYS_KO = ['일', '월', '화', '수', '목', '금', '토'];
+    const H = { nextTargetMs: null, nextLabel: '', clockOffsetMs: 0, schedulerState: 'loading', refreshing: false, lastFetchMs: 0 };
+
+    function parseKstToMs(s) {
+      if (!s) return null;
+      const clean = String(s).replace(' KST', '').trim().replace(' ', 'T');
+      const ms = Date.parse(clean + '+09:00');
+      return isNaN(ms) ? null : ms;
+    }
+
+    function buildScheduleLabel(s) {
+      const clean = String(s).replace(' KST', '').trim();
+      const [datePart, timePart] = clean.split(' ');
+      const [y, m, d] = (datePart || '').split('-').map(Number);
+      const hhmm = (timePart || '').slice(0, 5);
+      const wd = (y && m && d) ? WEEKDAYS_KO[new Date(Date.UTC(y, m - 1, d)).getUTCDay()] : '';
+      const kind = hhmm.startsWith('06') ? '장전 시황 브리핑' : (hhmm.startsWith('15') ? '마감 시황 브리핑' : '시황 브리핑');
+      return `${m}/${d}(${wd}) ${hhmm} ${kind}`;
+    }
+
+    function renderTrafficLights(data) {
+      const wrap = document.getElementById('botTrafficLights');
+      if (!wrap) return;
+      const active = new Set((data && data.active_workers) || []);
+      wrap.innerHTML = HEALTH_BOTS.map(b => {
+        const up = b.ids.some(id => active.has(id));
+        return `<span class="bot-light-chip${up ? '' : ' down'}" title="${up ? '실시간 폴링 가동 중' : '중단 또는 토큰 없음'}">${up ? '🟢' : '🔴'} ${esc(b.label)}</span>`;
+      }).join('');
+    }
+
+    function tickSchedulerTimer() {
+      const el = document.getElementById('schedulerTimer');
+      if (!el) return;
+      if (H.schedulerState === 'loading') { el.textContent = '⏰ 다음 발송: 확인 중...'; return; }
+      if (H.schedulerState === 'error') { el.textContent = '⏰ 다음 발송: 상태 조회 실패'; return; }
+      if (H.schedulerState === 'off' || !H.nextTargetMs) { el.textContent = '⏰ 다음 발송: 스케줄러 비활성'; return; }
+
+      const remainSec = Math.floor((H.nextTargetMs - (Date.now() + H.clockOffsetMs)) / 1000);
+      if (remainSec <= 0) {
+        el.textContent = `⏰ ${H.nextLabel} 발송 진행 중...`;
+        if (remainSec < -5 && Date.now() - H.lastFetchMs > 10000) refreshBotHealth();
+        return;
+      }
+      const days = Math.floor(remainSec / 86400);
+      const rest = remainSec % 86400;
+      const pad = n => String(n).padStart(2, '0');
+      const hms = `${pad(Math.floor(rest / 3600))}:${pad(Math.floor((rest % 3600) / 60))}:${pad(rest % 60)}`;
+      el.textContent = `⏰ 다음 발송: ${H.nextLabel} (D-${days} ${hms} 남음)`;
+    }
+
+    async function refreshBotHealth() {
+      if (H.refreshing) return;
+      H.refreshing = true;
+      H.lastFetchMs = Date.now();
+      try {
+        // /healthz returns 503 with a valid JSON body when DEGRADED, so read it regardless of status
+        const res = await fetch('/healthz', { cache: 'no-store' });
+        const data = await res.json();
+        renderTrafficLights(data);
+
+        const serverNow = parseKstToMs(data.timestamp_kst);
+        if (serverNow) H.clockOffsetMs = serverNow - Date.now();
+
+        const sched = data.briefing_scheduler || {};
+        const nextStr = sched.next_scheduled_kst;
+        H.nextTargetMs = parseKstToMs(nextStr);
+        H.nextLabel = nextStr ? buildScheduleLabel(nextStr) : '';
+        H.schedulerState = (sched.is_running && H.nextTargetMs) ? 'on' : 'off';
+      } catch (e) {
+        renderTrafficLights(null);
+        H.schedulerState = 'error';
+      } finally {
+        H.refreshing = false;
+        tickSchedulerTimer();
+      }
+    }
+
+    function initBotHealthStrip() {
+      refreshBotHealth();
+      setInterval(() => { if (!document.hidden) refreshBotHealth(); }, HEALTH_POLL_MS);
+      setInterval(tickSchedulerTimer, 1000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshBotHealth(); });
+    }
+
     // Initial load
     initSplashLoader();
-    switchTab('users');
+    initBotHealthStrip();
+    applyDeepLink();
   </script>
 </body>
 </html>

@@ -15,10 +15,12 @@ from kids_compass.channels.telegram import (
     format_dday_alert_html,
     format_fever_result_html,
     format_hospital_list_html,
+    format_pregnancy_html,
     format_weekend_briefing_html,
     measure_message,
 )
 from kids_compass.collector import (
+    PREGNANCY_BENEFITS,
     SEED_BOOKING_EVENTS,
     SEED_EXPERIENCES,
     SEED_HOSPITALS,
@@ -38,7 +40,14 @@ from kids_compass.interactive_bot import (
     build_weekend_messages,
     cb,
 )
-from kids_compass.models import AgeGroup, ChildProfile, ExperienceCategory, IngredientType
+from kids_compass.models import (
+    AgeGroup,
+    ChildProfile,
+    ExperienceCategory,
+    IngredientType,
+    PregnancyProfile,
+    age_group_for_months,
+)
 from kids_compass.storage.db import KidsCompassDatabase
 
 TYL, BRU, MAX = DEFAULT_MEDICINES["TYLENOL_32"], DEFAULT_MEDICINES["BRUFEN_20"], DEFAULT_MEDICINES["MAXIBUFEN_12"]
@@ -152,14 +161,40 @@ def test_child_age_months_and_group():
     assert c.age_months(date(2026, 11, 8)) == 24
     assert c.age_group(date(2026, 11, 8)) == AgeGroup.INFANT
     assert ChildProfile(2, "7", "a", "2021-01-01", 18).age_group(date(2026, 1, 1)) == AgeGroup.PRESCHOOL
-    assert ChildProfile(3, "7", "b", "2019-01-01", 25).age_group(date(2026, 1, 1)) == AgeGroup.ELEMENTARY
+    assert ChildProfile(3, "7", "b", "2019-01-01", 25).age_group(date(2026, 1, 1)) == AgeGroup.PRESCHOOL  # 84개월
+    assert ChildProfile(4, "7", "c", "2018-01-01", 27).age_group(date(2026, 1, 1)) == AgeGroup.ELEMENTARY  # 96개월
+
+
+@pytest.mark.parametrize("months,expected", [
+    (0, AgeGroup.INFANT), (47, AgeGroup.INFANT), (48, AgeGroup.PRESCHOOL),
+    (95, AgeGroup.PRESCHOOL), (96, AgeGroup.ELEMENTARY), (160, AgeGroup.ELEMENTARY),
+])
+def test_age_group_month_boundaries(months, expected):
+    assert age_group_for_months(months) == expected
+
+
+def test_age_group_boundaries_via_birth_date():
+    today = date(2026, 11, 7)
+    assert ChildProfile(1, "7", "a", "2022-12-07", 15).age_group(today) == AgeGroup.INFANT      # 47개월
+    assert ChildProfile(2, "7", "b", "2022-11-07", 16).age_group(today) == AgeGroup.PRESCHOOL   # 48개월
+    assert ChildProfile(3, "7", "c", "2018-12-07", 24).age_group(today) == AgeGroup.PRESCHOOL   # 95개월
+    assert ChildProfile(4, "7", "d", "2018-11-07", 25).age_group(today) == AgeGroup.ELEMENTARY  # 96개월
+
+
+def test_pregnancy_dday():
+    p = PregnancyProfile("7", "복덩이", "2027-03-07")
+    assert p.dday(date(2026, 11, 7)) == "D-120"
+    assert p.dday(date(2027, 3, 7)) == "D-DAY"
+    assert p.dday(date(2027, 3, 9)) == "D+2"
 
 
 # ── seeds & recommendation ────────────────────────────────────
 def test_seed_volumes():
     assert len(SEED_EXPERIENCES) >= 12 and len(SEED_BOOKING_EVENTS) >= 5 and len(SEED_HOSPITALS) >= 8
-    for ag in (AgeGroup.INFANT, AgeGroup.PRESCHOOL, AgeGroup.ELEMENTARY):
+    for ag in (AgeGroup.PREGNANCY, AgeGroup.INFANT, AgeGroup.PRESCHOOL, AgeGroup.ELEMENTARY):
         assert any(e.age_group == ag for e in SEED_EXPERIENCES)
+    assert sum(1 for e in SEED_EXPERIENCES if e.age_group == AgeGroup.PRESCHOOL and not e.booking_required) >= 3
+    assert len(PREGNANCY_BENEFITS) >= 4
 
 
 def test_booking_events_never_in_the_past():
@@ -187,6 +222,29 @@ def test_region_backfill_when_region_is_thin(db):
     assert len(picks) == 3
 
 
+@pytest.mark.parametrize("age", list(AgeGroup))
+@pytest.mark.parametrize("region", ["서울", "경기", "인천", None])
+@pytest.mark.parametrize("rain", [False, True])
+def test_dispatch_picks_are_walk_in_only(db, age, region, rain):
+    """Invariant: is_dispatch=True never returns a booking_required spot — including the region back-fill."""
+    picks = recommend_weekend_picks(db, age, region, weather_rain=rain, is_dispatch=True)
+    assert all(p.booking_required is False for p in picks)
+
+
+def test_preschool_dispatch_fills_three_walk_in_picks_with_backfill(db):
+    for region in ("서울", "인천"):
+        picks = recommend_weekend_picks(db, AgeGroup.PRESCHOOL, region, is_dispatch=True)
+        assert len(picks) == 3 and all(not p.booking_required for p in picks)
+        assert len({p.venue_name for p in picks}) == 3
+
+
+def test_pregnancy_and_child_spots_never_mix(db):
+    preg = recommend_weekend_picks(db, AgeGroup.PREGNANCY, "서울")
+    assert preg and all(p.age_group == AgeGroup.PREGNANCY for p in preg)
+    for age in (AgeGroup.INFANT, AgeGroup.PRESCHOOL, AgeGroup.ELEMENTARY, AgeGroup.ALL):
+        assert all(p.age_group != AgeGroup.PREGNANCY for p in recommend_weekend_picks(db, age, "서울"))
+
+
 # ── hospital card ─────────────────────────────────────────────
 def test_hospital_card_has_phone_warning_and_verified_date(db):
     hospitals = db.list_hospitals("서울")
@@ -203,6 +261,7 @@ def test_schema_tables_indexes_and_fk(db):
     names = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master").fetchall()}
     for t in ("kids_user_profiles", "kids_children", "kids_medicine_products", "kids_dose_events",
               "kids_experiences", "kids_booking_events", "kids_notification_deliveries", "kids_moonlight_hospitals",
+              "kids_pregnancy_profiles",
               "idx_kids_exp_filter", "idx_kids_hospital_region", "idx_kids_booking_open"):
         assert t in names
     assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
@@ -216,6 +275,64 @@ def test_child_ownership_and_dose_log(db):
     db.log_dose_event(cid, "TYLENOL_32", 4.3, 137.5)
     assert db.delete_child(cid, 7) is True
     assert db.conn.execute("SELECT COUNT(*) FROM kids_dose_events").fetchone()[0] == 0  # cascade
+
+
+def test_pregnancy_profile_crud(db):
+    assert db.get_pregnancy(7) is None
+    db.set_pregnancy(7, "복덩이", "2027-03-07")
+    p = db.get_pregnancy(7)
+    assert p is not None and p.nickname == "복덩이" and p.due_date == "2027-03-07"
+    db.set_pregnancy(7, "튼튼이", "2027-03-10")  # upsert
+    assert db.get_pregnancy(7).nickname == "튼튼이"
+    assert db.get_pregnancy(8) is None
+    assert db.delete_pregnancy(8) is False
+    assert db.delete_pregnancy(7) is True and db.get_pregnancy(7) is None
+
+
+def test_pregnancy_never_reaches_fever_calculator(db):
+    """A pregnancy profile is not a child: no child row, no fever button, no dose calculation."""
+    ch = RecordingChannel()
+    bot = make_bot(db, ch)
+    bot.handle_update({"message": {"chat": {"id": 7}, "text": "/preg 복덩이 2027-03-07"}})
+    assert db.get_pregnancy(7) is not None and db.list_children(7) == []
+    assert db.conn.execute("SELECT COUNT(*) FROM kids_children").fetchone()[0] == 0
+    tap(bot, "k:fvr")
+    text, kb = ch.rendered()[-1][2], ch.rendered()[-1][3]
+    assert "복덩이" not in text
+    assert all(not b["callback_data"].startswith("k:fvr:c:") for row in kb["inline_keyboard"] for b in row)
+
+
+def test_preg_command_validation(db):
+    ch = RecordingChannel()
+    bot = make_bot(db, ch)
+    for bad in ("/preg 복덩이 2026-01-01", "/preg 복덩이 2028-12-01", "/preg <b>x</b> 2027-03-07",
+                "/preg 복덩이 2027-02-30"):
+        bot.handle_update({"message": {"chat": {"id": 7}, "text": bad}})
+    assert db.get_pregnancy(7) is None
+    bot.handle_update({"message": {"chat": {"id": 7}, "text": "/preg"}})  # no args → dashboard only
+    assert db.get_pregnancy(7) is None and "태명 등록" in ch.rendered()[-1][2]
+
+
+def test_pregnancy_delete_is_two_step(db):
+    ch = RecordingChannel()
+    bot = make_bot(db, ch)
+    db.set_pregnancy(7, "복덩이", "2027-03-07")
+    tap(bot, "k:preg:x")
+    assert db.get_pregnancy(7) is not None and "삭제할까요" in ch.rendered()[-1][2]
+    tap(bot, "k:preg:xy")
+    assert db.get_pregnancy(7) is None
+
+
+def test_walk_in_toggle_callback(db):
+    ch = RecordingChannel()
+    bot = make_bot(db, ch)
+    tap(bot, "k:exp:a:PRESCHOOL:sunny:walk")
+    walk = ch.rendered()[-1][2]
+    assert "⚡ 예약 없이 바로 출발 3-Pick" in walk and "📅예약" not in walk
+    tap(bot, "k:exp:a:PRESCHOOL:sunny:all")
+    assert "⚡ 예약 없이 바로 출발" not in ch.rendered()[-1][2]
+    tap(bot, "k:exp:a:PRESCHOOL:sunny")  # legacy 4-part callback → 4~7세 defaults to 현장직행
+    assert "⚡ 예약 없이 바로 출발" in ch.rendered()[-1][2]
 
 
 # ── dispatch idempotency ──────────────────────────────────────
@@ -237,6 +354,22 @@ def test_weekend_dispatch_is_idempotent_per_week(db):
     assert len(ch.rendered()) == 1
     row = db.conn.execute("SELECT COUNT(*) FROM kids_notification_deliveries WHERE dispatch_key = ?", (key,)).fetchone()
     assert row[0] == 1
+
+
+def test_weekend_dispatch_routes_pregnancy_and_preschool(db):
+    today = date(2026, 11, 12)  # Thursday
+    db.set_pregnancy(301, "복덩이", "2027-03-07")              # pregnancy only
+    db.add_child(302, "콩이", "2021-03-01", 18.0)               # 4~7세
+    db.add_child(303, "아기", "2025-05-01", 9.0)                # 0~3세
+    db.set_pregnancy(303, "둘째", "2027-04-01")                 # has a child → child briefing wins
+    _, messages = build_weekend_messages(db, today)
+    by_uid = dict(messages)
+    assert "임신기 태교·바우처" in by_uid["301"] and "D-115" in by_uid["301"] and "첫만남이용권" in by_uid["301"]
+    assert "⚡ 예약 없이 바로 출발 3-Pick" in by_uid["302"] and "📅예약" not in by_uid["302"]
+    assert "임신기" not in by_uid["303"] and "⚡" not in by_uid["303"]
+    for text in by_uid.values():
+        html_len, visible_len = measure_message(text)
+        assert html_len <= MAX_HTML_CHARS and visible_len <= MAX_VISIBLE_CHARS
 
 
 def test_dday_dispatch_is_idempotent_and_skips_empty_window(db):
@@ -278,6 +411,9 @@ ALL_CALLBACKS = [
     "k:hsp:r:GGI", "k:hsp:r:ICN", "k:exp", "k:exp:a:INFANT:sunny", "k:exp:a:PRESCHOOL:rain",
     "k:exp:a:ELEMENTARY:sunny", *[f"k:exp:c:{c.value}" for c in ExperienceCategory], "k:dday", "k:set",
     "k:set:w", "k:set:d", "k:set:r:GGI",
+    "k:preg", "k:exp:a:PREGNANCY:sunny:all", "k:exp:a:PREGNANCY:rain:all", "k:exp:a:PRESCHOOL:sunny:walk",
+    "k:exp:a:PRESCHOOL:rain:walk", "k:exp:a:ELEMENTARY:rain:walk", "k:exp:a:INFANT:sunny:all", "k:preg:x",
+    "k:preg:xy",
 ]
 
 
@@ -291,6 +427,7 @@ def test_every_callback_is_ascii_and_within_64_bytes(db):
     ch = RecordingChannel()
     bot = make_bot(db, ch)
     db.add_child(7, "가나다라마바사아자차", "2024-05-01", 11.0)
+    db.set_pregnancy(7, "가나다라마바사아자차", "2027-03-07")
     bot.handle_update({"message": {"chat": {"id": 7}, "text": "/start"}})
     for n, data in enumerate(ALL_CALLBACKS):
         tap(bot, data, n=n)
@@ -305,7 +442,8 @@ def test_every_callback_is_ascii_and_within_64_bytes(db):
         cb("hsp", "r", "서울")
 
 
-@pytest.mark.parametrize("data", ALL_CALLBACKS + ["k:fvr:w:abc", "k:hsp:r:XXX", "garbage", "k:ch:x:999"])
+@pytest.mark.parametrize("data", ALL_CALLBACKS + ["k:fvr:w:abc", "k:hsp:r:XXX", "garbage", "k:ch:x:999",
+                                                  "k:exp:a:PRESCHOOL:sunny:zzz", "k:preg:zzz"])
 def test_answer_callback_query_is_called_first(db, data):
     ch = RecordingChannel()
     tap(make_bot(db, ch), data)
@@ -348,6 +486,7 @@ def test_all_rendered_messages_within_limits(db):
     bot = make_bot(db, ch)
     for i in range(4):
         db.add_child(7, f"아이{i}", "2022-05-01", 12.0)
+    db.set_pregnancy(7, "가나다라마바사아자차", "2027-03-07")
     bot.handle_update({"message": {"chat": {"id": 7}, "text": "/start"}})
     for n, data in enumerate(ALL_CALLBACKS):
         tap(bot, data, n=n)
@@ -357,6 +496,10 @@ def test_all_rendered_messages_within_limits(db):
         format_hospital_list_html(db.list_hospitals() * 3, "전체"),
         format_cross_dosing_html(),
         format_fever_result_html(calculate_all(100, 200)),
+        format_pregnancy_html(PregnancyProfile("7", "가" * 10, "2027-03-07"), PREGNANCY_BENEFITS * 3,
+                              db.list_experiences(AgeGroup.PREGNANCY) * 3, FIXED_NOW.date()),
+        format_weekend_briefing_html(recommend_weekend_picks(db, AgeGroup.PRESCHOOL, "서울", is_dispatch=True),
+                                     AgeGroup.PRESCHOOL, "x", walk_in=True),
     ]
     for t in texts:
         html_len, visible_len = measure_message(t)
@@ -370,6 +513,9 @@ def test_dynamic_fields_are_escaped(db):
     text = format_weekend_briefing_html([evil], AgeGroup.INFANT, "<i>rain</i>")
     assert "<script>" not in text and "&lt;script&gt;" in text and "a &amp; b" in text
     assert '"><b>' not in text and "&lt;i&gt;rain" in text
+    preg_text = format_pregnancy_html(PregnancyProfile("7", "<b>x</b>", "2027-03-07"), PREGNANCY_BENEFITS,
+                                      [evil], FIXED_NOW.date())
+    assert "<b>x</b>" not in preg_text and "&lt;b&gt;x" in preg_text and "<script>" not in preg_text
 
 
 # ── portal hub ────────────────────────────────────────────────

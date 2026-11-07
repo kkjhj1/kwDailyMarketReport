@@ -5,6 +5,8 @@ Supports:
 3. `--poll`: Long-polling interactive bot.
 4. `--dispatch-weekly`: Weekly solo curation briefing (idempotent per ISO week, [TG-05]).
    Add `--dry-run` to preview messages without calling Telegram.
+5. `--generate-report [PATH]`: v2.0 visual web magazine (default `reports/yolo_latest.html`),
+   rendered from the seed catalog via a `:memory:` DB round-trip (no SQLite file writes).
 """
 from __future__ import annotations
 
@@ -52,11 +54,32 @@ from yolo_brief.fixtures.seed_curations import SEED_CURATIONS
 from yolo_brief.interactive import YoloInteractiveBot
 from yolo_brief.matching import match_curations
 from yolo_brief.models import (
+    Season,
     SoloArchetype,
     WeatherClass,
     WeatherSnapshot,
 )
 from yolo_brief.storage.db import YoloDatabase
+from yolo_brief.web_report import DEFAULT_REPORT_PATH, YoloWebReportGenerator
+
+DEFAULT_REPORT_OUTPUT = BASE_DIR / DEFAULT_REPORT_PATH
+
+
+def generate_report(
+    output_path: str | Path = DEFAULT_REPORT_OUTPUT,
+    season: Season | None = None,
+    weather_snapshot: WeatherSnapshot | None = None,
+) -> Path:
+    """Renders the v2.0 web magazine from SEED_CURATIONS through a `:memory:` DB round-trip."""
+    db = YoloDatabase(":memory:")
+    try:
+        db.seed_curations(SEED_CURATIONS)
+        curations = db.list_active_curations()
+    finally:
+        db.close()
+    generator = YoloWebReportGenerator()
+    html_text = generator.render_html(curations, season=season, weather_snapshot=weather_snapshot)
+    return generator.save_report(html_text, output_path)
 
 
 def run_demo(ref_date: date = date(2026, 10, 17)) -> int:
@@ -166,6 +189,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Send a test onboarding/curation card to the specified chat_id (or YOLO_TELEGRAM_CHAT_ID)",
     )
     parser.add_argument(
+        "--generate-report",
+        nargs="?",
+        const=str(DEFAULT_REPORT_OUTPUT),
+        default=None,
+        metavar="PATH",
+        help="Generate v2.0 visual web magazine HTML (default: reports/yolo_latest.html)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Do not make network calls to Telegram API",
@@ -184,6 +215,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.demo:
         return run_demo()
+
+    if args.generate_report is not None:
+        out_path = generate_report(args.generate_report)
+        print(f"[YOLO Bot] Web magazine generated: {out_path}")
+        return 0
 
     db = YoloDatabase(args.db_path)
     if args.seed_sample:

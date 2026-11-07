@@ -4,6 +4,7 @@ Supports:
 2. `--seed-sample`: Seeds medicines, experiences, booking D-Days and moonlight hospitals into SQLite.
 3. `--poll`: Long-polling interactive bot.
 4. `--dispatch-weekend`: Thursday 17:00 weekend outing briefing (idempotent per ISO week).
+   4~7세 → 현장직행 3-Pick (booking_required == False only) · 임신기(아이 미등록) → 태교·바우처 대시보드.
 5. `--dispatch-dday`: Monday 09:00 booking-open D-Day alert (idempotent per ISO week).
    Add `--dry-run` to preview the messages without calling Telegram or writing the delivery log.
 """
@@ -13,7 +14,7 @@ import logging
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -37,7 +38,7 @@ if env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
 from kids_compass.channels.telegram import KidsTelegramChannel, SafeTelegramDispatcher, measure_message
-from kids_compass.collector import seed_all
+from kids_compass.collector import SEED_EXPERIENCES, seed_all
 from kids_compass.interactive_bot import (
     KidsCompassInteractiveBot,
     build_dday_messages,
@@ -85,7 +86,7 @@ class _ConsoleDemoChannel:
 
 
 def run_demo() -> None:
-    """홈 ➔ 4~7세 주말(맑음/우천) ➔ D-Day ➔ 해열제(11kg / 3개월 미만 / 5개월 NSAID 차단) ➔ 달빛병원 (in-memory)."""
+    """홈 ➔ 임신기 대시보드 ➔ 4~7세 현장직행/전체(맑음/우천) ➔ D-Day ➔ 해열제 ➔ 달빛병원 ➔ 목요일 발송 미리보기 (in-memory)."""
     db = KidsCompassDatabase(":memory:")
     counts = seed_all(db)
     print(f"✅ [DEMO] Seeded into :memory: DB → {counts}")
@@ -96,13 +97,24 @@ def run_demo() -> None:
         bot.handle_update({"callback_query": {"id": f"demo_cb_{n}", "data": data,
                                               "message": {"message_id": 1001, "chat": chat}}})
 
+    due = (date.today() + timedelta(days=120)).isoformat()
+    bot.handle_update({"message": {"chat": chat, "text": f"/preg 복덩이 {due}"}})
     bot.handle_update({"message": {"chat": chat, "text": "/start"}})
     steps = [
-        cb("exp", "a", "PRESCHOOL", "sunny"), cb("exp", "a", "PRESCHOOL", "rain"), cb("dday"),
+        cb("preg"), cb("exp", "a", "PRESCHOOL", "sunny", "walk"), cb("exp", "a", "PRESCHOOL", "sunny", "all"),
+        cb("exp", "a", "PRESCHOOL", "rain"), cb("dday"),
         cb("fvr", "w", 11), cb("fvr", "m3"), cb("fvr", "m5", 7), cb("fvr", "x"), cb("hsp", "r", "SEL"),
     ]
     for n, data in enumerate(steps):
         tap(data, n)
+
+    # Thursday dispatch preview: pregnancy-only subscriber + 4~7세 subscriber (in-memory, nothing sent)
+    db.add_child(2, "콩이", (date.today() - timedelta(days=365 * 5)).isoformat(), 18.0)
+    key, messages = build_weekend_messages(db, date.today())
+    print(f"\n===== [DISPATCH PREVIEW] {key} → {len(messages)} chat(s) =====")
+    for chat_id, text in messages:
+        html_len, visible_len = measure_message(text)
+        print(f"\n----- chat {chat_id} html={html_len} visible={visible_len} -----\n{text}")
     db.close()
 
 
@@ -174,8 +186,10 @@ def main() -> None:
     elif db.count_experiences() == 0:
         logger.info("Catalogue was empty — auto-seeded %s", seed_all(db))
     else:
-        # Booking open dates are rule-derived; refresh so D-Days never go stale
+        # Booking open dates are rule-derived; refresh so D-Days never go stale. Catalogue upsert is idempotent and
+        # brings new seed spots (e.g. 현장직행 / 임신기) into an existing DB.
         from kids_compass.collector import build_booking_events
+        db.upsert_experiences(SEED_EXPERIENCES)
         db.upsert_booking_events(build_booking_events())
 
     token = get_kids_bot_token()

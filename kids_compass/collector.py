@@ -12,7 +12,14 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
 
-from kids_compass.models import AgeGroup, BookingEvent, ExperienceCategory, ExperienceItem, MoonlightHospital
+from kids_compass.models import (
+    AgeGroup,
+    BookingEvent,
+    ExperienceCategory,
+    ExperienceItem,
+    MoonlightHospital,
+    PregnancyBenefit,
+)
 
 UNVERIFIED = "미검증(운영 전 E-gen 확인 필요)"
 EGEN_URL = "https://www.e-gen.or.kr/"
@@ -64,6 +71,12 @@ SEED_EXPERIENCES: list[ExperienceItem] = [
          "무료", "무료 (단체·개인 프로그램 예약)", False, False, False, True, "프로그램별 예약", "숲 놀이터 · 숲해설 프로그램"),
     _exp("forest_dream", "북서울꿈의숲 유아숲체험원", A.PRESCHOOL, C.NATURE, "서울", "강북구", "북서울꿈의숲 유아숲체험원",
          "무료", "무료 (프로그램 예약)", False, False, False, True, "프로그램별 예약", "흙·나무 자연놀이 · 생태 관찰"),
+    # 현장직행(booking_required=False) — Thursday dispatch for 4~7세 only uses walk-in spots
+    _exp("forest_dream_free", "북서울꿈의숲 유아숲 놀이터 & 잔디광장", A.PRESCHOOL, C.NATURE, "서울", "강북구",
+         "북서울꿈의숲", "무료", "무료 (숲해설 프로그램만 별도 예약)", False, True, False, False, "현장 입장",
+         "밧줄·통나무 자연놀이 · 대형 잔디광장"),
+    _exp("grandpark_zoo", "어린이대공원 동물원 & 잔디마당", A.PRESCHOOL, C.NATURE, "서울", "광진구", "서울어린이대공원",
+         "무료", "입장 무료 (일부 시설 유료)", False, True, True, False, "현장 입장", "동물 관찰 · 넓은 잔디마당 뛰놀기"),
     # ── ELEMENTARY (8~13세) ──
     _exp("bok_money", "한국은행 화폐박물관 어린이 경제교실", A.ELEMENTARY, C.ECONOMY, "서울", "중구", "한국은행 화폐박물관",
          "무료", "무료 (교실 사전예약)", True, True, False, True, "월 단위 예약 오픈", "화폐의 역사 · 위조지폐 구별 체험"),
@@ -78,6 +91,39 @@ SEED_EXPERIENCES: list[ExperienceItem] = [
          "무료", "입장 무료 (일부 시설 유료)", False, True, True, False, "현장 입장", "동물원 · 넓은 잔디 · 유아차 산책"),
     _exp("worldcup_park", "월드컵공원 하늘공원 생태 산책", A.ALL, C.NATURE, "서울", "마포구", "월드컵공원",
          "무료", "무료", False, False, False, False, "현장 입장", "억새·생태 탐방 · 노을 피크닉"),
+    _exp("nmk_main", "국립중앙박물관 상설전시관", A.ALL, C.PLAY, "서울", "용산구", "국립중앙박물관",
+         "무료", "상설전시 무료 (특별전 별도)", True, True, True, False, "현장 입장", "비 와도 OK · 넓은 실내 동선"),
+    # ── PREGNANCY (임신기 태교·산책: 평지 위주) ──
+    _exp("preg_botanic", "서울식물원 주제정원 & 온실", A.PREGNANCY, C.NATURE, "서울", "강서구", "서울식물원 주제정원",
+         "유료", "온실·주제정원 유료 · 열린숲 무료", True, True, True, False, "현장 발권",
+         "평지 산책 · 온실 피톤치드 · 수유·휴게시설"),
+    _exp("preg_kna", "국립수목원 전나무숲길", A.PREGNANCY, C.NATURE, "경기", "포천시", "국립수목원",
+         "유료", "소액 입장료 (사전예약제)", False, True, True, True, "방문일 사전예약", "피톤치드 힐링 · 평지 숲 산책로"),
+    _exp("preg_namsan", "남산 야외식물원 태교 숲길", A.PREGNANCY, C.NATURE, "서울", "용산구", "남산 야외식물원",
+         "무료", "무료", False, False, False, False, "현장 입장", "완만한 숲길 · 연못·약용식물원 산책"),
+]
+
+# Walk-in tips (오픈런·주차) shown on the 현장직행 3-Pick card. Generic fallback in the formatter.
+WALK_IN_TIPS: dict[str, str] = {
+    "seoulforest_insect": "🏃 오전 10시 전 도착 · 🚇 수인분당선 서울숲역 권장",
+    "forest_dream_free": "🏃 오전 일찍 잔디광장 그늘 선점 · 🚗 주말 주차 혼잡 → 대중교통 권장",
+    "grandpark_zoo": "🏃 개장 직후 동물원부터 · 🚇 7호선 어린이대공원역 권장",
+    "childrens_grand_park": "🏃 오전 입장 추천 · 🚇 7호선 어린이대공원역 권장",
+    "nmk_main": "🏃 개장 직후 입장 · 🚇 4호선·경의중앙선 이촌역 권장",
+    "botanic_park": "🏃 오전 입장 추천 · 🚇 9호선·공항철도 마곡나루역 권장",
+    "worldcup_park": "🏃 오전·노을 시간 추천 · 🚇 6호선 월드컵경기장역 권장",
+}
+
+# 임신기 복지·바우처 (fact safety: amounts vary by year/지자체 — the card always says to check the official notice)
+PREGNANCY_BENEFITS: list[PregnancyBenefit] = [
+    PregnancyBenefit("first_meet", "첫만남이용권", "첫째 200만원 · 둘째 이상 300만원",
+                     "출생 후 국민행복카드 바우처 지급", naver_search("첫만남이용권 신청")),
+    PregnancyBenefit("transport", "임산부 교통비 바우처", "서울 70만원 (지자체별 상이)",
+                     "거주 지자체에 임신 중 신청", naver_search("임산부 교통비 지원 신청")),
+    PregnancyBenefit("folic_iron", "보건소 엽산제·철분제 무료", "임신 초기 엽산 · 16주 이후 철분제",
+                     "관할 보건소 등록 후 방문·택배 수령", naver_search("보건소 임산부 엽산제 철분제")),
+    PregnancyBenefit("eco_food", "임산부 친환경 농산물 꾸러미", "시행 여부 지자체별 상이",
+                     "거주지 시행 여부를 먼저 확인", naver_search("임산부 친환경농산물 꾸러미 지원")),
 ]
 
 # Booking-open rules → concrete D-Day events. ("monthly", day, hh:mm) or ("weekly", weekday 0=Mon, hh:mm)
@@ -150,20 +196,36 @@ SEED_HOSPITALS: list[MoonlightHospital] = [
 ]
 
 
-def recommend_weekend_picks(db, age_group: AgeGroup, region_sido: Optional[str], weather_rain: bool = False,
-                            fine_dust_bad: bool = False, limit: int = 3) -> list[ExperienceItem]:
+def recommend_weekend_picks(db, age_group: AgeGroup, region_sido: Optional[str] = None, weather_rain: bool = False,
+                            fine_dust_bad: bool = False, is_dispatch: bool = False,
+                            limit: int = 3) -> list[ExperienceItem]:
     """Weather-aware 3-Pick.
     - rain / bad dust: indoor ONLY (returns fewer than `limit` rather than suggest an outdoor spot)
     - sunny: alternate outdoor (nature first) and indoor
+    - is_dispatch (현장직행): booking_required == False ONLY — also enforced on the region back-fill
+    - PREGNANCY returns PREGNANCY spots only; other age groups never see PREGNANCY spots
     Region matches come first; other regions back-fill when the region alone is too thin.
     """
     indoor_only = weather_rain or fine_dust_bad
-    pool = db.list_experiences(age_group=age_group, region_sido=region_sido, indoor_only=indoor_only)
+
+    def fetch(region: Optional[str]) -> list[ExperienceItem]:
+        items = db.list_experiences(age_group=age_group, region_sido=region, indoor_only=indoor_only)
+        if age_group == AgeGroup.PREGNANCY:
+            items = [e for e in items if e.age_group == AgeGroup.PREGNANCY]
+        else:
+            items = [e for e in items if e.age_group != AgeGroup.PREGNANCY]
+        if is_dispatch:
+            items = [e for e in items if not e.booking_required]
+        return items
+
+    pool = fetch(region_sido)
     if region_sido and len(pool) < limit:
         seen = {e.exp_id for e in pool}
-        pool += [e for e in db.list_experiences(age_group=age_group, indoor_only=indoor_only) if e.exp_id not in seen]
-    # Exact age-group items before generic ALL items
+        pool += [e for e in fetch(None) if e.exp_id not in seen]
+    # Exact age-group items before generic ALL items; then drop repeat venues (e.g. 어린이대공원 PRESCHOOL + ALL)
     pool.sort(key=lambda e: e.age_group == AgeGroup.ALL)
+    venues: set[str] = set()
+    pool = [e for e in pool if not (e.venue_name in venues or venues.add(e.venue_name))]
     if indoor_only:
         return pool[:limit]
     outdoor = sorted((e for e in pool if not e.is_indoor), key=lambda e: e.category != ExperienceCategory.NATURE)

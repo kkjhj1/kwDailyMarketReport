@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from market_brief.storage.db import MarketBriefDatabase
 from portal_hub.db import PortalDatabase
 from portal_hub.interactive import (
+    _get_admin_console_url,
     build_slot_gauge,
     handle_callback_query,
     render_category_home_view,
@@ -382,7 +383,10 @@ class PortalHubAdminAlertTests(unittest.TestCase):
         self.assertEqual(len(sends), 1)
         self.assertIn("회원 등업 신청 접수", sends[0].args[1])
         markup = sends[0].kwargs["reply_markup"]
-        self.assertEqual(markup["inline_keyboard"][0][0]["url"], "http://admin.test:8002/")
+        req_id = self.portal_db.get_pending_upgrade_requests()[0]["id"]
+        self.assertEqual(
+            markup["inline_keyboard"][0][0]["url"], f"http://admin.test:8002/?tab=users&req_id={req_id}"
+        )
 
         self.mock_client.reset_mock()
         self._click(uid, "support:req_tier:GREEN")
@@ -421,6 +425,26 @@ class PortalHubAdminAlertTests(unittest.TestCase):
             self.assertFalse(send_admin_new_user_alert(self.mock_client, user))
             self.assertFalse(send_admin_tier_upgrade_alert(self.mock_client, user, "GREEN", "CREATED"))
         self.mock_client.send_message.assert_not_called()
+
+    def test_admin_console_url_deeplink_query(self):
+        with patch.dict(os.environ, {"ADMIN_CONSOLE_URL": "http://admin.test:8002/"}):
+            self.assertEqual(_get_admin_console_url(), "http://admin.test:8002/")
+            self.assertEqual(
+                _get_admin_console_url(tab="users", req_id=123), "http://admin.test:8002/?tab=users&req_id=123"
+            )
+            self.assertEqual(_get_admin_console_url(tab="users"), "http://admin.test:8002/?tab=users")
+        # Base URL with existing query (e.g. token) and no trailing slash is preserved
+        with patch.dict(os.environ, {"ADMIN_CONSOLE_URL": "http://admin.test:8002?token=abc&tab=old"}):
+            self.assertEqual(
+                _get_admin_console_url(tab="users", req_id=7), "http://admin.test:8002/?token=abc&tab=users&req_id=7"
+            )
+
+    def test_upgrade_alert_button_carries_req_id(self):
+        user = UserProfile(user_id=70006, chat_id=70006, first_name="딥링크")
+        self.assertTrue(send_admin_tier_upgrade_alert(self.mock_client, user, "GREEN", "CREATED", req_id=42))
+        url = self._admin_sends()[0].kwargs["reply_markup"]["inline_keyboard"][0][0]["url"]
+        self.assertIn("tab=users", url)
+        self.assertIn("req_id=42", url)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from kids_compass.models import (
     IngredientType,
     MedicineProduct,
     MoonlightHospital,
+    PregnancyProfile,
 )
 
 DEFAULT_DB_PATH = "kids_compass.sqlite3"
@@ -112,6 +113,13 @@ CREATE TABLE IF NOT EXISTS kids_moonlight_hospitals (
     map_url TEXT NOT NULL DEFAULT '',
     last_verified_at TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS kids_pregnancy_profiles (
+    telegram_user_id TEXT PRIMARY KEY,
+    nickname TEXT NOT NULL DEFAULT '태명',
+    due_date TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_kids_exp_filter ON kids_experiences(is_active, age_group, region_sido, category);
 CREATE INDEX IF NOT EXISTS idx_kids_hospital_region ON kids_moonlight_hospitals(is_active, region_sido, region_sigungu);
@@ -213,6 +221,34 @@ class KidsCompassDatabase:
         cur = self.conn.execute(
             "DELETE FROM kids_children WHERE child_id = ? AND telegram_user_id = ?",
             (int(child_id), str(telegram_user_id)),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # ── pregnancy (separate from children — never used by the fever calculator) ──
+    def set_pregnancy(self, telegram_user_id: int | str, nickname: str, due_date: str) -> None:
+        uid = str(telegram_user_id)
+        self.ensure_user(uid)
+        self.conn.execute(
+            """INSERT INTO kids_pregnancy_profiles (telegram_user_id, nickname, due_date) VALUES (?, ?, ?)
+               ON CONFLICT(telegram_user_id) DO UPDATE SET
+                nickname = excluded.nickname, due_date = excluded.due_date, updated_at = ?""",
+            (uid, nickname, due_date, _now()),
+        )
+        self.conn.commit()
+
+    def get_pregnancy(self, telegram_user_id: int | str) -> Optional[PregnancyProfile]:
+        row = self.conn.execute(
+            "SELECT * FROM kids_pregnancy_profiles WHERE telegram_user_id = ?", (str(telegram_user_id),)
+        ).fetchone()
+        if not row:
+            return None
+        return PregnancyProfile(telegram_user_id=row["telegram_user_id"], nickname=row["nickname"],
+                                due_date=row["due_date"], created_at=row["created_at"] or "")
+
+    def delete_pregnancy(self, telegram_user_id: int | str) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM kids_pregnancy_profiles WHERE telegram_user_id = ?", (str(telegram_user_id),)
         )
         self.conn.commit()
         return cur.rowcount > 0

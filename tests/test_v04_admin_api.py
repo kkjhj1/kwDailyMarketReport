@@ -372,6 +372,20 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("openUserHistoryModal", html)
         self.assertIn('id="userHistoryModal"', html)
 
+    def test_pending_badge_deeplink_and_health_strip_ui_present(self):
+        html = self.client.get("/").text
+        self.assertIn('id="userPendingBadge"', html)
+        self.assertIn('id="bnavPendingBadge"', html)
+        self.assertIn('id="botHealthStrip"', html)
+        self.assertIn('id="botTrafficLights"', html)
+        self.assertIn('id="schedulerTimer"', html)
+        self.assertIn("@keyframes pulseGold", html)
+        self.assertIn("data-req-card-id", html)
+        self.assertIn("applyDeepLink", html)
+        self.assertIn("'/healthz'", html)
+        for bot_id in ("menu_bot", "brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot"):
+            self.assertIn(f"'{bot_id}'", html)
+
     def test_healthz_endpoint(self):
         """Validates that /healthz returns 200 OK for Uptime ping monitors."""
         res = self.client.get("/healthz")

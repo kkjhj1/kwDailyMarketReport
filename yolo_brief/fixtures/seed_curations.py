@@ -1,19 +1,29 @@
 """Fact-checked solo-friendly seasonal & weather-fallback curations for YOLO Bot (욜로봇).
 Covers all 4 SoloArchetypes across 4 Seasons + Indoor Rainy/Severe Weather Fallbacks.
 Every curation strictly enforces [INV-01] with verified `solo_tags` and `https://` URLs.
+v2.0: every curation carries magazine details (hero photo, timeline, 1-won budget, secret tip, maps).
+Hero/gallery photos are Wikimedia Commons 1280px thumbnails; curations without a verified
+photo render a gradient+emoji hero in the web magazine instead.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+from urllib.parse import quote
+
 from yolo_brief.models import (
     ActivityMode,
+    BudgetLine,
+    GalleryImage,
     Season,
     SoloArchetype,
+    TimelineEntry,
     WeatherClass,
     YoloCuration,
 )
 
 
-SEED_CURATIONS: list[YoloCuration] = [
+_BASE_SEED_CURATIONS: list[YoloCuration] = [
     # =========================================================================
     # 1. ACTIVE_CHALLENGER (액티브 챌린저: 땀·성취·스포츠) - 정규 사계절
     # =========================================================================
@@ -109,6 +119,21 @@ SEED_CURATIONS: list[YoloCuration] = [
         emoji="🏔️",
     ),
     YoloCuration(
+        id="ACT-AUT-03",
+        title="서울둘레길 불암산 단풍 트레일 솔로 하이킹",
+        summary="지하철역에서 바로 시작해 스탬프를 모으며 걷는 가을 숲길. 완만한 능선이라 혼자서도 부담 제로.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.OUTDOOR,
+        location_name="서울둘레길 1코스 (당고개역~화랑대역)",
+        cost_or_duration="무료 · 4시간",
+        action_url="https://gil.seoul.go.kr/",
+        archetypes=(SoloArchetype.ACTIVE_CHALLENGER,),
+        solo_tags=("#나홀로트레킹", "#스탬프투어", "#역세권출발"),
+        priority=118,
+        emoji="🍂",
+    ),
+    YoloCuration(
         id="ACT-WIN-01",
         title="덕유산 눈꽃 상고대 곤돌라 & 향적봉 설산 트레킹",
         summary="아이젠 신고 오르는 은빛 눈꽃 터널. 곤돌라 탑승으로 초보 솔로 등산객도 안전 완주.",
@@ -161,6 +186,23 @@ SEED_CURATIONS: list[YoloCuration] = [
         priority=120,
         emoji="🏃",
     ),
+    YoloCuration(
+        id="ACT-FB-03",
+        title="올림픽공원 실내 수영장 1인 자유수영 & 사우나 리커버리",
+        summary="비 오는 날에도 레인 하나를 차지하고 내 페이스로 1km 완영. 자유수영은 원래 혼자 오는 곳.",
+        season=Season.ALL,
+        weather_class=WeatherClass.RAIN,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울 송파구 올림픽수영장",
+        cost_or_duration="자유수영 6천원 · 2시간",
+        action_url="https://www.ksponco.or.kr/",
+        archetypes=(SoloArchetype.ACTIVE_CHALLENGER,),
+        solo_tags=("#1인자유수영", "#실내전천후", "#개인락커"),
+        is_fallback=True,
+        fallback_for="RAIN,SNOW,DUST,HEAT,COLD",
+        priority=115,
+        emoji="🏊",
+    ),
 
     # =========================================================================
     # 2. URBAN_HIPSTER (어반 힙스터: 문화·전시·미식)
@@ -209,6 +251,36 @@ SEED_CURATIONS: list[YoloCuration] = [
         solo_tags=("#1인석완비", "#혼술환영", "#대화없는조용한바"),
         priority=130,
         emoji="🥃",
+    ),
+    YoloCuration(
+        id="URB-AUT-02",
+        title="국립중앙박물관 '사유의 방' 반가사유상 명상 & 용산 1인 돈카츠",
+        summary="어둡고 고요한 전시실에서 두 반가사유상과 마주하는 혼자만의 사색 시간. 관람 무료.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울 용산구 국립중앙박물관",
+        cost_or_duration="무료 관람 · 식사 1.3만원",
+        action_url="https://www.museum.go.kr/",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#혼전시최적", "#무료관람", "#1인카운터석"),
+        priority=125,
+        emoji="🗿",
+    ),
+    YoloCuration(
+        id="URB-AUT-03",
+        title="을지로 인쇄골목 레트로 산책 & 세운상가 루프탑 1인 하이볼",
+        summary="오래된 공구상가 사이 숨은 카페와 전시를 탐색하고, 세운 옥상 데크에서 가을 노을 한 잔.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울 중구 을지로·세운상가",
+        cost_or_duration="하이볼 1.2만원 · 3시간",
+        action_url="https://korean.visitseoul.net/",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#혼술환영", "#1인바석", "#골목탐방"),
+        priority=118,
+        emoji="🏙️",
     ),
     YoloCuration(
         id="URB-WIN-01",
@@ -277,6 +349,37 @@ SEED_CURATIONS: list[YoloCuration] = [
         emoji="🌾",
     ),
     YoloCuration(
+        id="NOM-AUT-02",
+        title="KTX 전주 당일치기 한옥마을 은행나무길 & 1인 비빔밥 정식",
+        summary="노랗게 물든 전주향교 은행나무 아래 혼자 걷기. 1인 상차림이 기본인 비빔밥·콩나물국밥 성지.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.OUTDOOR,
+        location_name="전북 전주 한옥마을·전주향교",
+        cost_or_duration="KTX 왕복 7만원 · 당일",
+        action_url="https://www.letskorail.com/",
+        archetypes=(SoloArchetype.ROAD_NOMAD,),
+        solo_tags=("#KTX창측1인석", "#1인상차림기본", "#도보여행최적"),
+        location_area_code="2900000000",
+        priority=125,
+        emoji="🍁",
+    ),
+    YoloCuration(
+        id="NOM-AUT-03",
+        title="ITX-청춘 가평 자라섬 가을 꽃정원 & 남이섬 단풍 산책",
+        summary="용산역에서 1시간, 창가 좌석에 앉아 떠나는 가을 강변 기차여행. 섬 산책로는 혼자 걷기 좋은 평지.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.OUTDOOR,
+        location_name="경기 가평 자라섬·남이섬",
+        cost_or_duration="열차+입장 4만원 · 당일",
+        action_url="https://namisum.com/",
+        archetypes=(SoloArchetype.ROAD_NOMAD,),
+        solo_tags=("#ITX1인좌석", "#평지산책로", "#혼밥가능식당"),
+        priority=118,
+        emoji="🚃",
+    ),
+    YoloCuration(
         id="NOM-WIN-01",
         title="속초 겨울 바다 혼술 여행 & 설악 척산온천 휴양",
         summary="겨울 동해 파도 소리를 들으며 즐기는 오징어순대 1인 포장 & 뜨끈한 천연 온천욕.",
@@ -330,6 +433,24 @@ SEED_CURATIONS: list[YoloCuration] = [
         priority=120,
         emoji="🐠",
     ),
+    YoloCuration(
+        id="NOM-FB-03",
+        title="KTX 대전 당일 빵지순례 & 대전시립미술관 실내 산책",
+        summary="비가 와도 역에서 역으로. 대전역 성심당 1인 빵 쇼핑과 지하철로 닿는 미술관 실내 코스.",
+        season=Season.ALL,
+        weather_class=WeatherClass.RAIN,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="대전 중구·서구 일원",
+        cost_or_duration="KTX 왕복 4.7만원 · 당일",
+        action_url="https://www.letskorail.com/",
+        archetypes=(SoloArchetype.ROAD_NOMAD,),
+        solo_tags=("#KTX창측1인석", "#역세권실내코스", "#1인빵쇼핑"),
+        is_fallback=True,
+        fallback_for="RAIN,SNOW,DUST,HEAT,COLD",
+        location_area_code="3000000000",
+        priority=115,
+        emoji="🥐",
+    ),
 
     # =========================================================================
     # 4. WELLNESS_DEEPDIVER (웰니스 딥다이버: 홈바·휴식·취향)
@@ -380,6 +501,36 @@ SEED_CURATIONS: list[YoloCuration] = [
         emoji="🍷",
     ),
     YoloCuration(
+        id="WEL-AUT-02",
+        title="제철 군밤·꿀고구마 에어프라이어 디저트 & LP 재즈 홈카페",
+        summary="가을 제철 밤과 고구마를 에어프라이어에 굽고, 따뜻한 라떼와 재즈 플레이리스트로 완성하는 1인 디저트 타임.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="나만의 홈 카페",
+        cost_or_duration="재료비 1.2만원 · 60분",
+        action_url="https://www.10000recipe.com/",
+        archetypes=(SoloArchetype.WELLNESS_DEEPDIVER,),
+        solo_tags=("#홈쿡1인분", "#홈카페", "#제철간식"),
+        priority=122,
+        emoji="🌰",
+    ),
+    YoloCuration(
+        id="WEL-AUT-03",
+        title="환절기 리셋 홈 요가 30분 & 대추생강차 셀프 웰니스 루틴",
+        summary="일교차 큰 가을, 무료 요가 영상을 따라 몸을 풀고 직접 달인 대추생강차로 마무리하는 셀프 케어.",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="나만의 홈 스튜디오",
+        cost_or_duration="재료비 8천원 · 90분",
+        action_url="https://www.youtube.com/results?search_query=%ED%99%88%EC%9A%94%EA%B0%80+30%EB%B6%84",
+        archetypes=(SoloArchetype.WELLNESS_DEEPDIVER,),
+        solo_tags=("#1인홈트", "#셀프케어", "#타인방해0%"),
+        priority=118,
+        emoji="🧘",
+    ),
+    YoloCuration(
         id="WEL-WIN-01",
         title="겨울 시트러스 아로마 반신욕 & 드립백 홈카페 명상",
         summary="따뜻한 유자·히노끼 입욕제로 피로를 녹이고 푹신한 침구 속에서 즐기는 연말 사색.",
@@ -394,4 +545,554 @@ SEED_CURATIONS: list[YoloCuration] = [
         priority=125,
         emoji="🕯️",
     ),
+]
+
+
+# =========================================================================
+# v2.0 Visual Magazine Details (hero photo · timeline · 1-won budget · secret · maps)
+# =========================================================================
+_WM_THUMB = "https://thumb.wikimedia.org/wikipedia/commons/thumb/"
+
+
+def _wm(hash_path: str, file_name: str) -> str:
+    """Wikimedia Commons 1280px thumbnail URL (`file_name` must already be URL-encoded)."""
+    return f"{_WM_THUMB}{hash_path}/{file_name}/1280px-{file_name}"
+
+
+def _v2(
+    *,
+    hero: tuple[str, str] = ("", ""),
+    gallery: tuple[tuple[str, str], ...] = (),
+    timeline: tuple[tuple[str, str, str], ...] = (),
+    budget: tuple[tuple[str, int, str], ...] = (),
+    secret: str = "",
+    map_query: str = "",
+) -> dict[str, Any]:
+    return {
+        "hero_image_url": hero[0],
+        "hero_image_alt": hero[1],
+        "gallery_images": tuple(GalleryImage(url=u, alt=a) for u, a in gallery),
+        "timeline": tuple(TimelineEntry(time=t, spot=s, desc=d) for t, s, d in timeline),
+        "budget_breakdown": tuple(BudgetLine(item=i, cost_krw=c, category=cat) for i, c, cat in budget),
+        "solo_secrets": secret,
+        "map_naver_url": f"https://map.naver.com/p/search/{quote(map_query)}" if map_query else "",
+        "map_kakao_url": f"https://map.kakao.com/?q={quote(map_query)}" if map_query else "",
+    }
+
+
+_V2_DETAILS: dict[str, dict[str, Any]] = {
+    # --- ACTIVE_CHALLENGER ---
+    "ACT-SPR-01": _v2(
+        hero=(_wm("3/3f", "Cherry_Blossom_in_Yeouido_Park_-_panoramio.jpg"), "여의도공원 벚꽃길"),
+        gallery=((_wm("2/2d", "Cherry_Blossom_in_Yeouido_Park_-_panoramio_%282%29.jpg"), "여의도 벚꽃 터널"),),
+        timeline=(
+            ("07:30", "여의나루역 물품보관소", "개인 짐 맡기고 기록칩 부착, 혼자 가볍게 동적 스트레칭"),
+            ("08:30", "여의도 한강공원 출발선", "벚꽃 터널 구간에서 내 페이스 유지하며 10K 질주"),
+            ("10:30", "여의도 국밥 골목", "완주 메달 걸고 1인 국밥으로 회복 식사"),
+        ),
+        budget=(
+            ("대회 참가비 (10K)", 40000, "ticket"),
+            ("지하철 왕복", 2800, "transport"),
+            ("완주 후 1인 국밥", 10000, "food"),
+        ),
+        secret="출발 그룹 맨 뒤에서 시작하면 벚꽃 구간을 사진 찍으며 여유롭게 달릴 수 있어요.",
+        map_query="여의도한강공원",
+    ),
+    "ACT-SPR-02": _v2(
+        hero=(_wm("8/8c", "Bicycle_path_of_Han_River%2C_Seoul.JPG"), "한강 자전거길"),
+        gallery=((_wm("4/4d", "Han_river_bike_path_-_panoramio.jpg"), "한강 강변 자전거 도로"),),
+        timeline=(
+            ("09:00", "광나루 자전거공원", "따릉이 대여 후 안전모 착용, 국토종주 인증수첩 챙기기"),
+            ("10:30", "팔당대교 인증센터", "인증 도장 찍고 강변 벤치에서 물 한 모금"),
+            ("11:30", "팔당 초계국수 거리", "혼자 들어가도 1인분 주문 OK, 시원한 초계국수"),
+        ),
+        budget=(
+            ("따릉이 1일권 (2시간)", 3000, "transport"),
+            ("초계국수 1인분", 9000, "food"),
+            ("이온음료·생수", 3000, "food"),
+        ),
+        secret="오전 9시 이전에 출발하면 주말 라이더 정체 없이 팔당까지 쭉 달릴 수 있어요.",
+        map_query="광나루한강공원 자전거공원",
+    ),
+    "ACT-SUM-01": _v2(
+        hero=(_wm("b/bf", "Banpo_Bridge_Moonlight_Rainbow_Fountain_at_night_-_2023-08-14.jpg"), "반포대교 달빛무지개분수 야경"),
+        gallery=((_wm("4/41", "Jamsu_Bridge_at_Night.jpg"), "잠수교 야경"),),
+        timeline=(
+            ("19:30", "반포 한강공원 달빛광장", "라커에 짐 보관, 무선 이어폰으로 무소음 DJ 채널 접속"),
+            ("20:00", "반포~잠수교 강변", "분수 쇼를 보며 7K 나이트런, 혼자 리듬 타기"),
+            ("21:30", "세빛섬 편의점 테라스", "땀 식히며 1인 라면 한 그릇"),
+        ),
+        budget=(
+            ("러닝 참가 (크루 무료)", 0, "ticket"),
+            ("물품 보관 라커", 2000, "etc"),
+            ("편의점 라면·음료", 6000, "food"),
+            ("지하철 왕복", 2800, "transport"),
+        ),
+        secret="분수 쇼 시간(20시 전후)에 맞춰 잠수교를 지나면 최고의 러닝 배경을 독차지해요.",
+        map_query="반포한강공원 달빛광장",
+    ),
+    "ACT-SUM-02": _v2(
+        hero=(
+            _wm("7/77", "Hajodae_Beach%2C_Yangyang_%28%EC%96%91%EC%96%91_%ED%95%98%EC%A1%B0%EB%8C%80_%ED%95%B4%EC%88%98%EC%9A%95%EC%9E%A5%29_-_panoramio.jpg"),
+            "양양 해변 풍경",
+        ),
+        timeline=(
+            ("07:00", "동서울터미널", "양양행 고속버스 1인석 탑승, 가는 길에 한숨 자기"),
+            ("10:00", "죽도해변 서핑숍", "슈트·보드 대여 후 지상 강습 30분"),
+            ("10:30", "죽도해변 라인업", "강사 밀착 코칭으로 첫 테이크오프 도전"),
+            ("13:30", "해변 앞 물회집", "1인 물회로 바다 마무리"),
+        ),
+        budget=(
+            ("서핑 입문 강습 (슈트·보드 포함)", 65000, "ticket"),
+            ("고속버스 왕복", 34000, "transport"),
+            ("1인 물회", 15000, "food"),
+        ),
+        secret="강습 예약 시 '1인 참가'라고 남기면 같은 회차 솔로 수강생과 자연스럽게 팀을 짜줘요.",
+        map_query="양양 죽도해변",
+    ),
+    "ACT-AUT-01": _v2(
+        hero=(_wm("f/f3", "Korea-Seoul_International_Marathon-01.jpg"), "서울 마라톤 주자들"),
+        gallery=((_wm("6/6b", "Korea-Seoul_International_Marathon-05.jpg"), "서울 도심 마라톤 코스"),),
+        timeline=(
+            ("06:30", "잠실종합운동장 집결지", "물품 보관 후 기록칩 확인, 혼자 워밍업 조깅"),
+            ("08:00", "출발 그룹 대기", "페이서 풍선 뒤에 서서 목표 기록 맞추기"),
+            ("11:00", "피니시 라인", "완주 메달 각인 부스에서 내 기록 새기기"),
+            ("12:00", "잠실새내 해장국집", "1인 뼈해장국으로 회복"),
+        ),
+        budget=(
+            ("대회 참가비", 50000, "ticket"),
+            ("지하철 왕복", 2800, "transport"),
+            ("완주 후 1인 해장국", 11000, "food"),
+        ),
+        secret="페이서 풍선을 따라가면 혼자서도 페이스 관리가 쉬워 첫 풀코스 완주율이 확 올라가요.",
+        map_query="잠실종합운동장",
+    ),
+    "ACT-AUT-02": _v2(
+        hero=(_wm("2/29", "Bukhansan_National_Park_in_autumn.jpg"), "가을 단풍 든 북한산국립공원"),
+        gallery=(
+            (
+                _wm("d/d3", "Landscape_of_Bukhansan_with_colored_leaves_in_September_%28from_southern_side%29.jpg"),
+                "단풍 든 북한산 능선",
+            ),
+        ),
+        timeline=(
+            ("08:00", "밤골탐방지원센터", "탐방로 안내도 확인, 스틱 길이 조절"),
+            ("09:30", "숨은벽 능선 전망대", "단풍과 인수봉을 한눈에, 혼자만의 인증샷"),
+            ("11:30", "하산 후 효자동 해장국집", "1인 해장국으로 따뜻하게 마무리"),
+        ),
+        budget=(
+            ("버스 왕복", 2800, "transport"),
+            ("김밥·간식", 5000, "food"),
+            ("하산 후 1인 해장국", 10000, "food"),
+        ),
+        secret="평일 오전에 오르면 숨은벽 전망 바위를 몇 분간 혼자 차지할 수 있어요.",
+        map_query="북한산 밤골탐방지원센터",
+    ),
+    "ACT-AUT-03": _v2(
+        timeline=(
+            ("09:00", "당고개역 스탬프함", "서울둘레길 1코스 첫 스탬프 찍고 출발"),
+            ("11:00", "불암산 둘레 숲길", "단풍 터널을 따라 완만한 흙길 하이킹"),
+            ("13:00", "화랑대 철도공원", "옛 기차역 풍경 구경 후 1인 칼국수"),
+        ),
+        budget=(
+            ("지하철 왕복", 2800, "transport"),
+            ("보온병 차·간식", 4000, "food"),
+            ("1인 칼국수", 9000, "food"),
+        ),
+        secret="서울둘레길 앱으로 스탬프를 모으면 완주 인증서를 받을 수 있어 혼자 걷는 동기부여가 돼요.",
+        map_query="서울둘레길 당고개역",
+    ),
+    "ACT-WIN-01": _v2(
+        hero=(_wm("6/67", "Korea-Snow_in_Mt._Deogyu-Stairway-01.jpg"), "눈 덮인 덕유산 계단길"),
+        timeline=(
+            ("07:00", "서울남부터미널", "무주행 버스 탑승"),
+            ("10:30", "무주덕유산리조트 곤돌라", "1인 예약 곤돌라로 설천봉까지 단숨에"),
+            ("11:00", "향적봉 상고대 능선", "아이젠 착용 후 은빛 눈꽃 터널 트레킹"),
+            ("13:00", "리조트 푸드코트", "1인 산채비빔밥으로 몸 녹이기"),
+        ),
+        budget=(
+            ("곤돌라 왕복", 22000, "ticket"),
+            ("아이젠 대여", 5000, "etc"),
+            ("버스 왕복", 40000, "transport"),
+            ("1인 산채비빔밥", 12000, "food"),
+        ),
+        secret="곤돌라는 주말 오전에 매진되니 전날 온라인 1인 예약이 필수예요.",
+        map_query="무주덕유산리조트 곤돌라",
+    ),
+    "ACT-FB-01": _v2(
+        hero=(
+            # 원본 폭이 1280px 미만이라 썸네일 대신 원본 URL 사용
+            "https://upload.wikimedia.org/wikipedia/commons/7/75/"
+            "Bouldering_wall_%28Luch_Climbing_Gym%29_in_Saint-Petersburg%2C_Russia.jpg",
+            "실내 볼더링 암벽",
+        ),
+        timeline=(
+            ("14:00", "클라이밍짐 리셉션", "암벽화·초크 대여 후 안전 교육"),
+            ("14:30", "초급 볼더링 존", "강사 1:1 무브 코칭으로 첫 문제 완등"),
+            ("15:30", "자유 이용 시간", "혼자 색깔 난이도를 하나씩 정복"),
+        ),
+        budget=(
+            ("원데이 강습 + 자유이용", 30000, "ticket"),
+            ("암벽화·초크 대여", 5000, "etc"),
+            ("프로틴 음료", 5000, "food"),
+        ),
+        secret="평일 낮 시간대는 강사 대 수강생 비율이 낮아 사실상 1:1 레슨이 돼요.",
+        map_query="성수 클라이밍",
+    ),
+    "ACT-FB-02": _v2(
+        hero=(
+            _wm("0/01", "Young_man_running_on_treadmill_during_sports_training_in_a_gym.jpg"),
+            "실내 트레드밀 러닝",
+        ),
+        timeline=(
+            ("19:00", "러닝스튜디오 체크인", "러닝화 렌탈 후 심박계 연동"),
+            ("19:10", "인터벌 세션", "코치 큐에 맞춰 혼자 집중하는 60분 인터벌"),
+            ("20:10", "개인 샤워부스", "샤워 후 프로틴 쉐이크로 회복"),
+        ),
+        budget=(
+            ("1회 이용권", 18000, "ticket"),
+            ("프로틴 쉐이크", 6000, "food"),
+        ),
+        secret="첫 방문 시 케이던스 측정을 요청하면 내 러닝 자세 리포트를 무료로 받아볼 수 있어요.",
+        map_query="신사 러닝스튜디오",
+    ),
+    "ACT-FB-03": _v2(
+        timeline=(
+            ("10:00", "올림픽수영장 매표소", "자유수영 1회권 구매, 개인 락커 배정"),
+            ("10:15", "자유수영 레인", "내 페이스로 1km 완영 도전"),
+            ("11:30", "사우나·건식 휴게실", "근육 이완하며 리커버리"),
+        ),
+        budget=(
+            ("자유수영 1회권", 6000, "ticket"),
+            ("세면도구 소분 키트", 3000, "etc"),
+            ("지하철 왕복", 2800, "transport"),
+        ),
+        secret="자유수영 시간표는 요일마다 달라요. 출발 전 홈페이지 시간표를 꼭 확인하세요.",
+        map_query="올림픽수영장",
+    ),
+    # --- URBAN_HIPSTER ---
+    "URB-SPR-01": _v2(
+        hero=(_wm("a/a8", "Flowery_cafe_in_Seongsu-dong.jpg"), "성수동 꽃 카페"),
+        gallery=((_wm("0/0c", "Cafe_storefront_in_Seongsu-dong.jpg"), "성수동 카페 외관"),),
+        timeline=(
+            ("13:00", "성수역 3번 출구", "연무장길 팝업 스토어 지도 확인"),
+            ("13:30", "브랜드 팝업 스토어", "네이버 사전예약으로 대기 없이 입장"),
+            ("15:00", "스페셜티 로스터리", "1인 바 테이블에서 핸드드립 시음"),
+        ),
+        budget=(
+            ("팝업 입장", 0, "ticket"),
+            ("핸드드립 커피", 7000, "food"),
+            ("디저트", 6500, "food"),
+            ("지하철 왕복", 2800, "transport"),
+        ),
+        secret="팝업은 평일 오픈 직후 30분이 가장 한산해 굿즈 재고도 넉넉해요.",
+        map_query="성수동 연무장길",
+    ),
+    "URB-SUM-01": _v2(
+        hero=(_wm("a/a9", "MMCA_Seoul.jpg"), "국립현대미술관 서울관"),
+        gallery=((_wm("3/30", "MMCA_Seoul_2016.jpg"), "국립현대미술관 서울관 마당"),),
+        timeline=(
+            ("18:00", "국립현대미술관 서울관", "야간 개장 시간 입장, 오디오 가이드 대여"),
+            ("20:00", "삼청동 골목", "한옥 사이 저녁 산책"),
+            ("20:30", "삼청동 1인 바", "바 카운터에서 하이볼 한 잔"),
+        ),
+        budget=(
+            ("전시 관람료", 4000, "ticket"),
+            ("하이볼 1잔", 12000, "food"),
+            ("버스", 1500, "transport"),
+        ),
+        secret="수·토 야간 개장 시간에는 관람객이 적어 대형 설치작품을 혼자 감상하기 좋아요.",
+        map_query="국립현대미술관 서울관",
+    ),
+    "URB-AUT-01": _v2(
+        hero=(_wm("3/35", "Seokjojeon.jpg"), "덕수궁 석조전"),
+        gallery=((_wm("f/f6", "Seokjojeon_of_Deoksugung_palace.jpg"), "덕수궁 석조전 정원"),),
+        timeline=(
+            ("18:30", "덕수궁 대한문", "야간 관람 입장, 돌담길 따라 석조전으로"),
+            ("19:30", "정동길", "가을 은행잎 깔린 길을 혼자 산책"),
+            ("20:30", "서촌 바이닐 LP바", "바텐더석에서 신청곡 한 장과 위스키"),
+        ),
+        budget=(
+            ("덕수궁 입장료", 1000, "ticket"),
+            ("위스키 1잔", 18000, "food"),
+            ("하우스 안주", 8000, "food"),
+        ),
+        secret="LP바 신청곡은 종이에 적어 내는 곳이 많아요. 대화 없이도 취향을 나눌 수 있는 방법.",
+        map_query="덕수궁",
+    ),
+    "URB-AUT-02": _v2(
+        timeline=(
+            ("10:00", "국립중앙박물관 상설전시관", "2층 '사유의 방'으로 직행"),
+            ("10:30", "사유의 방", "어둠 속 두 반가사유상 앞에서 20분 멍때리기"),
+            ("12:00", "이촌동 돈카츠집", "1인 카운터석에서 로스카츠"),
+        ),
+        budget=(
+            ("상설전시 관람", 0, "ticket"),
+            ("1인 돈카츠", 13000, "food"),
+            ("지하철", 1500, "transport"),
+        ),
+        secret="개관 직후 사유의 방은 거의 비어 있어 진짜 '혼자만의 사색'이 가능해요.",
+        map_query="국립중앙박물관",
+    ),
+    "URB-AUT-03": _v2(
+        timeline=(
+            ("15:00", "을지로3가역", "인쇄골목 사이 숨은 카페·전시 탐색"),
+            ("17:30", "세운상가 옥상 데크", "종묘 방향 가을 노을 감상"),
+            ("18:30", "을지로 1인 바", "바 좌석에서 하이볼 한 잔과 노포 백반"),
+        ),
+        budget=(
+            ("소규모 전시·굿즈", 5000, "ticket"),
+            ("하이볼 1잔", 12000, "food"),
+            ("노포 백반", 9000, "food"),
+            ("지하철", 1500, "transport"),
+        ),
+        secret="세운상가 옥상은 일몰 30분 전에 도착해야 종묘 쪽 명당 벤치를 잡을 수 있어요.",
+        map_query="세운상가",
+    ),
+    "URB-WIN-01": _v2(
+        hero=(_wm("1/1f", "Christmas_Festival_at_Cheonggyecheon.jpg"), "청계천 크리스마스 축제 조명"),
+        timeline=(
+            ("14:00", "더현대 서울", "실내 크리스마스 빌리지 구경"),
+            ("16:00", "광화문 독립영화관", "혼영 명당 좌석에서 엔딩 크레딧까지"),
+            ("18:30", "청계천", "겨울 조명 길을 따라 혼자 산책"),
+        ),
+        budget=(
+            ("독립영화 관람", 10000, "ticket"),
+            ("핫초코", 6000, "food"),
+            ("지하철", 1500, "transport"),
+        ),
+        secret="독립영화관은 평일 저녁 회차가 한산해 맨 뒷줄 가운데 '혼영 명당'을 쉽게 잡아요.",
+        map_query="더현대 서울",
+    ),
+    # --- ROAD_NOMAD ---
+    "NOM-SPR-01": _v2(
+        hero=(
+            _wm("d/d7", "Trees_surrounded_by_grassy_tumuli_at_sunset_in_Daereungwon_Tomb_Complex_of_Gyeongju_in_South_Korea.jpg"),
+            "해 질 녘 경주 대릉원 고분",
+        ),
+        gallery=((_wm("9/94", "GyeongjuBurialMounds.JPG"), "경주 고분군"),),
+        timeline=(
+            ("08:00", "서울역", "KTX 창측 1인석으로 경주 출발"),
+            ("10:30", "신경주역 앞 자전거 대여", "전기자전거로 보문호까지 벚꽃 라이딩"),
+            ("13:00", "황리단길", "1인 쌈밥정식으로 점심"),
+            ("15:00", "대릉원", "고분 사이 목련·벚꽃길 산책 후 귀경"),
+        ),
+        budget=(
+            ("KTX 서울-경주 왕복", 98600, "transport"),
+            ("자전거 대여 (3시간)", 9000, "transport"),
+            ("1인 쌈밥정식", 15000, "food"),
+        ),
+        secret="대릉원 목련 포토스팟은 오전 이른 시간에 가야 줄 없이 혼자 사진을 남길 수 있어요.",
+        map_query="경주 대릉원",
+    ),
+    "NOM-SUM-01": _v2(
+        hero=(_wm("9/9a", "Beach_in_Gangneung_%2855439566654%29.jpg"), "강릉 해변"),
+        timeline=(
+            ("08:00", "서울역", "KTX 강릉행 바다 방향 1인석"),
+            ("10:00", "초당순두부마을", "1인분 초당순두부 아침"),
+            ("11:30", "안목해변 커피거리", "창가 1인석 카페에서 바다멍"),
+            ("16:00", "강릉역", "귀경 열차 탑승"),
+        ),
+        budget=(
+            ("KTX 서울-강릉 왕복", 55000, "transport"),
+            ("초당순두부 1인분", 12000, "food"),
+            ("안목 카페 음료", 7000, "food"),
+            ("시내버스", 3000, "transport"),
+        ),
+        secret="KTX 강릉행은 진행 방향 오른쪽(D석)이 동해 바다 쪽 창가예요.",
+        map_query="강릉 안목해변",
+    ),
+    "NOM-AUT-01": _v2(
+        timeline=(
+            ("08:00", "청량리역", "민둥산역행 기차 1인석"),
+            ("11:30", "민둥산 억새 능선", "은빛 억새밭을 따라 정상까지 하이킹"),
+            ("15:00", "정선 곤드레밥집", "1인 곤드레밥 정식"),
+            ("17:00", "고택 북스테이", "1인실 체크인 후 조용한 독서"),
+        ),
+        budget=(
+            ("기차 왕복", 25000, "transport"),
+            ("1인 북스테이 1박", 80000, "stay"),
+            ("곤드레밥 정식", 12000, "food"),
+            ("역 픽업·택시", 5000, "transport"),
+        ),
+        secret="민둥산 억새는 오후 역광 시간대에 은빛으로 가장 빛나요. 하산은 해 지기 1시간 전에.",
+        map_query="민둥산",
+    ),
+    "NOM-AUT-02": _v2(
+        timeline=(
+            ("07:30", "용산역", "KTX 전주행 창측 1인석"),
+            ("09:30", "전주 콩나물국밥집", "1인 상차림 국밥으로 아침"),
+            ("11:00", "전주향교 은행나무길", "노란 은행잎 아래 혼자 걷기"),
+            ("13:00", "한옥마을", "1인 비빔밥 정식 후 골목 산책"),
+        ),
+        budget=(
+            ("KTX 용산-전주 왕복", 68000, "transport"),
+            ("1인 비빔밥 정식", 15000, "food"),
+            ("콩나물국밥", 8000, "food"),
+            ("시내버스", 3000, "transport"),
+        ),
+        secret="전주향교 은행나무는 10월 말~11월 초 절정이에요. 오전 일찍 가야 한산해요.",
+        map_query="전주향교",
+    ),
+    "NOM-AUT-03": _v2(
+        timeline=(
+            ("09:00", "용산역", "ITX-청춘 2층 창가 좌석으로 출발"),
+            ("10:30", "자라섬", "가을 꽃정원 혼자 산책"),
+            ("12:30", "남이섬", "배 타고 들어가 메타세쿼이아·단풍길 산책"),
+            ("14:30", "남이섬 식당가", "1인 잣칼국수"),
+        ),
+        budget=(
+            ("ITX-청춘 왕복", 14000, "transport"),
+            ("남이섬 입장 (배 포함)", 16000, "ticket"),
+            ("1인 잣칼국수", 10000, "food"),
+        ),
+        secret="ITX-청춘 2층 칸 좌석을 고르면 북한강 풍경을 더 높은 시야로 볼 수 있어요.",
+        map_query="가평 자라섬",
+    ),
+    "NOM-WIN-01": _v2(
+        hero=(_wm("e/e9", "Sokcho_Beach_20221209_003.jpg"), "겨울 속초해변"),
+        gallery=((_wm("7/70", "Sokcho_Beach_20221209_011.jpg"), "속초해변의 겨울 바다"),),
+        timeline=(
+            ("08:00", "동서울터미널", "속초행 우등버스 1인석"),
+            ("11:00", "속초해변", "겨울 파도 소리 들으며 해변 산책"),
+            ("13:00", "속초관광수산시장", "오징어순대 1인 포장"),
+            ("15:00", "척산온천", "뜨끈한 천연 온천욕 후 귀경"),
+        ),
+        budget=(
+            ("고속버스 왕복", 40000, "transport"),
+            ("척산온천 입욕", 10000, "ticket"),
+            ("오징어순대 1인 포장", 12000, "food"),
+            ("시내버스", 3000, "transport"),
+        ),
+        secret="우등버스 1열 단독 좌석(1인석)은 예매 오픈 직후 가장 먼저 매진돼요.",
+        map_query="속초해수욕장",
+    ),
+    "NOM-FB-01": _v2(
+        timeline=(
+            ("13:00", "도심 히노끼 스파", "1인 릴렉스룸 체크인"),
+            ("14:00", "히노끼 탕", "비 소리 들으며 반신욕"),
+            ("15:30", "라운지 북카페", "만화·소설 골라 4시간 북캉스"),
+        ),
+        budget=(
+            ("스파 이용권", 25000, "ticket"),
+            ("북카페 음료", 7000, "food"),
+            ("지하철 왕복", 2800, "transport"),
+        ),
+        secret="비 오는 평일 오후는 스파 이용객이 가장 적은 시간대예요.",
+        map_query="파주 출판도시 북카페",
+    ),
+    "NOM-FB-02": _v2(
+        hero=(_wm("f/fe", "Starfield_Library_COEX_20240218.jpg"), "코엑스 별마당 도서관"),
+        gallery=((_wm("2/29", "Starfield_library_4.jpg"), "별마당 도서관 대형 서가"),),
+        timeline=(
+            ("11:00", "코엑스 아쿠아리움", "수중 터널에서 물멍"),
+            ("13:00", "코엑스몰 식당가", "1인 라멘 카운터석"),
+            ("14:00", "별마당 도서관", "대형 서가 앞에서 책 한 권과 사색"),
+        ),
+        budget=(
+            ("아쿠아리움 입장권", 28000, "ticket"),
+            ("1인 라멘", 11000, "food"),
+            ("지하철 왕복", 2800, "transport"),
+        ),
+        secret="별마당 도서관 2층 난간 쪽 좌석은 서가 전체가 내려다보이는 숨은 명당이에요.",
+        map_query="코엑스 아쿠아리움",
+    ),
+    "NOM-FB-03": _v2(
+        timeline=(
+            ("09:00", "서울역", "KTX 대전행 창측 1인석"),
+            ("10:00", "대전역 성심당", "1인 빵 쇼핑 (튀김소보로·부추빵)"),
+            ("12:00", "대전시립미술관", "지하철로 이동해 실내 전시 감상"),
+            ("15:00", "대전역", "귀경 열차 탑승"),
+        ),
+        budget=(
+            ("KTX 서울-대전 왕복", 47400, "transport"),
+            ("성심당 빵 쇼핑", 15000, "food"),
+            ("미술관 기획전 관람", 2000, "ticket"),
+            ("대전 지하철", 2500, "transport"),
+        ),
+        secret="성심당 대전역점은 역사 안에 있어 비를 한 방울도 맞지 않고 빵지순례가 가능해요.",
+        map_query="성심당 대전역점",
+    ),
+    # --- WELLNESS_DEEPDIVER (홈 코스: 지도 없음) ---
+    "WEL-SPR-01": _v2(
+        timeline=(
+            ("10:00", "베란다", "몬스테라 분갈이와 잎 닦기"),
+            ("11:30", "주방", "바질페스토 1인 파스타 만들기"),
+            ("12:30", "창가 테이블", "초록 식물 옆에서 브런치"),
+        ),
+        budget=(
+            ("소형 몬스테라 화분", 12000, "etc"),
+            ("분갈이 흙", 3000, "etc"),
+            ("바질·파스타 재료", 6000, "food"),
+        ),
+        secret="바질페스토는 한 번에 만들어 얼음틀에 소분 냉동하면 1인분씩 쓰기 좋아요.",
+    ),
+    "WEL-SUM-01": _v2(
+        timeline=(
+            ("21:00", "홈바", "진토닉 시그니처 한 잔 제조"),
+            ("21:30", "소파", "미스터리 스릴러 시리즈 정주행 시작"),
+        ),
+        budget=(
+            ("진 미니어처", 8000, "food"),
+            ("토닉·라임·로즈마리", 7000, "food"),
+            ("OTT (기존 구독)", 0, "etc"),
+        ),
+        secret="얼음은 큰 사각 얼음을 쓰면 천천히 녹아 마지막 한 모금까지 맛이 유지돼요.",
+    ),
+    "WEL-AUT-01": _v2(
+        timeline=(
+            ("20:00", "서재", "재즈 플레이리스트 켜고 조명 낮추기"),
+            ("20:30", "리딩 체어", "가을 장편소설과 하프보틀 피노누아"),
+            ("22:00", "침실", "브리치즈 한 조각과 마지막 챕터"),
+        ),
+        budget=(
+            ("하프보틀 피노누아", 22000, "food"),
+            ("브리치즈", 8000, "food"),
+        ),
+        secret="하프보틀(375ml)은 혼자 한 번에 비우기 딱 좋은 양이라 남은 와인 걱정이 없어요.",
+    ),
+    "WEL-AUT-02": _v2(
+        timeline=(
+            ("15:00", "주방", "밤에 칼집 내고 고구마와 함께 에어프라이어 투입"),
+            ("15:40", "홈 카페", "라떼 내리고 LP 재즈 틀기"),
+            ("16:00", "창가", "군밤·꿀고구마 디저트 타임"),
+        ),
+        budget=(
+            ("생밤 1봉", 5000, "food"),
+            ("꿀고구마", 5000, "food"),
+            ("우유·원두", 2000, "food"),
+        ),
+        secret="밤은 칼집 낸 뒤 물에 10분 불렸다 200도 15분 구우면 껍질이 쉽게 까져요.",
+    ),
+    "WEL-AUT-03": _v2(
+        timeline=(
+            ("07:00", "거실 요가 매트", "무료 요가 영상 따라 30분 스트레칭"),
+            ("08:00", "주방", "대추·생강 달여 차 만들기"),
+            ("08:30", "창가", "따뜻한 차 한 잔과 저널링"),
+        ),
+        budget=(
+            ("건대추", 4000, "food"),
+            ("생강", 2000, "food"),
+            ("꿀 소분", 2000, "food"),
+        ),
+        secret="대추생강차는 넉넉히 끓여 보온병에 담아두면 하루 종일 1인용으로 마실 수 있어요.",
+    ),
+    "WEL-WIN-01": _v2(
+        timeline=(
+            ("21:00", "욕실", "유자·히노끼 입욕제로 20분 반신욕"),
+            ("21:40", "침실", "드립백 디카페인 커피 한 잔"),
+            ("22:00", "침대", "푹신한 침구 속 연말 사색 노트"),
+        ),
+        budget=(
+            ("유자 입욕제", 6000, "etc"),
+            ("디카페인 드립백", 4000, "food"),
+        ),
+        secret="반신욕 물 온도는 38~40도, 20분 이내가 숙면에 가장 좋아요.",
+    ),
+}
+
+
+SEED_CURATIONS: list[YoloCuration] = [
+    replace(c, **_V2_DETAILS[c.id]) if c.id in _V2_DETAILS else c
+    for c in _BASE_SEED_CURATIONS
 ]

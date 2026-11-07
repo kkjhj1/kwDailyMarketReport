@@ -16,6 +16,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
+from kids_compass.collector import WALK_IN_TIPS
 from kids_compass.fever_engine import (
     CROSS_ALLOWED_WITH_CAUTION,
     CROSS_BLOCKED_SAME_NSAID,
@@ -34,6 +35,8 @@ from kids_compass.models import (
     FeverCalculationResult,
     IngredientType,
     MoonlightHospital,
+    PregnancyBenefit,
+    PregnancyProfile,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +51,12 @@ KIDS_COMMANDS = [
     {"command": "fever", "description": "해열제 용량 계산기"},
     {"command": "hospital", "description": "달빛어린이병원 찾기"},
     {"command": "weekend", "description": "주말 나들이 3-Pick"},
+    {"command": "preg", "description": "임신기 태교·바우처"},
 ]
+
+WALK_IN_HEADER = "⚡ 예약 없이 바로 출발 3-Pick"
+DEFAULT_WALK_IN_TIP = "🏃 오전 일찍 도착 추천 · 🚗 주말 주차 혼잡 → 대중교통 권장"
+PREG_REGISTER_HINT = "🤰 태명 등록: <code>/preg 복덩이 2027-03-15</code> (태명, 출산예정일)"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 WEEKDAYS_KO = "월화수목금토일"
@@ -75,8 +83,11 @@ def fits_limits(html_text: str) -> bool:
 
 
 # ── Cards ─────────────────────────────────────────────────────
-def format_home_html(children: list[ChildProfile], profile: Optional[dict] = None) -> str:
+def format_home_html(children: list[ChildProfile], profile: Optional[dict] = None,
+                     pregnancy: Optional[PregnancyProfile] = None) -> str:
     lines = ["🍼 <b>키즈 나침반</b>", "평일엔 응급육아 · 주말엔 체험 나들이", ""]
+    if pregnancy:
+        lines += [f"🤰 {esc(pregnancy.nickname)} · 출산예정 <b>{esc(pregnancy.dday())}</b>", ""]
     if children:
         lines.append("👧 <b>우리 아이</b>")
         for c in children[:4]:
@@ -91,7 +102,7 @@ def format_home_html(children: list[ChildProfile], profile: Optional[dict] = Non
     return "\n".join(lines)
 
 
-def _exp_line(n: int, e: ExperienceItem) -> list[str]:
+def _exp_line(n: int, e: ExperienceItem, walk_in: bool = False) -> list[str]:
     tags = ["🏠실내" if e.is_indoor else "🌳야외"]
     if e.stroller_accessible:
         tags.append("👶유아차")
@@ -99,21 +110,48 @@ def _exp_line(n: int, e: ExperienceItem) -> list[str]:
         tags.append("🍼수유실")
     if e.booking_required:
         tags.append("📅예약")
-    return [
+    lines = [
         f"<b>{n}. {esc(e.title)}</b>",
         f"📍 {esc(e.region_sido)} {esc(e.region_sigungu)} · 💳 {esc(e.fee_detail)}",
         f"✨ {esc(e.key_points)}",
-        f"{' '.join(tags)} · {link('예약·안내', e.booking_url)}",
     ]
+    if walk_in:
+        lines.append(esc(WALK_IN_TIPS.get(e.exp_id, DEFAULT_WALK_IN_TIP)))
+    lines.append(f"{' '.join(tags)} · {link('안내' if walk_in else '예약·안내', e.booking_url)}")
+    return lines
 
 
-def format_weekend_briefing_html(picks: list[ExperienceItem], age_group: AgeGroup, weather_summary: str) -> str:
-    lines = ["🎈 <b>이번 주말 나들이 3-Pick</b>", f"{esc(age_group.label)}", f"🌤 {esc(weather_summary)}", ""]
+def format_weekend_briefing_html(picks: list[ExperienceItem], age_group: AgeGroup, weather_summary: str,
+                                 walk_in: bool = False) -> str:
+    """walk_in=True: 현장직행 card — caller must pass picks from recommend_weekend_picks(..., is_dispatch=True)."""
+    title = f"[{WALK_IN_HEADER}]" if walk_in else "이번 주말 나들이 3-Pick"
+    lines = [f"🎈 <b>{title}</b>", f"{esc(age_group.label)}", f"🌤 {esc(weather_summary)}", ""]
     if not picks:
         lines.append("조건에 맞는 장소가 아직 없어요. 다른 연령·테마를 눌러 보세요.")
     for i, e in enumerate(picks, 1):
-        lines += _exp_line(i, e) + [""]
+        lines += _exp_line(i, e, walk_in) + [""]
     lines.append("ℹ️ 요금·운영시간은 방문 전 공식 공지를 확인하세요.")
+    return "\n".join(lines)
+
+
+def format_pregnancy_html(preg_profile: Optional[PregnancyProfile], benefits: list[PregnancyBenefit],
+                          walks: list[ExperienceItem], today=None) -> str:
+    """임신기 대시보드: 태명 D-Day + 보건소·바우처 혜택 TOP + 힐링 태교 산책길."""
+    lines = ["🤰 <b>임신기 태교·바우처</b>"]
+    if preg_profile:
+        lines.append(f"👶 {esc(preg_profile.nickname)} · 출산예정 <b>{esc(preg_profile.dday(today))}</b>"
+                     f" ({esc(preg_profile.due_date)})")
+    else:
+        lines.append(PREG_REGISTER_HINT)
+    lines += ["", "🎁 <b>보건소·바우처 혜택 TOP</b>"]
+    for b in benefits[:4]:
+        lines += [f"• <b>{esc(b.title)}</b> · {esc(b.amount)}", f"   {esc(b.detail)} · {link('신청 안내', b.url)}"]
+    lines += ["", "🌿 <b>힐링 태교 산책길</b>"]
+    if not walks:
+        lines.append("조건에 맞는 산책길이 아직 없어요.")
+    for i, e in enumerate(walks[:3], 1):
+        lines += _exp_line(i, e) + [""]
+    lines.append("ℹ️ 지원 금액·대상은 지자체·연도별로 달라요. 신청 전 공식 공지를 확인하세요.")
     return "\n".join(lines)
 
 

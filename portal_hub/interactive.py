@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from portal_hub.db import PortalDatabase
 from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
@@ -501,8 +502,20 @@ def _get_admin_chat_id() -> str:
     return ""
 
 
-def _get_admin_console_url() -> str:
-    return os.environ.get("ADMIN_CONSOLE_URL", "http://161.33.196.211:8002/").strip()
+def _get_admin_console_url(tab: str = "", req_id: Optional[int] = None) -> str:
+    """Builds the admin console URL, optionally deep-linking to a tab and upgrade request card."""
+    base = os.environ.get("ADMIN_CONSOLE_URL", "http://161.33.196.211:8002/").strip()
+    params: dict[str, str] = {}
+    if tab:
+        params["tab"] = str(tab)
+    if req_id is not None:
+        params["req_id"] = str(int(req_id))
+    if not params:
+        return base
+    parts = urlsplit(base)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query = [(k, v) for k, v in query if k not in params] + list(params.items())
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(query), parts.fragment))
 
 
 def _admin_user_labels(user: UserProfile) -> tuple[str, str]:
@@ -548,7 +561,11 @@ def send_admin_new_user_alert(
 
 
 def send_admin_tier_upgrade_alert(
-    client: TelegramPortalClient, user: UserProfile, requested_tier: str, status_code: str
+    client: TelegramPortalClient,
+    user: UserProfile,
+    requested_tier: str,
+    status_code: str,
+    req_id: Optional[int] = None,
 ) -> bool:
     """Notifies the admin chat of a CREATED/CHANGED upgrade request. DUPLICATE is suppressed. Never raises."""
     if status_code not in ("CREATED", "CHANGED"):
@@ -573,7 +590,7 @@ def send_admin_tier_upgrade_alert(
         if not _within_tg_limits(text):
             logger.warning("Upgrade admin alert exceeds TG limits for %s; skipped", user.user_id)
             return False
-        markup = {"inline_keyboard": [[{"text": "🌐 관리자 콘솔 바로가기", "url": _get_admin_console_url()}]]}
+        markup = {"inline_keyboard": [[{"text": "🌐 관리자 콘솔 바로가기", "url": _get_admin_console_url(tab="users", req_id=req_id)}]]}
         client.send_message(admin_chat, text, reply_markup=markup)
         return True
     except Exception as err:
@@ -814,7 +831,7 @@ def handle_callback_query(
         _safe_edit_or_send(client, chat_id, message_id, done_text, done_markup)
 
         # 3. Notify admin after the user's screen is updated (DUPLICATE suppressed, Fail-Open)
-        send_admin_tier_upgrade_alert(client, user, req_tier, status_code)
+        send_admin_tier_upgrade_alert(client, user, req_tier, status_code, req_id=req_id)
         return
 
     # Legacy Telegram admin button handler: defuse and direct to Admin Web Console
