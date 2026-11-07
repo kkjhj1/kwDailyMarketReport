@@ -10,11 +10,14 @@ from datetime import datetime
 from typing import Any, Optional
 
 from admission_brief.ai_curator import AICurator
-from admission_brief.channels.telegram import TelegramChannel, _is_valid_url
+from admission_brief.channels.telegram import TelegramChannel, _is_valid_url, build_google_calendar_url
 from admission_brief.models import (
+    CHILD_ALIASES,
+    MAX_CHILDREN,
     AdmissionBriefing,
     AdmissionEvent,
     BriefingType,
+    ChildProfile,
     EventCategory,
     ParentUserProfile,
     TargetGrade,
@@ -68,18 +71,41 @@ def build_events_category_keyboard() -> dict[str, Any]:
     }
 
 
-def build_events_page_keyboard(category: EventCategory, page: int, total: int) -> dict[str, Any]:
-    """Builds prev/next pager and back-to-categories buttons for an event list page."""
+def build_events_page_keyboard(
+    category: EventCategory,
+    page: int,
+    total: int,
+    events: Optional[list[AdmissionEvent]] = None,
+) -> dict[str, Any]:
+    """Builds per-card Google Calendar url buttons, prev/next pager and back-to-categories buttons."""
     code = CATEGORY_TO_CODE[category]
     last_page = max(0, (total - 1) // EVENTS_PAGE_SIZE)
+    rows: list[list[dict[str, Any]]] = []
+    for idx, ev in enumerate(events or [], page * EVENTS_PAGE_SIZE + 1):
+        cal_url = build_google_calendar_url(ev)
+        if cal_url:
+            rows.append([{"text": f"📅 {idx}번 구글 캘린더에 담기", "url": cal_url}])
     nav_row = []
     if page > 0:
         nav_row.append({"text": "◀ 이전", "callback_data": f"adm:cat:{code}:{page - 1}"})
     if page < last_page:
         nav_row.append({"text": "다음 ▶", "callback_data": f"adm:cat:{code}:{page + 1}"})
-    rows = [nav_row] if nav_row else []
+    if nav_row:
+        rows.append(nav_row)
     rows.append([{"text": "🏛 카테고리 목록", "callback_data": "adm:menu"}])
     return {"inline_keyboard": rows}
+
+
+def _dday_label(event_date_str: str, now: Optional[datetime] = None) -> str:
+    """Returns ' · D-n' / ' · D-Day' for dated upcoming events, '' otherwise."""
+    try:
+        ev_date = datetime.strptime((event_date_str or "").strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    days = (ev_date - (now or datetime.now()).date()).days
+    if days < 0:
+        return ""
+    return " · <b>D-Day</b>" if days == 0 else f" · D-{days}"
 
 
 def format_events_page_html(
@@ -103,7 +129,7 @@ def format_events_page_html(
     for idx, ev in enumerate(events, page * EVENTS_PAGE_SIZE + 1):
         place = "💻 온라인 생중계" if ev.is_online_live else ev.target_region.badge
         lines.append(f"<b>{idx}. {html.escape(ev.title)}</b>")
-        lines.append(f"🗓 <b>{html.escape(ev.event_date_str)}</b>")
+        lines.append(f"🗓 <b>{html.escape(ev.event_date_str)}</b>{_dday_label(ev.event_date_str)}")
         lines.append(f"🏢 {html.escape(ev.organizer)} · {html.escape(place)}")
         if ev.is_first_come:
             lines.append("⚡ <b>선착순 마감</b>")
@@ -132,6 +158,34 @@ def build_grade_inline_keyboard() -> dict[str, Any]:
             [
                 {"text": "🌐 전학년 공통 알림", "callback_data": "grade:ALL"},
             ],
+        ]
+    }
+
+
+REGION_SHORT: dict[TargetRegion, str] = {
+    TargetRegion.ALL: "전국",
+    TargetRegion.ONLINE: "온라인",
+    TargetRegion.SEOUL: "서울",
+    TargetRegion.GYEONGGI: "경기·인천",
+    TargetRegion.LOCAL: "지방",
+}
+
+
+def format_child_line(child: ChildProfile, active: bool = False) -> str:
+    """'• 첫째: 📕 고3/수험생 (서울)' — one child per line, active child marked."""
+    grade_txt = child.grade.badge.replace("[", "").replace("]", "")
+    mark = " ✅" if active else ""
+    return f"• <b>{html.escape(child.alias)}</b>: {html.escape(grade_txt)} ({REGION_SHORT.get(child.region, '전국')}){mark}"
+
+
+def build_child_add_keyboard(slot: int) -> dict[str, Any]:
+    """Grade picker for a new child; slot (new child's index) guards against double-tap duplicates."""
+    return {
+        "inline_keyboard": [
+            [{"text": "📘 중등 / 예비고1", "callback_data": f"adm:cadd:MIDDLE:{slot}"}],
+            [{"text": "📗 고1 ~ 고2", "callback_data": f"adm:cadd:HIGH_1_2:{slot}"}],
+            [{"text": "📕 고3 / N수생", "callback_data": f"adm:cadd:HIGH_3_N:{slot}"}],
+            [{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}],
         ]
     }
 
@@ -266,32 +320,117 @@ class AdmissionInteractiveBot:
             reply_markup=build_region_inline_keyboard(),
         )
 
-    def _cmd_settings(self, chat_id: str) -> None:
-        """Presents grade and region configuration menu."""
+    def _cmd_settings(self, chat_id: str, message_id: Optional[int] = None, notice: str = "") -> None:
+        """Presents grade/region configuration plus the registered children (multi-child switch)."""
         profile = self.db.get_subscriber(chat_id)
-        current_grade = profile.target_grade.label if profile else "미설정"
-        current_region = profile.target_region.label if profile else "전국 전체"
-        text = (
-            f"⚙️ <b>맞춤 알림 설정 현황</b>\n\n"
-            f"• <b>자녀 학년:</b> {current_grade}\n"
-            f"• <b>관심 지역:</b> {current_region}\n\n"
-            f"변경을 원하시는 항목의 버튼을 선택해 주세요:"
-        )
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "🎓 학년 변경하기", "callback_data": "menu:grade"},
-                    {"text": "📍 지역/온라인 변경하기", "callback_data": "menu:region"},
-                ]
+        active = profile.get_active_child() if profile else None
+        current_grade = active.grade.label if active else "미설정"
+        current_region = active.region.label if active else "전국 전체"
+        lines = [f"⚙️ <b>맞춤 알림 설정 현황</b>", ""]
+        if notice:
+            lines.extend([notice, ""])
+        if profile and profile.children:
+            lines.append(f"👨‍👩‍👧 <b>등록 자녀</b> (현재: {html.escape(active.alias)})")
+            for i, child in enumerate(profile.children):
+                lines.append(format_child_line(child, active=(i == profile.active_child_index)))
+            lines.append("")
+        lines.extend([
+            f"• <b>자녀 학년:</b> {html.escape(current_grade)}",
+            f"• <b>관심 지역:</b> {html.escape(current_region)}",
+            "",
+            "변경을 원하시는 항목의 버튼을 선택해 주세요:",
+        ])
+        rows: list[list[dict[str, Any]]] = [
+            [
+                {"text": "🎓 학년 변경하기", "callback_data": "menu:grade"},
+                {"text": "📍 지역/온라인 변경하기", "callback_data": "menu:region"},
             ]
-        }
-        self.channel.send_message(chat_id, text, reply_markup=markup)
+        ]
+        children = profile.children if profile else []
+        if len(children) >= 2:
+            nxt_idx = (profile.active_child_index + 1) % len(children)
+            rows.append([{
+                "text": f"👦 {active.alias} ⇄ 👧 {children[nxt_idx].alias} 전환",
+                "callback_data": f"adm:child:toggle:{nxt_idx}:{children[nxt_idx].grade.value}",
+            }])
+        if len(children) < MAX_CHILDREN:
+            rows.append([{"text": "➕ 자녀 추가하기", "callback_data": "adm:child:add"}])
+        markup = {"inline_keyboard": rows}
+        text = "\n".join(lines)
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
+
+    def _toggle_child(self, chat_id: str, message_id: Optional[int], data: str) -> None:
+        """adm:child:toggle[:<IDX>:<GRADE>] — switches to the encoded child (idempotent on double-tap),
+        or to the next child for the bare form; then refreshes the settings message in place."""
+        profile = self.db.get_subscriber(chat_id)
+        children = profile.children if profile else []
+        if len(children) < 2:
+            self._cmd_settings(chat_id, message_id, notice="⚠️ 전환할 자녀가 없습니다. 먼저 자녀를 추가해 주세요.")
+            return
+        parts = data.split(":")
+        try:
+            target = int(parts[3]) if len(parts) > 3 else (profile.active_child_index + 1) % len(children)
+        except ValueError:
+            target = (profile.active_child_index + 1) % len(children)
+        if not (0 <= target < len(children)):
+            target = (profile.active_child_index + 1) % len(children)
+        self.db.set_active_child(chat_id, target)
+        child = children[target]
+        notice = f"✅ <b>{html.escape(child.alias)} ({html.escape(child.grade.label)})</b> 모드로 전환되었습니다!"
+        self._cmd_settings(chat_id, message_id, notice=notice)
+
+    def _child_add_menu(self, chat_id: str, message_id: Optional[int]) -> None:
+        """Presents the grade picker for a new child (max MAX_CHILDREN)."""
+        profile = self.db.get_subscriber(chat_id)
+        count = max(1, len(profile.children)) if profile else 1
+        if count >= MAX_CHILDREN:
+            self._cmd_settings(chat_id, message_id, notice=f"⚠️ 자녀는 최대 {MAX_CHILDREN}명까지 등록할 수 있습니다.")
+            return
+        alias = CHILD_ALIASES[count]
+        text = (
+            f"➕ <b>{alias} 자녀 추가</b>\n\n"
+            f"👇 {alias} 자녀의 현재 학년을 탭해 주세요:\n"
+            "<i>정기 브리핑은 등록된 모든 자녀의 학년으로 받아보실 수 있습니다.</i>"
+        )
+        self._safe_edit_or_send(chat_id, message_id, text, build_child_add_keyboard(count))
+
+    def _add_child(self, chat_id: str, message_id: Optional[int], data: str) -> None:
+        """adm:cadd:<GRADE>[:<SLOT>] — creates 둘째/셋째 with the chosen grade and the active child's region."""
+        parts = data.split(":")
+        try:
+            grade = TargetGrade(parts[2] if len(parts) > 2 else "")
+        except ValueError:
+            self._cmd_settings(chat_id, message_id, notice="⚠️ 알 수 없는 학년입니다. 다시 선택해 주세요.")
+            return
+        profile = self.db.get_subscriber(chat_id)
+        if not profile:
+            return
+        count = max(1, len(profile.children))
+        if len(parts) > 3 and parts[3] != str(count):
+            # Stale/double-tapped picker: that slot is already filled
+            self._cmd_settings(chat_id, message_id, notice="ℹ️ 이미 처리된 요청입니다.")
+            return
+        if count >= MAX_CHILDREN:
+            self._cmd_settings(chat_id, message_id, notice=f"⚠️ 자녀는 최대 {MAX_CHILDREN}명까지 등록할 수 있습니다.")
+            return
+        alias = CHILD_ALIASES[count]
+        child = ChildProfile(alias=alias, grade=grade, region=profile.get_active_child().region)
+        if self.db.add_child(chat_id, child):
+            notice = f"🎉 <b>{alias} ({html.escape(grade.label)})</b> 자녀가 추가되었습니다!"
+        else:
+            notice = "⚠️ 자녀 추가에 실패했습니다. 다시 시도해 주세요."
+        self._cmd_settings(chat_id, message_id, notice=notice)
 
     def _cmd_todo(self, chat_id: str) -> None:
-        """Sends grade-specific weekly action To-Do list."""
+        """Sends the active child's grade-specific weekly action To-Do list."""
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.MIDDLE
+        grade = profile.get_active_child().grade if profile else TargetGrade.MIDDLE
         briefing = self.curator.generate_weekly_todo_briefing(grade)
+        if profile and len(profile.children) >= 2:
+            briefing.headline = f"[{profile.get_active_child().alias}] {briefing.headline}"
         briefing.silent = True  # Silent push for regular digests
         self.channel.send(chat_id, briefing)
 
@@ -319,8 +458,8 @@ class AdmissionInteractiveBot:
     def _cmd_hot_events(self, chat_id: str) -> None:
         """Presents top 3 hot events & breaking notices matching subscriber's profile."""
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.ALL
-        region = profile.target_region if profile else TargetRegion.ALL
+        grade = profile.get_active_child().grade if profile else TargetGrade.ALL
+        region = profile.get_active_child().region if profile else TargetRegion.ALL
 
         briefings = self.curator.get_top3_hot_events(grade=grade, region=region, db=self.db)
         if not briefings:
@@ -336,7 +475,7 @@ class AdmissionInteractiveBot:
     def _cmd_factcheck(self, chat_id: str) -> None:
         """Presents the latest verified 1-minute admission policy factcheck."""
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.ALL
+        grade = profile.get_active_child().grade if profile else TargetGrade.ALL
         briefing = self.curator.get_latest_factcheck(grade)
         briefing.silent = True
         self.channel.send(chat_id, briefing)
@@ -344,7 +483,7 @@ class AdmissionInteractiveBot:
     def _cmd_recap(self, chat_id: str) -> None:
         """Presents the latest admission seminar recap."""
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.ALL
+        grade = profile.get_active_child().grade if profile else TargetGrade.ALL
 
         events = self.db.list_upcoming_ticketing()
         if events:
@@ -394,8 +533,8 @@ class AdmissionInteractiveBot:
     def _cmd_events_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
         """Presents the three event categories (박람회 / 대형설명회 / 테마세미나)."""
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.ALL
-        region = profile.target_region if profile else TargetRegion.ALL
+        grade = profile.get_active_child().grade if profile else TargetGrade.ALL
+        region = profile.get_active_child().region if profile else TargetRegion.ALL
         text = (
             "🎪 <b>설명회·박람회 전체보기</b>\n\n"
             f"🎯 맞춤 필터: <b>{html.escape(grade.label)}</b> · {html.escape(region.label)}\n\n"
@@ -419,8 +558,8 @@ class AdmissionInteractiveBot:
             page = 0
 
         profile = self.db.get_subscriber(chat_id)
-        grade = profile.target_grade if profile else TargetGrade.ALL
-        region = profile.target_region if profile else TargetRegion.ALL
+        grade = profile.get_active_child().grade if profile else TargetGrade.ALL
+        region = profile.get_active_child().region if profile else TargetRegion.ALL
 
         events, total = self.db.get_events_by_category(
             category, grade, region, page=page, page_size=EVENTS_PAGE_SIZE
@@ -434,7 +573,7 @@ class AdmissionInteractiveBot:
             )
 
         text = format_events_page_html(category, events, page, total, grade, region)
-        self._safe_edit_or_send(chat_id, message_id, text, build_events_page_keyboard(category, page, total))
+        self._safe_edit_or_send(chat_id, message_id, text, build_events_page_keyboard(category, page, total, events))
 
     def _safe_edit_or_send(
         self,
@@ -458,7 +597,13 @@ class AdmissionInteractiveBot:
                 return f"✅ {TargetGrade(data.split(':', 1)[1]).label} 설정 완료!"
             if data.startswith("region:"):
                 return f"✅ {TargetRegion(data.split(':', 1)[1]).label} 설정 완료!"
-        except ValueError:
+            if data.startswith("adm:child:toggle:"):
+                # Target child is encoded in the button so the toast needs no DB read
+                parts = data.split(":")
+                idx, grade = int(parts[3]), TargetGrade(parts[4])
+                if 0 <= idx < len(CHILD_ALIASES):
+                    return f"✅ {CHILD_ALIASES[idx]} ({grade.label}) 모드로 전환되었습니다!"
+        except (ValueError, IndexError):
             return "⚠️ 알 수 없는 선택입니다."
         return ""
 
@@ -526,7 +671,7 @@ class AdmissionInteractiveBot:
                 self.db.update_subscriber_region(chat_id, target_region)
 
                 profile = self.db.get_subscriber(chat_id)
-                grade = profile.target_grade if profile else TargetGrade.ALL
+                grade = profile.get_active_child().grade if profile else TargetGrade.ALL
                 final_text = (
                     "🎉 <b>모든 맞춤 설정이 완료되었습니다!</b>\n\n"
                     f"▪ <b>자녀 학년</b>: {html.escape(grade.label)}\n"
@@ -565,6 +710,16 @@ class AdmissionInteractiveBot:
             self._cmd_grade(chat_id)
         elif data == "menu:region":
             self._cmd_region(chat_id)
+        elif data == "adm:settings":
+            self._cmd_settings(chat_id, message_id)
+
+        # 3-1. Multi-child switch / add (adm:child:toggle[:<IDX>:<GRADE>], adm:child:add, adm:cadd:<GRADE>[:<SLOT>])
+        elif data.startswith("adm:child:toggle"):
+            self._toggle_child(chat_id, message_id, data)
+        elif data == "adm:child:add":
+            self._child_add_menu(chat_id, message_id)
+        elif data.startswith("adm:cadd:"):
+            self._add_child(chat_id, message_id, data)
 
         # 4. Welcome / preview shortcuts (manual requests are not logged as dispatches)
         elif data == "adm:hot":

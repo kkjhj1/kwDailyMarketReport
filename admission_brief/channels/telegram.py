@@ -10,11 +10,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from admission_brief.models import (
     AdmissionBriefing,
+    AdmissionEvent,
     BriefingType,
     TargetGrade,
     TargetRegion,
@@ -30,6 +32,62 @@ def _is_valid_url(url: str | None) -> bool:
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
     return bool(host and "." in host and host not in {"localhost", "127.0.0.1"})
+
+
+GCAL_BASE_URL = "https://calendar.google.com/calendar/render"
+GCAL_MAX_URL_BYTES = 1800
+GCAL_DEFAULT_DURATION = timedelta(hours=2)
+KST_OFFSET = timedelta(hours=9)
+
+
+def build_google_calendar_url(event: AdmissionEvent, now: Optional[datetime] = None) -> Optional[str]:
+    """Builds a Google Calendar 'add event' web deeplink for an admission event.
+
+    event_date_str is KST ("YYYY-MM-DD HH:MM" → 2-hour slot in UTC; "YYYY-MM-DD" → all-day).
+    Returns None for unparseable (TBA) or past dates. now is naive KST (defaults to datetime.now()).
+    """
+    raw = (event.event_date_str or "").strip()
+    now = now or datetime.now()
+    start_kst: Optional[datetime] = None
+    all_day = False
+    try:
+        start_kst = datetime.strptime(raw[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        try:
+            start_kst = datetime.strptime(raw[:10], "%Y-%m-%d")
+            all_day = True
+        except ValueError:
+            return None
+
+    if all_day:
+        if start_kst.date() < now.date():
+            return None
+        dates_str = f"{start_kst:%Y%m%d}/{start_kst + timedelta(days=1):%Y%m%d}"
+    else:
+        if start_kst < now:
+            return None
+        start_utc = start_kst - KST_OFFSET
+        end_utc = start_utc + GCAL_DEFAULT_DURATION
+        dates_str = f"{start_utc:%Y%m%dT%H%M%SZ}/{end_utc:%Y%m%dT%H%M%SZ}"
+
+    def _build(details: str) -> str:
+        query = urllib.parse.urlencode({
+            "action": "TEMPLATE",
+            "text": f"[{event.organizer}] {event.title}",
+            "dates": dates_str,
+            "details": details,
+            "location": event.target_region.label,
+        })
+        return f"{GCAL_BASE_URL}?{query}"
+
+    details = f"주최: {event.organizer}\n원문/신청: {event.booking_url or ''}\n\n{event.so_what}"
+    url = _build(details)
+    # Shrink details until the URL fits (percent-encoded URL is ASCII, so len == bytes)
+    while len(url) > GCAL_MAX_URL_BYTES and details:
+        cut = max(0, len(details) - max(10, (len(url) - GCAL_MAX_URL_BYTES) // 9 + 1))
+        details = details[:cut].rstrip() + "…" if cut else ""
+        url = _build(details)
+    return url if len(url) <= GCAL_MAX_URL_BYTES else None
 
 
 TG_MAX_HTML_LEN = 3500       # [TG-01] HTML 원문 상한

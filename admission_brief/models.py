@@ -228,9 +228,44 @@ class AdmissionBriefing:
         return self.target_region == user_region
 
 
+MAX_CHILDREN = 3
+CHILD_ALIASES = ("첫째", "둘째", "셋째")
+
+
+@dataclass
+class ChildProfile:
+    """One child of a parent subscriber (multi-child households switch between these)."""
+    alias: str = "첫째"
+    grade: TargetGrade = TargetGrade.ALL
+    region: TargetRegion = TargetRegion.ALL
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "alias": self.alias,
+            "grade": self.grade.value,
+            "region": self.region.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ChildProfile:
+        try:
+            grade = TargetGrade(data.get("grade", "ALL"))
+        except ValueError:
+            grade = TargetGrade.ALL
+        try:
+            region = TargetRegion(data.get("region", "ALL"))
+        except ValueError:
+            region = TargetRegion.ALL
+        return cls(alias=str(data.get("alias") or "자녀"), grade=grade, region=region)
+
+
 @dataclass
 class ParentUserProfile:
-    """Subscribed parent profile in Telegram."""
+    """Subscribed parent profile in Telegram.
+
+    target_grade/target_region always mirror the active child so legacy readers keep working;
+    an empty children list means a legacy single-child subscriber.
+    """
     chat_id: str
     target_grade: TargetGrade = TargetGrade.ALL
     target_region: TargetRegion = TargetRegion.ALL
@@ -239,6 +274,18 @@ class ParentUserProfile:
     alert_enabled: bool = True
     registered_at: datetime = field(default_factory=datetime.now)
     last_active_at: datetime = field(default_factory=datetime.now)
+    children: list[ChildProfile] = field(default_factory=list)
+    active_child_index: int = 0
+
+    def get_active_child(self) -> ChildProfile:
+        if self.children and 0 <= self.active_child_index < len(self.children):
+            return self.children[self.active_child_index]
+        return ChildProfile(alias="자녀", grade=self.target_grade, region=self.target_region)
+
+    def get_all_grades(self) -> set[TargetGrade]:
+        if not self.children:
+            return {self.target_grade}
+        return {c.grade for c in self.children}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -250,4 +297,6 @@ class ParentUserProfile:
             "alert_enabled": self.alert_enabled,
             "registered_at": self.registered_at.isoformat(),
             "last_active_at": self.last_active_at.isoformat(),
+            "children": [c.to_dict() for c in self.children],
+            "active_child_index": self.active_child_index,
         }

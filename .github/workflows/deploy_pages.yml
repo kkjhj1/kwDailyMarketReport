@@ -36,6 +36,8 @@ jobs:
           mkdir -p _site
           cp -r reports _site/
           cp index.html _site/ 2>/dev/null || true
+          cp reports/yolo_latest.html _site/ 2>/dev/null || true
+          cp reports/travel_latest.html _site/ 2>/dev/null || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

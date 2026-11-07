@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Optional
 
 from admission_brief.models import (
+    MAX_CHILDREN,
     AdmissionEvent,
     BriefingType,
+    ChildProfile,
     EventCategory,
     ParentUserProfile,
     TargetGrade,
@@ -61,6 +63,14 @@ class AdmissionDatabase:
             # Safe migration for existing DB
             try:
                 cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN target_region TEXT NOT NULL DEFAULT 'ALL'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN children_json TEXT NOT NULL DEFAULT '[]'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN active_child_index INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
 
@@ -142,8 +152,9 @@ class AdmissionDatabase:
             cursor.execute(
                 """
                 INSERT INTO admission_subscribers (
-                    chat_id, target_grade, target_region, username, first_name, alert_enabled, registered_at, last_active_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    chat_id, target_grade, target_region, username, first_name, alert_enabled, registered_at, last_active_at,
+                    children_json, active_child_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     username = excluded.username,
                     first_name = excluded.first_name,
@@ -158,41 +169,149 @@ class AdmissionDatabase:
                     1 if profile.alert_enabled else 0,
                     profile.registered_at.isoformat(),
                     profile.last_active_at.isoformat(),
+                    json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
+                    profile.active_child_index,
                 ),
             )
             conn.commit()
 
     def update_subscriber_grade(self, chat_id: str, grade: TargetGrade) -> bool:
-        """Updates target grade for a parent."""
+        """Updates target grade for a parent (mirrored into the active child when multi-child)."""
+        return self._update_active_target(chat_id, grade=grade)
+
+    def update_subscriber_region(self, chat_id: str, region: TargetRegion) -> bool:
+        """Updates target region for a parent (mirrored into the active child when multi-child)."""
+        return self._update_active_target(chat_id, region=region)
+
+    def _update_active_target(
+        self,
+        chat_id: str,
+        grade: Optional[TargetGrade] = None,
+        region: Optional[TargetRegion] = None,
+    ) -> bool:
+        """Writes grade/region to the legacy columns and keeps the active child in sync."""
         now = datetime.now().isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM admission_subscribers WHERE chat_id = ?", (str(chat_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            profile = self._row_to_subscriber(row)
+            if grade is not None:
+                profile.target_grade = grade
+            if region is not None:
+                profile.target_region = region
+            if profile.children:
+                child = profile.get_active_child()
+                child.grade = profile.target_grade
+                child.region = profile.target_region
             cursor.execute(
                 """
                 UPDATE admission_subscribers
-                SET target_grade = ?, last_active_at = ?
+                SET target_grade = ?, target_region = ?, children_json = ?, last_active_at = ?
                 WHERE chat_id = ?
                 """,
-                (grade.value, now, str(chat_id)),
+                (
+                    profile.target_grade.value,
+                    profile.target_region.value,
+                    json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
+                    now,
+                    str(chat_id),
+                ),
             )
             conn.commit()
             return cursor.rowcount > 0
 
-    def update_subscriber_region(self, chat_id: str, region: TargetRegion) -> bool:
-        """Updates target region for a parent."""
+    def set_active_child(self, chat_id: str, index: int) -> bool:
+        """Switches the active child and mirrors its grade/region into the legacy columns."""
         now = datetime.now().isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM admission_subscribers WHERE chat_id = ?", (str(chat_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            profile = self._row_to_subscriber(row)
+            if not (0 <= index < len(profile.children)):
+                return False
+            child = profile.children[index]
             cursor.execute(
                 """
                 UPDATE admission_subscribers
-                SET target_region = ?, last_active_at = ?
+                SET active_child_index = ?, target_grade = ?, target_region = ?, last_active_at = ?
                 WHERE chat_id = ?
                 """,
-                (region.value, now, str(chat_id)),
+                (index, child.grade.value, child.region.value, now, str(chat_id)),
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def add_child(self, chat_id: str, child: ChildProfile) -> bool:
+        """Appends a child (up to MAX_CHILDREN); the active child is unchanged.
+        A legacy single-child subscriber is first seeded as 첫째 from target_grade/target_region.
+        """
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM admission_subscribers WHERE chat_id = ?", (str(chat_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            profile = self._row_to_subscriber(row)
+            children = list(profile.children)
+            active_index = profile.active_child_index
+            if not children:
+                children.append(ChildProfile(alias="첫째", grade=profile.target_grade, region=profile.target_region))
+                active_index = 0
+            if len(children) >= MAX_CHILDREN:
+                return False
+            children.append(child)
+            cursor.execute(
+                """
+                UPDATE admission_subscribers
+                SET children_json = ?, active_child_index = ?, last_active_at = ?
+                WHERE chat_id = ?
+                """,
+                (
+                    json.dumps([c.to_dict() for c in children], ensure_ascii=False),
+                    active_index,
+                    now,
+                    str(chat_id),
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_subscriber(r: sqlite3.Row) -> ParentUserProfile:
+        """Converts a subscriber row to ParentUserProfile (tolerates pre-migration rows and bad JSON)."""
+        keys = r.keys()
+        children: list[ChildProfile] = []
+        if "children_json" in keys and r["children_json"]:
+            try:
+                raw = json.loads(r["children_json"])
+            except ValueError:
+                raw = []
+            if isinstance(raw, list):
+                children = [ChildProfile.from_dict(c) for c in raw if isinstance(c, dict)][:MAX_CHILDREN]
+        active_index = 0
+        if "active_child_index" in keys and r["active_child_index"] is not None:
+            active_index = int(r["active_child_index"])
+        if children and not (0 <= active_index < len(children)):
+            active_index = 0
+        return ParentUserProfile(
+            chat_id=r["chat_id"],
+            target_grade=TargetGrade(r["target_grade"]),
+            target_region=TargetRegion(r["target_region"] if "target_region" in keys else "ALL"),
+            username=r["username"] or "",
+            first_name=r["first_name"] or "",
+            alert_enabled=bool(r["alert_enabled"]),
+            registered_at=datetime.fromisoformat(r["registered_at"]),
+            last_active_at=datetime.fromisoformat(r["last_active_at"]),
+            children=children,
+            active_child_index=active_index,
+        )
 
     def get_subscriber(self, chat_id: str) -> Optional[ParentUserProfile]:
         """Retrieves subscriber profile by chat_id."""
@@ -205,16 +324,7 @@ class AdmissionDatabase:
             row = cursor.fetchone()
             if not row:
                 return None
-            return ParentUserProfile(
-                chat_id=row["chat_id"],
-                target_grade=TargetGrade(row["target_grade"]),
-                target_region=TargetRegion(row["target_region"] if "target_region" in row.keys() else "ALL"),
-                username=row["username"] or "",
-                first_name=row["first_name"] or "",
-                alert_enabled=bool(row["alert_enabled"]),
-                registered_at=datetime.fromisoformat(row["registered_at"]),
-                last_active_at=datetime.fromisoformat(row["last_active_at"]),
-            )
+            return self._row_to_subscriber(row)
 
     def list_subscribers(
         self,
@@ -223,7 +333,11 @@ class AdmissionDatabase:
         is_online_live: bool = False,
         active_only: bool = True,
     ) -> list[ParentUserProfile]:
-        """Lists subscribers filtered by target grade and region."""
+        """Lists subscribers filtered by target grade and region.
+
+        A multi-child parent matches when any one child's (grade, region) pair matches, so the
+        parent of a 고3 and a 중등 child receives both grades' briefings.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             query = "SELECT * FROM admission_subscribers WHERE 1=1"
@@ -237,37 +351,40 @@ class AdmissionDatabase:
 
             results = []
             for r in rows:
-                p_grade = TargetGrade(r["target_grade"])
-                p_reg = TargetRegion(r["target_region"] if "target_region" in r.keys() else "ALL")
-
-                # 1. Grade match check
-                if grade and grade != TargetGrade.ALL:
-                    if p_grade != TargetGrade.ALL and p_grade != grade:
-                        continue
-
-                # 2. Region match check
-                if region and region != TargetRegion.ALL:
-                    if p_reg == TargetRegion.ONLINE:
-                        if not is_online_live:
-                            continue
-                    elif p_reg != TargetRegion.ALL:
-                        if not is_online_live and p_reg != region:
-                            continue
-
-                results.append(
-                    ParentUserProfile(
-                        chat_id=r["chat_id"],
-                        target_grade=p_grade,
-                        target_region=p_reg,
-                        username=r["username"] or "",
-                        first_name=r["first_name"] or "",
-                        alert_enabled=bool(r["alert_enabled"]),
-                        registered_at=datetime.fromisoformat(r["registered_at"]),
-                        last_active_at=datetime.fromisoformat(r["last_active_at"]),
-                    )
+                profile = self._row_to_subscriber(r)
+                targets = (
+                    [(c.grade, c.region) for c in profile.children]
+                    if profile.children
+                    else [(profile.target_grade, profile.target_region)]
                 )
+                if any(self._target_matches(g, rg, grade, region, is_online_live) for g, rg in targets):
+                    results.append(profile)
 
             return results
+
+    @staticmethod
+    def _target_matches(
+        p_grade: TargetGrade,
+        p_reg: TargetRegion,
+        grade: Optional[TargetGrade],
+        region: Optional[TargetRegion],
+        is_online_live: bool,
+    ) -> bool:
+        """Whether one child's (grade, region) target accepts a briefing for (grade, region)."""
+        # 1. Grade match check
+        if grade and grade != TargetGrade.ALL:
+            if p_grade != TargetGrade.ALL and p_grade != grade:
+                return False
+
+        # 2. Region match check
+        if region and region != TargetRegion.ALL:
+            if p_reg == TargetRegion.ONLINE:
+                if not is_online_live:
+                    return False
+            elif p_reg != TargetRegion.ALL:
+                if not is_online_live and p_reg != region:
+                    return False
+        return True
 
     # --- Event Methods ---
 

@@ -20,7 +20,7 @@ MAX_VISIBLE_CHARS = 1800
 MAX_HTML_CHARS = 3500
 MAX_CALLBACK_BYTES = 64
 
-WEB_MAGAZINE_URL = "https://kkjhj1.github.io/kwDailyMarketReport/yolo_latest.html"
+WEB_MAGAZINE_URL = "https://kkjhj1.github.io/kwDailyMarketReport/reports/yolo_latest.html"
 WEB_MAGAZINE_BUTTON_TEXT = "🌐 감성 사진 & 나홀로 풀코스 매거진 보기"
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -89,23 +89,23 @@ def render_onboarding_card(
 ) -> tuple[str, dict[str, Any]]:
     """Renders the /start or archetype selection card."""
     current_arc = user.archetype if user else None
-    header = "🎯 <b>나홀로 욜로봇 · 4대 성향 선택</b>"
-    sub = (
-        f"현재 성향: <b>{html.escape(current_arc.emoji + ' ' + current_arc.label)}</b>\n"
-        if current_arc
-        else "혼자 있을 때 에너지를 얻는 방식을 선택해 주세요.\n"
-    )
     lines = [
-        header,
-        sub.rstrip(),
-        "──────────────────",
-        "🏃 <b>액티브 챌린저</b> · 마라톤/등산/클라이밍",
-        "🎨 <b>어반 힙스터</b> · 전시/팝업/1인 LP바",
-        "✈️ <b>로드 노마드</b> · KTX당일치기/섬/온천",
-        "🛋️ <b>웰니스 딥다이버</b> · 홈바/북캉스/OTT",
-        "──────────────────",
-        "💡 <i>모든 코스는 100% 1인 환영 여부와 사계절·날씨가 자동 반영됩니다.</i>",
+        "🎯 <b>나홀로 욜로봇 · 취향 성향 선택</b>",
+        "",
+        "혼자 있을 때 에너지를 얻는 나만의 방식을 골라주세요.",
+        "사계절 날씨와 100% 1인 맞춤 코스가 실시간 연결됩니다.",
+        "",
+        "───────────────────────",
+        "🏃 <b>액티브 챌린저</b> ｜ 땀·성취 (마라톤/등산/클라이밍)",
+        "🎨 <b>어반 힙스터</b> ｜ 문화·미식 (전시/팝업/1인 LP바)",
+        "✈️ <b>로드 노마드</b> ｜ 혼여·방랑 (KTX당일/섬/온천)",
+        "🛋️ <b>웰니스 딥다이버</b> ｜ 홈바·휴식 (칵테일/북캉스/OTT)",
+        "───────────────────────",
     ]
+    if current_arc:
+        lines.append(f"현재 선택: <b>{current_arc.emoji} {current_arc.label}</b>")
+    else:
+        lines.append("👇 <i>아래 버튼을 눌러 성향을 선택하세요 (언제든 1초 변경 가능)</i>")
     text = "\n".join(lines)
     return text, build_archetype_keyboard(current=current_arc)
 
@@ -126,20 +126,19 @@ def render_curation_card(
     esc_area = html.escape(area_label)
 
     if match.fallback_applied:
-        title_line = "☔ <b>이번 주 혼자 놀기 · 실내 스마트 대체</b>"
-        weather_line = f"🌧 날씨: <b>{esc_reason}</b> · 실내 fallback"
+        title_line = "☔ <b>이번 주 나홀로 욜로 · 실내 스마트 대체</b>"
+        weather_line = f"🌧 날씨: <b>{esc_reason}</b> (실내 대체 가동)"
     elif match.is_severe_weather:
         title_line = "⚠️ <b>이번 주 나홀로 욜로 · 기상 주의</b>"
         weather_line = f"🌧 날씨: <b>{esc_reason}</b>"
     else:
-        title_line = f"✨ <b>이번 주 혼자 놀기 · {esc_season} 큐레이션</b>"
+        title_line = f"✨ <b>이번 주 나홀로 욜로 · {esc_season} 큐레이션</b>"
         weather_line = f"🌤 날씨: <b>{esc_reason}</b> ({esc_area})"
 
     lines: list[str] = [
         title_line,
-        f"🎯 성향: <b>{esc_arc}</b>",
-        weather_line,
-        "──────────────────",
+        f"🎯 <b>{esc_arc}</b> ｜ {weather_line}",
+        "───────────────────────",
     ]
 
     if match.blocked_by_weather_no_fallback:
@@ -147,7 +146,8 @@ def render_curation_card(
             [
                 "🚨 <b>악천후 안전 가드 작동</b>",
                 "현재 야외 활동이 위험하며, <b>실내 대체(Fallback)</b> 설정이 꺼져 있어 야외 추천을 보류합니다.",
-                "👉 아래 버튼으로 <b>[실내대체: ON]</b>을 켜시면 비·눈·폭염에도 안전한 1인 실내 코스를 추천해 드립니다.",
+                "",
+                "👉 아래 <b>[실내대체: ON]</b> 버튼을 켜시면 비·눈·폭염에도 안전한 1인 실내 코스를 바로 추천해 드립니다.",
             ]
         )
     elif not match.items:
@@ -158,20 +158,17 @@ def render_curation_card(
             esc_title = html.escape(item.title)
             esc_loc = html.escape(item.location_name)
             esc_cost = html.escape(item.cost_or_duration)
-            esc_summary = html.escape(item.summary)
             tags_str = " · ".join(html.escape(t) for t in item.solo_tags[:3])
             safe_url = html.escape(item.action_url, quote=True)
 
             lines.append(f"{badge} {item.emoji} <b>{esc_title}</b>")
-            lines.append(f"📍 {esc_loc} · ⏱ {esc_cost}")
-            lines.append(f"📝 {esc_summary}")
-            lines.append(f"🧍 <b>{tags_str}</b>")
-            lines.append(f'🔗 <a href="{safe_url}">상세·1인 예약 안내 보기</a>')
+            lines.append(f"📍 {esc_loc}  ｜  ⏱ {esc_cost}")
+            lines.append(f"🏷️ <b>{tags_str}</b>  <a href=\"{safe_url}\">바로가기↗</a>")
             if idx < len(match.items[:3]) - 1:
                 lines.append("")
 
-    lines.append("──────────────────")
-    lines.append("💡 <i>버튼을 눌러 성향을 1초 만에 바꾸거나 우천 대체를 미리 볼 수 있습니다.</i>")
+    lines.append("───────────────────────")
+    lines.append("💡 <i>상세 사진·타임테이블·예산은 아래 웹 매거진에서 확인하세요!</i>")
 
     full_html = "\n".join(lines)
     vis_len, html_len = measure_message(full_html)

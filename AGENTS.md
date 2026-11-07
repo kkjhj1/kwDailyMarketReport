@@ -46,7 +46,7 @@
   - *[현행 과제]*: `travel_bot_runner.py`와 `portal_bot_runner.py`는 `--demo` 완비 상태이나, 미구현된 `telegram_bot_runner.py`와 `admission_bot_runner.py`는 향후 L2 작업 시 `--demo`를 최우선 구현 과제로 둔다.
 - **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
   - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
-  - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.
+  - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고하며, 완료 보고 시 실제 실행 명령과 실측 결과를 반드시 제시한다(미실행 검증 보고 금지).
 
 ## 4. 멀티 AI 2단계 강제 파이프라인 (Two-Phase Multi-AI Protocol)
 
@@ -57,10 +57,10 @@
   - **[Phase 1: 기획·아키텍처 자율 선행 감사 (Non-Destructive)]**:
     1. **Gemini (요구정리)**: 사용자 요청 분석, 1차 명세 및 `scratch/handoff_to_gpt.md` 작성.
     2. **GPT (수석 감사관 - codex CLI)**: 산식·DB·상태·불변조건·UI/UX 감사를 **사용자 승인 대기 없이 즉시 자동 실행** (`-s read-only`).
-    3. **Fail-Closed 원칙**: GPT 감사가 누락되거나 실패하면 L2/L3 계획 승인 요청을 할 수 없다 (`AUDIT_INCOMPLETE`).
+    3. **Fail-Closed 원칙**: GPT 감사 산출물(`scratch/gpt_architecture.md`)이 없는 L2/L3 계획의 임의 제안·확정·사용자 승인 요청은 일체 금지한다 (`AUDIT_INCOMPLETE`).
     4. **Gemini (계획서 확정 및 보고)**: GPT 감사가 반영된 **「확정 계획서(Artifact)」**를 생성하여 사용자에게 보고.
   - **[Phase 2: 실제 개발 착수 게이트 (Destructive / Two-Phase Gate [AUTH-01])]**:
-    5. **사용자 승인 게이트**: 최신 GPT 감사 계획서에 대한 사용자의 명시적 `"개발진행하라"` 확인 후 착수.
+    5. **사용자 승인 게이트**: 최신 GPT 감사 계획서에 대한 사용자의 명확한 자연어 개발 착수 승인(예: "개발 진행해", "개발진행하라", "그대로 진행") 확인 후 착수 (단순 맞장구는 승인으로 보지 않음).
     6. **Gemini 코딩 절대 락(Lock)**: Phase 2 진입 즉시 Gemini의 모든 파일 수정 도구(`edit_file`, `write_file`) 및 쉘 파일 수정 명령 호출을 물리적으로 엄금한다.
     7. **Claude (시니어 구현 - claude CLI)**: Single-Writer Lease 권한을 부여받아 실제 코드 작성 및 단위 테스트 실행.
     8. **Claude 실패 시 대체 금지**: Claude 구현 실패 시 Gemini가 코딩을 가로채지 못하며, `IMPLEMENTATION_FAILED` 또는 `BLOCKED` 상태로 사용자에게 즉각 보고한다.
