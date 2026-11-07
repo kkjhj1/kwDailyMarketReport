@@ -189,7 +189,7 @@ TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
                 {"code": "COUPLE", "label": "👴👵 노부부 세대 복지", "short": "노부부 세대"},
             ],
             [
-                {"code": "WITH_CHILD", "label": "🏠 자녀 동거 부모님 복지", "short": "자녀 동거"},
+                {"code": "FAM", "label": "🏠 자녀 동거 부모님 복지", "short": "자녀 동거"},
                 {"code": "ALL", "label": "💌 주간 효도 브리핑 전체", "short": "주간 효도 브리핑"},
             ],
         ],
@@ -800,7 +800,7 @@ class MultiBotInteractionRouter:
                 mem_db.upsert_benefits(SEED_BENEFITS)
                 living_val = (
                     norm_target
-                    if norm_target in {LivingType.ALONE.value, LivingType.COUPLE.value, LivingType.WITH_CHILD.value}
+                    if norm_target in {LivingType.ALONE.value, LivingType.COUPLE.value, LivingType.FAM.value}
                     else LivingType.ALONE.value
                 )
                 sample_parent = ParentProfile(
