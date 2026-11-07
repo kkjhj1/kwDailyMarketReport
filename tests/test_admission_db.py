@@ -1,8 +1,10 @@
 """Unit tests for AdmissionDatabase with isolated in-memory SQLite."""
+import sqlite3
 from datetime import datetime
 from admission_brief.models import (
     AdmissionEvent,
     BriefingType,
+    EventCategory,
     ParentUserProfile,
     TargetGrade,
     TargetRegion,
@@ -115,3 +117,122 @@ def test_dispatch_log_duplicate_prevention():
 
     # Another user
     assert db.has_dispatched("brief_1", "chat_user_2") is False
+
+
+# --- Event category listing (EXPO / BRIEFING / SEMINAR) ---
+
+_NOW = datetime(2026, 11, 7, 12, 0)
+
+
+def _ev(event_id, category, date_str, grade=TargetGrade.HIGH_3_N, region=TargetRegion.SEOUL,
+        online=False, expires_at=None, event_type=BriefingType.BRIEFING_RECAP):
+    return AdmissionEvent(
+        event_id=event_id,
+        title=f"행사 {event_id}",
+        organizer="종로학원",
+        target_grade=grade,
+        target_region=region,
+        is_online_live=online,
+        event_type=event_type,
+        event_date_str=date_str,
+        category=category,
+        expires_at=expires_at,
+    )
+
+
+def test_event_category_and_expires_roundtrip():
+    db = AdmissionDatabase(db_path=":memory:")
+    exp = datetime(2027, 1, 7, 18, 0)
+    db.save_event(_ev("e1", EventCategory.EXPO, "2026년 12월 중 (공고 예정)", expires_at=exp))
+    fetched = db.get_event("e1")
+    assert fetched.category == EventCategory.EXPO
+    assert fetched.expires_at == exp
+
+    # Upsert must refresh date/category (stale rows from old collector titles get corrected)
+    db.save_event(_ev("e1", EventCategory.SEMINAR, "2026-12-01 10:00"))
+    fetched = db.get_event("e1")
+    assert fetched.category == EventCategory.SEMINAR
+    assert fetched.event_date_str == "2026-12-01 10:00"
+    assert fetched.expires_at is None
+
+
+def test_get_events_by_category_filters_category_and_past_events():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.save_event(_ev("past", EventCategory.EXPO, "2026-11-06 10:00"))
+    db.save_event(_ev("today", EventCategory.EXPO, "2026-11-07 09:00"))  # same day stays visible
+    db.save_event(_ev("future", EventCategory.EXPO, "2026-12-13 10:00"))
+    db.save_event(_ev("tba", EventCategory.EXPO, "2026년 12월 중", expires_at=datetime(2027, 1, 7)))
+    db.save_event(_ev("tba_expired", EventCategory.EXPO, "2099-01-01 10:00", expires_at=datetime(2026, 11, 1)))
+    db.save_event(_ev("other_cat", EventCategory.SEMINAR, "2026-12-13 10:00"))
+    db.save_event(_ev("notice", EventCategory.EXPO, "2026-12-13 10:00", event_type=BriefingType.POLICY_TRANSLATE))
+
+    events, total = db.get_events_by_category(EventCategory.EXPO, now=_NOW)
+    assert total == 3
+    # Chronological, undated (TBA) entries after dated ones
+    assert [e.event_id for e in events] == ["today", "future", "tba"]
+
+
+def test_get_events_by_category_grade_and_region_matching():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.save_event(_ev("seoul_off", EventCategory.BRIEFING, "2026-11-22 14:00", region=TargetRegion.SEOUL))
+    db.save_event(_ev("seoul_live", EventCategory.BRIEFING, "2026-11-22 15:00", region=TargetRegion.SEOUL, online=True))
+    db.save_event(_ev("middle", EventCategory.BRIEFING, "2026-11-22 16:00", grade=TargetGrade.MIDDLE))
+    db.save_event(_ev("all_grade", EventCategory.BRIEFING, "2026-11-22 17:00", grade=TargetGrade.ALL))
+
+    events, _ = db.get_events_by_category(EventCategory.BRIEFING, TargetGrade.HIGH_3_N, TargetRegion.ONLINE, now=_NOW)
+    assert [e.event_id for e in events] == ["seoul_live"]
+
+    events, total = db.get_events_by_category(EventCategory.BRIEFING, TargetGrade.HIGH_3_N, TargetRegion.GYEONGGI, now=_NOW)
+    assert [e.event_id for e in events] == ["seoul_live"]
+    assert total == 1
+
+    events, total = db.get_events_by_category(EventCategory.BRIEFING, TargetGrade.HIGH_3_N, TargetRegion.SEOUL, now=_NOW)
+    assert {e.event_id for e in events} == {"seoul_off", "seoul_live", "all_grade"}
+    assert total == 3
+
+
+def test_get_events_by_category_paging():
+    db = AdmissionDatabase(db_path=":memory:")
+    for i in range(7):
+        db.save_event(_ev(f"b{i}", EventCategory.BRIEFING, f"2026-11-{20 + i} 10:00"))
+
+    p0, total = db.get_events_by_category(EventCategory.BRIEFING, page=0, page_size=3, now=_NOW)
+    p1, _ = db.get_events_by_category(EventCategory.BRIEFING, page=1, page_size=3, now=_NOW)
+    p2, _ = db.get_events_by_category(EventCategory.BRIEFING, page=2, page_size=3, now=_NOW)
+    p3, _ = db.get_events_by_category(EventCategory.BRIEFING, page=3, page_size=3, now=_NOW)
+    assert total == 7
+    assert [e.event_id for e in p0] == ["b0", "b1", "b2"]
+    assert [e.event_id for e in p1] == ["b3", "b4", "b5"]
+    assert [e.event_id for e in p2] == ["b6"]
+    assert p3 == []
+
+
+def test_additive_migration_on_legacy_events_table(tmp_path):
+    legacy = tmp_path / "legacy_admission.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.execute(
+        """
+        CREATE TABLE admission_events (
+            event_id TEXT PRIMARY KEY, title TEXT NOT NULL, organizer TEXT NOT NULL,
+            target_grade TEXT NOT NULL, event_type TEXT NOT NULL, event_date_str TEXT NOT NULL,
+            booking_opens_at TEXT, is_first_come INTEGER NOT NULL DEFAULT 0, booking_url TEXT,
+            summary_3lines_json TEXT, so_what TEXT, action_todos_json TEXT, pdf_attachment_path TEXT,
+            credibility_score INTEGER NOT NULL DEFAULT 80, status TEXT NOT NULL DEFAULT 'SCHEDULED',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO admission_events (event_id, title, organizer, target_grade, event_type, event_date_str, created_at) "
+        "VALUES ('old1', '기존 행사', '종로학원', 'HIGH_3_N', 'BRIEFING_RECAP', '2026-12-01 10:00', ?)",
+        (datetime(2026, 11, 1).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+
+    db = AdmissionDatabase(db_path=str(legacy))
+    old = db.get_event("old1")
+    assert old.category == EventCategory.BRIEFING
+    assert old.expires_at is None
+    events, total = db.get_events_by_category(EventCategory.BRIEFING, now=_NOW)
+    assert total == 1 and events[0].event_id == "old1"

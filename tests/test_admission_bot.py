@@ -170,8 +170,10 @@ def test_build_persistent_reply_keyboard():
     assert "📋 이번 주 필수 To-Do" in all_btn_texts
     assert "⚡ 긴급 속보 & 핫 행사 TOP 3" in all_btn_texts
     assert "💡 1분 입시 팩트체크 (So-What)" in all_btn_texts
+    assert "🎪 설명회·박람회 전체보기" in all_btn_texts
     assert "🎓 학년/지역 설정" in all_btn_texts
     assert "❓ 이용 도움말" in all_btn_texts
+    assert [len(row) for row in kb["keyboard"]] == [2, 2, 2]
 
 
 def test_interactive_bot_korean_text_touch_buttons():
@@ -208,3 +210,191 @@ def test_interactive_bot_korean_text_touch_buttons():
     last_chat_id, last_briefing = mock_channel.send.call_args[0]
     assert last_chat_id == "777"
     assert last_briefing.briefing_type == BriefingType.POLICY_TRANSLATE
+
+
+# --- Events menu (박람회 / 대형설명회 / 테마세미나) ---
+
+def _future_event(event_id, category, day, grade=TargetGrade.HIGH_3_N, title=None):
+    return AdmissionEvent(
+        event_id=event_id,
+        title=title or f"행사 {event_id}",
+        organizer="종로학원",
+        target_grade=grade,
+        target_region=TargetRegion.SEOUL,
+        is_online_live=True,
+        event_type=BriefingType.BRIEFING_RECAP,
+        event_date_str=f"2099-01-{day:02d} 14:00",
+        booking_url="https://www.jongro.co.kr",
+        category=category,
+    )
+
+
+def _cb(data, cb_id="cb_evt", chat_id=888, message_id=77):
+    return {
+        "update_id": 900,
+        "callback_query": {
+            "id": cb_id,
+            "data": data,
+            "message": {"message_id": message_id, "chat": {"id": chat_id}},
+        },
+    }
+
+
+def _all_callback_data(markup):
+    return [b["callback_data"] for row in markup["inline_keyboard"] for b in row if "callback_data" in b]
+
+
+def test_events_menu_keyboard_and_callback_byte_limit():
+    kb = build_events_category_keyboard()
+    assert _all_callback_data(kb) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+    for cat in EventCategory:
+        for page in (0, 5, 999):
+            for data in _all_callback_data(build_events_page_keyboard(cat, page, 10_000)):
+                assert data.isascii()
+                assert len(data.encode("utf-8")) <= 64
+
+
+def test_events_menu_text_routing():
+    db = AdmissionDatabase(db_path=":memory:")
+    mock_channel = MagicMock(spec=TelegramChannel)
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    for text in ("🎪 설명회·박람회 전체보기", "박람회", "설명회 일정", "세미나", "행사 전체", "/events"):
+        mock_channel.reset_mock()
+        bot.handle_update({"update_id": 1, "message": {"chat": {"id": 888}, "text": text}})
+        mock_channel.send_message.assert_called_once()
+        _, kwargs = mock_channel.send_message.call_args
+        assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+
+    # Existing hot-events button still routes to TOP 3 (channel.send), not the events menu
+    mock_channel.reset_mock()
+    bot.handle_update({"update_id": 2, "message": {"chat": {"id": 888}, "text": "⚡ 긴급 속보 & 핫 행사 TOP 3"}})
+    mock_channel.send_message.assert_not_called()
+    assert mock_channel.send.call_count >= 1
+
+
+def test_callback_answer_precedes_db_access():
+    db = AdmissionDatabase(db_path=":memory:")
+    order = []
+    real_get = db.get_subscriber
+    db.get_subscriber = lambda cid: (order.append("db"), real_get(cid))[1]
+    mock_channel = MagicMock(spec=TelegramChannel)
+    mock_channel.answer_callback_query.side_effect = lambda *a, **k: order.append("ack")
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    for data in ("adm:cat:BRIEF:0", "grade:MIDDLE", "region:SEOUL", "menu:grade", "adm:menu"):
+        order.clear()
+        bot.handle_update(_cb(data))
+        assert order[0] == "ack", data
+        assert order.count("ack") == 1, data
+
+
+def test_category_page_navigation_in_place():
+    db = AdmissionDatabase(db_path=":memory:")
+    for i in range(1, 8):
+        db.save_event(_future_event(f"b{i}", EventCategory.BRIEFING, i))
+    db.save_event(_future_event("x1", EventCategory.EXPO, 1))
+    mock_channel = MagicMock(spec=TelegramChannel)
+    mock_channel.edit_message_text.return_value = True
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    # Page 0: 3 cards, only "다음" + category list
+    bot.handle_update(_cb("adm:cat:BRIEF:0"))
+    args, kwargs = mock_channel.edit_message_text.call_args
+    assert args[0] == "888" and args[1] == 77
+    text = args[2]
+    assert "5대 대형 입시기관 설명회" in text and "1/3쪽" in text
+    assert "행사 b1" in text and "행사 b3" in text and "행사 b4" not in text
+    assert "행사 x1" not in text
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:BRIEF:1", "adm:menu"]
+    mock_channel.send_message.assert_not_called()
+
+    # Middle page: both directions
+    bot.handle_update(_cb("adm:cat:BRIEF:1"))
+    args, kwargs = mock_channel.edit_message_text.call_args
+    assert "<b>4. 행사 b4</b>" in args[2]
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:BRIEF:0", "adm:cat:BRIEF:2", "adm:menu"]
+
+    # Last page: only "이전"
+    bot.handle_update(_cb("adm:cat:BRIEF:2"))
+    args, kwargs = mock_channel.edit_message_text.call_args
+    assert "행사 b7" in args[2] and "3/3쪽" in args[2]
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:BRIEF:1", "adm:menu"]
+
+    # Stale page beyond range clamps to last page
+    bot.handle_update(_cb("adm:cat:BRIEF:9"))
+    args, _ = mock_channel.edit_message_text.call_args
+    assert "3/3쪽" in args[2]
+
+    # Back to category list
+    bot.handle_update(_cb("adm:menu"))
+    _, kwargs = mock_channel.edit_message_text.call_args
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+
+
+def test_category_page_empty_and_edit_fallback():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.upsert_subscriber(ParentUserProfile(chat_id="888", target_grade=TargetGrade.MIDDLE))
+    db.save_event(_future_event("s1", EventCategory.SEMINAR, 1, grade=TargetGrade.HIGH_3_N))
+    mock_channel = MagicMock(spec=TelegramChannel)
+    mock_channel.edit_message_text.return_value = False  # e.g. message too old to edit
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("adm:cat:SEMI:0"))
+    mock_channel.send_message.assert_called_once()
+    args, kwargs = mock_channel.send_message.call_args
+    assert "예정 행사가 없습니다" in args[1]
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:menu"]
+
+    # Unknown category code falls back to the category menu
+    mock_channel.reset_mock()
+    mock_channel.edit_message_text.return_value = True
+    bot.handle_update(_cb("adm:cat:NOPE:0"))
+    _, kwargs = mock_channel.edit_message_text.call_args
+    assert _all_callback_data(kwargs["reply_markup"])[0] == "adm:cat:EXPO:0"
+
+
+def test_events_page_html_escape_and_limits():
+    malicious = _future_event("m1", EventCategory.BRIEFING, 1, title="<script>alert(1)</script> & 설명회")
+    out = format_events_page_html(EventCategory.BRIEFING, [malicious], 0, 1, TargetGrade.ALL, TargetRegion.ALL)
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+    # Every collector page (3 cards) stays within [TG-01] limits
+    db = AdmissionDatabase(db_path=":memory:")
+    events = AdmissionCollector(db=db, curator=AICurator()).collect_public_education_notices()
+    events += AdmissionCollector(db=db, curator=AICurator()).collect_major_academy_seminars()
+    for cat in EventCategory:
+        cat_events = [e for e in events if e.category == cat]
+        for page in range(0, len(cat_events), 3):
+            out = format_events_page_html(cat, cat_events[page:page + 3], page // 3, len(cat_events),
+                                          TargetGrade.ALL, TargetRegion.ALL)
+            html_len, visible_len = measure_message(out)
+            assert html_len <= TG_MAX_HTML_LEN
+            assert visible_len <= TG_MAX_VISIBLE_LEN
+
+
+def test_format_admission_html_category_badge_and_limits():
+    curator = AICurator()
+    events = AdmissionCollector(db=AdmissionDatabase(db_path=":memory:"), curator=curator).collect_public_education_notices()
+    expo = next(e for e in events if e.category == EventCategory.EXPO)
+    briefing = curator.curate_event_briefing(expo)
+    assert briefing.category == EventCategory.EXPO
+    out = format_admission_html(briefing)
+    assert "🎪 [대입박람회]" in out.splitlines()[0]
+    html_len, visible_len = measure_message(out)
+    assert html_len <= TG_MAX_HTML_LEN and visible_len <= TG_MAX_VISIBLE_LEN
+
+    # Non-event briefings (weekly To-Do) carry no category badge
+    todo = format_admission_html(curator.generate_weekly_todo_briefing(TargetGrade.MIDDLE))
+    assert "[대형설명회]" not in todo and "[대입박람회]" not in todo
+
+
+def test_curator_get_events_by_category():
+    db = AdmissionDatabase(db_path=":memory:")
+    db.save_event(_future_event("e1", EventCategory.EXPO, 2))
+    db.save_event(_future_event("b1", EventCategory.BRIEFING, 1))
+    briefings = AICurator().get_events_by_category(EventCategory.EXPO, TargetGrade.HIGH_3_N, TargetRegion.SEOUL, db=db)
+    assert [b.briefing_id for b in briefings] == ["brief_e1"]
+    assert briefings[0].category == EventCategory.EXPO
+    assert AICurator().get_events_by_category(EventCategory.EXPO, db=None) == []
