@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from market_brief.link_gate import GATE_REGISTRY, LinkGateRouter, build_gate_button
 from market_brief.storage.models import BotRecord, BotType
 from market_brief.subscription_engine import SubscriptionEngine
 
@@ -122,6 +123,32 @@ class TelegramBotTransport:
         elif inline_keyboard:
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         return self.api_call("sendMessage", payload, timeout=10)
+
+    def edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        html_text: str,
+        inline_keyboard: list[list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """Edits existing message text in-place ([TG-04]). Falls back to send_html if editing fails."""
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id).strip(),
+            "message_id": int(message_id),
+            "text": html_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if inline_keyboard is not None:
+            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+        try:
+            return self.api_call("editMessageText", payload, timeout=10)
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "message is not modified" in err_str:
+                return {"ok": True, "result": {"message_id": message_id}}
+            logger.debug(f"editMessageText failed ({exc}), falling back to send_html")
+            return self.send_html(chat_id, html_text, inline_keyboard=inline_keyboard)
 
     def answer_callback(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
         try:
@@ -592,8 +619,8 @@ class MultiBotInteractionRouter:
             )
 
         kb.append([{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}])
-        if menu_uname:
-            kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
+        menu_handle = menu_uname or os.environ.get("PORTAL_BOT_USERNAME") or "KwMenu_bot"
+        kb.append([{"text": "🏠 통합 메뉴봇 바로가기", "url": f"https://t.me/{menu_handle}?start=from_sub"}])
         return kb
 
     def _resolve_target_short_label(self, bot: BotRecord, target_code: str) -> str:
@@ -692,8 +719,9 @@ class MultiBotInteractionRouter:
                 body_html = format_telegram_html(briefing)
                 header_banner = "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n━━━━━━━━━━━━━━━━━━\n"
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
+                GATE_REGISTRY.update_preset_url("bf_rep", report_url)
                 kb = [
-                    [{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}],
+                    [build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")],
                     [{"text": "🔄 최신 시황 브리핑 다시 보기", "callback_data": "info:preview:brief_bot"}],
                 ]
             except Exception as exc:
@@ -705,7 +733,8 @@ class MultiBotInteractionRouter:
                     "• <b>KOSPI</b> / <b>S&amp;P 500</b> / <b>USD/KRW</b> 최신 장전·마감 시황 브리핑이 제공됩니다.\n"
                     "• 매일 <b>06:30 모닝 시황</b>, <b>15:40 마감 시황</b> 및 장중 급등락 알림이 발송됩니다."
                 )
-                kb = [[{"text": "📊 웹 리포트 상세 분석 보기", "url": report_url}]]
+                GATE_REGISTRY.update_preset_url("bf_rep", report_url)
+                kb = [[build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")]]
 
         # Case 2: Target-Selection Bot — Admission Bot (입시 나침반)
         elif bot.bot_id in ("admission_bot", "edu_bot"):
@@ -732,8 +761,10 @@ class MultiBotInteractionRouter:
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 btn_url = briefing.booking_url or admission_url
+                btn_lbl = briefing.booking_button_text or "🌐 상세 입시 리포트 보기"
+                tok_adm = GATE_REGISTRY.register_dynamic(btn_url, btn_lbl, "선착순 티켓팅 및 설명회 공식 접수 사이트로 이동합니다.", "admission:home")
                 kb = [
-                    [{"text": briefing.booking_button_text or "🌐 상세 입시 리포트 보기", "url": btn_url}],
+                    [build_gate_button(tok_adm, btn_lbl)],
                     [
                         {"text": "⚡ 핫 행사 TOP 3 보기", "callback_data": "adm:hot"},
                         {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
@@ -747,7 +778,11 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                     "🎓 선택한 학년에 맞춘 이번 주 필수 입시 체크리스트(To-Do) 및 주요 설명회 일정입니다."
                 )
-                kb = [[{"text": "🔄 자녀 학년 다시 선택하기", "callback_data": f"info:retarget:{bot.bot_id}"}]]
+                GATE_REGISTRY.update_preset_url("adm_rep", admission_url)
+                kb = [
+                    [build_gate_button("adm_rep", "📅 입시 캘린더 확인")],
+                    [{"text": "🔄 자녀 학년 다시 선택하기", "callback_data": f"info:retarget:{bot.bot_id}"}],
+                ]
 
         # Case 3: Target-Selection Bot — Travel Pathfinder (트래블 패스파인더)
         elif bot.bot_id == "travel_bot":
@@ -784,8 +819,9 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
+                GATE_REGISTRY.update_preset_url("trv_rep", travel_report_url)
                 kb = [
-                    [{"text": "📊 6개월 특가 웹 리포트 ↗", "url": travel_report_url}],
+                    [build_gate_button("trv_rep", "📊 6개월 특가 웹 리포트 ↗")],
                     [{"text": "🔄 관심 여행지 다시 선택하기", "callback_data": "info:retarget:travel_bot"}],
                 ]
             except Exception as exc:
@@ -1000,6 +1036,38 @@ class MultiBotInteractionRouter:
         clean_text = (text or "").strip().lower()
         menu_bot = self.engine.get_menu_bot()
         menu_uname = (menu_bot.telegram_username or "").lstrip("@").strip() if menu_bot else ""
+
+        # 0. Link Confirmation Gate Callback
+        if cb.startswith("gate:"):
+            gate_router = LinkGateRouter(GATE_REGISTRY)
+            gate_res = gate_router.handle_callback(cb, bot.bot_id, uid, 0)
+            if gate_res.get("handled"):
+                if gate_res.get("action") == "CONFIRM_CARD":
+                    return {
+                        "bot_id": bot.bot_id,
+                        "reply_html": gate_res["html"],
+                        "inline_keyboard": gate_res["inline_keyboard"],
+                        "callback_toast": gate_res.get("toast", ""),
+                        "result_code": "GATE_CARD",
+                        "user_profile": self.engine.get_user_profile(uid),
+                    }
+                elif gate_res.get("action") == "CANCEL":
+                    from market_brief.briefing_service import generate_bot_briefing
+                    try:
+                        gen = generate_bot_briefing(bot.bot_id, db=self.engine)
+                        reply_html = gen.get("content_html") or "이동이 취소되었습니다."
+                        kb = gen.get("inline_keyboard") or []
+                    except Exception:
+                        reply_html = "이동이 취소되었습니다."
+                        kb = [[{"text": "🔄 최신 브리핑 확인", "callback_data": f"info:preview:{bot.bot_id}"}]]
+                    return {
+                        "bot_id": bot.bot_id,
+                        "reply_html": reply_html,
+                        "inline_keyboard": kb,
+                        "callback_toast": gate_res.get("toast", "이동을 취소했습니다."),
+                        "result_code": "GATE_CANCEL",
+                        "user_profile": self.engine.get_user_profile(uid),
+                    }
 
         # 1. Explicit Unsubscribe via command or inline button
         if clean_text in {"/stop", "/탈퇴", "/해지", "/구독취소", "/unsubscribe", "탈퇴", "구독취소"} or cb == f"info:unsub:{bot.bot_id}":
@@ -1364,6 +1432,7 @@ class DynamicBotManager:
                 chat_id=chat_id,
                 username=user_info.get("username"),
                 first_name=user_info.get("first_name"),
+                last_name=user_info.get("last_name"),
             )
             if getattr(user, "is_new", False) is True:
                 send_admin_new_user_alert(portal_client, user)
@@ -1431,12 +1500,15 @@ class DynamicBotManager:
                 from portal_hub.interactive import build_persistent_reply_keyboard
                 # Send persistent 2x2 reply keyboard pinned to mobile screen
                 portal_client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=build_persistent_reply_keyboard())
-                t_out, m_out = render_main_menu(user)
+                subs = portal_db.get_user_subscriptions(user_id)
+                t_out, m_out = render_main_menu(user, subs)
             elif action == "SUBS":
                 subs = portal_db.get_user_subscriptions(user_id)
                 t_out, m_out = render_subscription_view(user, subs)
             elif action == "CAT":
-                t_out, m_out = render_category_home_view()
+                from portal_hub.interactive import render_catalog_all_view
+                subs = portal_db.get_user_subscriptions(user_id)
+                t_out, m_out = render_catalog_all_view(user, subs)
             elif action == "TIER":
                 t_out, m_out = render_tier_benefits_view(user)
             elif action == "SUPPORT":
@@ -1680,6 +1752,44 @@ class DynamicBotManager:
             up_id = int(item.get("update_id", 0))
             if up_id > last_offset:
                 last_offset = up_id
+
+            # [TG-04 & INV-01] Link Confirmation Gate intercepts before any domain bot
+            if "callback_query" in item:
+                cq = item["callback_query"]
+                cb_data = str(cq.get("data") or "")
+                if cb_data.startswith("gate:"):
+                    cq_id = str(cq.get("id", ""))
+                    msg = cq.get("message", {}) or {}
+                    chat = msg.get("chat", {}) or cq.get("from", {}) or {}
+                    chat_id = str(chat.get("id") or "")
+                    msg_id = int(msg.get("message_id") or 0)
+                    gate_router = LinkGateRouter(GATE_REGISTRY)
+                    gate_res = gate_router.handle_callback(cb_data, bot.bot_id, chat_id, msg_id)
+                    if gate_res.get("handled"):
+                        if cq_id:
+                            transport.answer_callback(cq_id, text=gate_res.get("toast", ""))
+                        if gate_res.get("action") == "CONFIRM_CARD":
+                            transport.edit_message_text(chat_id, msg_id, gate_res["html"], gate_res["inline_keyboard"])
+                        elif gate_res.get("action") == "CANCEL":
+                            from market_brief.briefing_service import generate_bot_briefing
+                            try:
+                                gen = generate_bot_briefing(bot.bot_id, db=self.engine)
+                                transport.edit_message_text(
+                                    chat_id,
+                                    msg_id,
+                                    gen.get("content_html") or "이동이 취소되었습니다.",
+                                    gen.get("inline_keyboard"),
+                                )
+                            except Exception:
+                                transport.edit_message_text(
+                                    chat_id,
+                                    msg_id,
+                                    "이동이 취소되었습니다.\n아래 버튼을 눌러 최신 화면을 확인하세요.",
+                                    [[{"text": "🔄 최신 브리핑 확인", "callback_data": f"info:preview:{bot.bot_id}"}]],
+                                )
+                        processed += 1
+                        events.append({"user_id": chat_id, "type": "gate_callback", "code": gate_res.get("action")})
+                        continue
 
             if bot.bot_id == "menu_bot":
                 handled, reason = self._dispatch_portal_menu_update(bot.token, item)

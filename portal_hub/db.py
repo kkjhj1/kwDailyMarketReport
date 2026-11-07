@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
+from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "alerts.sqlite3"
 
@@ -134,6 +135,18 @@ class PortalDatabase:
                     ('kids_bot', 'INFO', '자녀', '육아·자녀', '👶', 1, 5),
                     ('yolo_bot', 'INFO', '욜로', '여가·라이프', '🏄', 1, 6);
             """)
+
+            # Idempotent migration for users table columns
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(users)")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            if "is_name_custom" not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN is_name_custom INTEGER NOT NULL DEFAULT 0")
+            if "name_source" not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN name_source TEXT DEFAULT 'TELEGRAM'")
+            if "name_synced_at" not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN name_synced_at TEXT")
+
             conn.commit()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -152,6 +165,7 @@ class PortalDatabase:
         chat_id: int,
         username: Optional[str] = None,
         first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
     ) -> UserProfile:
         """Retrieves existing profile from alerts.sqlite3 users table, or creates with default WHITE/FREE."""
         uid_str = str(user_id).strip()
@@ -165,25 +179,44 @@ class PortalDatabase:
                     tier_val = UserTier(raw_tier)
                 except ValueError:
                     tier_val = UserTier.WHITE
+
+                current_full_name = str(row["full_name"] or "")
+                is_custom = int(row["is_name_custom"] or 0) if "is_name_custom" in row.keys() else 0
+                source = str(row["name_source"] or "TELEGRAM") if "name_source" in row.keys() else "TELEGRAM"
+
+                # Auto-heal corrupted placeholder names if not custom
+                if not is_custom and is_placeholder_name(current_full_name) and (first_name or last_name or username):
+                    healed_name, new_src = resolve_telegram_display_name(first_name, last_name, username, user_id)
+                    cur.execute(
+                        "UPDATE users SET full_name = ?, name_source = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_user_id = ?",
+                        (healed_name, new_src, uid_str),
+                    )
+                    conn.commit()
+                    current_full_name = healed_name
+                    source = new_src
+
                 return UserProfile(
                     user_id=user_id,
                     chat_id=chat_id,
                     username=row["username"] or username,
-                    first_name=row["full_name"] or first_name,
+                    first_name=current_full_name or first_name,
+                    full_name=current_full_name,
                     tier=tier_val,
                     status=row["status"] or "ACTIVE",
                     created_at=str(row["created_at"]),
                     updated_at=str(row["updated_at"]),
+                    is_name_custom=is_custom,
+                    name_source=source,
                 )
 
             # Insert new user into alerts.sqlite3 users table
-            name_to_use = first_name or (f"@{username}" if username else f"유저_{uid_str[-4:]}")
+            name_to_use, source = resolve_telegram_display_name(first_name, last_name, username, user_id)
             cur.execute(
                 """
-                INSERT INTO users (telegram_user_id, username, full_name, tier, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'WHITE', 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO users (telegram_user_id, username, full_name, tier, status, is_name_custom, name_source, created_at, updated_at)
+                VALUES (?, ?, ?, 'WHITE', 'ACTIVE', 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (uid_str, username or "", name_to_use),
+                (uid_str, username or "", name_to_use, source),
             )
             conn.commit()
             return UserProfile(
@@ -191,9 +224,12 @@ class PortalDatabase:
                 chat_id=chat_id,
                 username=username,
                 first_name=name_to_use,
+                full_name=name_to_use,
                 tier=UserTier.WHITE,
                 status="ACTIVE",
                 is_new=True,
+                is_name_custom=0,
+                name_source=source,
             )
 
     def set_user_tier(self, user_id: int, tier: UserTier) -> bool:

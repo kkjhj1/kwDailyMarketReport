@@ -262,6 +262,7 @@ def run_polling(token: str) -> None:
                         chat_id=chat_id,
                         username=user_info.get("username"),
                         first_name=user_info.get("first_name"),
+                        last_name=user_info.get("last_name"),
                     )
                     if getattr(user, "is_new", False) is True:
                         send_admin_new_user_alert(client, user)
@@ -321,7 +322,8 @@ def run_polling(token: str) -> None:
 
                     # Handle Fixed Commands & Persistent Keyboard Texts
                     if action == "START":
-                        reply_text, markup = render_main_menu(user)
+                        subs = db.get_user_subscriptions(user_id)
+                        reply_text, markup = render_main_menu(user, subs)
                         client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=reply_kb)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
@@ -331,7 +333,9 @@ def run_polling(token: str) -> None:
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
                     elif action == "CAT":
-                        reply_text, markup = render_category_home_view()
+                        from portal_hub.interactive import render_catalog_all_view
+                        subs = db.get_user_subscriptions(user_id)
+                        reply_text, markup = render_catalog_all_view(user, subs)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
                     elif action == "TIER":

@@ -35,6 +35,7 @@ from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
 from market_brief.briefing_scheduler import InternalBriefingScheduler
 from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
+from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
 from market_brief.subscription_engine import SubscriptionEngine
 
 try:
@@ -228,30 +229,23 @@ class BriefingSubscriberDispatchRequest(BaseModel):
 
 def fetch_telegram_profile_name(token: str, chat_id: str) -> str:
     if not token or not chat_id:
-        return f"수신자_{chat_id[-4:]}" if chat_id else "수신자"
+        return f"수신자_{str(chat_id)[-4:]}" if chat_id else "수신자"
     url = f"https://api.telegram.org/bot{token}/getChat?chat_id={chat_id}"
     req = urllib.request.Request(url, headers={"User-Agent": "MarketBriefAdmin"})
     try:
         with urllib.request.urlopen(req, timeout=5) as res:
             data = json.loads(res.read().decode())
             r = data.get("result", {})
-            first = r.get("first_name", "").strip()
-            last = r.get("last_name", "").strip()
-            title = r.get("title", "").strip()
-            username = r.get("username", "").strip()
+            first = r.get("first_name", "")
+            last = r.get("last_name", "")
+            title = (r.get("title") or "").strip()
+            username = r.get("username", "")
             if title:
                 return title
-            if last and first:
-                if any("\uac00" <= c <= "\ud7a3" for c in last + first):
-                    return f"{last}{first}"
-                return f"{first} {last}"
-            if first:
-                return first
-            if username:
-                return f"@{username}"
-            return f"수신자_{chat_id[-4:]}"
+            name, _ = resolve_telegram_display_name(first, last, username, chat_id)
+            return name
     except Exception:
-        return f"수신자_{chat_id[-4:]}"
+        return f"수신자_{str(chat_id)[-4:]}"
 
 
 def create_admin_app(
@@ -664,19 +658,74 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail="텔레그램 봇 토큰이 설정되지 않았습니다.")
 
         users = sub_engine.list_users_with_subscriptions()
-        synced_count = 0
+        total = len(users)
+        updated = 0
+        skipped_custom = 0
+        unchanged = 0
+        failed = 0
+
         for u in users:
             uid = str(u.get("telegram_user_id") or "").strip()
             if not uid:
                 continue
-            name = fetch_telegram_profile_name(token, uid)
-            if name and not name.startswith("수신자_") and name != u.get("full_name"):
-                try:
-                    sub_engine.update_user_details(telegram_user_id=uid, full_name=name)
-                    synced_count += 1
-                except KeyError:
-                    continue
-        return {"success": True, "synced_count": synced_count}
+            # Invariant: Never overwrite admin custom names
+            if int(u.get("is_name_custom") or 0) == 1:
+                skipped_custom += 1
+                continue
+
+            try:
+                name = fetch_telegram_profile_name(token, uid)
+                if name and not is_placeholder_name(name) and name != u.get("full_name"):
+                    sub_engine.update_user_details(
+                        telegram_user_id=uid,
+                        full_name=name,
+                        is_name_custom=0,
+                        name_source="TELEGRAM",
+                    )
+                    updated += 1
+                elif name and is_placeholder_name(u.get("full_name")) and not is_placeholder_name(name):
+                    sub_engine.update_user_details(
+                        telegram_user_id=uid,
+                        full_name=name,
+                        is_name_custom=0,
+                        name_source="TELEGRAM",
+                    )
+                    updated += 1
+                else:
+                    unchanged += 1
+            except Exception:
+                failed += 1
+
+        return {
+            "success": True,
+            "total": total,
+            "updated": updated,
+            "synced_count": updated,
+            "skipped_custom": skipped_custom,
+            "unchanged": unchanged,
+            "failed": failed,
+        }
+
+    @app.post("/api/platform/users/{user_id}/reset-name")
+    def reset_platform_user_name(user_id: str, request: Request):
+        verify_admin_token(request)
+        uid = str(user_id).strip()
+        token = os.getenv("TELEGRAM_BOT_TOKEN") or ""
+        if not token:
+            brief_bot = sub_engine.get_bot("brief_bot")
+            if brief_bot and getattr(brief_bot, "token", None):
+                token = brief_bot.token
+        if not token:
+            raise HTTPException(status_code=400, detail="텔레그램 봇 토큰이 설정되지 않았습니다.")
+
+        name = fetch_telegram_profile_name(token, uid)
+        user = sub_engine.update_user_details(
+            telegram_user_id=uid,
+            full_name=name,
+            is_name_custom=0,
+            name_source="TELEGRAM",
+        )
+        return {"success": True, "user_id": uid, "name": name, "user": user}
 
     @app.get("/api/platform/upgrade-requests")
     def list_platform_upgrade_requests(status: str | None = None):

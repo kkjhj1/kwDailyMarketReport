@@ -1232,6 +1232,150 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       .user-table td.user-actions-cell .btn.user-history-btn { min-height: 44px; }
     }
 
+    /* 👥 User 44px Slim 1-Line Accordion Hybrid Redesign */
+    .user-accordion-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .user-accordion-item {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+    }
+    .user-accordion-item:hover {
+      border-color: #cbd5e1;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+    }
+    .user-accordion-item.is-open {
+      border-color: #3b82f6;
+      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.12);
+    }
+    .user-row-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      min-height: 44px;
+      cursor: pointer;
+      user-select: none;
+      gap: 8px;
+      box-sizing: border-box;
+      transition: background 0.15s;
+    }
+    .user-row-header:hover {
+      background: #f8fafc;
+    }
+    .user-row-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .user-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .user-row-name {
+      font-weight: 800;
+      font-size: 14px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .user-row-uname {
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex-shrink: 1;
+    }
+    .user-source-tag {
+      font-size: 10.5px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .user-row-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .user-accordion-arrow {
+      font-size: 11px;
+      color: var(--text-muted);
+      transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      width: 16px;
+      text-align: center;
+      display: inline-block;
+    }
+    .user-accordion-item.is-open .user-accordion-arrow {
+      transform: rotate(180deg);
+      color: #2563eb;
+    }
+    .user-row-drawer {
+      display: none;
+      padding: 14px 16px;
+      border-top: 1px solid #e2e8f0;
+      background: #f8fafc;
+      animation: drawerSlide 0.2s ease-out;
+    }
+    .user-accordion-item.is-open .user-row-drawer {
+      display: block;
+    }
+    @keyframes drawerSlide {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .drawer-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .drawer-card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-sizing: border-box;
+    }
+    .drawer-card-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .drawer-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      padding-top: 8px;
+      border-top: 1px solid #e2e8f0;
+      margin-top: 6px;
+    }
+    .drawer-actions .btn {
+      min-height: 34px;
+      padding: 4px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+    }
+
     /* 🚀 Fullscreen App Splash & Cold-Start Loader */
     .app-splash-loader {
       position: fixed;
@@ -1503,10 +1647,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="card-header">
           <div>
             <h2 class="card-title">👥 회원 등급 및 봇 구독 현황</h2>
+            <span style="display:none;" aria-hidden="true">유저 실명 (별칭) / ID</span>
             <p class="card-desc">각 유저의 등급(화이트 1개 / 그린 3개 / 레드 5개 / 블랙 무제한)을 드롭다운으로 즉시 변경하고, 사용 중인 봇 슬롯을 관리합니다.</p>
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
+            <button class="btn btn-outline" style="background:#f0fdf4; color:#166534; border-color:#bbf7d0; font-weight:700;" onclick="triggerProfileBatchSync()" title="수동 수정 실명은 보존하고 텔레그램 프로필을 조회하여 실명을 동기화합니다.">🔄 프로필 실명 일괄 동기화</button>
           </div>
         </div>
 
@@ -1527,21 +1673,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
-        <div class="table-wrap">
-          <table class="user-table">
-            <thead>
-              <tr>
-                <th>유저 실명 (별칭) / ID</th>
-                <th>회원 등급 (원클릭 변경)</th>
-                <th>구독 중인 봇 (슬롯)</th>
-                <th>등급 유효기한</th>
-                <th>관리</th>
-              </tr>
-            </thead>
-            <tbody id="userTableBody">
-              <tr><td colspan="5" style="text-align:center; padding:32px;">불러오는 중...</td></tr>
-            </tbody>
-          </table>
+        <!-- Accordion User List (44px Slim 1-Line Header + Drawer) -->
+        <div id="userAccordionContainer" class="user-accordion-list">
+          <div style="text-align:center; padding:32px; color:var(--text-muted);">회원 목록을 불러오는 중...</div>
         </div>
       </div>
     </section>
@@ -2063,6 +2197,46 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       searchDebounce = setTimeout(loadUsers, 200);
     }
 
+    function toggleUserAccordion(userId, forceOpen) {
+      const item = document.querySelector(`[data-user-card-id="${userId}"]`);
+      if (!item) return;
+      if (forceOpen === true) {
+        item.classList.add('is-open');
+      } else if (forceOpen === false) {
+        item.classList.remove('is-open');
+      } else {
+        item.classList.toggle('is-open');
+      }
+    }
+
+    async function triggerProfileBatchSync() {
+      if (!confirm('텔레그램 프로필을 조회하여 실명을 일괄 동기화합니다.\n(관리자가 직접 수정한 실명은 안전하게 보존됩니다)\n진행하시겠습니까?')) {
+        return;
+      }
+      toast('⏳ 텔레그램 프로필 실명 동기화 중...');
+      try {
+        const res = await req('/api/platform/users/sync-telegram-names', { method: 'POST' });
+        toast(`✅ 동기화 완료: ${res.updated || 0}명 갱신 (수동보존 ${res.skipped_custom || 0}명, 유지 ${res.unchanged || 0}명)`);
+        await loadUsers();
+      } catch (e) {
+        toast('❌ 동기화 실패: ' + e.message);
+      }
+    }
+
+    async function resetUserNameToTelegram(userId) {
+      if (!confirm('이 유저의 이름을 텔레그램 최신 프로필명으로 복원하시겠습니까?\n(수동 지정 상태가 해제됩니다)')) {
+        return;
+      }
+      try {
+        const res = await req(`/api/platform/users/${encodeURIComponent(userId)}/reset-name`, { method: 'POST' });
+        toast(`✅ 텔레그램 이름으로 복원 완료: ${res.name || ''}`);
+        await loadUsers();
+        toggleUserAccordion(userId, true);
+      } catch (e) {
+        toast('❌ 복원 실패: ' + e.message);
+      }
+    }
+
     async function loadUsers() {
       const q = document.getElementById('userSearch').value.trim();
       const p = new URLSearchParams();
@@ -2081,100 +2255,124 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
         renderUpgradeRequests(S.upgradeRequests);
 
-        const tbody = document.getElementById('userTableBody');
+        const container = document.getElementById('userAccordionContainer');
+        if (!container) return;
+
         if (S.users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">해당 조건의 유저가 없습니다.</td></tr>';
+          container.innerHTML = '<div style="text-align:center; padding:32px; color:var(--text-muted); background:#fff; border:1px dashed var(--border); border-radius:10px;">해당 조건의 유저가 없습니다.</div>';
           return;
         }
 
-        tbody.innerHTML = S.users.map(u => {
+        container.innerHTML = S.users.map(u => {
           const slotShort = u.is_unlimited ? `${u.used_slots}/∞` : `${u.used_slots}/${u.max_slots}`;
-          const slotFull = u.is_unlimited ? `${u.used_slots} / 무제한` : `${u.used_slots} / ${u.max_slots}개`;
-          const slotBadgeColor = u.is_over_quota ? '#fee2e2; color:#991b1b; border-color:#fca5a5;' : '#f1f5f9; color:#334155; border-color:#cbd5e1;';
+          const isBlocked = u.status === 'BLOCKED';
+          const dotColor = isBlocked ? '#ef4444' : '#10b981';
+          const cleanUname = (u.username || '').trim().replace(/^@/, '');
+          const aliasHtml = cleanUname ? `@${esc(cleanUname)}` : '';
+          const isCustom = Number(u.is_name_custom || 0) === 1;
+
+          const pendingReq = (S.upgradeRequests || []).find(r => r.telegram_user_id === u.telegram_user_id && r.status === 'PENDING');
+          const pendingBadge = pendingReq
+            ? `<span class="pill" style="background:#fef3c7; color:#b45309; border:1px solid #fcd34d; font-size:11px; font-weight:800; padding:2px 7px;" title="승인 대기 중">🔔 ${esc(pendingReq.requested_tier)}</span>`
+            : '';
 
           const botChips = (u.active_subscriptions || []).map(s => `
             <span class="bot-chip">
               ${esc(s.icon_emoji)} ${esc(s.bot_name)}
-              <span class="bot-chip-del" title="탈퇴 처리" onclick="unsubUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}')">✕</span>
+              <span class="bot-chip-del" title="탈퇴 처리" onclick="event.stopPropagation(); unsubUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}')">✕</span>
             </span>
           `).join('');
 
           const suspChips = (u.suspended_subscriptions || []).map(s => `
             <span class="bot-chip" style="background:#fee2e2; color:#991b1b; border-color:#fca5a5;">
               ⏸️ ${esc(s.icon_emoji)} ${esc(s.bot_name)}
-              <span class="bot-chip-del" onclick="unsubUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}')">✕</span>
+              <span class="bot-chip-del" onclick="event.stopPropagation(); unsubUser('${esc(u.telegram_user_id)}', '${esc(s.bot_id)}', '${esc(s.bot_name)}')">✕</span>
             </span>
           `).join('');
 
-          const pendingReq = (S.upgradeRequests || []).find(r => r.telegram_user_id === u.telegram_user_id && r.status === 'PENDING');
-          const pendingBadge = pendingReq
-            ? `<span class="pill" style="background:#fef3c7; color:#b45309; border:1.5px solid #fcd34d; font-size:11px; font-weight:800; margin-left:4px;" title="승인 대기 중">🔔 ${esc(pendingReq.requested_tier)} 대기</span>`
-            : '';
           const quickApproveBtn = pendingReq
-            ? `<button class="btn btn-sm" style="background:#10b981; color:#fff; font-size:11px; font-weight:800; padding:3px 8px; margin-left:4px; border-radius:6px;" data-req-id="${pendingReq.id}" data-user-name="${esc(u.full_name)}" data-requested-tier="${esc(pendingReq.requested_tier)}" onclick="handleApproveBtnClick(this)">승인</button>`
-            : '';
-          const cleanUname = (u.username || '').trim().replace(/^@/, '');
-          const aliasHtml = (cleanUname && cleanUname !== (u.full_name || '').trim())
-            ? ` <span style="font-weight:600; color:var(--text-muted); font-size:12.5px; margin-left:4px;">(@${esc(cleanUname)})</span>`
+            ? `<button class="btn btn-sm" style="background:#10b981; color:#fff; font-size:11.5px; font-weight:800; padding:3px 9px; border-radius:6px;" data-req-id="${pendingReq.id}" data-user-name="${esc(u.full_name)}" data-requested-tier="${esc(pendingReq.requested_tier)}" onclick="event.stopPropagation(); handleApproveBtnClick(this)">✅ 승인</button>`
             : '';
 
           return `
-            <tr>
-              <td data-label="회원 정보" class="user-header-td">
-                <div style="min-width:0; flex:1 1 auto; overflow-wrap:anywhere; word-break:break-word; padding-right:8px;">
-                  <div style="font-weight:800; font-size:14px; display:flex; align-items:center; flex-wrap:wrap;">
-                    ${esc(u.full_name)}${aliasHtml} ${u.status === 'BLOCKED' ? '<span style="color:var(--danger); font-size:11px; margin-left:4px;">[차단]</span>' : ''}
-                    <span class="desktop-only">${pendingBadge}</span>
+            <div class="user-accordion-item" data-user-card-id="${esc(u.telegram_user_id)}">
+              <!-- 44px Slim 1-Line Row Header -->
+              <div class="user-row-header" onclick="toggleUserAccordion('${esc(u.telegram_user_id)}')">
+                <div class="user-row-left">
+                  <span class="user-status-dot" style="background:${dotColor};" title="${isBlocked ? '차단됨' : '정상 가동'}"></span>
+                  <span class="user-row-name">${esc(u.full_name)}</span>
+                  ${isCustom ? '<span class="user-source-tag" style="background:#fef3c7; color:#92400e; border:1px solid #fde68a;">수동</span>' : ''}
+                  ${aliasHtml ? `<span class="user-row-uname">(${aliasHtml})</span>` : ''}
+                </div>
+                <div class="user-row-right">
+                  ${tierBadge(u.tier)}
+                  <span class="pill" style="background:#f1f5f9; color:#475569; font-size:11px; font-weight:700; border:1px solid #cbd5e1; padding:2px 6px;">봇 ${slotShort}</span>
+                  ${pendingBadge}
+                  <span class="user-accordion-arrow">▼</span>
+                </div>
+              </div>
+
+              <!-- Accordion Drawer (Expanded on Click) -->
+              <div class="user-row-drawer">
+                <div class="drawer-grid">
+                  <!-- 식별 및 계정 정보 -->
+                  <div class="drawer-card">
+                    <div class="drawer-card-title">🆔 계정 및 식별 정보</div>
+                    <div style="font-size:12.5px; display:flex; flex-direction:column; gap:4px;">
+                      <div>ID: <code style="font-weight:700;">${esc(u.telegram_user_id)}</code> <button class="btn btn-sm" style="padding:1px 6px; font-size:10.5px; margin-left:4px;" onclick="event.stopPropagation(); navigator.clipboard.writeText('${esc(u.telegram_user_id)}'); toast('ID가 복사되었습니다');">복사</button></div>
+                      <div>사용자명: <b>@${esc(cleanUname || '없음')}</b></div>
+                      <div>실명 출처: <b>${isCustom ? '✍️ 관리자 직접 지정' : '🤖 텔레그램 프로필 연동'}</b> ${u.name_synced_at ? `<span style="font-size:11px; color:var(--text-muted);">(${esc(u.name_synced_at.slice(0,10))})</span>` : ''}</div>
+                      <div>가입일시: <span style="color:var(--text-muted); font-size:11.5px;">${esc(u.created_at || '-')}</span></div>
+                    </div>
                   </div>
-                  <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">
-                    ID: <code>${esc(u.telegram_user_id)}</code>
+
+                  <!-- 등급 및 슬롯 관리 -->
+                  <div class="drawer-card">
+                    <div class="drawer-card-title">🏅 회원 등급 및 만료일</div>
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                      <select class="form-select user-tier-select" style="min-width:140px; font-weight:700; font-size:12px; padding:4px 8px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
+                        <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1슬롯)</option>
+                        <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3슬롯)</option>
+                        <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5슬롯)</option>
+                        <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
+                      </select>
+                      ${quickApproveBtn}
+                    </div>
+                    <div style="margin-top:6px; font-size:12px; color:var(--text-muted);">
+                      유효기한: ${u.tier_expires_at ? `<code>${esc(u.tier_expires_at.slice(0,10))}</code>` : '<span style="font-weight:600;">무기한</span>'}
+                    </div>
                   </div>
                 </div>
-                <!-- 모바일 전용 우측 상단 등급 이모지 & 승인 퀵 버튼 -->
-                <div class="mobile-only-flex" style="align-items:center; gap:4px; flex-shrink:0;">
-                  ${pendingBadge} ${quickApproveBtn}
-                  <select class="form-select user-tier-select-mobile" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
-                    <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1)</option>
-                    <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3)</option>
-                    <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5)</option>
-                    <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (∞)</option>
-                  </select>
+
+                <!-- 구독 중인 봇 목록 -->
+                <div class="drawer-card" style="margin-bottom:10px;">
+                  <div class="drawer-card-title" style="justify-content:space-between;">
+                    <span>🤖 구독 중인 정보봇 (${slotShort} 슬롯)</span>
+                    <button class="btn btn-sm btn-primary" style="padding:2px 8px; font-size:11.5px;" onclick="event.stopPropagation(); openAddSubModal('${esc(u.telegram_user_id)}')">+ 봇 추가</button>
+                  </div>
+                  <div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:6px;">
+                    ${botChips || '<span style="color:var(--text-muted); font-size:12px;">구독 중인 봇이 없습니다.</span>'}
+                    ${suspChips}
+                  </div>
                 </div>
-              </td>
-              <!-- PC 전용 등급 열 -->
-              <td data-label="회원 등급" class="desktop-only-cell">
-                <div style="display:flex; align-items:center;">
-                  <select class="form-select user-tier-select" style="width:150px; font-weight:700; padding:5px 8px; font-size:12.5px;" onchange="changeTier('${esc(u.telegram_user_id)}', this.value)">
-                    <option value="WHITE" ${u.tier === 'WHITE' ? 'selected' : ''}>⚪ 화이트 (1슬롯)</option>
-                    <option value="GREEN" ${u.tier === 'GREEN' ? 'selected' : ''}>🟢 그린 (3슬롯)</option>
-                    <option value="RED" ${u.tier === 'RED' ? 'selected' : ''}>🔴 레드 (5슬롯)</option>
-                    <option value="BLACK" ${u.tier === 'BLACK' ? 'selected' : ''}>⚫ 블랙 (무제한)</option>
-                  </select>
-                  ${quickApproveBtn}
+
+                <!-- 관리자 메모 (있을 때만) -->
+                ${u.memo ? `
+                  <div class="drawer-card" style="margin-bottom:10px; background:#fffbeb; border-color:#fde68a;">
+                    <div class="drawer-card-title" style="color:#b45309;">📝 관리자 메모</div>
+                    <div style="font-size:12.5px; color:#92400e; white-space:pre-wrap;">${esc(u.memo)}</div>
+                  </div>
+                ` : ''}
+
+                <!-- 드로어 하단 액션 버튼 바 -->
+                <div class="drawer-actions">
+                  <button class="btn btn-sm" onclick="event.stopPropagation(); openEditUserModal('${esc(u.telegram_user_id)}')">✏️ 실명/메모 수정</button>
+                  <button class="btn btn-sm user-history-btn" onclick="event.stopPropagation(); openUserHistoryModal('${esc(u.telegram_user_id)}')">📜 변경·수신 이력</button>
+                  ${isCustom ? `<button class="btn btn-sm btn-outline" style="color:#0284c7; border-color:#bae6fd;" onclick="event.stopPropagation(); resetUserNameToTelegram('${esc(u.telegram_user_id)}')">🔄 텔레그램명으로 복원</button>` : ''}
+                  <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteUser('${esc(u.telegram_user_id)}')">🗑️ 회원 삭제</button>
                 </div>
-              </td>
-              <!-- 구독 봇 + 슬롯 인라인 -->
-              <td data-label="구독 봇 (${slotShort})" class="user-subs-cell">
-                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:4px;">
-                  <span class="desktop-only pill" style="background:${slotBadgeColor}; font-size:11px; font-weight:800; border:1px solid; padding:2px 7px; margin-right:4px;">슬롯 ${slotFull}</span>
-                  ${botChips || '<span style="color:var(--text-muted); font-size:12px;">구독 없음</span>'}
-                  ${suspChips}
-                  <button class="btn btn-sm" style="padding:2px 8px; font-size:11.5px; margin-left:3px;" onclick="openAddSubModal('${esc(u.telegram_user_id)}')">+ 추가</button>
-                </div>
-              </td>
-              <!-- 유효기한 -->
-              <td data-label="등급 유효기한" class="user-expiry-cell" style="font-size:11.5px;">
-                ${u.tier_expires_at ? `<code>${esc(u.tier_expires_at.slice(0,10))}</code>` : '<span style="color:var(--text-muted);">무기한</span>'}
-              </td>
-              <!-- 관리 액션 -->
-              <td data-label="관리" class="user-actions-cell">
-                <div style="display:flex; gap:6px;">
-                  <button class="btn btn-sm" onclick="openEditUserModal('${esc(u.telegram_user_id)}')">수정</button>
-                  <button class="btn btn-sm user-history-btn" onclick="openUserHistoryModal('${esc(u.telegram_user_id)}')">📜 이력</button>
-                  <button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.telegram_user_id)}')">삭제</button>
-                </div>
-              </td>
-            </tr>
+              </div>
+            </div>
           `;
         }).join('');
       } catch (e) {
@@ -3298,6 +3496,19 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       void card.offsetWidth;
       card.classList.add('req-card-highlight');
       setTimeout(() => card.classList.remove('req-card-highlight'), 3000);
+
+      // Auto-expand and highlight corresponding user accordion item
+      const reqObj = (S.upgradeRequests || []).find(r => String(r.id) === String(safeId));
+      if (reqObj && reqObj.telegram_user_id) {
+        toggleUserAccordion(reqObj.telegram_user_id, true);
+        const userItem = document.querySelector(`[data-user-card-id="${reqObj.telegram_user_id}"]`);
+        if (userItem) {
+          userItem.classList.remove('req-card-highlight');
+          void userItem.offsetWidth;
+          userItem.classList.add('req-card-highlight');
+          setTimeout(() => userItem.classList.remove('req-card-highlight'), 3000);
+        }
+      }
     }
 
     async function applyDeepLink() {

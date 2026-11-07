@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from portal_hub.db import PortalDatabase
 from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
 from portal_hub.telegram import TelegramPortalClient
+from market_brief.link_gate import GATE_REGISTRY, build_gate_button
 
 logger = logging.getLogger(__name__)
 
@@ -76,47 +77,42 @@ def _safe_edit_or_send(
 # Screen Renderers
 # ============================================================
 
-def render_main_menu(user: UserProfile) -> tuple[str, dict[str, Any]]:
-    """Renders Welcome & Main Hub Dashboard with 4-Category Grid & Popular Top 3."""
+def render_main_menu(
+    user: UserProfile, subs: Optional[dict[BotServiceType, bool]] = None
+) -> tuple[str, dict[str, Any]]:
+    """Renders Welcome & Main Hub Dashboard with streamlined 3-row layout and active subscriptions chip."""
     name = html.escape(user.first_name or user.username or "회원")
+    active_line = ""
+    if subs is not None:
+        active_bots = [b.short_name for b, act in subs.items() if act]
+        if active_bots:
+            chips = " · ".join(active_bots)
+            active_line = f"📌 <b>내 활성 구독 ({len(active_bots)}개)</b>: {chips}\n"
+        else:
+            active_line = "📌 <b>내 활성 구독</b>: 아직 구독 중인 봇이 없습니다.\n"
+
     text = (
         f"👋 안녕하세요, <b>{name}</b>님!\n"
         f"<b>통합 인텔리전스 허브(Hub)</b>에 오신 것을 환영합니다.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏅 <b>나의 회원 등급</b>: {user.tier.badge}\n"
         f"📦 <b>구독 가능 슬롯</b>: <b>{user.tier.max_slots if user.tier != UserTier.BLACK else '무제한'}개</b>\n"
+        f"{active_line}"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔥 <b>[운영 중인 6대 전문 AI 브리핑 봇]</b>\n"
-        f"• 📈 <b>시황 브리핑</b>: 매일 06:30·15:40 증시/환율\n"
-        f"• 🎓 <b>입시 나침반</b>: 학년별 대입 To-Do & 설명회\n"
-        f"• ✈️ <b>여행 특가</b>: 6개월 최저가 항공권·숙소 딜\n"
-        f"• 👵 <b>부모님 복지</b>: 실버케어 맞춤 혜택·효도 비서\n"
-        f"• 🍼 <b>키즈 나침반</b>: 주말 아이 나들이·해열제·달빛병원\n"
-        f"• 🏄 <b>욜로 라이프</b>: 1인 액티비티·전시·힐링 큐레이션\n\n"
-        f"💡 <i>관심 카테고리를 터치하거나, 찾으시는 단어(예: '환율', '수시', '특가', '실버', '키즈', '욜로')를 채팅창에 바로 입력하세요!</i>"
+        f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '입시', '실버', '키즈', '욜로')를 입력하세요!</i>"
     )
 
     markup = {
         "inline_keyboard": [
             [
-                {"text": "💰 금융 / 재테크", "callback_data": "cat:view:FINANCE"},
-                {"text": "🎓 교육 / 입시", "callback_data": "cat:view:EDU"},
+                {"text": "📋 전체 봇 둘러보고 구독하기", "callback_data": "cat:all"},
             ],
             [
-                {"text": "✈️ 라이프 / 여가 (4종)", "callback_data": "cat:view:LIFE"},
-                {"text": "💼 업무 / 생산성", "callback_data": "cat:view:BIZ"},
+                {"text": "⚙️ 내 구독 관리", "callback_data": "nav:subs"},
+                {"text": "💎 내 등급 혜택", "callback_data": "nav:tiers"},
             ],
             [
-                {"text": "📋 6개 봇 한눈에 보기", "callback_data": "cat:all"},
-            ],
-            [
-                {"text": "📋 내 구독 센터 (6대 봇 원클릭 설정)", "callback_data": "nav:subs"},
-            ],
-            [
-                {"text": "💎 내 등급 & 혜택", "callback_data": "nav:tiers"},
                 {"text": "💬 고객센터 / 문의", "callback_data": "support:home"},
-            ],
-            [
                 {"text": "❓ 이용 도움말", "callback_data": "nav:help"},
             ],
         ]
@@ -166,17 +162,20 @@ def render_subscription_view(
             ])
         else:
             deep_link_url = f"https://t.me/{bot.telegram_handle}?start=portal"
+            tok = f"bot_{bot.value.replace('_bot', '')}"
+            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
+            move_btn = build_gate_button(tok, f"{bot.short_name} 이동 🔗")
             if is_subbed:
                 btn_text = f"🟢 구독중  │  {bot.icon} {bot.short_name}"
                 keyboard.append([
                     {"text": btn_text, "callback_data": f"sub:ask_unsub:{bot.value}:subs"},
-                    {"text": f"{bot.short_name} 이동 🔗", "url": deep_link_url},
+                    move_btn,
                 ])
             else:
                 btn_text = f"⚪ 미구독  │  {bot.icon} {bot.short_name}"
                 keyboard.append([
                     {"text": btn_text, "callback_data": f"sub:do_sub:{bot.value}:subs"},
-                    {"text": f"{bot.short_name} 이동 🔗", "url": deep_link_url},
+                    move_btn,
                 ])
 
     keyboard.extend([
@@ -240,9 +239,13 @@ def render_category_view(
             else:
                 action_btn = {"text": f"➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:cat:{category.value}"}
 
+            tok = f"bot_{b.value.replace('_bot', '')}"
+            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
+            move_btn = build_gate_button(tok, f"{b.short_name} 이동 🔗")
+
             keyboard.append([
                 action_btn,
-                {"text": f"{b.short_name} 이동 🔗", "url": deep_link_url},
+                move_btn,
             ])
 
     keyboard.extend([
@@ -385,10 +388,22 @@ def _onboarding_keyboard(bot_type: BotServiceType, context_str: str) -> dict[str
 def render_subscribe_onboarding_view(
     bot_type: BotServiceType, context_str: str = "subs"
 ) -> tuple[str, dict[str, Any]]:
-    """Renders subscription-complete card with a 1-tap deep link into the bot's chat room."""
+    """Renders subscription-complete card with schedule guidance and 1-tap deep link."""
+    schedule_map = {
+        BotServiceType.BRIEF: "매 영업일 아침 06:30 (장전 핵심 요약)",
+        BotServiceType.ADMISSION: "매주 월요일 아침 08:00 (대입 To-Do & 설명회)",
+        BotServiceType.TRAVEL: "매주 화·목 오전 10:00 (최저가 특가 딜)",
+        BotServiceType.SILVER: "매주 일요일 오전 09:00 (부모님 복지 브리핑)",
+        BotServiceType.KIDS: "매주 금요일 오전 10:00 (주말 나들이 & 육아 대처)",
+        BotServiceType.YOLO: "매주 금요일 오후 14:00 (주말 1인 취미 & 힐링)",
+    }
+    sched = schedule_map.get(bot_type, "정기 발행 스케줄에 맞춰 발송")
     text = (
         f"🎉 <b>{html.escape(bot_type.title)} 구독 완료!</b>\n\n"
-        f"지금 바로 대화방으로 이동하여 알림을 시작해보세요."
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ <b>정규 발송 시점</b>: {sched}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <i>대화방으로 이동하신 후, 화면 하단의 <b>[시작(START)]</b> 버튼을 꼭 눌러주세요. 그래야 알림이 정상 도착합니다!</i>"
     )
     return text, _onboarding_keyboard(bot_type, context_str)
 
@@ -489,9 +504,13 @@ def render_search_results_view(
             else:
                 action_btn = {"text": f"➕ 구독하기", "callback_data": f"sub:do_sub:{b.value}:search:{clean_q}"}
 
+            tok = f"bot_{b.value.replace('_bot', '')}"
+            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
+            move_btn = build_gate_button(tok, f"{b.short_name} 이동 🔗")
+
             keyboard.append([
                 action_btn,
-                {"text": f"{b.short_name} 이동 🔗", "url": deep_link_url},
+                move_btn,
             ])
 
     keyboard.extend([
@@ -792,6 +811,21 @@ def handle_callback_query(
     if not data.startswith("sub:toggle:") and not data.startswith("adm:"):
         client.answer_callback_query(cq_id)
 
+    # 0. Link Confirmation Gate Intercept
+    if data.startswith("gate:"):
+        from market_brief.link_gate import LinkGateRouter, GATE_REGISTRY
+        gate_router = LinkGateRouter(GATE_REGISTRY)
+        gate_res = gate_router.handle_callback(data, "menu_bot", str(chat_id), int(message_id or 0))
+        if gate_res.get("handled"):
+            if gate_res.get("action") == "CONFIRM_CARD":
+                _safe_edit_or_send(client, chat_id, message_id, gate_res["html"], {"inline_keyboard": gate_res["inline_keyboard"]})
+                return
+            elif gate_res.get("action") == "CANCEL":
+                subs = db.get_user_subscriptions(user_id)
+                text, markup = render_subscription_view(user, subs)
+                _safe_edit_or_send(client, chat_id, message_id, text, markup)
+                return
+
     if data == "noop":
         return
 
@@ -812,13 +846,15 @@ def handle_callback_query(
         chat_id=chat_id,
         username=from_user.get("username"),
         first_name=from_user.get("first_name"),
+        last_name=from_user.get("last_name"),
     )
     if getattr(user, "is_new", False) is True:
         send_admin_new_user_alert(client, user)
 
     # 2. Main Navigation (with full backwards compatibility for menu:home, menu:my_subs, menu:tiers)
     if data in ("nav:main", "menu:home", "home"):
-        text, markup = render_main_menu(user)
+        subs = db.get_user_subscriptions(user_id)
+        text, markup = render_main_menu(user, subs)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
 

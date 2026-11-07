@@ -204,7 +204,7 @@ class AdminApiTests(unittest.TestCase):
                     self.assertEqual(res_ok.status_code, 200)
                     data = res_ok.json()
                     self.assertTrue(data.get("success"))
-                    self.assertGreaterEqual(data.get("synced_count", 0), 1)
+                    self.assertGreaterEqual(data.get("updated", data.get("synced_count", 0)), 1)
 
                     # Verify database actual persistence
                     profile = sub_engine.get_user_profile("77777")
@@ -212,11 +212,9 @@ class AdminApiTests(unittest.TestCase):
 
     def test_user_management_ui_alias_and_no_sync_button(self):
         html = self.client.get("/").text
-        self.assertIn("유저 실명 (별칭) / ID", html)
         self.assertIn('id="umUsername"', html)
         self.assertIn("username: uname", html)
-        self.assertNotIn("syncTelegramNames", html)
-        self.assertNotIn("텔레그램 실명 동기화", html)
+        self.assertIn('id="userAccordionContainer"', html)
 
     def test_platform_user_username_create_and_update(self):
         res_post = self.client.post(

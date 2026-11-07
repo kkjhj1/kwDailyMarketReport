@@ -701,6 +701,32 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertFalse(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.SILVER])
         self.assertIn("6개 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
 
+    def test_main_menu_personalized_active_subs_chip_and_3row_layout(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="테스터")
+        subs = {b: False for b in BotServiceType}
+        subs[BotServiceType.BRIEF] = True
+        subs[BotServiceType.TRAVEL] = True
+
+        text, markup = render_main_menu(user, subs)
+        self.assertIn("내 활성 구독 (2개)", text)
+        self.assertIn("시황 브리핑", text)
+        self.assertIn("여행 특가", text)
+
+        rows = markup["inline_keyboard"]
+        self.assertEqual(len(rows), 3, "Main menu must have exactly 3 streamlined rows")
+        self.assertEqual(rows[0][0]["callback_data"], "cat:all")
+        self.assertEqual(rows[1][0]["callback_data"], "nav:subs")
+        self.assertEqual(rows[1][1]["callback_data"], "nav:tiers")
+        self.assertEqual(rows[2][0]["callback_data"], "support:home")
+        self.assertEqual(rows[2][1]["callback_data"], "nav:help")
+
+    def test_subscribe_onboarding_view_schedule_and_cta_notice(self):
+        from portal_hub.interactive import render_subscribe_onboarding_view
+        text, markup = render_subscribe_onboarding_view(BotServiceType.BRIEF)
+        self.assertIn("정규 발송 시점", text)
+        self.assertIn("매 영업일 아침 06:30", text)
+        self.assertIn("시작(START)", text)
+
 
 if __name__ == "__main__":
     unittest.main()

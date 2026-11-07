@@ -554,6 +554,10 @@ class SubscriptionEngine:
                 is_over = (not policy.is_unlimited) and (used_slots > policy.max_bots)
                 remaining = None if policy.is_unlimited else max(0, policy.max_bots - used_slots)
 
+                is_custom = int(u["is_name_custom"] or 0) if "is_name_custom" in u.keys() else 0
+                n_source = str(u["name_source"] or "TELEGRAM") if "name_source" in u.keys() else "TELEGRAM"
+                n_synced = u["name_synced_at"] if "name_synced_at" in u.keys() else None
+
                 user_obj = PlatformUser(
                     telegram_user_id=uid,
                     full_name=u["full_name"],
@@ -564,6 +568,9 @@ class SubscriptionEngine:
                     memo=u["memo"] or "",
                     created_at=u["created_at"],
                     updated_at=u["updated_at"],
+                    is_name_custom=is_custom,
+                    name_source=n_source,
+                    name_synced_at=n_synced,
                 ).to_dict()
                 user_obj.update(
                     {
@@ -640,6 +647,9 @@ class SubscriptionEngine:
         username: str | None = None,
         status: str | None = None,
         memo: str | None = None,
+        is_name_custom: int | None = None,
+        name_source: str | None = None,
+        name_synced_at: str | None = None,
     ) -> dict[str, Any]:
         uid = str(telegram_user_id).strip()
         with self._exclusive_tx() as conn:
@@ -650,12 +660,40 @@ class SubscriptionEngine:
             new_uname = username.strip().lstrip("@") if username is not None else (existing["username"] or "")
             new_status = status.strip().upper() if status is not None else (existing["status"] or "ACTIVE")
             new_memo = memo if memo is not None else (existing["memo"] or "")
-            conn.execute(
-                """UPDATE users
-                   SET full_name = ?, username = ?, status = ?, memo = ?, updated_at = ?
-                   WHERE telegram_user_id = ?""",
-                (new_name, new_uname, new_status, new_memo, now_kst_str(), uid),
-            )
+
+            # If full_name was explicitly provided and differs from old name, mark as custom
+            existing_custom = int(existing["is_name_custom"] or 0) if "is_name_custom" in existing.keys() else 0
+            if is_name_custom is not None:
+                final_custom = is_name_custom
+            elif full_name is not None and new_name != existing["full_name"]:
+                final_custom = 1
+            else:
+                final_custom = existing_custom
+
+            if name_source is not None:
+                final_source = name_source
+            elif full_name is not None and new_name != existing["full_name"]:
+                final_source = "MANUAL"
+            else:
+                final_source = existing["name_source"] if "name_source" in existing.keys() else "TELEGRAM"
+
+            final_synced = name_synced_at if name_synced_at is not None else (existing["name_synced_at"] if "name_synced_at" in existing.keys() else None)
+
+            if "is_name_custom" in existing.keys():
+                conn.execute(
+                    """UPDATE users
+                       SET full_name = ?, username = ?, status = ?, memo = ?,
+                           is_name_custom = ?, name_source = ?, name_synced_at = ?, updated_at = ?
+                       WHERE telegram_user_id = ?""",
+                    (new_name, new_uname, new_status, new_memo, final_custom, final_source, final_synced, now_kst_str(), uid),
+                )
+            else:
+                conn.execute(
+                    """UPDATE users
+                       SET full_name = ?, username = ?, status = ?, memo = ?, updated_at = ?
+                       WHERE telegram_user_id = ?""",
+                    (new_name, new_uname, new_status, new_memo, now_kst_str(), uid),
+                )
             if new_name != existing["full_name"]:
                 conn.execute("UPDATE recipients SET name = ? WHERE chat_id = ?", (new_name, uid))
 

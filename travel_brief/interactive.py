@@ -162,6 +162,9 @@ class TravelInteractiveHandler:
                 [
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
                 ],
+                [
+                    {"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"},
+                ],
             ]
         }
 
@@ -189,6 +192,9 @@ class TravelInteractiveHandler:
                 ],
                 [
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
+                ],
+                [
+                    {"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"},
                 ],
             ]
         }

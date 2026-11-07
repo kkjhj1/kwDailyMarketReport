@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import Any, Optional
 
 from admission_brief.ai_curator import AICurator
-from admission_brief.channels.telegram import TelegramChannel, _is_valid_url, build_google_calendar_url
+from admission_brief.channels.telegram import (
+    TelegramChannel,
+    _is_valid_url,
+    build_briefing_share_text,
+    build_event_share_text,
+    build_glossary_share_text,
+    build_google_calendar_url,
+    format_kakao_share_html,
+)
+from admission_brief.fixtures.glossary import GlossaryEntry, get_glossary_entry, list_glossary_entries
 from admission_brief.models import (
     CHILD_ALIASES,
     MAX_CHILDREN,
@@ -28,6 +37,11 @@ from admission_brief.storage.db import AdmissionDatabase
 logger = logging.getLogger(__name__)
 
 EVENTS_PAGE_SIZE = 3
+GLOSSARY_COLUMNS = 3
+CALLBACK_MAX_BYTES = 64
+GLOSSARY_MENU_TEXT = "📖 1초 입시용어 사전"
+SETTINGS_MENU_TEXT = "⚙️ 자녀 및 맞춤 설정"
+SHARE_TOAST = "📋 아래 박스를 터치하면 복사됩니다!"
 
 # callback_data short codes (adm:cat:<CODE>:<PAGE>) — ASCII only, well under 64 bytes
 CATEGORY_CODES: dict[str, EventCategory] = {
@@ -54,6 +68,10 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
                 {"text": "🎓 학년/지역 설정"},
                 {"text": "❓ 이용 도움말"},
             ],
+            [
+                {"text": GLOSSARY_MENU_TEXT},
+                {"text": SETTINGS_MENU_TEXT},
+            ],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -67,6 +85,7 @@ def build_events_category_keyboard() -> dict[str, Any]:
             [{"text": f"{EventCategory.EXPO.icon} {EventCategory.EXPO.title}", "callback_data": "adm:cat:EXPO:0"}],
             [{"text": f"{EventCategory.BRIEFING.icon} {EventCategory.BRIEFING.title}", "callback_data": "adm:cat:BRIEF:0"}],
             [{"text": f"{EventCategory.SEMINAR.icon} {EventCategory.SEMINAR.title}", "callback_data": "adm:cat:SEMI:0"}],
+            [{"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"}],
         ]
     }
 
@@ -76,6 +95,7 @@ def build_events_page_keyboard(
     page: int,
     total: int,
     events: Optional[list[AdmissionEvent]] = None,
+    include_share: bool = False,
 ) -> dict[str, Any]:
     """Builds per-card Google Calendar url buttons, prev/next pager and back-to-categories buttons."""
     code = CATEGORY_TO_CODE[category]
@@ -85,6 +105,10 @@ def build_events_page_keyboard(
         cal_url = build_google_calendar_url(ev)
         if cal_url:
             rows.append([{"text": f"📅 {idx}번 구글 캘린더에 담기", "url": cal_url}])
+        if include_share:
+            share_cb = f"adm:sh:ev:{ev.event_id}"
+            if len(share_cb.encode("utf-8")) <= CALLBACK_MAX_BYTES:
+                rows.append([{"text": f"📲 {idx}번 카톡 공유", "callback_data": share_cb}])
     nav_row = []
     if page > 0:
         nav_row.append({"text": "◀ 이전", "callback_data": f"adm:cat:{code}:{page - 1}"})
@@ -140,6 +164,54 @@ def format_events_page_html(
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"<i>총 {total}건 · 지난 행사는 자동 제외됩니다</i>")
     return "\n".join(lines)
+
+
+def build_glossary_menu_keyboard() -> dict[str, Any]:
+    """15 terms as a 3-column grid (adm:gl:<CODE>) plus a back-to-categories row."""
+    entries = list_glossary_entries()
+    rows: list[list[dict[str, Any]]] = [
+        [{"text": e.short_name, "callback_data": f"adm:gl:{e.code}"} for e in entries[i:i + GLOSSARY_COLUMNS]]
+        for i in range(0, len(entries), GLOSSARY_COLUMNS)
+    ]
+    rows.append([{"text": "🏛 카테고리 목록", "callback_data": "adm:menu"}])
+    return {"inline_keyboard": rows}
+
+
+def build_glossary_detail_keyboard(entry: GlossaryEntry) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "📲 카톡 공유용 요약", "callback_data": f"adm:sh:gl:{entry.code}"}],
+            [
+                {"text": "📚 다른 용어 보기", "callback_data": "adm:gl:menu"},
+                {"text": "🏛 카테고리 목록", "callback_data": "adm:menu"},
+            ],
+        ]
+    }
+
+
+def format_glossary_menu_html() -> str:
+    return (
+        "📖 <b>1초 입시 은어·용어 사전</b>\n\n"
+        "설명회에서 들은 낯선 용어, 학부모 눈높이로 3줄 풀이해 드립니다.\n"
+        "👇 궁금한 용어를 탭해 주세요:"
+    )
+
+
+def format_glossary_entry_html(entry: GlossaryEntry) -> str:
+    """Term detail card: 개념 / 학부모 득실 / 주의사항."""
+    return "\n".join([
+        f"📖 <b>[1초 입시사전] {html.escape(entry.term)}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "💡 <b>핵심 개념</b>",
+        html.escape(entry.definition),
+        "",
+        "🎯 <b>학부모 실전 득실</b>",
+        html.escape(entry.impact),
+        "",
+        "⚠️ <b>주의사항 & 꿀팁</b>",
+        html.escape(entry.caution),
+        "━━━━━━━━━━━━━━━━━━━━",
+    ])
 
 
 def build_grade_inline_keyboard() -> dict[str, Any]:
@@ -260,6 +332,10 @@ class AdmissionInteractiveBot:
         clean_text = text.strip()
         if clean_text.startswith("/start"):
             self._cmd_start(chat_id, first_name)
+        elif clean_text == GLOSSARY_MENU_TEXT or clean_text.startswith("/glossary") or "용어" in clean_text:
+            self._cmd_glossary_menu(chat_id)
+        elif clean_text == SETTINGS_MENU_TEXT:
+            self._cmd_settings(chat_id)
         elif (
             clean_text.startswith("/events") or "박람회" in clean_text or "설명회" in clean_text
             or "세미나" in clean_text or "행사 전체" in clean_text
@@ -432,7 +508,48 @@ class AdmissionInteractiveBot:
         if profile and len(profile.children) >= 2:
             briefing.headline = f"[{profile.get_active_child().alias}] {briefing.headline}"
         briefing.silent = True  # Silent push for regular digests
-        self.channel.send(chat_id, briefing)
+        share_markup = {"inline_keyboard": [[{"text": "📲 카톡 공유", "callback_data": "adm:sh:todo"}]]}
+        self.channel.send(chat_id, briefing, reply_markup=share_markup)
+
+    def _cmd_glossary_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
+        """Presents the 15-term glossary grid (in place when navigated back from a term card)."""
+        text = format_glossary_menu_html()
+        markup = build_glossary_menu_keyboard()
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
+
+    def _show_glossary_entry(self, chat_id: str, message_id: Optional[int], code: str) -> None:
+        """adm:gl:<CODE> — renders one term card in place; unknown codes fall back to the grid."""
+        entry = get_glossary_entry(code)
+        if entry is None:
+            self._cmd_glossary_menu(chat_id, message_id)
+            return
+        self._safe_edit_or_send(chat_id, message_id, format_glossary_entry_html(entry), build_glossary_detail_keyboard(entry))
+
+    def _send_share_card(self, chat_id: str, data: str) -> None:
+        """adm:sh:gl:<CODE> / adm:sh:todo / adm:sh:ev:<EVENT_ID> — sends a separate one-tap-copy <code> card."""
+        parts = data.split(":", 3)
+        kind = parts[2] if len(parts) > 2 else ""
+        ref = parts[3] if len(parts) > 3 else ""
+        plain = ""
+        if kind == "gl":
+            entry = get_glossary_entry(ref)
+            if entry:
+                plain = build_glossary_share_text(entry)
+        elif kind == "todo":
+            profile = self.db.get_subscriber(chat_id)
+            grade = profile.get_active_child().grade if profile else TargetGrade.MIDDLE
+            plain = build_briefing_share_text(self.curator.generate_weekly_todo_briefing(grade))
+        elif kind == "ev" and ref:
+            event = self.db.get_event(ref)
+            if event:
+                plain = build_event_share_text(event)
+        if not plain:
+            self.channel.send_message(chat_id, "⚠️ 공유할 내용을 찾을 수 없습니다. 메뉴에서 다시 열어 주세요.")
+            return
+        self.channel.send_message(chat_id, format_kakao_share_html(plain), disable_notification=True)
 
     def _send_welcome_todo(self, chat_id: str, grade: TargetGrade) -> None:
         """Sends this ISO week's To-Do right after onboarding and logs it so the Sunday batch skips it."""
@@ -597,6 +714,8 @@ class AdmissionInteractiveBot:
                 return f"✅ {TargetGrade(data.split(':', 1)[1]).label} 설정 완료!"
             if data.startswith("region:"):
                 return f"✅ {TargetRegion(data.split(':', 1)[1]).label} 설정 완료!"
+            if data.startswith("adm:sh:"):
+                return SHARE_TOAST
             if data.startswith("adm:child:toggle:"):
                 # Target child is encoded in the button so the toast needs no DB read
                 parts = data.split(":")
@@ -735,6 +854,14 @@ class AdmissionInteractiveBot:
             code = parts[2] if len(parts) > 2 else ""
             page_str = parts[3] if len(parts) > 3 else "0"
             self._show_events_page(chat_id, message_id, code, page_str)
+
+        # 6. Glossary (adm:gl:menu / adm:gl:<CODE>) and one-tap Kakao share cards (adm:sh:...)
+        elif data == "adm:gl:menu":
+            self._cmd_glossary_menu(chat_id, message_id)
+        elif data.startswith("adm:gl:"):
+            self._show_glossary_entry(chat_id, message_id, data.split(":")[2])
+        elif data.startswith("adm:sh:"):
+            self._send_share_card(chat_id, data)
 
     def poll_once(self, offset: int = 0) -> int:
         """Polls updates once and returns new offset."""

@@ -255,6 +255,9 @@ class PlatformUser:
     memo: str = ""
     created_at: str | None = None
     updated_at: str | None = None
+    is_name_custom: int = 0
+    name_source: str = "TELEGRAM"
+    name_synced_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -265,6 +268,9 @@ class PlatformUser:
             "tier_expires_at": self.tier_expires_at,
             "status": self.status,
             "memo": self.memo or "",
+            "is_name_custom": int(self.is_name_custom or 0),
+            "name_source": self.name_source or "TELEGRAM",
+            "name_synced_at": self.name_synced_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

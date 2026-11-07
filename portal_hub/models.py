@@ -202,9 +202,12 @@ class UserProfile:
     chat_id: int
     username: Optional[str] = None
     first_name: Optional[str] = None
+    full_name: Optional[str] = None
     tier: UserTier = UserTier.WHITE
     status: str = "ACTIVE"
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     updated_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     # True only on the call that INSERTed this user (drives one-shot admin signup alert)
     is_new: bool = False
+    is_name_custom: int = 0
+    name_source: str = "TELEGRAM"
