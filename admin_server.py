@@ -50,6 +50,7 @@ try:
         AdmissionBriefing,
         AdmissionEvent,
         BriefingType,
+        EventCategory,
         ParentUserProfile,
         TargetGrade,
         TargetRegion,
@@ -119,6 +120,7 @@ class AdmissionEventCreateRequest(BaseModel):
     target_region: str = "ALL"
     is_online_live: bool = False
     event_type: str = "TICKETING_ALERT"
+    category: str = "BRIEFING"
     event_date_str: str
     booking_url: str | None = None
     is_first_come: bool = False
@@ -1389,6 +1391,7 @@ def create_admin_app(
                 target_region=TargetRegion(req.target_region),
                 is_online_live=req.is_online_live,
                 event_type=BriefingType(req.event_type),
+                category=EventCategory(req.category),
                 event_date_str=req.event_date_str,
                 booking_url=req.booking_url,
                 is_first_come=req.is_first_come,

@@ -4,6 +4,7 @@ Supports:
 2. `--dispatch`: Dispatches grade-specific weekly briefings or ticketing alerts to subscribers.
 3. `--dry-run`: Console preview of HTML cards and target recipients without sending.
 4. `--seed-sample`: Seeds realistic high-end admission events into SQLite database.
+5. `--demo`: Token-free console walkthrough of the events menu (in-memory DB, no file writes).
 """
 from __future__ import annotations
 import argparse
@@ -38,7 +39,7 @@ if env_file.exists():
 
 from admission_brief.ai_curator import AICurator
 from admission_brief.collector import AdmissionCollector
-from admission_brief.channels.telegram import TelegramChannel, format_admission_html
+from admission_brief.channels.telegram import TelegramChannel, format_admission_html, measure_message
 from admission_brief.channels.telegram_limiter import SafeTelegramDispatcher
 from admission_brief.interactive_bot import AdmissionInteractiveBot
 from admission_brief.models import (
@@ -154,6 +155,59 @@ def run_poll(channel: TelegramChannel, db: AdmissionDatabase, curator: AICurator
             time.sleep(2.0)
 
 
+class _ConsoleDemoChannel:
+    """Token-free stand-in for TelegramChannel that prints outgoing messages ([TG-06] --demo)."""
+
+    def __init__(self) -> None:
+        self._next_id = 1000
+
+    def _print(self, label: str, text: str, reply_markup: dict | None = None) -> None:
+        html_len, visible_len = measure_message(text)
+        print(f"\n----- [{label}] html={html_len} visible={visible_len} -----")
+        print(text)
+        if reply_markup and "inline_keyboard" in reply_markup:
+            for row in reply_markup["inline_keyboard"]:
+                print("  " + " | ".join(f"[{b['text']}]({b.get('callback_data') or b.get('url')})" for b in row))
+
+    def send_message(self, recipient, text, reply_markup=None, parse_mode="HTML", disable_notification=False) -> str:
+        self._next_id += 1
+        self._print(f"sendMessage #{self._next_id}", text, reply_markup)
+        return str(self._next_id)
+
+    def edit_message_text(self, chat_id, message_id, text, reply_markup=None, parse_mode="HTML") -> bool:
+        self._print(f"editMessageText #{message_id}", text, reply_markup)
+        return True
+
+    def send(self, recipient, briefing, disable_notification=None) -> str:
+        self._next_id += 1
+        self._print(f"send #{self._next_id}", format_admission_html(briefing))
+        return str(self._next_id)
+
+    def answer_callback_query(self, callback_query_id, text="") -> bool:
+        print(f"\n(answerCallbackQuery {callback_query_id} {text!r})")
+        return True
+
+
+def run_demo() -> None:
+    """[TG-06] Token-free console walkthrough of the events menu on an in-memory DB (no file writes)."""
+    db = AdmissionDatabase(db_path=":memory:")
+    curator = AICurator()
+    results = AdmissionCollector(db=db, curator=curator).run_collection()
+    print(f"✅ [DEMO] Collected {results['total_saved']} event(s) into :memory: DB")
+
+    bot = AdmissionInteractiveBot(channel=_ConsoleDemoChannel(), db=db, curator=curator)
+    chat = {"id": 1, "first_name": "데모"}
+    bot.handle_update({"message": {"chat": chat, "text": "🎪 설명회·박람회 전체보기"}})
+    for idx, data in enumerate(("adm:cat:BRIEF:0", "adm:cat:BRIEF:1", "adm:cat:EXPO:0", "adm:cat:SEMI:0", "adm:menu")):
+        bot.handle_update({
+            "callback_query": {
+                "id": f"demo_cb_{idx}",
+                "data": data,
+                "message": {"message_id": 1001, "chat": chat},
+            }
+        })
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Admission Briefing Telegram Bot Runner")
     parser.add_argument("--poll", action="store_true", help="Start interactive long-polling bot")
@@ -164,7 +218,13 @@ def main() -> None:
     parser.add_argument("--grade", type=str, default="MIDDLE", choices=["MIDDLE", "HIGH_1_2", "HIGH_3_N", "ALL"],
                         help="Target student grade for weekly briefing")
     parser.add_argument("--db-path", type=str, default="data/admission_brief.db", help="SQLite database path")
+    parser.add_argument("--demo", action="store_true",
+                        help="Token-free console demo of the events menu (in-memory DB, no file writes)")
     args = parser.parse_args()
+
+    if args.demo:
+        run_demo()
+        return
 
     token = get_admission_bot_token()
     db = AdmissionDatabase(db_path=args.db_path)
