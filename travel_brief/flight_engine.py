@@ -289,8 +289,9 @@ class FlightEngine:
             targets = list(self.destinations.values())
 
         if self.live_naver and self._live_client is not None:
+            target_dest_map = {t.code: t for t in targets}
             live_all = self._live_client.fetch_all_weekend_deals(
-                destinations=self.destinations,
+                destinations=target_dest_map,
                 slots=slots,
                 holiday_fn=self.get_peak_holiday_info,
                 ref_date=ref_date,

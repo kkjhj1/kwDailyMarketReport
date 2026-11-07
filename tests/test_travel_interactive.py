@@ -247,5 +247,42 @@ class TestTravelInteractive(unittest.TestCase):
                 handler.shutdown()
 
 
+
+    @patch("travel_brief.interactive.TelegramChannel")
+    def test_dispatch_travel_bot_message_update_sends_welcome_card(self, mock_tg_cls):
+        from market_brief.multi_bot_manager import DynamicBotManager, SubscriptionEngine, MultiBotInteractionRouter
+        from market_brief.storage.db import MarketBriefDatabase
+        
+        mock_tg = MagicMock()
+        mock_tg_cls.return_value = mock_tg
+        
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        tmp.close()
+        db = MarketBriefDatabase(db_path=tmp.name)
+        engine = SubscriptionEngine(db)
+        router = MultiBotInteractionRouter(engine)
+        manager = DynamicBotManager(engine, router)
+        
+        item = {
+            "update_id": 999,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 12345},
+                "text": "/start",
+                "from": {"id": 12345, "first_name": "여행자"}
+            }
+        }
+        
+        handled, reason = manager._dispatch_travel_bot_update("fake_travel_token", item)
+        self.assertTrue(handled)
+        self.assertEqual(reason, "travel_message_handled")
+        mock_tg.send_message.assert_called_once()
+        call_args = mock_tg.send_message.call_args[1]
+        self.assertEqual(call_args["chat_id"], "12345")
+        self.assertIn("트래블 패스파인더", call_args["text"])
+        self.assertIn("inline_keyboard", call_args["reply_markup"])
+
+
 if __name__ == "__main__":
     unittest.main()

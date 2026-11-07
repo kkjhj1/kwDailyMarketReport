@@ -174,6 +174,10 @@ class PlatformUserUpdateRequest(BaseModel):
     memo: str | None = None
 
 
+class UserBotDispatchRequest(BaseModel):
+    bot_id: str
+
+
 class PlatformTierUpdateRequest(BaseModel):
     tier: str
     tier_expires_at: str | None = None
@@ -568,7 +572,9 @@ def create_admin_app(
 
     @app.get("/api/platform/users")
     def list_platform_users(q: str = "", tier: str = "", status: str = ""):
-        return {"users": sub_engine.list_users_with_subscriptions(q=q, tier_filter=tier, status_filter=status)}
+        users = sub_engine.list_users_with_subscriptions(q=q, tier_filter=tier, status_filter=status)
+        tier_counts = sub_engine.get_tier_counts()
+        return {"users": users, "tier_counts": tier_counts}
 
     @app.post("/api/platform/users")
     def create_platform_user(req: PlatformUserCreateRequest, request: Request):
@@ -730,6 +736,49 @@ def create_admin_app(
     @app.get("/api/platform/upgrade-requests")
     def list_platform_upgrade_requests(status: str | None = None):
         return {"requests": sub_engine.get_upgrade_requests(status=status)}
+
+    @app.post("/api/platform/upgrade-requests/batch-approve")
+    def batch_approve_platform_upgrade_requests(request: Request):
+        verify_admin_token(request)
+        return sub_engine.batch_approve_upgrade_requests(actor="ADMIN")
+
+    @app.post("/api/platform/users/{user_id}/dispatch-bot")
+    def dispatch_bot_to_user(user_id: str, req: UserBotDispatchRequest, request: Request):
+        verify_admin_token(request)
+        uid = str(user_id).strip()
+        bot_id = str(req.bot_id).strip()
+
+        profile = sub_engine.get_user_profile(uid)
+        if not profile:
+            raise HTTPException(status_code=404, detail="유저를 찾을 수 없습니다.")
+        if profile.get("status") == "BLOCKED":
+            raise HTTPException(status_code=400, detail="차단된 유저에게는 발송할 수 없습니다.")
+
+        active_subs = [s["bot_id"] for s in profile.get("active_subscriptions", [])]
+        if bot_id not in active_subs:
+            raise HTTPException(status_code=400, detail=f"유저가 [{bot_id}] 봇을 구독하고 있지 않습니다.")
+
+        try:
+            briefing = generate_bot_briefing(bot_id, db=sub_engine)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"브리핑 생성 실패: {exc}")
+
+        res = send_bot_test_message(
+            bot_id=bot_id,
+            content_html=briefing["content_html"],
+            inline_keyboard=briefing.get("inline_keyboard"),
+            target_chat_id=uid,
+            db=sub_engine,
+        )
+        if not res.get("success"):
+            raise HTTPException(status_code=502, detail=res.get("error", "텔레그램 발송 실패"))
+
+        return {
+            "success": True,
+            "user_id": uid,
+            "bot_id": bot_id,
+            "delivery": res,
+        }
 
     @app.post("/api/platform/upgrade-requests/{request_id}/approve")
     def approve_platform_upgrade_request(request_id: int, request: Request):

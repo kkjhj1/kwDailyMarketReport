@@ -1054,6 +1054,75 @@ class SubscriptionEngine:
             "user": user_info,
         }
 
+    def get_tier_counts(self) -> dict[str, int]:
+        """Returns member counts grouped by tier."""
+        with self._read_conn() as conn:
+            rows = conn.execute("SELECT tier, COUNT(*) as cnt FROM users GROUP BY tier").fetchall()
+            counts = {"ALL": 0, "WHITE": 0, "GREEN": 0, "RED": 0, "BLACK": 0}
+            total = 0
+            for r in rows:
+                t = str(r["tier"] or "WHITE").upper()
+                c = int(r["cnt"])
+                total += c
+                if t in counts:
+                    counts[t] += c
+                else:
+                    counts[t] = c
+            counts["ALL"] = total
+            return counts
+
+    def batch_approve_upgrade_requests(self, actor: str = "ADMIN") -> dict[str, Any]:
+        """Batch approves all currently PENDING upgrade requests.
+        
+        Separates DB transactions from external Telegram notifications:
+        1. DB tier updates executed inside single exclusive transaction.
+        2. Congratulatory Telegram messages sent sequentially after commit.
+        """
+        approved_items: list[dict[str, Any]] = []
+        now_str = now_kst_str()
+
+        with self._exclusive_tx() as conn:
+            pending_rows = conn.execute(
+                "SELECT id, telegram_user_id, requested_tier FROM upgrade_requests WHERE status = 'PENDING'"
+            ).fetchall()
+
+            for r in pending_rows:
+                req_id = int(r["id"])
+                uid = str(r["telegram_user_id"])
+                req_tier = str(r["requested_tier"])
+
+                conn.execute(
+                    """UPDATE upgrade_requests
+                       SET status = 'APPROVED', reviewed_at = ?, reviewed_by = ?
+                       WHERE id = ?""",
+                    (now_str, actor, req_id),
+                )
+                self._update_user_tier_in_tx(
+                    conn,
+                    uid,
+                    req_tier,
+                    actor=actor,
+                    memo=f"일괄 승인 #{req_id}",
+                )
+                approved_items.append({"request_id": req_id, "telegram_user_id": uid, "new_tier": req_tier})
+
+        # Outside SQLite exclusive transaction: dispatch Telegram notifications safely
+        notified_count = 0
+        for item in approved_items:
+            try:
+                self._notify_user_upgrade_result(item["telegram_user_id"], item["new_tier"], approved=True)
+                notified_count += 1
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "total": len(approved_items),
+            "approved_count": len(approved_items),
+            "notified_count": notified_count,
+            "approved_items": approved_items,
+        }
+
     def reject_upgrade_request(self, request_id: int, actor: str = "ADMIN", reason: str = "") -> dict[str, Any]:
         """Rejects a pending upgrade request."""
         with self._exclusive_tx() as conn:
