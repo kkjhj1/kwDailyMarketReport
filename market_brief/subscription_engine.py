@@ -178,6 +178,17 @@ class SubscriptionEngine:
             (str(user_id), bot_id, action, actor, detail_str, now_kst_str()),
         )
 
+    def log_audit(
+        self,
+        user_id: str,
+        bot_id: str | None,
+        action: str,
+        actor: str = "ADMIN",
+        detail: dict[str, Any] | str | None = None,
+    ) -> None:
+        with self.db._connect() as conn:
+            self._log_audit_in_tx(conn, user_id, bot_id, action, actor=actor, detail=detail)
+
     def _enforce_user_expiry_in_tx(self, conn: sqlite3.Connection, user_row: sqlite3.Row) -> sqlite3.Row:
         """Checks if user's paid tier has expired; if so, rolls back to WHITE with Grace Period protection."""
         exp = user_row["tier_expires_at"]

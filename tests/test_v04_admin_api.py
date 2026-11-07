@@ -515,6 +515,20 @@ class AdminApiTests(unittest.TestCase):
                 self.assertTrue(data.get("success"))
                 self.assertEqual(data.get("bot_id"), "brief_bot")
 
+            # Verify INDIVIDUAL_DISPATCH audit log recorded
+            logs = self._audit_logs_for("disp_u1", action="INDIVIDUAL_DISPATCH")
+            self.assertEqual(len(logs), 1)
+            self.assertEqual(logs[0]["bot_id"], "brief_bot")
+
+            # Test 1b: Immediate repeat call hits cooldown (429)
+            with patch("admin_server.send_bot_test_message", return_value={"success": True, "message_id": 12346}):
+                res_cd = self.client.post(
+                    "/api/platform/users/disp_u1/dispatch-bot",
+                    json={"bot_id": "brief_bot"},
+                    headers={"X-Admin-Token": "secret_token_123"}
+                )
+                self.assertEqual(res_cd.status_code, 429)
+
             # Test 2: Unsubscribed bot dispatch should fail with 400
             res_fail = self.client.post(
                 "/api/platform/users/disp_u1/dispatch-bot",
@@ -523,6 +537,19 @@ class AdminApiTests(unittest.TestCase):
             )
             self.assertEqual(res_fail.status_code, 400)
             self.assertIn("구독하고 있지 않습니다", res_fail.json().get("detail", ""))
+
+            # Test 3: Missing X-Admin-Token returns 401
+            res_unauth = self.client.post(
+                "/api/platform/users/disp_u1/dispatch-bot",
+                json={"bot_id": "brief_bot"},
+            )
+            self.assertEqual(res_unauth.status_code, 401)
+
+    def test_admin_token_modal_ui_present(self):
+        html = self.client.get("/").text
+        self.assertIn('id="adminTokenModal"', html)
+        self.assertIn("openAdminTokenModal", html)
+        self.assertIn("saveAdminTokenFromModal", html)
 
 
 if __name__ == "__main__":

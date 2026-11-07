@@ -66,8 +66,12 @@ try:
 except ImportError:
     _HAS_ADMISSION_MODULE = False
 
+import time
+
 ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
+_DISPATCH_COOLDOWN_SEC: float = 5.0
+_dispatch_last_sent: dict[tuple[str, str], float] = {}
 
 
 def verify_admin_token(request: Request) -> None:
@@ -759,6 +763,15 @@ def create_admin_app(
         if bot_id not in active_subs:
             raise HTTPException(status_code=400, detail=f"유저가 [{bot_id}] 봇을 구독하고 있지 않습니다.")
 
+        now_mono = time.monotonic()
+        last_ts = _dispatch_last_sent.get((uid, bot_id), 0.0)
+        if _DISPATCH_COOLDOWN_SEC > 0 and last_ts > 0 and (now_mono - last_ts) < _DISPATCH_COOLDOWN_SEC:
+            remain = max(1, int(_DISPATCH_COOLDOWN_SEC - (now_mono - last_ts) + 0.99))
+            raise HTTPException(
+                status_code=429,
+                detail=f"연속 발송 쿨다운 중입니다 ({remain}초 후 다시 시도해주세요).",
+            )
+
         try:
             briefing = generate_bot_briefing(bot_id, db=sub_engine)
         except Exception as exc:
@@ -773,6 +786,15 @@ def create_admin_app(
         )
         if not res.get("success"):
             raise HTTPException(status_code=502, detail=res.get("error", "텔레그램 발송 실패"))
+
+        _dispatch_last_sent[(uid, bot_id)] = time.monotonic()
+        sub_engine.log_audit(
+            user_id=uid,
+            bot_id=bot_id,
+            action="INDIVIDUAL_DISPATCH",
+            actor="ADMIN",
+            detail={"bot_id": bot_id, "message_id": res.get("message_id")},
+        )
 
         return {
             "success": True,
@@ -1652,6 +1674,16 @@ def find_available_port(preferred_port: int = 8002, max_attempts: int = 20) -> i
 
 
 if __name__ == "__main__":
+    if not os.environ.get("ADMIN_API_TOKEN", "").strip():
+        _env_candidate = ROOT / ".env"
+        if _env_candidate.exists():
+            for _line in _env_candidate.read_text(encoding="utf-8-sig").splitlines():
+                _s = _line.strip()
+                if _s.startswith("ADMIN_API_TOKEN="):
+                    _val = _s.split("=", 1)[1].strip().strip('"').strip("'")
+                    if _val:
+                        os.environ["ADMIN_API_TOKEN"] = _val
+                    break
     is_cloud = bool(os.environ.get("PORT") or os.environ.get("ORACLE_CLOUD") or os.environ.get("OCI"))
     if is_cloud:
         port = int(os.environ.get("PORT", "8002"))

@@ -1565,6 +1565,27 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 🔑 Admin API Token Modal -->
+  <div id="adminTokenModal" style="display:none; position:fixed; inset:0; z-index:10050; background:rgba(2,6,23,0.78); backdrop-filter:blur(6px); align-items:center; justify-content:center; padding:16px;">
+    <div style="background:#0f172a; border:1px solid #334155; border-radius:14px; width:100%; max-width:410px; padding:20px; box-shadow:0 20px 50px rgba(0,0,0,0.65);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <div style="font-size:15px; font-weight:800; color:#f8fafc;">🔑 관리자 인증키 (X-Admin-Token) 설정</div>
+        <button class="btn btn-xs btn-ghost" onclick="closeAdminTokenModal(false)">✕</button>
+      </div>
+      <div id="adminTokenModalSub" style="font-size:12px; color:#94a3b8; line-height:1.5; margin-bottom:12px;">
+        보호된 관리자 기능(일괄 승인, 개별 발송, 실명 동기화, 감사 이력 조회 등)을 실행하려면 서버의 <code>ADMIN_API_TOKEN</code>을 입력하세요. 브라우저 <code>localStorage</code>에 안전하게 보관됩니다.
+      </div>
+      <input type="password" id="adminTokenInput" class="input" placeholder="관리자 인증키 입력..." style="width:100%; margin-bottom:12px; font-family:monospace;" onkeydown="if(event.key==='Enter') saveAdminTokenFromModal()" />
+      <div style="display:flex; justify-content:space-between; gap:8px;">
+        <button class="btn btn-xs btn-danger" onclick="clearAdminTokenFromModal()">저장된 키 삭제</button>
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-xs btn-ghost" onclick="closeAdminTokenModal(false)">취소</button>
+          <button class="btn btn-xs btn-primary" onclick="saveAdminTokenFromModal()">💾 저장 및 적용</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Top Minimal Header -->
   <header class="header">
     <div class="header-brand">
@@ -1579,6 +1600,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span class="pill" title="실시간 정상 작동"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
+      <button class="btn btn-sm btn-ghost" id="btnAdminToken" onclick="openAdminTokenModal()" title="관리자 API 인증키 설정">
+        <span>🔑</span> <span class="btn-text" id="adminTokenBtnLabel">인증키</span>
+      </button>
       <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="전체 봇 대화 즉시 수신">
         <span>🔄</span> <span class="btn-text">대화 즉시 수신</span>
       </button>
@@ -1814,6 +1838,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             <select id="auditActionSel" class="form-select" onchange="loadAuditLogs()">
               <option value="">전체 구분</option>
               <option value="USER_UPDATED">USER_UPDATED (정보 수정)</option>
+              <option value="INDIVIDUAL_DISPATCH">INDIVIDUAL_DISPATCH (개별 봇 발송)</option>
+              <option value="BATCH_UPGRADE_APPROVED">BATCH_UPGRADE_APPROVED (일괄 등급 승인)</option>
               <option value="TIER_CHANGE">TIER_CHANGE (등급 변경)</option>
               <option value="SUBSCRIBE">SUBSCRIBE (구독)</option>
               <option value="UNSUBSCRIBE">UNSUBSCRIBE (구독 해지)</option>
@@ -2141,17 +2167,81 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       setTimeout(() => el.remove(), 3200);
     }
 
+    let _adminTokenWaiters = [];
+
+    function updateAdminTokenBadge() {
+      const btn = document.getElementById('btnAdminToken');
+      const lbl = document.getElementById('adminTokenBtnLabel');
+      if (!btn || !lbl) return;
+      const hasToken = !!(localStorage.getItem('admin_api_token') || '').trim();
+      lbl.textContent = hasToken ? '인증됨' : '인증키';
+      btn.style.borderColor = hasToken ? 'rgba(16,185,129,0.5)' : '';
+      btn.style.color = hasToken ? '#34d399' : '';
+    }
+
+    function openAdminTokenModal(reasonMsg = '') {
+      const modal = document.getElementById('adminTokenModal');
+      const input = document.getElementById('adminTokenInput');
+      const sub = document.getElementById('adminTokenModalSub');
+      if (!modal || !input) return Promise.resolve(false);
+      if (sub && reasonMsg) {
+        sub.innerHTML = `<span style="color:#fbbf24; font-weight:700;">🔒 ${esc(reasonMsg)}</span><br>서버에 설정된 <code>ADMIN_API_TOKEN</code>을 입력하면 브라우저에 저장되고 방금 요청이 즉시 재시도됩니다.`;
+      }
+      input.value = localStorage.getItem('admin_api_token') || '';
+      modal.style.display = 'flex';
+      setTimeout(() => input.focus(), 50);
+      return new Promise(resolve => {
+        _adminTokenWaiters.push(resolve);
+      });
+    }
+
+    function closeAdminTokenModal(saved = false) {
+      const modal = document.getElementById('adminTokenModal');
+      if (modal) modal.style.display = 'none';
+      const waiters = _adminTokenWaiters.splice(0, _adminTokenWaiters.length);
+      waiters.forEach(fn => { try { fn(!!saved); } catch (e) {} });
+    }
+
+    function saveAdminTokenFromModal() {
+      const input = document.getElementById('adminTokenInput');
+      const val = (input ? input.value : '').trim();
+      if (!val) {
+        alert('관리자 인증키를 입력해주세요.');
+        return;
+      }
+      localStorage.setItem('admin_api_token', val);
+      updateAdminTokenBadge();
+      toast('🔑 관리자 인증키가 저장되었습니다.');
+      closeAdminTokenModal(true);
+    }
+
+    function clearAdminTokenFromModal() {
+      localStorage.removeItem('admin_api_token');
+      const input = document.getElementById('adminTokenInput');
+      if (input) input.value = '';
+      updateAdminTokenBadge();
+      toast('🗑️ 저장된 관리자 인증키를 삭제했습니다.');
+      closeAdminTokenModal(false);
+    }
+
     async function req(url, opts = {}) {
-      const headers = opts.headers || {};
-      const token = localStorage.getItem('admin_api_token') || new URLSearchParams(window.location.search).get('token') || '';
+      const headers = { ...(opts.headers || {}) };
+      const token = (localStorage.getItem('admin_api_token') || new URLSearchParams(window.location.search).get('token') || new URLSearchParams(window.location.search).get('admin_token') || '').trim();
       if (token) {
         headers['X-Admin-Token'] = token;
       }
-      if (opts.body && typeof opts.body === 'object') {
+      let bodyPayload = opts.body;
+      if (bodyPayload && typeof bodyPayload === 'object') {
         headers['Content-Type'] = 'application/json';
-        opts.body = JSON.stringify(opts.body);
+        bodyPayload = JSON.stringify(bodyPayload);
       }
-      const res = await fetch(url, { ...opts, headers });
+      const res = await fetch(url, { ...opts, headers, body: bodyPayload });
+      if (res.status === 401 && !opts._retriedAuth) {
+        const saved = await openAdminTokenModal('관리자 인증이 필요한 작업입니다.');
+        if (saved) {
+          return req(url, { ...opts, _retriedAuth: true });
+        }
+      }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
       return data;
@@ -3562,15 +3652,23 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function applyDeepLink() {
       const params = new URLSearchParams(window.location.search);
+      const urlToken = (params.get('token') || params.get('admin_token') || '').trim();
+      if (urlToken) {
+        localStorage.setItem('admin_api_token', urlToken);
+      }
+      updateAdminTokenBadge();
+
       let tab = (params.get('tab') || '').toLowerCase();
       const reqId = params.get('req_id');
       if (tab === 'upgrade' || (!tab && reqId)) tab = 'users';
       if (!DEEPLINK_TABS.includes(tab)) tab = 'users';
 
-      // Strip one-shot deep-link params so a manual refresh doesn't re-trigger the highlight
-      if (params.has('tab') || params.has('req_id')) {
+      // Strip one-shot deep-link & token params so they don't remain exposed in URL bar
+      if (params.has('tab') || params.has('req_id') || params.has('token') || params.has('admin_token')) {
         params.delete('tab');
         params.delete('req_id');
+        params.delete('token');
+        params.delete('admin_token');
         const qs = params.toString();
         try {
           window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
