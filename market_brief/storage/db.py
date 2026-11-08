@@ -225,6 +225,9 @@ class MarketBriefDatabase:
                     tier_expires_at TEXT,
                     status TEXT NOT NULL DEFAULT 'ACTIVE',
                     memo TEXT DEFAULT '',
+                    is_name_custom INTEGER NOT NULL DEFAULT 0,
+                    name_source TEXT DEFAULT 'TELEGRAM',
+                    name_synced_at TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )"""
@@ -267,6 +270,14 @@ class MarketBriefDatabase:
                     FOREIGN KEY(telegram_user_id) REFERENCES users(telegram_user_id)
                 )"""
             )
+            # Idempotent user column migrations
+            existing_user_cols = {row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+            if "is_name_custom" not in existing_user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN is_name_custom INTEGER NOT NULL DEFAULT 0")
+            if "name_source" not in existing_user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN name_source TEXT DEFAULT 'TELEGRAM'")
+            if "name_synced_at" not in existing_user_cols:
+                db.execute("ALTER TABLE users ADD COLUMN name_synced_at TEXT")
 
     def _seed_initial_data(self) -> None:
         with self._connect() as db:
