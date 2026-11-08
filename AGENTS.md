@@ -1,21 +1,21 @@
 # ============================================================
 # PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
 # Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
-# Version: 2.3 (Two-Phase Multi-AI Pipeline & Autonomous Planning Audit Edition)
+# Version: 2.4 (Two-Phase Multi-AI & PROD-LIVE Trigger Context Edition)
 # ============================================================
 
 ## 1. 프로젝트 개요 및 멀티봇 파이프라인
 - **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
 - **운영 인프라 환경**:
   - **운영 메인 서버**: **오라클 클라우드(OCI) VM** (`161.33.196.211`, `systemd` 서비스 `multibot.service`, 포트 `8002`, 24/7 상시 가동)
-  - **웹 대시보드 및 리포트 서빙**: **오라클 클라우드 VM 자체 서빙** (`http://161.33.196.211:8002/reports/`, 지연 0초 즉시 서빙)
+  - **웹 대시보드 및 정적 리포트 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
   - **클라우드 퇴역 완료**: Render Cloud는 완전히 폐기되었으며 일체 사용하지 않음
 - **주요 파이프라인 및 구성 서비스**:
   - **시황 브리핑 (`telegram_bot_runner.py`)**: 일일 장전 브리핑(오전 06:30 KST 자동 실행) 및 긴급 변동성 브리핑(장중 ±3% 이상 급등락 감지 시 발송)
   - **트래블 패스파인더 (`travel_bot_runner.py`)**: 네이버 실시간 항공/숙소/예산 검증 및 6개월 특가 브리핑
   - **입시 나침반 (`admission_bot_runner.py`)**: 주간 대입 일정 큐레이션 및 인터랙티브 상담
   - **통합 포털 허브 (`portal_bot_runner.py`)**: 회원 등급(FREE/GREEN/RED/BLACK) 기반 구독 슬롯 제어 허브
-  - **웹 리포트 서빙**: **오라클 클라우드 VM 자체 서빙** (`http://161.33.196.211:8002/reports/`)
+  - **웹 리포트 정적 페이지 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
   - **시황 및 멀티봇 발송 현황 관리자 콘솔**: `admin_server.py`
 
 ## 2. 포트 및 개발 환경 가드 (전역 헌법 [DEV-PORT] 준수)
@@ -28,7 +28,7 @@
   - `market_brief_starter`: 8002
   - 향후 신규 프로젝트: 8003+
 
-## 3. 텔레그램 봇 7대 실전 수칙 및 운영 안정성 (Mandatory Telegram Rules)
+## 3. 텔레그램 봇 실전 수칙 및 운영 발송 통제 (Mandatory Telegram & Live Rules)
 - **[TG-01] 용량 상한 & 고정 슬림 템플릿**:
   - 가시 텍스트(태그 제외) **1,800자 이내**, HTML 원문(`len`) **3,500자 이내**를 엄수한다(4,096자 절벽 및 임의 항목 삭제식 가변 축약 금지). 상세 표·설명은 웹 리포트 링크로 분리한다.
 - **[TG-02] Strict HTML Escape**:
@@ -40,13 +40,17 @@
   - 인라인 버튼 수신 즉시 `answerCallbackQuery`를 **무조건 선행 호출**하여 로딩 스피너를 제거한다.
   - `callback_data`는 **64 bytes 이하 영문 축약 코드(`도메인:액션:ID`)**만 사용하며, 화면 수정은 `_safe_edit_or_send`(`message is not modified` 무시 및 폴백 포함)를 통하고 파괴적 액션(구독 해지 등)은 제자리 2단계 확인(`In-Place Confirm`)을 거친다.
 - **[TG-05] Safe Dispatcher (429 Rate Limit 방어)**:
-  - 다수 수신자 발송 시 단순 루프 직발송을 금하며, `SafeTelegramDispatcher`와 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) 및 지수 백오프 재시도를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다.
+  - 다수 수신자 발송 시 단순 루프 직발송을 금하며, `SafeTelegramDispatcher`와 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) 및 지수 백오프 재시도를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다. 본 디스패처는 `[PROD-LIVE]` 게이트를 통과한 정상 작업만 전달받아 발송한다.
 - **[TG-06] 토큰 프리 `--demo` & 운영 자산 무오염**:
   - 모든 봇 러너는 실제 토큰 없이 1초 내 콘솔 검증이 가능한 `--demo` 플래그를 제공해야 하며, 데모·테스트 실행 중 운영 DB(`*.sqlite3`) 및 배포 폴더(`reports/`)에 파일을 기록하지 않는다(`:memory:` 또는 `scratch/` 격리).
   - *[현행 과제]*: `travel_bot_runner.py`와 `portal_bot_runner.py`는 `--demo` 완비 상태이나, 미구현된 `telegram_bot_runner.py`와 `admission_bot_runner.py`는 향후 L2 작업 시 `--demo`를 최우선 구현 과제로 둔다.
 - **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
   - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
   - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고하며, 완료 보고 시 실제 실행 명령과 실측 결과를 반드시 제시한다(미실행 검증 보고 금지).
+- **[PROD-LIVE] 실사용자 Telegram 발송 및 재발송 절대 통제 (Mandatory Live Gate)**:
+  - **실사용자 발송 기본 거부 (Deny-by-Default)**: 운영(Production) 환경, 실제 텔레그램 채널, 실구독자 대상 메시지는 기본 거부된다. 개발·배포·테스트 중에는 실제 발송 플래그 실행을 금지하며, 반드시 `--demo` 또는 모의(Dry-run) 모드만 사용한다. 관리자 수동 발송(`MANUAL`)은 대상과 사유를 기록하고 사용자의 명시적 승인이 있을 때만 단 1회 실행한다.
+  - **서버 재기동 시 보상성 자동 재발송(Redelivery) 원천 금지 (Trigger Context)**: 서비스 시작, `systemd restart`, 배포 완료 시의 초기화(`STARTUP_INIT`) 컨텍스트에서는 과거 미발송 슬롯에 대한 자동 보상 발송을 일체 금지(0건 강제)하며, 오직 현재 시각 이후의 미래 슬롯만 예약한다. 정시 스케줄러(`CRON_TICK`)에 의해 정상 시작된 작업은 데이터 수집이나 리포트 생성이 다소 지연되더라도 동일 세션(`execution_id`) 안에서 유효기간(TTL 2시간) 내 정상 발송을 완료할 수 있다.
+  - **발송 원장(SSOT) 단일화 및 UNKNOWN 격리**: 발송 여부의 단일 진실 공급원(SSOT)은 실제 운영 DB인 `alerts.sqlite3`의 배달 원장(`delivery_jobs`, `delivery_job_recipients`)만 사용한다(`portal.sqlite3`는 구독 대상 산출용으로만 사용). 동일 슬롯에 `SENT` 또는 네트워크 응답 불명확(`UNKNOWN`) 기록이 1건이라도 존재하면 발송 완료로 간주하여 자동 재발송을 원천 차단한다. 원격 OCI VM 상태 조회 실패나 로컬 DB와의 불일치 발생 시 즉시 발송 게이트를 `BLOCKED`(Fail-Closed) 처리한다.
 
 ## 4. 멀티 AI 2단계 강제 파이프라인 (Two-Phase Multi-AI Protocol)
 
@@ -86,5 +90,5 @@ Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --too
 
 ### 4.3 Git 상태 동기화 및 최종 판결 (Fresh Read & Anti-Drift)
 - 작업 착수 전 `git rev-parse HEAD` 및 `git status --short`로 기준점을 고정한다.
-- Claude 작업 반환 즉시 Gemini는 실제 `git diff`를 통해 변경분을 신선하게 대조(Fresh Read)하고, 7대 수칙(`[TG-01]`~`[TG-07]`) 및 불변조건 준수 여부를 최종 판정하여 통합한다.
+- Claude 작업 반환 즉시 Gemini는 실제 `git diff`를 통해 변경분을 신선하게 대조(Fresh Read)하고, 7대 수칙(`[TG-01]`~`[TG-07]`, `[PROD-LIVE]`) 및 불변조건 준수 여부를 최종 판정하여 통합한다.
 - **Fail-Closed**: L3 배포 및 운영 DB 마이그레이션은 외부 감사가 누락되거나 테스트가 실패한 경우 즉시 작업을 중단한다.
