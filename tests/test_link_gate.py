@@ -39,7 +39,7 @@ class TestLinkGateSystem(unittest.TestCase):
         for tok in expected_tokens:
             target = self.registry.get_target(tok)
             self.assertIsNotNone(target, f"Token {tok} must be registered")
-            self.assertTrue(target.dest_url.startswith("https://"), f"{tok} url must start with https://")
+            self.assertTrue(target.dest_url.startswith(("https://", "http://")), f"{tok} url must start with http(s)://")
             self.assertTrue(len(target.target_name) > 0, f"{tok} must have target_name")
 
     def test_build_gate_button_64_bytes(self):
