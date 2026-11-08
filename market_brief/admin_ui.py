@@ -1566,7 +1566,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <!-- 🔑 Admin API Token Modal -->
-  <div id="adminTokenModal" style="display:none; position:fixed; inset:0; z-index:10050; background:rgba(2,6,23,0.78); backdrop-filter:blur(6px); align-items:center; justify-content:center; padding:16px;">
+  <div id="adminTokenModal" style="display:none; position:fixed; inset:0; z-index:1000050; background:rgba(2,6,23,0.78); backdrop-filter:blur(6px); align-items:center; justify-content:center; padding:16px;">
     <div style="background:#0f172a; border:1px solid #334155; border-radius:14px; width:100%; max-width:410px; padding:20px; box-shadow:0 20px 50px rgba(0,0,0,0.65);">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
         <div style="font-size:15px; font-weight:800; color:#f8fafc;">🔑 관리자 인증키 (X-Admin-Token) 설정</div>
@@ -2180,6 +2180,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function openAdminTokenModal(reasonMsg = '') {
+      hideSplashLoader();
       const modal = document.getElementById('adminTokenModal');
       const input = document.getElementById('adminTokenInput');
       const sub = document.getElementById('adminTokenModalSub');
@@ -2344,7 +2345,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function triggerProfileBatchSync() {
-      if (!confirm('텔레그램 프로필을 조회하여 실명을 일괄 동기화합니다.\n(관리자가 직접 수정한 실명은 안전하게 보존됩니다)\n진행하시겠습니까?')) {
+      if (!confirm(`텔레그램 프로필을 조회하여 실명을 일괄 동기화합니다.\n(관리자가 직접 수정한 실명은 안전하게 보존됩니다)\n진행하시겠습니까?`)) {
         return;
       }
       toast('⏳ 텔레그램 프로필 실명 동기화 중...');
@@ -2358,7 +2359,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function resetUserNameToTelegram(userId) {
-      if (!confirm('이 유저의 이름을 텔레그램 최신 프로필명으로 복원하시겠습니까?\n(수동 지정 상태가 해제됩니다)')) {
+      if (!confirm(`이 유저의 이름을 텔레그램 최신 프로필명으로 복원하시겠습니까?\n(수동 지정 상태가 해제됩니다)`)) {
         return;
       }
       try {
