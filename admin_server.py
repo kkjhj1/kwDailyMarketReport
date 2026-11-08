@@ -325,7 +325,7 @@ def create_admin_app(
             for line in env_file.read_text(encoding="utf-8-sig").splitlines():
                 if line.startswith("REPORT_BASE_URL="):
                     configured = line.split("=", 1)[1].strip().strip('"').strip("'")
-        return configured or "https://kkjhj1.github.io/kwDailyMarketReport"
+        return configured or "http://161.33.196.211:8002"
 
     briefing_scheduler = InternalBriefingScheduler(
         db=db,

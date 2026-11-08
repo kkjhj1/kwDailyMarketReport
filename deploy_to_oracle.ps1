@@ -25,9 +25,9 @@ if (-not (Test-Path $KeyPath)) {
 
 $resolvedKey = (Resolve-Path $KeyPath).Path
 
-Write-Host "📡 [1/3] 오라클 서버에 연결하여 최신 소스코드 동기화 (git pull)..." -ForegroundColor Yellow
+Write-Host "📡 [1/3] 오라클 서버에 연결하여 최신 소스코드 및 환경설정 동기화 (git pull)..." -ForegroundColor Yellow
 
-$remoteSyncScript = "cd /home/ubuntu/kwDailyMarketReport && git fetch origin main && git reset --hard origin/main && ./venv/bin/python -m py_compile admin_server.py telegram_bot_runner.py market_brief/web_report.py market_brief/briefing_scheduler.py"
+$remoteSyncScript = "cd /home/ubuntu/kwDailyMarketReport && git fetch origin main && git reset --hard origin/main && sed -i 's|^REPORT_BASE_URL=.*|REPORT_BASE_URL=http://161.33.196.211:8002|' .env && ./venv/bin/python -m py_compile admin_server.py telegram_bot_runner.py market_brief/web_report.py market_brief/briefing_scheduler.py"
 
 ssh -i "$resolvedKey" -o StrictHostKeyChecking=no -o ConnectTimeout=15 "$User@$ServerIp" "$remoteSyncScript"
 

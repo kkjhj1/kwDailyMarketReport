@@ -8,14 +8,14 @@
 - **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
 - **운영 인프라 환경**:
   - **운영 메인 서버**: **오라클 클라우드(OCI) VM** (`161.33.196.211`, `systemd` 서비스 `multibot.service`, 포트 `8002`, 24/7 상시 가동)
-  - **웹 대시보드 및 정적 리포트 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
+  - **웹 대시보드 및 리포트 서빙**: **오라클 클라우드 VM 자체 서빙** (`http://161.33.196.211:8002/reports/`, 지연 0초 즉시 서빙)
   - **클라우드 퇴역 완료**: Render Cloud는 완전히 폐기되었으며 일체 사용하지 않음
 - **주요 파이프라인 및 구성 서비스**:
   - **시황 브리핑 (`telegram_bot_runner.py`)**: 일일 장전 브리핑(오전 06:30 KST 자동 실행) 및 긴급 변동성 브리핑(장중 ±3% 이상 급등락 감지 시 발송)
   - **트래블 패스파인더 (`travel_bot_runner.py`)**: 네이버 실시간 항공/숙소/예산 검증 및 6개월 특가 브리핑
   - **입시 나침반 (`admission_bot_runner.py`)**: 주간 대입 일정 큐레이션 및 인터랙티브 상담
   - **통합 포털 허브 (`portal_bot_runner.py`)**: 회원 등급(FREE/GREEN/RED/BLACK) 기반 구독 슬롯 제어 허브
-  - **웹 리포트 정적 페이지 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
+  - **웹 리포트 서빙**: **오라클 클라우드 VM 자체 서빙** (`http://161.33.196.211:8002/reports/`)
   - **시황 및 멀티봇 발송 현황 관리자 콘솔**: `admin_server.py`
 
 ## 2. 포트 및 개발 환경 가드 (전역 헌법 [DEV-PORT] 준수)

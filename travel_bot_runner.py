@@ -88,12 +88,12 @@ def resolve_travel_report_url() -> str:
     if "/" in gh_repo:
         owner, repo = gh_repo.split("/", 1)
         return f"https://{owner.lower()}.github.io/{repo}/reports/travel_latest.html"
-    return "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
+    return "http://161.33.196.211:8002/reports/travel_latest.html"
 
 
 def format_telegram_briefing(
     recommendations: list[TravelRecommendation],
-    web_report_url: str = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html",
+    web_report_url: str = "http://161.33.196.211:8002/reports/travel_latest.html",
     engine: Optional[FlightEngine] = None,
     snapshot: Optional[TravelSnapshot] = None,
 ) -> str:

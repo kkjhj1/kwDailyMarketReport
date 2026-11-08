@@ -118,7 +118,7 @@ def build_list_keyboard(parent: ParentProfile, matches: list, page: int) -> dict
 def build_detail_keyboard(
     pid: int, bid: int, page: int, bookmarked: bool, report_url: str = ""
 ) -> dict[str, Any]:
-    url = report_url or "https://kkjhj1.github.io/kwDailyMarketReport/reports/silver_latest.html"
+    url = report_url or "http://161.33.196.211:8002/reports/silver_latest.html"
     return _kb([
         [_btn("📞 통화 대본", cb("t", pid, bid, page)), _btn("💌 카톡 전송문", cb("k", pid, bid, page))],
         [{"text": "📊 부모님 복지 상세 리포트 ↗", "url": url}],

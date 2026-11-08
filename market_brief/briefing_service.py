@@ -188,7 +188,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
     # 1. BRIEF BOT (금융 / 시장 시황) -> NaverFinanceProvider / BriefingBuilder
     # =========================================================================
     if bot_id == "brief_bot":
-        report_url = _get_env_val("REPORT_BASE_URL", "https://kkjhj1.github.io/kwDailyMarketReport/")
+        report_url = _get_env_val("REPORT_BASE_URL", "http://161.33.196.211:8002/")
         try:
             from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider
             from market_brief.market_data.naver_provider import NewsItem, fetch_naver_market_news
@@ -237,7 +237,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
     # 2. TRAVEL BOT (여행 특가 & AI 추천) -> FlightEngine / BudgetCalculator
     # =========================================================================
     elif bot_id == "travel_bot":
-        travel_report_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
+        travel_report_url = "http://161.33.196.211:8002/reports/travel_latest.html"
         try:
             import html as _html
             from travel_brief.models import round_man
@@ -315,7 +315,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
     # 3. ADMISSION BOT (입시 & 교육 큐레이션) -> AdmissionDatabase / AICurator
     # =========================================================================
     elif bot_id == "admission_bot" or bot_id == "edu_bot":
-        admission_url = _get_env_val("ADMISSION_REPORT_URL", "https://kkjhj1.github.io/kwDailyMarketReport/reports/admission_latest.html")
+        admission_url = _get_env_val("ADMISSION_REPORT_URL", "http://161.33.196.211:8002/reports/admission_latest.html")
         try:
             from admission_brief.ai_curator import AICurator
             from admission_brief.models import TargetGrade, BriefingType

@@ -102,7 +102,7 @@ class TravelInteractiveHandler:
         bot_token: str,
         engine: Optional[FlightEngine] = None,
         max_workers: int = 2,
-        report_url: str = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html",
+        report_url: str = "http://161.33.196.211:8002/reports/travel_latest.html",
     ):
         self.bot_token = bot_token
         self.engine = engine or FlightEngine()

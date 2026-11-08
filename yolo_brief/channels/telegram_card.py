@@ -20,7 +20,7 @@ MAX_VISIBLE_CHARS = 1800
 MAX_HTML_CHARS = 3500
 MAX_CALLBACK_BYTES = 64
 
-WEB_MAGAZINE_URL = "https://kkjhj1.github.io/kwDailyMarketReport/reports/yolo_latest.html"
+WEB_MAGAZINE_URL = "http://161.33.196.211:8002/reports/yolo_latest.html"
 WEB_MAGAZINE_BUTTON_TEXT = "🌐 감성 사진 & 나홀로 풀코스 매거진 보기"
 
 _TAG_RE = re.compile(r"<[^>]+>")

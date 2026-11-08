@@ -680,7 +680,7 @@ class MultiBotInteractionRouter:
 
         # Case 1: Common Broadcast Bot (brief_bot / 시황 브리핑)
         if bot.bot_id == "brief_bot":
-            report_url = os.environ.get("REPORT_BASE_URL", "https://kkjhj1.github.io/kwDailyMarketReport/")
+            report_url = os.environ.get("REPORT_BASE_URL", "http://161.33.196.211:8002/")
             try:
                 from pathlib import Path
                 from zoneinfo import ZoneInfo
@@ -740,7 +740,7 @@ class MultiBotInteractionRouter:
         elif bot.bot_id in ("admission_bot", "edu_bot"):
             admission_url = os.environ.get(
                 "ADMISSION_REPORT_URL",
-                "https://kkjhj1.github.io/kwDailyMarketReport/reports/admission_latest.html",
+                "http://161.33.196.211:8002/reports/admission_latest.html",
             )
             try:
                 from admission_brief.ai_curator import AICurator
@@ -786,7 +786,7 @@ class MultiBotInteractionRouter:
 
         # Case 3: Target-Selection Bot — Travel Pathfinder (트래블 패스파인더)
         elif bot.bot_id == "travel_bot":
-            travel_report_url = "https://kkjhj1.github.io/kwDailyMarketReport/reports/travel_latest.html"
+            travel_report_url = "http://161.33.196.211:8002/reports/travel_latest.html"
             try:
                 from travel_brief.flight_engine import FlightEngine
                 from travel_brief.budget_calculator import BudgetCalculator
