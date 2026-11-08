@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>KOSPI -6.02% 약세 · 원/달러 1,364.0원(상승) - 상세 시황 리포트</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --card-border: #e2e8f0;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --text-sub: #334155;
+      --primary: #2563eb;
+      --primary-bg: #eff6ff;
+      --up-color: #dc2626;
+      --up-bg: #fef2f2;
+      --down-color: #2563eb;
+      --down-bg: #eff6ff;
+      --steady-color: #64748b;
+      --steady-bg: #f1f5f9;
+      --summary-border: #2563eb;
+      --summary-bg: #f1f5f9;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.03);
+    }
+
+    [data-theme="dark"] {
+      --bg: #0b0f19;
+      --card-bg: #151d2f;
+      --card-border: #223049;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-sub: #cbd5e1;
+      --primary: #3b82f6;
+      --primary-bg: #1e293b;
+      --up-color: #f87171;
+      --up-bg: rgba(239, 68, 68, 0.15);
+      --down-color: #60a5fa;
+      --down-bg: rgba(59, 130, 246, 0.15);
+      --steady-color: #94a3b8;
+      --steady-bg: #1e293b;
+      --summary-border: #3b82f6;
+      --summary-bg: #152238;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      line-height: 1.5;
+      padding: 16px 12px 56px;
+      transition: background 0.2s ease, color 0.2s ease;
+      word-break: keep-all;
+    }
+    .container {
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .top-nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding: 2px 2px;
+    }
+    .hist-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-sub);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+      text-decoration: none;
+    }
+    .nav-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .curr-date {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-main);
+      padding: 0 4px;
+    }
+    .util-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .theme-toggle-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-sub);
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 15px;
+      transition: all 0.15s ease;
+    }
+    .theme-toggle-btn:hover {
+      border-color: var(--primary);
+    }
+
+    .header-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 18px 18px 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #2563eb;
+      background: #dbeafe;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 4px;
+      color: var(--text-main);
+      line-height: 1.35;
+    }
+    .as-of {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .summary-box {
+      padding: 12px 14px;
+      background: var(--summary-bg);
+      border-left: 3px solid var(--summary-border);
+      border-radius: 8px;
+    }
+    .summary-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .summary-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .summary-item {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-sub);
+      line-height: 1.5;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    .summary-item::before {
+      content: "•";
+      color: var(--primary);
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1;
+    }
+    .summary-item b {
+      font-weight: 700;
+      color: var(--text-main);
+      flex-shrink: 0;
+    }
+
+    .macro-section {
+      margin-bottom: 16px;
+    }
+    .macro-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (max-width: 659px) {
+      .macro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 439px) {
+      .macro-grid { grid-template-columns: minmax(0, 1fr); }
+    }
+    .macro-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: var(--shadow-sm);
+      min-width: 0;
+    }
+    .macro-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .macro-title .macro-name {
+      min-width: 0;
+    }
+    .macro-title .macro-tag {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .macro-val {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 6px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .macro-val .macro-formula {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-left: 4px;
+      white-space: nowrap;
+    }
+    .macro-compare-box {
+      background: #f8fafc;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-bottom: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    [data-theme="dark"] .macro-compare-box {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .macro-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+    }
+    .macro-row .name {
+      color: var(--text-muted);
+      font-weight: 600;
+      white-space: pre;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .macro-row .val {
+      color: var(--text-main);
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .macro-row .chg {
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      min-width: 52px;
+      text-align: right;
+    }
+    .macro-desc {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      display: inline-block;
+    }
+    .macro-desc.alert {
+      color: #b91c1c;
+      background: #fee2e2;
+    }
+    [data-theme="dark"] .macro-desc.alert {
+      color: #f87171;
+      background: rgba(239, 68, 68, 0.2);
+    }
+    .macro-desc.ok {
+      color: #047857;
+      background: #d1fae5;
+    }
+    [data-theme="dark"] .macro-desc.ok {
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.2);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+      color: var(--text-sub);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .zones-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .zone-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: var(--shadow-sm);
+    }
+    .zone-header {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-sub);
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .zone-body {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .asset-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .asset-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .symbol-name {
+      font-weight: 700;
+      color: var(--text-main);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .price-val {
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-main);
+    }
+    .pill-chg {
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pill-chg.up { color: var(--up-color); background: var(--up-bg); }
+    .pill-chg.down { color: var(--down-color); background: var(--down-bg); }
+    .pill-chg.steady { color: var(--steady-color); background: var(--steady-bg); }
+
+    .news-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .news-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .news-card-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+      text-decoration: none;
+      display: block;
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+    .news-card-title:hover {
+      color: var(--primary);
+    }
+    .news-summary-txt {
+      font-size: 12px;
+      color: var(--text-sub);
+      line-height: 1.5;
+      margin-bottom: 8px;
+      background: var(--summary-bg);
+      padding: 8px 10px;
+      border-radius: 6px;
+    }
+    .news-meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .news-tags {
+      display: flex;
+      gap: 4px;
+    }
+    .tag-badge {
+      background: var(--primary-bg);
+      color: var(--primary);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      font-size: 10px;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 36px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="top-nav">
+      <div class="hist-nav">
+        <span class="curr-date">📅 2026-11-09</span>
+      </div>
+      <div class="util-actions">
+        <button class="nav-btn" onclick="copySummary()" title="요약 복사">📋 요약 복사</button>
+        <button class="theme-toggle-btn" onclick="toggleTheme()" id="themeBtn" title="다크/라이트 모드">🌙</button>
+      </div>
+    </div>
+
+    <div class="header-card">
+      <span class="badge">06:30 장전 브리핑</span>
+      <h1>KOSPI -6.02% 약세 · 원/달러 1,364.0원(상승)</h1>
+      <div class="as-of">기준: 2026-11-09 06:30 KST (전 지표 종가 기준)</div>
+      
+            <div class="summary-box">
+              <div class="summary-label">📌 오늘의 3줄 핵심 요약</div>
+              <ul class="summary-list" id="summaryList">
+                <li class="summary-item"><b>주가:</b> 코스피 하락(-6.02%), 코스닥 약세(-5.03%), 미 나스닥 상승(+1.09%)</li>
+                <li class="summary-item"><b>채권:</b> 국고10년 3.852%(-4.0bp) · 미10년 4.859%(+2.2bp) · 한·미 10년물 금리차 +100.7bp 역전 지속</li>
+                <li class="summary-item"><b>기타:</b> 원/달러 1,364.0원(+0.52%) · WTI유가 $90.83(+0.34%) · 국제금 $4,074.90(-0.94%)</li>
+              </ul>
+            </div>
+            
+    </div>
+
+    
+            <div class="macro-section">
+              <div class="section-title">⚡ 스프레드 분석</div>
+              <div class="macro-grid">
+                
+            <div class="macro-card">
+              <div class="macro-title">
+                <span class="macro-name">한·미 10년물 금리차</span>
+                <span class="macro-tag">외환 / 외국인 수급</span>
+              </div>
+              <div class="macro-val">+100.7 bp <span class="macro-formula">(미 10Y - 국고 10Y)</span></div>
+              <div class="macro-compare-box">
+                <div class="macro-row">
+                  <span class="name">한국 10Y</span>
+                  <span class="val">3.852%</span>
+                  <span class="chg">-4.0 bp</span>
+                </div>
+                <div class="macro-row">
+                  <span class="name">미국 10Y</span>
+                  <span class="val">4.859%</span>
+                  <span class="chg">+2.2 bp</span>
+                </div>
+              </div>
+              <span class="macro-desc alert">⚠️ 한·미 금리 역전 지속 (외환 변동성 주의)</span>
+            </div>
+            
+            <div class="macro-card">
+              <div class="macro-title">
+                <span class="macro-name">미국 장단기 금리차 (10Y - 2Y)</span>
+                <span class="macro-tag">경기 선행 지표</span>
+              </div>
+              <div class="macro-val">+34.8 bp <span class="macro-formula">(미 10Y - 미 2Y)</span></div>
+              <div class="macro-compare-box">
+                <div class="macro-row">
+                  <span class="name">미 10Y (장기)</span>
+                  <span class="val">4.859%</span>
+                  <span class="chg">+2.2 bp</span>
+                </div>
+                <div class="macro-row">
+                  <span class="name">미  2Y (단기)</span>
+                  <span class="val">4.511%</span>
+                  <span class="chg">+3.4 bp</span>
+                </div>
+              </div>
+              <span class="macro-desc ok">🟢 정상 수익률 곡선 (연착륙 시그널)</span>
+            </div>
+            
+            <div class="macro-card">
+              <div class="macro-title">
+                <span class="macro-name">국내 장단기 금리차 (10Y - 3Y)</span>
+                <span class="macro-tag">국내 통화 / 경기</span>
+              </div>
+              <div class="macro-val">+23.0 bp <span class="macro-formula">(국고 10Y - 국고 3Y)</span></div>
+              <div class="macro-compare-box">
+                <div class="macro-row">
+                  <span class="name">국고 10Y</span>
+                  <span class="val">3.852%</span>
+                  <span class="chg">-4.0 bp</span>
+                </div>
+                <div class="macro-row">
+                  <span class="name">국고  3Y</span>
+                  <span class="val">3.622%</span>
+                  <span class="chg">-4.9 bp</span>
+                </div>
+              </div>
+              <span class="macro-desc ok">🟢 정상 수익률 곡선 (경기 연착륙)</span>
+            </div>
+            
+              </div>
+            </div>
+            
+
+    <div class="section-title">📊 5대 자산군 전 지표 종합 (종가 기준)</div>
+    <div class="zones-grid">
+      
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🇰🇷 국내 증시 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSPI</span>
+                <div class="row-right">
+                  <span class="price-val">5,059.69 pt</span>
+                  <span class="pill-chg down">-6.02% (-324.11pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSDAQ</span>
+                <div class="row-right">
+                  <span class="price-val">644.27 pt</span>
+                  <span class="pill-chg down">-5.03% (-34.14pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 KOSPI 200</span>
+                <div class="row-right">
+                  <span class="price-val">783.23 pt</span>
+                  <span class="pill-chg down">-6.51% (-54.55pt)</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🇺🇸 글로벌 증시 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 S&amp;P500</span>
+                <div class="row-right">
+                  <span class="price-val">7,376.86 pt</span>
+                  <span class="pill-chg up">+0.31% (+23.13pt)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 NASDAQ</span>
+                <div class="row-right">
+                  <span class="price-val">24,579.43 pt</span>
+                  <span class="pill-chg up">+1.09% (+264.43pt)</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 🏦 금리 &amp; 채권 (종가)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 국고3년</span>
+                <div class="row-right">
+                  <span class="price-val">3.622%</span>
+                  <span class="pill-chg down">-4.9bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 국고10년</span>
+                <div class="row-right">
+                  <span class="price-val">3.852%</span>
+                  <span class="pill-chg down">-4.0bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 미국채10년</span>
+                <div class="row-right">
+                  <span class="price-val">4.859%</span>
+                  <span class="pill-chg up">+2.2bp</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 미국채2년</span>
+                <div class="row-right">
+                  <span class="price-val">4.511%</span>
+                  <span class="pill-chg up">+3.4bp</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+                <div class="zone-card">
+                  <div class="zone-header">
+                    <span>■ 💵 환율 &amp; 원자재 (종가/고시)</span>
+                  </div>
+                  <div class="zone-body">
+                    
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 USD/KRW</span>
+                <div class="row-right">
+                  <span class="price-val">1,364.0원</span>
+                  <span class="pill-chg up">+0.52% (+7.0원)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔴 WTI유가</span>
+                <div class="row-right">
+                  <span class="price-val">$90.83</span>
+                  <span class="pill-chg up">+0.34%</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="asset-item">
+              <div class="asset-row">
+                <span class="symbol-name">🔵 국제금</span>
+                <div class="row-right">
+                  <span class="price-val">$4,074.90</span>
+                  <span class="pill-chg down">-0.94%</span>
+                </div>
+              </div>
+            </div>
+            
+                  </div>
+                </div>
+                
+    </div>
+
+    <div class="section-title">📰 주요 시황 뉴스 & 변동 요인</div>
+    <div class="news-list">
+      
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/011/0004679988" target="_blank" rel="noopener" class="news-card-title">코스피 10% 급락에도 웃었다…통신·K콘텐츠 지수 9%대 상승 [마켓시그널]</a>
+                  <div class="news-summary-txt">미국 중간선거 충격으로 국내 증시가 급락했지만 통신과 K콘텐츠 관련 지수는 사흘간 9%대 상승률을 기록했다. 인공지능(AI) 투자 위축 우려로 반도체주가 흔들리는 사이 정책 영향을 상대적으로 덜 받는 업종과 방어주로</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>서울경제 · 20261109061607</span>
+                  </div>
+                </div>
+                
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/215/0001272070" target="_blank" rel="noopener" class="news-card-title">실적 앞두고 대형 악재…젠슨 황 &#x27;스파이 연루설&#x27; 불륜 시인</a>
+                  <div class="news-summary-txt">인공지능(AI) 반도체 시장을 독점하고 있는 엔비디아의 젠슨 황 최고경영자(CEO)가 중국 정보기관에 포섭된 것으로 의심받은 여성 임원과 부적절한 관계를 맺었다는 외신 보도 직후 해당 외도 사실을 공식 인정했다. 엔</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>한국경제TV · 20261109061518</span>
+                  </div>
+                </div>
+                
+                <div class="news-card">
+                  <a href="https://n.news.naver.com/mnews/article/366/0001203355" target="_blank" rel="noopener" class="news-card-title">줄어든 거래대금에 증권가는 ‘MTS’ 전쟁…AI·배당·연금으로 고객 자산 잡는다</a>
+                  <div class="news-summary-txt">신한투자證, AI로 투자전략 제공 대신證, 배당 등 주주환원 정보 강화 하나證, 퇴직연금 ETF 적립식 매수 서비스 “MTS, 금융상품 아우르는 거래플랫폼으로 발돋움…고도화 필요성&quot; 증시 조정으로 주식 거래가 위축되</div>
+                  <div class="news-meta-row">
+                    <div class="news-tags">
+                      <span class="tag-badge">#KR_EQUITY</span>
+                    </div>
+                    <span>조선비즈 · 20261109060221</span>
+                  </div>
+                </div>
+                
+    </div>
+
+    <div class="footer">
+      © 2026 Daily Market Brief Bot · Automated Intelligence Pipeline
+    </div>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme');
+      const target = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', target);
+      document.getElementById('themeBtn').textContent = target === 'dark' ? '☀️' : '🌙';
+    }
+
+    function copySummary() {
+      const listEl = document.getElementById('summaryList');
+      if (listEl) {
+        const items = Array.from(listEl.querySelectorAll('.summary-item')).map(el => el.textContent.trim());
+        const txt = "📌 [오늘의 3줄 핵심 요약]\n" + items.map(i => "• " + i).join("\n");
+        navigator.clipboard.writeText(txt).then(() => {
+          alert('3줄 핵심 요약이 클립보드에 복사되었습니다! 팀 채널이나 카톡에 바로 붙여넣기 하세요.');
+        }).catch(() => {
+          alert('복사 실패');
+        });
+      }
+    }
+  </script>
+</body>
+</html>
