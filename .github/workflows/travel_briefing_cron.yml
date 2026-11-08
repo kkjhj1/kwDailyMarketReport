@@ -1,9 +1,11 @@
 name: Travel Briefing Automation
 
 on:
-  schedule:
-    # 매주 목요일 12:00 KST (03:00 UTC) 주말 특가 브리핑
-    - cron: '0 3 * * 4'
+  # 1. [오라클 클라우드 VM 단일화 완료]
+  # 모든 정기 스케줄은 오라클 서버 crontab(run_cron.sh)으로 일원화되었습니다.
+  # 중복 발송을 원천 차단하기 위해 GitHub Actions 자동 스케줄은 비활성화합니다.
+  # schedule:
+  #   - cron: '0 3 * * 4'
   workflow_dispatch:
     inputs:
       dry_run:

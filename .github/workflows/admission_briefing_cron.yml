@@ -1,11 +1,12 @@
 name: Admission Briefing Automation (에듀브리프 입시 브리핑 자동화)
 
 on:
-  schedule:
-    # 1. 매주 일요일 20:00 KST (11:00 UTC) - 학년별 주간 To-Do 브리핑 자동 발송
-    - cron: '0 11 * * 0'
-    # 2. 매일 08:30 KST (전날 23:30 UTC) - 공식 교육 공지 및 설명회 자동 수집
-    - cron: '30 23 * * *'
+  # 1. [오라클 클라우드 VM 단일화 완료]
+  # 모든 정기 스케줄은 오라클 서버 crontab(run_cron.sh)으로 일원화되었습니다.
+  # 중복 발송을 원천 차단하기 위해 GitHub Actions 자동 스케줄은 비활성화합니다.
+  # schedule:
+  #   - cron: '0 11 * * 0'
+  #   - cron: '30 23 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -98,7 +99,7 @@ jobs:
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/admission_brief.db || true
+          # git add data/admission_brief.db (DB Git 추적 제외)
           if git diff --staged --quiet; then
             echo "No database changes to commit."
           else

@@ -44,8 +44,15 @@ jobs:
           script: |
             set -e
             cd /home/ubuntu/kwDailyMarketReport
+            mkdir -p backups
+            if [ -f "alerts.sqlite3" ]; then
+              cp -p alerts.sqlite3 backups/alerts_pre_deploy.sqlite3
+            fi
             git fetch origin main
             git reset --hard origin/main
+            if [ -f "backups/alerts_pre_deploy.sqlite3" ] && [ ! -f "alerts.sqlite3" ]; then
+              cp -p backups/alerts_pre_deploy.sqlite3 alerts.sqlite3
+            fi
             if [ -f "requirements.txt" ]; then
               ./venv/bin/pip install -r requirements.txt --quiet
             fi

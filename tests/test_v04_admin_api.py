@@ -551,6 +551,16 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("openAdminTokenModal", html)
         self.assertIn("saveAdminTokenFromModal", html)
 
+    def test_bot_master_detail_ui_present(self):
+        html = self.client.get("/").text
+        self.assertIn('id="botMasterStrip"', html)
+        self.assertIn('id="botDetailInspector"', html)
+        self.assertIn("renderBotMasterStrip", html)
+        self.assertIn("selectBot", html)
+        self.assertIn("renderBotDetailInspector", html)
+        self.assertIn("loadInlineBriefingPreview", html)
+        self.assertIn("bot-master-tile", html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -394,6 +394,105 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
 
+    /* 📡 7-Bot Master-Detail Dashboard */
+    .bot-master-strip {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .bot-master-tile {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      min-height: 52px;
+      text-align: left;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      user-select: none;
+      min-width: 0;
+    }
+    .bot-master-tile:hover {
+      border-color: #93c5fd;
+      background: #f8fafc;
+    }
+    .bot-master-tile.is-selected {
+      border-color: var(--primary);
+      background: #eff6ff;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+    }
+    .bot-master-tile-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      min-width: 0;
+    }
+    .bot-master-tile-name {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bot-master-tile-status {
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .bot-master-tile-sub {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .bot-detail-inspector {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+      margin-top: 14px;
+    }
+    .bot-inspector-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+    .bot-inspector-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .bot-inline-preview {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      font-family: monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-wrap: anywhere;
+      max-height: 380px;
+      overflow-y: auto;
+    }
+
     /* Bot Cards Grid */
     .bot-grid {
       display: grid;
@@ -1054,6 +1153,31 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         cursor: pointer;
       }
 
+      /* Bot Master-Detail Mobile */
+      .bot-master-strip {
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) !important;
+        gap: 8px !important;
+      }
+      .bot-master-tile {
+        min-height: 48px !important;
+        padding: 8px 10px !important;
+      }
+      .bot-inspector-header {
+        flex-direction: column !important;
+        align-items: stretch !important;
+      }
+      .bot-inspector-actions {
+        display: grid !important;
+        grid-template-columns: 1fr !important;
+        gap: 8px !important;
+        width: 100% !important;
+      }
+      .bot-inspector-actions .btn {
+        min-height: 44px !important;
+        font-size: 13.5px !important;
+        width: 100% !important;
+      }
+
       /* Bot Grid 1-column on mobile */
       .bot-grid {
         grid-template-columns: 1fr;
@@ -1708,21 +1832,23 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- TAB 2: BOTS & DIRECT BROADCAST HUB                                  -->
     <!-- =================================================================== -->
     <section id="pane-bots" class="tab-pane">
-      <!-- Integrated Single Menu Bot Banner Card -->
-      <div class="card" style="background:linear-gradient(135deg, #eff6ff 0%, #ffffff 80%); border:2px solid #bfdbfe; margin-bottom:20px;">
-        <div id="menuBotSection"></div>
-      </div>
-
-      <!-- Info Bots Grid with Direct Broadcast Buttons -->
-      <div class="card">
-        <div class="card-header">
+      <!-- 📡 7대 봇 실시간 통합 상황판 (Master Status Strip) -->
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header" style="margin-bottom:0;">
           <div>
-            <h2 class="card-title">📡 운영 중인 정보봇 목록 &amp; 원클릭 즉시 발송 센터</h2>
-            <p class="card-desc">각 봇의 [🚀 정규 브리핑 발송 센터]를 누르면 정해진 실시간 콘텐츠(시황 데이터, 여행 특가, 입시 나침반, 실버케어 복지, 자녀 나침반, 욜로 1인 라이프)를 즉시 생성하여 미리보고, 관리자 테스트 발송 및 전체 구독자 발송을 실행할 수 있습니다.</p>
+            <h2 class="card-title">📡 7대 봇 실시간 통합 상황판 &amp; 원클릭 즉시 발송 센터</h2>
+            <p class="card-desc">7대 봇의 실시간 폴링 및 토큰 연결 상태를 한눈에 모니터링하고, 원하는 봇을 클릭하여 상세 브리핑 생성 및 즉시 발송을 제어합니다.</p>
           </div>
           <button class="btn btn-primary" onclick="openNewBotModal()">➕ 새 정보봇 추가</button>
         </div>
-        <div class="bot-grid" id="infoBotGrid"></div>
+        <div id="botMasterStrip" class="bot-master-strip">
+          <div style="grid-column: 1 / -1; text-align:center; padding:20px; color:var(--text-muted);">봇 상태를 불러오는 중...</div>
+        </div>
+      </div>
+
+      <!-- 🔍 선택 봇 전용 상세 제어 센터 (Detail Inspector) -->
+      <div id="botDetailInspector" class="bot-detail-inspector">
+        <div style="text-align:center; padding:32px; color:var(--text-muted);">봇을 선택해주세요.</div>
       </div>
     </section>
 
@@ -2145,6 +2271,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     let S = {
       users: [],
       bots: [],
+      selectedBotId: null,
+      previewRequestVersion: 0,
       upgradeRequests: [],
       overview: null,
       tierFilter: '',
@@ -2854,8 +2982,18 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     // =========================================================================
-    // TAB 2: BOTS & DIRECT BROADCAST
+    // TAB 2: 7-BOT MASTER-DETAIL STATUS DASHBOARD & DIRECT BROADCAST
     // =========================================================================
+    const FIXED_7_BOT_SLOTS = [
+      { id: 'menu_bot', aliases: ['menu_bot', 'portal_bot'], label: '통합 메뉴', emoji: '🧭' },
+      { id: 'brief_bot', aliases: ['brief_bot'], label: '시황 브리핑', emoji: '📈' },
+      { id: 'travel_bot', aliases: ['travel_bot'], label: '여행 특가', emoji: '✈️' },
+      { id: 'admission_bot', aliases: ['admission_bot', 'edu_bot'], label: '입시 나침반', emoji: '🎓' },
+      { id: 'silver_bot', aliases: ['silver_bot'], label: '실버케어', emoji: '👵' },
+      { id: 'kids_bot', aliases: ['kids_bot'], label: '자녀 나침반', emoji: '👶' },
+      { id: 'yolo_bot', aliases: ['yolo_bot'], label: '욜로 라이프', emoji: '🏄' },
+    ];
+
     let currentBriefingData = {
       bot_id: '',
       preset: '',
@@ -2863,90 +3001,226 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       inline_keyboard: []
     };
 
+    function getBotStatusSpec(b) {
+      if (!b) return { text: '⚪ 미등록', color: 'var(--text-muted)', up: false };
+      if (b.is_active === false) return { text: '⚪ 비활성', color: 'var(--text-muted)', up: false };
+      if (!b.has_token) return { text: '🟠 토큰 필요', color: 'var(--warning)', up: false };
+      if (!b.worker_running) return { text: '🔴 중단됨', color: 'var(--danger)', up: false };
+      return { text: '🟢 폴링 정상', color: 'var(--success)', up: true };
+    }
+
+    function renderBotMasterStrip() {
+      const container = document.getElementById('botMasterStrip');
+      if (!container) return;
+
+      if (!S.bots || S.bots.length === 0) {
+        container.innerHTML = '<div style="grid-column: 1 / -1; text-align:center; padding:20px; color:var(--text-muted);">등록된 봇이 없습니다.</div>';
+        return;
+      }
+
+      // Map fixed 7 slots to actual bot objects in DB
+      const renderedIds = new Set();
+      const slots = FIXED_7_BOT_SLOTS.map(slot => {
+        const b = S.bots.find(x => slot.aliases.includes(x.bot_id));
+        if (b) renderedIds.add(b.bot_id);
+        return { slot, bot: b };
+      });
+
+      // Extra dynamic info bots if any
+      const extras = S.bots.filter(b => !renderedIds.has(b.bot_id)).map(b => ({
+        slot: { id: b.bot_id, aliases: [b.bot_id], label: b.name, emoji: b.icon_emoji || '🤖' },
+        bot: b
+      }));
+
+      const allItems = [...slots, ...extras];
+
+      container.innerHTML = allItems.map(({ slot, bot }) => {
+        const botId = bot ? bot.bot_id : slot.id;
+        const name = bot ? (bot.name || slot.label) : slot.label;
+        const emoji = bot ? (bot.icon_emoji || slot.emoji) : slot.emoji;
+        const status = getBotStatusSpec(bot);
+        const subCount = bot ? Number(bot.active_subscribers || 0) : 0;
+        const isSelected = S.selectedBotId === botId;
+        const isMenu = bot && bot.bot_type === 'MENU';
+
+        return `
+          <div class="bot-master-tile ${isSelected ? 'is-selected' : ''}"
+               data-bot-id="${esc(botId)}"
+               role="button"
+               tabindex="0"
+               aria-pressed="${isSelected ? 'true' : 'false'}"
+               onclick="selectBot('${esc(botId)}')"
+               onkeydown="if(event.key==='Enter'||event.key===' ') { selectBot('${esc(botId)}'); event.preventDefault(); }">
+            <div class="bot-master-tile-header">
+              <span style="font-size:20px; flex-shrink:0;">${esc(emoji)}</span>
+              <span class="bot-master-tile-status" style="color:${status.color};">${esc(status.text)}</span>
+            </div>
+            <div class="bot-master-tile-name" title="${esc(name)}">${esc(name)}</div>
+            <div class="bot-master-tile-sub">
+              <span>${isMenu ? '포털허브' : `${subCount}명 구독`}</span>
+              ${bot && bot.telegram_username ? `<span style="font-size:10.5px; color:var(--primary);">@${esc(bot.telegram_username)}</span>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function selectBot(botId) {
+      if (!botId) return;
+      S.selectedBotId = botId;
+
+      // Update active tile highlight
+      document.querySelectorAll('.bot-master-tile').forEach(el => {
+        const matches = el.getAttribute('data-bot-id') === botId;
+        el.classList.toggle('is-selected', matches);
+        el.setAttribute('aria-pressed', matches ? 'true' : 'false');
+      });
+
+      renderBotDetailInspector(botId);
+      await loadInlineBriefingPreview(botId);
+    }
+
+    function renderBotDetailInspector(botId) {
+      const inspector = document.getElementById('botDetailInspector');
+      if (!inspector) return;
+
+      const bot = S.bots.find(b => b.bot_id === botId);
+      if (!bot) {
+        inspector.innerHTML = `<div style="text-align:center; padding:24px; color:var(--text-muted);">선택된 봇 정보를 찾을 수 없습니다 (${esc(botId)}).</div>`;
+        return;
+      }
+
+      const status = getBotStatusSpec(bot);
+      const isMenu = bot.bot_type === 'MENU';
+      const uname = bot.telegram_username ? `@${esc(bot.telegram_username)}` : '토큰 미설정';
+      const subBadge = isMenu
+        ? `<span class="badge" style="background:#dbeafe; color:#1e40af; font-size:12px; padding:3px 8px; border-radius:6px; font-weight:700;">🧭 가입·안내 통합 포털 허브</span>`
+        : `<span class="badge" style="background:#dbeafe; color:#1e40af; font-size:12px; padding:3px 8px; border-radius:6px; font-weight:700;">👥 활성 구독자 ${bot.active_subscribers || 0}명</span>`;
+
+      inspector.innerHTML = `
+        <div class="bot-inspector-header">
+          <div style="display:flex; align-items:center; gap:14px; min-width:0;">
+            <span style="font-size:38px; flex-shrink:0;">${esc(bot.icon_emoji)}</span>
+            <div style="min-width:0;">
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <h3 style="font-size:18px; font-weight:800; margin:0;">${esc(bot.name)}</h3>
+                <span style="font-size:12px; font-weight:700; color:var(--primary);">${uname}</span>
+                <span style="font-size:12px; font-weight:700; color:${status.color};">${esc(status.text)}</span>
+                ${subBadge}
+              </div>
+              <div style="font-size:12.5px; color:var(--text-muted); margin-top:4px;">
+                <b>카테고리:</b> ${esc(bot.category)} · <b>설명:</b> ${esc(bot.description || '설명 없음')}
+              </div>
+            </div>
+          </div>
+          <div class="bot-inspector-actions">
+            <button class="btn btn-sm btn-primary btn-dispatch-center" onclick="openBriefingModal('${esc(bot.bot_id)}')">
+              🚀 ${isMenu ? '포털 카탈로그' : '정규 브리핑'} 발송 센터
+            </button>
+            <button class="btn btn-sm btn-dark" onclick="openSimModal('${esc(bot.bot_id)}')">
+              🧪 유저 시점 시뮬레이터
+            </button>
+            <button class="btn btn-sm" onclick="openEditBotModal('${esc(bot.bot_id)}')">
+              ⚙️ 설정 및 토큰 수정
+            </button>
+          </div>
+        </div>
+
+        <!-- 📄 Inline Live Briefing Preview Section -->
+        <div style="margin-top:14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+            <div style="font-size:13.5px; font-weight:800; color:var(--text);">
+              📄 [${esc(bot.name)}] 실시간 브리핑 미리보기
+            </div>
+            <div id="botInlinePresetBar" style="display:flex; gap:6px; align-items:center;">
+              <span style="font-size:12px; color:var(--text-muted);">프리셋 로딩 중...</span>
+            </div>
+          </div>
+          <div id="botInlinePreviewBox" class="bot-inline-preview">
+            <div style="text-align:center; padding:24px; color:var(--text-muted);">실시간 콘텐츠를 불러오는 중입니다...</div>
+          </div>
+          <div id="botInlinePreviewButtons" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:10px;"></div>
+        </div>
+      `;
+    }
+
+    async function loadInlineBriefingPreview(botId, presetId = null) {
+      const pBox = document.getElementById('botInlinePresetBar');
+      const box = document.getElementById('botInlinePreviewBox');
+      const bBox = document.getElementById('botInlinePreviewButtons');
+      if (!box) return;
+
+      const currentReqVer = ++S.previewRequestVersion;
+
+      try {
+        // Fetch presets
+        const pRes = await req(`/api/platform/bots/${botId}/presets`);
+        if (currentReqVer !== S.previewRequestVersion || S.selectedBotId !== botId) return;
+
+        const presets = pRes.presets || [];
+        const activePreset = presetId || (presets[0] ? presets[0].id : null);
+
+        if (pBox) {
+          pBox.innerHTML = presets.length > 0 ? presets.map(p => `
+            <button class="btn btn-xs ${p.id === activePreset ? 'btn-primary' : 'btn-outline'}"
+                    onclick="loadInlineBriefingPreview('${esc(botId)}', '${esc(p.id)}')">
+              ${esc(p.label)}
+            </button>
+          `).join('') : '<span style="font-size:11.5px; color:var(--text-muted);">(기본 템플릿)</span>';
+        }
+
+        // Fetch live preview content
+        const payload = activePreset ? { preset: activePreset } : {};
+        const prevRes = await req(`/api/platform/bots/${botId}/preview`, {
+          method: 'POST',
+          body: payload
+        });
+        if (currentReqVer !== S.previewRequestVersion || S.selectedBotId !== botId) return;
+
+        currentBriefingData = {
+          bot_id: botId,
+          preset: activePreset || '',
+          content_html: prevRes.content_html || '',
+          inline_keyboard: prevRes.inline_keyboard || []
+        };
+
+        box.innerHTML = prevRes.content_html || '<span style="color:var(--text-muted);">미리보기 내용이 없습니다.</span>';
+
+        if (bBox) {
+          const kb = prevRes.inline_keyboard || [];
+          bBox.innerHTML = kb.flatMap(row => row.map(btn => `
+            <span class="btn btn-xs" style="background:#e2e8f0; color:#334155; border:1px solid #cbd5e1; pointer-events:none;">
+              ${esc(btn.text)}
+            </span>
+          `)).join('');
+        }
+      } catch (e) {
+        if (currentReqVer !== S.previewRequestVersion || S.selectedBotId !== botId) return;
+        box.innerHTML = `<span style="color:var(--danger);">미리보기 생성 실패: ${esc(e.message)}</span>`;
+        if (bBox) bBox.innerHTML = '';
+      }
+    }
+
     async function loadBots() {
       try {
         const res = await req('/api/platform/bots');
         S.bots = res.bots || [];
-        const menuBot = S.bots.find(b => b.bot_type === 'MENU');
-        const infoBots = S.bots.filter(b => b.bot_type === 'INFO');
 
-        // Render Menu Bot Section
-        const mBox = document.getElementById('menuBotSection');
-        if (!menuBot) {
-          mBox.innerHTML = '<div style="color:var(--text-muted);">메뉴봇이 없습니다.</div>';
-        } else {
-          const uname = menuBot.telegram_username ? `@${menuBot.telegram_username}` : '토큰 등록 필요';
-          const tokenBadge = menuBot.has_token
-            ? `<span style="color:var(--success); font-weight:700;">🟢 토큰 등록됨</span>`
-            : `<span style="color:var(--warning); font-weight:700;">🟠 토큰 필요</span>`;
-          const workerBadge = menuBot.worker_running
-            ? `<span style="background:#dcfce7; color:#15803d; font-size:11px; padding:2px 6px; border-radius:4px; font-weight:700;">⚡ 실시간 폴링 가동중</span>`
-            : '';
-          mBox.innerHTML = `
-            <div class="menu-bot-box">
-              <div class="menu-bot-info">
-                <span style="font-size:36px; flex-shrink:0;">${esc(menuBot.icon_emoji)}</span>
-                <div>
-                  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <strong style="font-size:16px;">${esc(menuBot.name)}</strong>
-                    <span style="font-size:12px; color:var(--primary); font-weight:700;">${uname}</span>
-                    <span style="font-size:12px;">${tokenBadge}</span>
-                    ${workerBadge}
-                    <span class="badge" style="background:#dbeafe; color:#1e40af; font-size:11.5px; padding:2px 7px; border-radius:4px; font-weight:700;">가입·안내 포털 (6대 봇 통합 허브)</span>
-                  </div>
-                  <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">${esc(menuBot.description)}</div>
-                </div>
-              </div>
-              <div class="menu-bot-btns">
-                <button class="btn btn-sm btn-primary" onclick="openBriefingModal('${esc(menuBot.bot_id)}')">🚀 포털 카탈로그 발송 센터</button>
-                <button class="btn btn-sm btn-dark" onclick="openSimModal('${esc(menuBot.bot_id)}')">👁️ 유저 시점 미리보기</button>
-                <button class="btn btn-sm" onclick="openEditBotModal('${esc(menuBot.bot_id)}')">⚙️ 설정·토큰 수정</button>
-              </div>
-            </div>
-          `;
+        // Reconcile selectedBotId: preserve if in list, fallback to brief_bot or first bot
+        const botIds = S.bots.map(b => b.bot_id);
+        if (!S.selectedBotId || !botIds.includes(S.selectedBotId)) {
+          if (botIds.includes('brief_bot')) {
+            S.selectedBotId = 'brief_bot';
+          } else {
+            const firstActive = S.bots.find(b => b.is_active !== false);
+            S.selectedBotId = firstActive ? firstActive.bot_id : (botIds[0] || null);
+          }
         }
 
-        // Render Info Bots
-        document.getElementById('infoBotGrid').innerHTML = infoBots.map(b => {
-          const tokenBadge = b.has_token
-            ? `<span style="color:var(--success); font-weight:700;">🟢 연결됨</span>`
-            : `<span style="color:var(--warning); font-weight:700;">🟠 토큰 필요</span>`;
-          const unameTag = b.telegram_username
-            ? `<span style="color:var(--primary); font-weight:700;">@${esc(b.telegram_username)}</span> · `
-            : '';
-          const workerTag = b.worker_running
-            ? ` · <span style="color:#15803d; font-weight:700;">⚡ 폴링중</span>`
-            : '';
-
-          return `
-            <div class="bot-card">
-              <div>
-                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
-                  <div style="display:flex; align-items:center; gap:10px;">
-                    <span style="font-size:28px;">${esc(b.icon_emoji)}</span>
-                    <div>
-                      <div style="font-size:15px; font-weight:800;">${esc(b.name)}</div>
-                      <div style="font-size:12px; color:var(--text-muted);">${unameTag}${esc(b.category)} · ${tokenBadge}${workerTag}</div>
-                    </div>
-                  </div>
-                  <span style="font-size:12px; font-weight:800; background:#dbeafe; color:#1e40af; padding:3px 8px; border-radius:6px; flex-shrink:0;">
-                    👥 ${b.active_subscribers}명 구독중
-                  </span>
-                </div>
-                <div style="font-size:12.5px; color:#475569; margin:8px 0;">${esc(b.description || '설명 없음')}</div>
-              </div>
-              <div class="bot-card-actions">
-                <button class="btn btn-sm btn-primary btn-dispatch-center" onclick="openBriefingModal('${esc(b.bot_id)}')">
-                  🚀 정규 브리핑 발송 센터
-                </button>
-                <div class="bot-card-sub-actions">
-                  <button class="btn btn-sm" onclick="openEditBotModal('${esc(b.bot_id)}')">⚙️ 설정</button>
-                  <button class="btn btn-sm" onclick="openSimModal('${esc(b.bot_id)}')">🧪 시뮬</button>
-                </div>
-              </div>
-            </div>
-          `;
-        }).join('') || '<div style="color:var(--text-muted);">등록된 정보봇이 없습니다.</div>';
+        renderBotMasterStrip();
+        if (S.selectedBotId) {
+          await selectBot(S.selectedBotId);
+        }
       } catch (e) {
         toast('봇 목록 로드 실패: ' + e.message);
       }
