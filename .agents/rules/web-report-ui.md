@@ -1,7 +1,7 @@
 ---
 description: "웹 리포트 HTML 대시보드 360px 모바일 뷰포트 무오버플로우 UI 규격"
 trigger: "glob"
-globs: ["reports/**", "*.html", "static/**"]
+globs: "**/reports/**, **/*.html, **/static/**"
 ---
 
 # 웹 리포트 UI 규격 (텔레그램 인앱 웹 연동)
