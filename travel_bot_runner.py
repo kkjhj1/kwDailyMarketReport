@@ -96,11 +96,49 @@ def format_telegram_briefing(
     web_report_url: str = "http://161.33.196.211:8002/reports/travel_latest.html",
     engine: Optional[FlightEngine] = None,
     snapshot: Optional[TravelSnapshot] = None,
+    target_city: Optional[str] = None,
 ) -> str:
-    """Format mobile-optimized Telegram message with concise hierarchy and <=4096 single-message guarantee."""
+    """Format mobile-optimized Telegram message with concise hierarchy and <=4096 single-message guarantee.
+
+    `target_city`:
+      - None  : scheduled/legacy briefing (full 6-month monthly summary incl. SSE verification).
+      - "ALL" : on-demand all-city query (monthly summary from the already-warm deal cache, no extra SSE).
+      - code  : on-demand single-city query (single-city header, no monthly matrix / SSE).
+    """
     now_str = snapshot.generated_at if snapshot else datetime.now().strftime("%Y-%m-%d %H:%M")
     is_live_mode = any(r.best_deal.is_live for r in recommendations[:3])
-    if is_live_mode:
+    target_norm = (target_city or "").strip().upper()
+    single_city_meta: Optional[DestinationMeta] = None
+    if target_norm and target_norm != "ALL":
+        single_city_meta = next(
+            (r.destination for r in recommendations if r.destination.code.upper() == target_norm),
+            None,
+        )
+        if single_city_meta is None and engine is not None:
+            single_city_meta = engine.destinations.get(target_norm)
+
+    if single_city_meta is not None:
+        city_name = html.escape(single_city_meta.name)
+        city_code = html.escape(single_city_meta.code)
+        hero = recommendations[0].best_deal if recommendations else None
+        if hero is not None and hero.data_source == "LIVE_SSE":
+            source_tag = " (네이버 실시간 관측)"
+            fare_note = "💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>"
+        elif hero is not None and hero.data_source == "LIVE_PG":
+            source_tag = " (네이버 가격그래프)"
+            fare_note = "💡 <i>항공권: 네이버 가격그래프 최근값 (실시간 요금 링크 확인)</i>"
+        else:
+            source_tag = ""
+            fare_note = "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>"
+        header_lines = [
+            f"✈️ <b>[{city_name} 주말 특가 나침반{source_tag}]</b>",
+            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
+            fare_note,
+            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
+            "──────────────────",
+            f"🔥 <b>{city_name} ({city_code}) 추천 최저가 일정 TOP {min(len(recommendations), 3)}</b>",
+        ]
+    elif is_live_mode:
         header_lines = [
             "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>",
             f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
@@ -218,38 +256,30 @@ def format_telegram_briefing(
         return "\n".join(lines)
 
     # Build concise, readable 6-month monthly best value summary directly in Telegram
+    monthly_picks: list[tuple[str, DestinationMeta, FlightDeal]] = []
+    all_months: list[str] = []
     if snapshot and snapshot.monthly_picks:
         monthly_picks = [(m, d_meta, deal) for m, (d_meta, deal) in snapshot.monthly_picks.items()]
         all_months = [m for m, _, _ in monthly_picks]
+    elif single_city_meta is not None:
+        # On-demand single-city query: skip the 6-destination matrix and its SSE calls entirely.
+        pass
+    elif target_norm == "ALL":
+        # On-demand all-city query: reuse the deal list the caller just warmed (same cache key,
+        # no network I/O on a warm cache) and skip the synchronous monthly SSE loop for responsiveness.
+        f_engine = engine or FlightEngine()
+        matrix = _build_month_matrix(f_engine, f_engine.search_deals(months_ahead=6))
+        all_months, monthly_picks = _pick_monthly_best(f_engine, matrix)
     else:
         f_engine = engine or FlightEngine()
         matrix = f_engine.get_6month_matrix()
-        all_months = sorted({m for d_map in matrix.values() for m in d_map.keys()})
-        monthly_picks: list[tuple[str, DestinationMeta, FlightDeal]] = []
-        if all_months:
-            used_dests: set[str] = set()
-            for m in all_months[:6]:
-                candidates = []
-                for d_code, d_map in matrix.items():
-                    m_deal = d_map.get(m)
-                    d_meta = f_engine.destinations.get(d_code)
-                    if m_deal and d_meta:
-                        eval_rec = BudgetCalculator.evaluate_deal(d_meta, m_deal)
-                        candidates.append((eval_rec.recommendation_score, -m_deal.price_krw, d_meta, m_deal))
-                if not candidates:
-                    continue
-                candidates.sort(reverse=True)
-                chosen = next((c for c in candidates if c[2].code not in used_dests), candidates[0])
-                _, _, c_dest, c_deal = chosen
-                used_dests.add(c_dest.code)
-                monthly_picks.append((m, c_dest, c_deal))
-
-            if f_engine.live_naver and monthly_picks:
-                verified_m_deals = f_engine.ensure_deals_sse_verified([p[2] for p in monthly_picks])
-                monthly_picks = [
-                    (m, d_meta, v_deal)
-                    for (m, d_meta, _), v_deal in zip(monthly_picks, verified_m_deals)
-                ]
+        all_months, monthly_picks = _pick_monthly_best(f_engine, matrix)
+        if f_engine.live_naver and monthly_picks:
+            verified_m_deals = f_engine.ensure_deals_sse_verified([p[2] for p in monthly_picks])
+            monthly_picks = [
+                (m, d_meta, v_deal)
+                for (m, d_meta, _), v_deal in zip(monthly_picks, verified_m_deals)
+            ]
 
     for top_lim, banner_opt, m_air_opt, m_lim in (
         (3, True, True, 6),
@@ -275,6 +305,44 @@ def format_telegram_briefing(
     if 'last_valid' in locals():
         return last_valid
     raise ValueError(f"Formatted Telegram message ({len(rendered)} chars) exceeds Telegram 4096-char limit")
+
+
+def _build_month_matrix(
+    f_engine: FlightEngine, deals: list[FlightDeal]
+) -> dict[str, dict[str, FlightDeal]]:
+    """[destination_code][YYYY-MM] -> cheapest deal (same rule as FlightEngine.get_6month_matrix)."""
+    matrix: dict[str, dict[str, FlightDeal]] = {code: {} for code in f_engine.destinations}
+    for deal in deals:
+        month_key = deal.departure_date[:7]
+        d_map = matrix.setdefault(deal.destination_code, {})
+        if month_key not in d_map or deal.price_krw < d_map[month_key].price_krw:
+            d_map[month_key] = deal
+    return matrix
+
+
+def _pick_monthly_best(
+    f_engine: FlightEngine, matrix: dict[str, dict[str, FlightDeal]]
+) -> tuple[list[str], list[tuple[str, DestinationMeta, FlightDeal]]]:
+    """Picks one best-value destination per month (destination de-duplicated where possible)."""
+    all_months = sorted({m for d_map in matrix.values() for m in d_map.keys()})
+    monthly_picks: list[tuple[str, DestinationMeta, FlightDeal]] = []
+    used_dests: set[str] = set()
+    for m in all_months[:6]:
+        candidates = []
+        for d_code, d_map in matrix.items():
+            m_deal = d_map.get(m)
+            d_meta = f_engine.destinations.get(d_code)
+            if m_deal and d_meta:
+                eval_rec = BudgetCalculator.evaluate_deal(d_meta, m_deal)
+                candidates.append((eval_rec.recommendation_score, -m_deal.price_krw, d_meta, m_deal))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        chosen = next((c for c in candidates if c[2].code not in used_dests), candidates[0])
+        _, _, c_dest, c_deal = chosen
+        used_dests.add(c_dest.code)
+        monthly_picks.append((m, c_dest, c_deal))
+    return all_months, monthly_picks
 
 
 def run_briefing(

@@ -14,6 +14,7 @@ import concurrent.futures
 import dataclasses
 import json
 import logging
+import os
 import socket
 import tempfile
 import threading
@@ -86,10 +87,120 @@ IATA_AIRLINE_KO: dict[str, str] = {
     "ET": "에티오피아항공",
 }
 
+# Cache key: (eff_ref_iso, months_ahead, sorted destination codes tuple)
+_CacheKey = tuple[str, int, tuple[str, ...]]
+
 _CACHE_LOCK = threading.Lock()
-_MEM_CACHE: dict[tuple[str, int], tuple[float, list[FlightDeal]]] = {}
-_IN_FLIGHT: dict[tuple[str, int], concurrent.futures.Future] = {}
-_FAIL_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
+_MEM_CACHE: dict[_CacheKey, tuple[float, list[FlightDeal]]] = {}
+_IN_FLIGHT: dict[_CacheKey, concurrent.futures.Future] = {}
+_FAIL_CACHE: dict[_CacheKey, tuple[float, str]] = {}
+# Emergency backup of invalidated entries: never served as fresh, only as STALE fallback on outage.
+_STALE_BACKUP: dict[_CacheKey, tuple[float, list[FlightDeal]]] = {}
+# Invalidation generation: leaders started before an invalidate() must not repopulate caches.
+_CACHE_EPOCH = 0
+
+DISK_CACHE_MAX_ENTRIES = 24
+
+
+def _dests_tuple(destinations: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted(destinations))
+
+
+def _disk_key_for(mem_key: _CacheKey) -> str:
+    return f"{mem_key[0]}:{mem_key[1]}:{','.join(mem_key[2])}"
+
+
+def _parse_disk_key(disk_key: str) -> Optional[_CacheKey]:
+    try:
+        ref, months, dests = disk_key.split(":", 2)
+        return ref, int(months), tuple(x for x in dests.split(",") if x)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _slice_superset(
+    requested: tuple[str, ...], deals: list[FlightDeal]
+) -> Optional[list[FlightDeal]]:
+    """Returns the requested-destination subset only if EVERY requested destination has real data."""
+    req = set(requested)
+    sliced = [d for d in deals if d.destination_code in req]
+    if {d.destination_code for d in sliced} != req:
+        return None
+    return sliced
+
+
+def _bump_epoch_and_demote_memory() -> None:
+    """Moves fresh memory entries into the stale backup, clears fail/in-flight registries (caller holds lock)."""
+    global _CACHE_EPOCH
+    _CACHE_EPOCH += 1
+    for k, v in _MEM_CACHE.items():
+        _STALE_BACKUP[k] = v
+    now = time.time()
+    for k in [k for k, (ts, _) in _STALE_BACKUP.items() if (now - ts) > STALE_FALLBACK_SECONDS]:
+        _STALE_BACKUP.pop(k, None)
+    _MEM_CACHE.clear()
+    _FAIL_CACHE.clear()
+    # Detach pre-invalidation flights so post-refresh requests start a fresh leader.
+    # Existing followers keep their Future reference and still get the old leader's result.
+    _IN_FLIGHT.clear()
+
+
+def _demote_disk_cache(path: Optional[Path]) -> None:
+    """Moves all fresh disk entries into the emergency backup section (fresh lookups miss afterwards)."""
+    if not path or not path.exists():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+    entries, backup = _normalize_disk_payload(raw)
+    backup.update(entries)
+    _write_disk_payload(path, {}, backup)
+
+
+def _normalize_disk_payload(raw: object) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Accepts legacy single-key payloads and v2 multi-key payloads; returns (fresh_entries, backup_entries)."""
+    if not isinstance(raw, dict):
+        return {}, {}
+    if "entries" in raw or "backup" in raw:
+        entries = raw.get("entries") or {}
+        backup = raw.get("backup") or {}
+        return (
+            {k: v for k, v in entries.items() if isinstance(v, dict)},
+            {k: v for k, v in backup.items() if isinstance(v, dict)},
+        )
+    legacy_key = raw.get("cache_key")
+    if isinstance(legacy_key, str):
+        return {legacy_key: {"saved_at": raw.get("saved_at", 0), "deals": raw.get("deals") or []}}, {}
+    return {}, {}
+
+
+def _prune_entries(entries: dict[str, dict], now: float) -> dict[str, dict]:
+    kept = {
+        k: v for k, v in entries.items()
+        if (now - float(v.get("saved_at", 0) or 0)) <= STALE_FALLBACK_SECONDS
+    }
+    if len(kept) > DISK_CACHE_MAX_ENTRIES:
+        newest = sorted(kept.items(), key=lambda kv: float(kv[1].get("saved_at", 0) or 0), reverse=True)
+        kept = dict(newest[:DISK_CACHE_MAX_ENTRIES])
+    return kept
+
+
+def _write_disk_payload(path: Path, entries: dict[str, dict], backup: dict[str, dict]) -> None:
+    now = time.time()
+    payload = {
+        "version": 2,
+        "entries": _prune_entries(entries, now),
+        "backup": _prune_entries(backup, now),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _tag_stale(deals: Iterable[FlightDeal]) -> list[FlightDeal]:
@@ -489,32 +600,63 @@ class NaverFlightLiveClient:
             next_day_arrival=ch["next_day_arrival"],
         )
 
-    def _load_disk_cache(self, cache_key: str, max_age_sec: int) -> Optional[list[FlightDeal]]:
+    def _read_disk_sections(self) -> tuple[dict[str, dict], dict[str, dict]]:
         if not self.cache_path.exists():
+            return {}, {}
+        try:
+            return _normalize_disk_payload(json.loads(self.cache_path.read_text(encoding="utf-8")))
+        except Exception:
+            return {}, {}
+
+    @staticmethod
+    def _entry_deals(entry: Optional[dict], max_age_sec: float) -> Optional[list[FlightDeal]]:
+        if not entry:
             return None
         try:
-            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            if raw.get("cache_key") != cache_key:
+            if (time.time() - float(entry.get("saved_at", 0) or 0)) > max_age_sec:
                 return None
-            saved_at = float(raw.get("saved_at", 0))
-            if (time.time() - saved_at) > max_age_sec:
-                return None
-            items = raw.get("deals") or []
+            items = entry.get("deals") or []
             if not items:
                 return None
             return [FlightDeal(**it) for it in items]
         except Exception:
             return None
 
+    def _load_disk_cache(
+        self, cache_key: str, max_age_sec: int, allow_backup: bool = False
+    ) -> Optional[list[FlightDeal]]:
+        """Loads an exact-key (or verified superset-sliced) disk entry.
+        Fresh section only by default; `allow_backup=True` also consults invalidated emergency backups.
+        """
+        entries, backup = self._read_disk_sections()
+        sections = [entries, backup] if allow_backup else [entries]
+        req_key = _parse_disk_key(cache_key)
+        for section in sections:
+            exact = self._entry_deals(section.get(cache_key), max_age_sec)
+            if exact:
+                return exact
+            if req_key is None:
+                continue
+            # Superset slicing (e.g. full 10-city morning briefing -> single-city request)
+            for k, entry in section.items():
+                sup = _parse_disk_key(k)
+                if not sup or sup[:2] != req_key[:2] or not set(req_key[2]) < set(sup[2]):
+                    continue
+                deals = self._entry_deals(entry, max_age_sec)
+                sliced = _slice_superset(req_key[2], deals) if deals else None
+                if sliced:
+                    return sliced
+        return None
+
     def _save_disk_cache(self, cache_key: str, deals: list[FlightDeal]) -> None:
         try:
-            payload = {
-                "cache_key": cache_key,
+            entries, backup = self._read_disk_sections()
+            entries[cache_key] = {
                 "saved_at": time.time(),
                 "deals": [dataclasses.asdict(d) for d in deals],
             }
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            backup.pop(cache_key, None)
+            _write_disk_payload(self.cache_path, entries, backup)
         except Exception as exc:
             logger.debug("Disk cache write skipped: %s", exc)
 
@@ -533,16 +675,28 @@ class NaverFlightLiveClient:
             eff_ref = datetime.now(KST).date().isoformat()
         else:
             eff_ref = ref_date.isoformat()
-        mem_key = (eff_ref, months_ahead)
-        disk_key = f"{eff_ref}:{months_ahead}:{','.join(sorted(destinations.keys()))}"
+        mem_key: _CacheKey = (eff_ref, months_ahead, _dests_tuple(destinations.keys()))
+        disk_key = _disk_key_for(mem_key)
 
         is_leader = False
         fut: concurrent.futures.Future[list[FlightDeal]]
 
         with _CACHE_LOCK:
+            now = time.time()
             cached = _MEM_CACHE.get(mem_key)
-            if cached and (time.time() - cached[0]) <= CACHE_TTL_SECONDS:
+            if cached and (now - cached[0]) <= CACHE_TTL_SECONDS:
                 return list(cached[1])
+
+            # Superset memory slicing: a fresh entry covering all requested cities (O(n), no network I/O)
+            for sup_key, (ts, sup_deals) in list(_MEM_CACHE.items()):
+                if (
+                    sup_key[:2] == mem_key[:2]
+                    and set(mem_key[2]) < set(sup_key[2])
+                    and (now - ts) <= CACHE_TTL_SECONDS
+                ):
+                    sliced = _slice_superset(mem_key[2], sup_deals)
+                    if sliced:
+                        return sliced
 
             disk_fresh = self._load_disk_cache(disk_key, max_age_sec=CACHE_TTL_SECONDS)
             if disk_fresh:
@@ -553,12 +707,8 @@ class NaverFlightLiveClient:
             fail_entry = _FAIL_CACHE.get(mem_key)
             if fail_entry and (time.time() - fail_entry[0]) <= FAIL_CACHE_TTL_SECONDS:
                 logger.info("Circuit breaker active for %s (reason: %s); attempting stale fallback.", mem_key, fail_entry[1])
-                disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
-                if disk_stale:
-                    return _tag_stale(disk_stale)
-                if cached:
-                    return _tag_stale(cached[1])
-                return []
+                stale = self._stale_fallback_locked(mem_key, disk_key, cached)
+                return stale or []
 
             # Single-Flight Leader vs Follower assignment
             if mem_key in _IN_FLIGHT:
@@ -568,6 +718,7 @@ class NaverFlightLiveClient:
                 fut = concurrent.futures.Future()
                 _IN_FLIGHT[mem_key] = fut
                 is_leader = True
+            leader_epoch = _CACHE_EPOCH
 
         # Follower execution path: wait for Leader's Future outside the lock
         if not is_leader:
@@ -581,13 +732,7 @@ class NaverFlightLiveClient:
                     exc,
                 )
             with _CACHE_LOCK:
-                cached = _MEM_CACHE.get(mem_key)
-                if cached:
-                    return _tag_stale(cached[1])
-            disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
-            if disk_stale:
-                return _tag_stale(disk_stale)
-            return []
+                return self._stale_fallback_locked(mem_key, disk_key, _MEM_CACHE.get(mem_key)) or []
 
         # Leader execution path: perform network I/O strictly outside the lock
         deals: list[FlightDeal] = []
@@ -595,14 +740,17 @@ class NaverFlightLiveClient:
             deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
             if deals:
                 with _CACHE_LOCK:
-                    _MEM_CACHE[mem_key] = (time.time(), deals)
-                    self._save_disk_cache(disk_key, deals)
-                    _FAIL_CACHE.pop(mem_key, None)
+                    # Epoch guard: a refresh happened mid-flight -> do not resurrect pre-refresh data as fresh.
+                    if _CACHE_EPOCH == leader_epoch:
+                        _MEM_CACHE[mem_key] = (time.time(), deals)
+                        self._save_disk_cache(disk_key, deals)
+                        _FAIL_CACHE.pop(mem_key, None)
                 fut.set_result(deals)
                 return list(deals)
             else:
                 with _CACHE_LOCK:
-                    _FAIL_CACHE[mem_key] = (time.time(), "empty_deals_collected")
+                    if _CACHE_EPOCH == leader_epoch:
+                        _FAIL_CACHE[mem_key] = (time.time(), "empty_deals_collected")
                 fut.set_result([])
         except Exception as exc:
             logger.warning(
@@ -610,50 +758,61 @@ class NaverFlightLiveClient:
                 exc,
             )
             with _CACHE_LOCK:
-                _FAIL_CACHE[mem_key] = (time.time(), str(exc))
+                if _CACHE_EPOCH == leader_epoch:
+                    _FAIL_CACHE[mem_key] = (time.time(), str(exc))
             fut.set_exception(exc)
         finally:
             with _CACHE_LOCK:
-                _IN_FLIGHT.pop(mem_key, None)
+                # Only detach our own Future (a post-invalidate leader may own the slot now).
+                if _IN_FLIGHT.get(mem_key) is fut:
+                    _IN_FLIGHT.pop(mem_key, None)
 
         # Fallback to stale cache if leader failed or yielded empty
         with _CACHE_LOCK:
-            cached = _MEM_CACHE.get(mem_key)
-            if cached:
-                return _tag_stale(cached[1])
-        disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS)
-        if disk_stale:
+            stale = self._stale_fallback_locked(mem_key, disk_key, _MEM_CACHE.get(mem_key))
+        if stale:
             logger.warning("Using emergency stale live cache (<12h) due to upstream outage.")
-            stale_tagged = _tag_stale(disk_stale)
-            with _CACHE_LOCK:
-                _MEM_CACHE[mem_key] = (time.time(), stale_tagged)
-            return list(stale_tagged)
-
+            return stale
         return []
 
+    def _stale_fallback_locked(
+        self,
+        mem_key: _CacheKey,
+        disk_key: str,
+        cached: Optional[tuple[float, list[FlightDeal]]],
+    ) -> Optional[list[FlightDeal]]:
+        """STALE-tagged fallback order: disk (fresh+backup) -> memory -> memory backup. Caller holds lock."""
+        disk_stale = self._load_disk_cache(disk_key, max_age_sec=STALE_FALLBACK_SECONDS, allow_backup=True)
+        if disk_stale:
+            return _tag_stale(disk_stale)
+        if cached:
+            return _tag_stale(cached[1])
+        backup = _STALE_BACKUP.get(mem_key)
+        if backup and (time.time() - backup[0]) <= STALE_FALLBACK_SECONDS:
+            return _tag_stale(backup[1])
+        return None
+
     def invalidate_cache(self, ref_date: Optional[date] = None, months_ahead: int = 6) -> None:
-        """Invalidates memory, disk, and failure caches to guarantee fresh collection."""
+        """Invalidates fresh memory/disk/failure caches so the next lookup re-collects live data.
+        Invalidated entries are kept only as an emergency STALE backup for upstream outages, and
+        in-flight collections started before this call can no longer repopulate the fresh cache.
+        """
         with _CACHE_LOCK:
-            _MEM_CACHE.clear()
-            _FAIL_CACHE.clear()
-        try:
-            if self.cache_path and self.cache_path.exists():
-                self.cache_path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.debug("Disk cache removal skipped: %s", exc)
+            _bump_epoch_and_demote_memory()
+            try:
+                _demote_disk_cache(self.cache_path)
+            except Exception as exc:
+                logger.debug("Disk cache demotion skipped: %s", exc)
 
     @classmethod
     def invalidate_global_cache(cls, ref_date: Optional[date] = None, months_ahead: int = 6, custom_path: Optional[Path] = None) -> None:
         """Classmethod helper to invalidate global memory, fail cache, and default disk cache file."""
         with _CACHE_LOCK:
-            _MEM_CACHE.clear()
-            _FAIL_CACHE.clear()
-        try:
-            target_path = custom_path or (Path(tempfile.gettempdir()) / "kw_travel_naver_live_v4.json")
-            if target_path.exists():
-                target_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            _bump_epoch_and_demote_memory()
+            try:
+                _demote_disk_cache(custom_path or (Path(tempfile.gettempdir()) / "kw_travel_naver_live_v4.json"))
+            except Exception:
+                pass
 
     def _collect_live_deals_uncached(
         self,
@@ -886,8 +1045,7 @@ class NaverFlightLiveClient:
                 if changed:
                     new_cached.sort(key=lambda x: x.price_krw)
                     _MEM_CACHE[m_key] = (ts, new_cached)
-                    d_key = f"{m_key[0]}:{m_key[1]}:{','.join(sorted(destinations.keys()))}"
-                    self._save_disk_cache(d_key, new_cached)
+                    self._save_disk_cache(_disk_key_for(m_key), new_cached)
 
         return [
             upgraded_map.get((d.destination_code, d.departure_date, d.return_date), d)

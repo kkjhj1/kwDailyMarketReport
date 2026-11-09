@@ -167,11 +167,18 @@ class TestTravelInteractive(unittest.TestCase):
             handler.shutdown()
 
     def test_force_refresh_invalidates_disk_cache_real_trigger(self):
-        """Validates that trv:r:ALL truly deletes disk cache file and triggers uncached collection without mocks (M-F)."""
+        """Validates that trv:r:ALL invalidates the fresh disk cache (keeping only an emergency backup)
+        and triggers uncached collection without mocks (M-F)."""
         import tempfile
         from datetime import date, timedelta
         from travel_brief.models import FlightDeal
-        from travel_brief.naver_live import NaverFlightLiveClient, _CACHE_LOCK, _MEM_CACHE
+        from travel_brief.naver_live import (
+            CACHE_TTL_SECONDS,
+            STALE_FALLBACK_SECONDS,
+            NaverFlightLiveClient,
+            _CACHE_LOCK,
+            _MEM_CACHE,
+        )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             custom_cache = Path(tmp_dir) / "test_live_cache.json"
@@ -233,8 +240,14 @@ class TestTravelInteractive(unittest.TestCase):
                     callback_data="trv:r:ALL",
                     from_user={"id": 111},
                 )
-                # Disk cache file must have been physically unlinked!
-                self.assertFalse(custom_cache.exists())
+                # Fresh disk lookup must miss after refresh ...
+                self.assertIsNone(live_client._load_disk_cache(disk_key, max_age_sec=CACHE_TTL_SECONDS))
+                # ... while the emergency backup survives for upstream-outage STALE fallback.
+                backup = live_client._load_disk_cache(
+                    disk_key, max_age_sec=STALE_FALLBACK_SECONDS, allow_backup=True
+                )
+                self.assertIsNotNone(backup)
+                self.assertEqual(backup[0].price_krw, 300000)
 
                 # 3. Next fetch must actually trigger uncached live scraper!
                 with patch.object(live_client, "_collect_live_deals_uncached", side_effect=mock_collect):
@@ -245,7 +258,6 @@ class TestTravelInteractive(unittest.TestCase):
                     self.assertEqual(collect_count, 1)  # Scraper executed!
             finally:
                 handler.shutdown()
-
 
 
     @patch("travel_brief.interactive.TelegramChannel")
@@ -282,6 +294,316 @@ class TestTravelInteractive(unittest.TestCase):
         self.assertEqual(call_args["chat_id"], "12345")
         self.assertIn("트래블 패스파인더", call_args["text"])
         self.assertIn("inline_keyboard", call_args["reply_markup"])
+
+
+def _mk_deal(code: str, dep: str, ret: str, price: int, source: str = "LIVE_PG", name: str = ""):
+    from travel_brief.models import FlightDeal
+
+    return FlightDeal(
+        destination_code=code,
+        destination_name=name or code,
+        origin_code="ICN",
+        departure_date=dep,
+        return_date=ret,
+        departure_day_of_week="목",
+        return_day_of_week="일",
+        nights=3,
+        airline="네이버 직항 최저가",
+        price_krw=price,
+        baseline_krw=price + 50000,
+        is_peak_holiday=False,
+        holiday_name="",
+        data_source=source,
+    )
+
+
+class TestTravelCacheAndSequenceGuards(unittest.TestCase):
+    """Regression tests for GPT audit items: city cache isolation, superset slicing, refresh epoch,
+    per-message sequence guard, loading-card ordering, SSE re-rank, and on-demand formatter modes."""
+
+    def setUp(self):
+        import tempfile
+        import travel_brief.naver_live as nl
+
+        self.nl = nl
+        with nl._CACHE_LOCK:
+            nl._MEM_CACHE.clear()
+            nl._IN_FLIGHT.clear()
+            nl._FAIL_CACHE.clear()
+            nl._STALE_BACKUP.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cache_path = Path(self._tmp.name) / "live_cache.json"
+        self.client = nl.NaverFlightLiveClient(cache_path=self.cache_path)
+        self.engine = FlightEngine()
+        self.holiday_fn = lambda d1, d2: (False, "", 1.0)
+        from datetime import date, timedelta
+
+        self.ref = date(2026, 11, 20)
+        self.slots = [(self.ref, self.ref + timedelta(days=3), "목", "일", 3)]
+
+    def tearDown(self):
+        with self.nl._CACHE_LOCK:
+            self.nl._MEM_CACHE.clear()
+            self.nl._IN_FLIGHT.clear()
+            self.nl._FAIL_CACHE.clear()
+            self.nl._STALE_BACKUP.clear()
+        self._tmp.cleanup()
+
+    def _dests(self, *codes):
+        return {c: self.engine.destinations[c] for c in codes}
+
+    def _fake_collect(self, calls):
+        def _collect(destinations, slots, holiday_fn):
+            calls.append(tuple(sorted(destinations)))
+            return [_mk_deal(c, "2026-11-20", "2026-11-23", 300000 + i * 1000) for i, c in enumerate(sorted(destinations))]
+        return _collect
+
+    def test_city_cache_isolation_nrt_then_kix_fuk(self):
+        calls: list = []
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=self._fake_collect(calls)):
+            nrt = self.client.fetch_all_weekend_deals(self._dests("NRT"), self.slots, self.holiday_fn, ref_date=self.ref)
+            kix = self.client.fetch_all_weekend_deals(self._dests("KIX"), self.slots, self.holiday_fn, ref_date=self.ref)
+            fuk = self.client.fetch_all_weekend_deals(self._dests("FUK"), self.slots, self.holiday_fn, ref_date=self.ref)
+        self.assertEqual({d.destination_code for d in nrt}, {"NRT"})
+        self.assertEqual({d.destination_code for d in kix}, {"KIX"})
+        self.assertEqual({d.destination_code for d in fuk}, {"FUK"})
+        self.assertEqual(calls, [("NRT",), ("KIX",), ("FUK",)])
+
+    def test_superset_cache_slicing_memory_and_disk(self):
+        calls: list = []
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=self._fake_collect(calls)):
+            full = self.client.fetch_all_weekend_deals(
+                self._dests("NRT", "KIX", "FUK"), self.slots, self.holiday_fn, ref_date=self.ref
+            )
+            self.assertEqual(len(full), 3)
+            kix = self.client.fetch_all_weekend_deals(self._dests("KIX"), self.slots, self.holiday_fn, ref_date=self.ref)
+            self.assertEqual([d.destination_code for d in kix], ["KIX"])
+            self.assertEqual(len(calls), 1)  # served from memory superset, no network
+
+            # Disk superset (e.g. separate cron process warmed the file): clear memory only
+            with self.nl._CACHE_LOCK:
+                self.nl._MEM_CACHE.clear()
+            fuk = self.client.fetch_all_weekend_deals(self._dests("FUK"), self.slots, self.holiday_fn, ref_date=self.ref)
+            self.assertEqual([d.destination_code for d in fuk], ["FUK"])
+            self.assertEqual(len(calls), 1)
+
+            # A destination absent from the superset data must NOT be sliced to an empty list
+            tpe = self.client.fetch_all_weekend_deals(self._dests("TPE"), self.slots, self.holiday_fn, ref_date=self.ref)
+            self.assertEqual([d.destination_code for d in tpe], ["TPE"])
+            self.assertEqual(calls[-1], ("TPE",))
+
+    def test_sse_upgrade_syncs_all_cache_keys(self):
+        calls: list = []
+        dests = self._dests("NRT", "KIX")
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=self._fake_collect(calls)):
+            self.client.fetch_all_weekend_deals(dests, self.slots, self.holiday_fn, ref_date=self.ref)
+            self.client.fetch_all_weekend_deals(self._dests("NRT", "KIX", "FUK"), self.slots, self.holiday_fn, ref_date=self.ref)
+        sse = {
+            "cheapest": {
+                "airline": "제주항공", "dep_time": "08:00", "ret_dep_time": "20:00",
+                "ret_arr_time": "22:10", "next_day_arrival": False,
+                "min_card": 287000, "min_general": 290000,
+            },
+            "popular": None,
+        }
+        target = _mk_deal("NRT", "2026-11-20", "2026-11-23", 300000)
+        with patch.object(self.client, "fetch_live_sse_slot", return_value=sse), \
+             patch.object(self.client, "_fetch_session_cookie_header", return_value=""):
+            out = self.client.ensure_deals_sse_verified([target], self.engine.destinations)
+        self.assertEqual(out[0].data_source, "LIVE_SSE")
+        with self.nl._CACHE_LOCK:
+            for key in [("2026-11-20", 6, ("KIX", "NRT")), ("2026-11-20", 6, ("FUK", "KIX", "NRT"))]:
+                nrt = [d for d in self.nl._MEM_CACHE[key][1] if d.destination_code == "NRT"][0]
+                self.assertEqual(nrt.data_source, "LIVE_SSE", key)
+        for disk_key in ["2026-11-20:6:KIX,NRT", "2026-11-20:6:FUK,KIX,NRT"]:
+            disk = self.client._load_disk_cache(disk_key, max_age_sec=self.nl.CACHE_TTL_SECONDS)
+            nrt = [d for d in disk if d.destination_code == "NRT"][0]
+            self.assertEqual(nrt.price_krw, 287000, disk_key)
+
+    def test_refresh_during_inflight_does_not_reuse_or_cache_old_result(self):
+        import threading
+
+        dests = self._dests("NRT")
+        gate = threading.Event()
+        started = threading.Event()
+        calls: list = []
+
+        def slow_old(destinations, slots, holiday_fn):
+            calls.append("old")
+            started.set()
+            gate.wait(5)
+            return [_mk_deal("NRT", "2026-11-20", "2026-11-23", 111111)]
+
+        def fresh_new(destinations, slots, holiday_fn):
+            calls.append("new")
+            return [_mk_deal("NRT", "2026-11-20", "2026-11-23", 222222)]
+
+        result_old: list = []
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=slow_old):
+            t = threading.Thread(
+                target=lambda: result_old.extend(
+                    self.client.fetch_all_weekend_deals(dests, self.slots, self.holiday_fn, ref_date=self.ref)
+                )
+            )
+            t.start()
+            self.assertTrue(started.wait(5))
+            self.client.invalidate_cache()
+            with patch.object(self.client, "_collect_live_deals_uncached", side_effect=fresh_new):
+                new = self.client.fetch_all_weekend_deals(dests, self.slots, self.holiday_fn, ref_date=self.ref)
+            gate.set()
+            t.join(5)
+
+        self.assertEqual(new[0].price_krw, 222222)  # did not join the pre-refresh flight
+        self.assertEqual(result_old[0].price_krw, 111111)
+        self.assertEqual(calls, ["old", "new"])
+        # Old leader finished after invalidate -> must not overwrite the fresh post-refresh cache
+        cached = self.client.fetch_all_weekend_deals(dests, self.slots, self.holiday_fn, ref_date=self.ref)
+        self.assertEqual(cached[0].price_krw, 222222)
+
+    def _make_handler(self):
+        handler = TravelInteractiveHandler(bot_token="dummy_token", engine=FlightEngine(live_naver=False))
+        handler.tg = MagicMock()
+        self.edits: list = []
+        self.loading_edits: list = []
+        handler._safe_edit_message = lambda chat_id, message_id, text, reply_markup=None: self.edits.append(text)
+        handler._edit_in_place_only = lambda chat_id, message_id, text, reply_markup=None: self.loading_edits.append(text)
+        return handler
+
+    def test_sequence_guard_latest_click_wins(self):
+        handler = self._make_handler()
+        try:
+            seq_tokyo = handler._next_request_seq("c1", 7)
+            seq_osaka = handler._next_request_seq("c1", 7)
+            # Osaka (newer) finishes first, Tokyo (older, slower) finishes later
+            handler._async_execute_and_update("c1", 7, "KIX", "u2", request_seq=seq_osaka)
+            handler._async_execute_and_update("c1", 7, "NRT", "u1", request_seq=seq_tokyo)
+            self.assertEqual(len(self.edits), 1)
+            self.assertIn("오사카", self.edits[0])
+            # Other messages are independent
+            seq_other = handler._next_request_seq("c1", 8)
+            handler._async_execute_and_update("c1", 8, "NRT", "u3", request_seq=seq_other)
+            self.assertEqual(len(self.edits), 2)
+        finally:
+            handler.shutdown()
+
+    def test_loading_card_never_overwrites_final_result(self):
+        handler = self._make_handler()
+        try:
+            seq = handler._next_request_seq("c1", 9)
+            handler._async_execute_and_update("c1", 9, "FUK", "u1", request_seq=seq)
+            # Delayed loading edit of the same request arrives after the final result
+            issued = handler._edit_if_latest("c1", 9, seq, "loading", None, is_loading=True)
+            self.assertFalse(issued)
+            self.assertEqual(self.loading_edits, [])
+            self.assertEqual(len(self.edits), 1)
+        finally:
+            handler.shutdown()
+
+    def test_callback_shows_loading_card_then_result_and_s_increments_seq(self):
+        handler = self._make_handler()
+        try:
+            handler.handle_callback_query("cq1", "c9", 11, "trv:q:FUK", {"id": 901})
+            handler.tg.answer_callback.assert_called_once()
+            handler.worker_pool.shutdown(wait=True)
+            handler.ui_pool.shutdown(wait=True)
+            self.assertEqual(len(self.edits), 1)
+            self.assertIn("후쿠오카", self.edits[0])
+            self.assertLessEqual(len(self.loading_edits), 1)
+            if self.loading_edits:
+                self.assertIn("실시간 특가 검색 중", self.loading_edits[0])
+            self.assertEqual(handler._msg_seq[("c9", 11)], 1)
+            # Blocked click (cooldown / in-progress) must not bump the sequence
+            handler.handle_callback_query("cq2", "c9", 11, "trv:q:NRT", {"id": 901})
+            self.assertEqual(handler._msg_seq[("c9", 11)], 1)
+        finally:
+            handler.shutdown()
+
+    def test_empty_results_and_exceptions_end_in_error_card(self):
+        handler = self._make_handler()
+        try:
+            handler.engine.search_deals = MagicMock(return_value=[])
+            seq = handler._next_request_seq("c1", 21)
+            handler._async_execute_and_update("c1", 21, "DAD", "u1", request_seq=seq)
+            self.assertIn("특가 조회 실패", self.edits[-1])
+            self.assertNotIn("u1", handler.cooldown._in_progress_users)
+
+            handler.engine.search_deals = MagicMock(side_effect=RuntimeError("boom <x>"))
+            seq = handler._next_request_seq("c1", 21)
+            handler._async_execute_and_update("c1", 21, "DAD", "u1", request_seq=seq)
+            self.assertIn("일시적인 오류", self.edits[-1])
+            self.assertNotIn("<x>", self.edits[-1])
+        finally:
+            handler.shutdown()
+
+    def test_hero_sse_rerank_promotes_and_verifies_next_deal(self):
+        from dataclasses import replace
+
+        handler = self._make_handler()
+        try:
+            a = _mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")
+            b = _mk_deal("NRT", "2026-12-10", "2026-12-13", 260000, name="도쿄")
+            calls: list = []
+
+            def fake_verify(deals):
+                d = deals[0]
+                calls.append(d.departure_date)
+                surged = 420000 if d.departure_date == "2026-12-03" else 262000
+                return [replace(d, data_source="LIVE_SSE", price_krw=surged, price_min_krw=surged, airline="제주항공")]
+
+            handler.engine.live_naver = True
+            handler.engine.ensure_deals_sse_verified = fake_verify
+            from travel_brief.budget_calculator import BudgetCalculator
+
+            recs = BudgetCalculator.rank_recommendations(handler.engine.destinations, [a, b], top_n=3)
+            self.assertEqual(recs[0].best_deal.departure_date, "2026-12-03")
+            out = handler._verify_hero_with_rerank([a, b], recs)
+            self.assertEqual(calls, ["2026-12-03", "2026-12-10"])
+            self.assertEqual(out[0].best_deal.departure_date, "2026-12-10")
+            self.assertEqual(out[0].best_deal.data_source, "LIVE_SSE")
+            self.assertIn("20261210", out[0].naver_flight_url)
+
+            # SSE timeout/empty -> stays LIVE_PG and formatter discloses price-graph source
+            calls.clear()
+            handler.engine.ensure_deals_sse_verified = lambda deals: list(deals)
+            out2 = handler._verify_hero_with_rerank([a, b], recs)
+            self.assertEqual(out2[0].best_deal.data_source, "LIVE_PG")
+            from travel_bot_runner import format_telegram_briefing
+
+            msg = format_telegram_briefing(out2, engine=handler.engine, target_city="NRT")
+            self.assertIn("가격그래프", msg)
+            self.assertNotIn("네이버 실시간 관측", msg)
+        finally:
+            handler.shutdown()
+
+    def test_formatter_modes_skip_heavy_paths(self):
+        from datetime import date
+        from travel_bot_runner import format_telegram_briefing
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        engine = FlightEngine(live_naver=False)
+        deals = engine.search_deals(dest_code="KIX", months_ahead=6, ref_date=date(2026, 11, 20))
+        recs = BudgetCalculator.rank_recommendations(engine.destinations, deals, top_n=3)
+        with patch.object(engine, "get_6month_matrix", side_effect=AssertionError("matrix must be skipped")), \
+             patch.object(engine, "ensure_deals_sse_verified", side_effect=AssertionError("SSE must be skipped")):
+            single = format_telegram_briefing(recs, engine=engine, target_city="KIX")
+            self.assertIn("오사카 주말 특가 나침반", single)
+            self.assertIn("추천 최저가 일정 TOP 1", single)
+            self.assertNotIn("월별 주말 최저가", single)
+
+            engine.live_naver = True  # ALL on-demand must not run the monthly SSE loop even in live mode
+            all_recs = BudgetCalculator.rank_recommendations(
+                engine.destinations, FlightEngine(live_naver=False).search_deals(months_ahead=6), top_n=3
+            )
+            with patch.object(engine, "search_deals", wraps=engine.search_deals) as spy_search:
+                all_msg = format_telegram_briefing(all_recs, engine=engine, target_city="ALL")
+            # Monthly picks come from the caller-warmed cache key (ref_date=None), not get_6month_matrix
+            spy_search.assert_called_once_with(months_ahead=6)
+            self.assertIn("주말 해외여행 6개월 특가 나침반", all_msg.split("\n")[0])  # not single-city header
+        for msg in (single, all_msg):
+            import re
+
+            self.assertLessEqual(len(msg), 3500)
+            self.assertLessEqual(len(re.sub(r"<[^>]+>", "", msg)), 1800)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,9 @@ Equipped with:
 3. Decoupled ThreadPoolExecutor worker pool to prevent poller loop blocking (C3).
 4. Single-Flight caching with 5-minute Global Admin Refresh Cooldown & real cache invalidation (M-F).
 5. Safe In-place edit with reply_markup retention & non-destructive empty fallbacks (M-D, M-E).
+6. Instant in-place loading card + per-message request sequence guard so a slower, older query
+   (e.g. Tokyo) never overwrites a newer one (e.g. Osaka), and failures always end in an error card.
+7. Single-city hero deal SSE verification with re-rank (up to 2 rounds).
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 from travel_brief.channels.telegram import TelegramChannel
@@ -30,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 USER_COOLDOWN_SECONDS = 3.0
 GLOBAL_REFRESH_COOLDOWN_SECONDS = 300.0  # 5 minutes minimum between full live scrapes
+MAX_TRACKED_MESSAGES = 5000  # LRU bound for per-message sequence/lock registries
+SSE_RERANK_ROUNDS = 2
 
 CITY_CODE_ALIASES: dict[str, str] = {
     "TYO": "NRT",
@@ -111,9 +117,18 @@ class TravelInteractiveHandler:
         self.worker_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="TravelWorker"
         )
+        # Separate tiny pool for lightweight UI edits (loading cards) so they never queue behind scrapes.
+        self.ui_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="TravelUI"
+        )
         self.tg = TelegramChannel(bot_token=bot_token)
         self.dispatcher = SafeTelegramDispatcher()
         self._admin_ids = self._load_admin_ids()
+        # Per-message request sequencing: (chat_id, message_id) -> latest seq / final-rendered seq / edit lock.
+        self._seq_lock = threading.Lock()
+        self._msg_seq: OrderedDict[tuple[str, int], int] = OrderedDict()
+        self._msg_final_seq: dict[tuple[str, int], int] = {}
+        self._msg_locks: dict[tuple[str, int], threading.Lock] = {}
 
     def _load_admin_ids(self) -> set[str]:
         raw = os.environ.get("ADMIN_TELEGRAM_ID", "") or os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -199,6 +214,98 @@ class TravelInteractiveHandler:
             ]
         }
 
+    # ------------------------------------------------------------------
+    # Per-message sequence guard
+    # ------------------------------------------------------------------
+    def _next_request_seq(self, chat_id: str, message_id: int) -> int:
+        """Registers a new accepted request for this message and returns its sequence (O(1), polling-thread safe)."""
+        key = (str(chat_id), int(message_id or 0))
+        with self._seq_lock:
+            seq = self._msg_seq.get(key, 0) + 1
+            self._msg_seq[key] = seq
+            self._msg_seq.move_to_end(key)
+            self._msg_locks.setdefault(key, threading.Lock())
+            while len(self._msg_seq) > MAX_TRACKED_MESSAGES:
+                old_key, _ = self._msg_seq.popitem(last=False)
+                self._msg_final_seq.pop(old_key, None)
+                self._msg_locks.pop(old_key, None)
+            return seq
+
+    def _is_latest_seq(self, chat_id: str, message_id: int, seq: Optional[int]) -> bool:
+        if seq is None:
+            return True
+        with self._seq_lock:
+            return self._msg_seq.get((str(chat_id), int(message_id or 0))) == seq
+
+    def _get_msg_lock(self, chat_id: str, message_id: int) -> threading.Lock:
+        key = (str(chat_id), int(message_id or 0))
+        with self._seq_lock:
+            return self._msg_locks.setdefault(key, threading.Lock())
+
+    def _edit_if_latest(
+        self,
+        chat_id: str,
+        message_id: int,
+        request_seq: Optional[int],
+        text: str,
+        reply_markup: Optional[dict[str, Any]] = None,
+        is_loading: bool = False,
+    ) -> bool:
+        """Edits the message only if `request_seq` is still the newest request for it.
+        "Check sequence then edit" runs under a per-message lock taken only by worker threads, so an
+        older result can never land after a newer one. A loading card additionally never overwrites
+        the final result of the same request. Returns True when an edit was issued.
+        """
+        if request_seq is None:
+            if is_loading:
+                self._edit_in_place_only(chat_id, message_id, text, reply_markup)
+            else:
+                self._safe_edit_message(
+                    chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+                )
+            return True
+
+        key = (str(chat_id), int(message_id or 0))
+        with self._get_msg_lock(chat_id, message_id):
+            if not self._is_latest_seq(chat_id, message_id, request_seq):
+                logger.info("Skipping superseded edit for %s (seq=%s, loading=%s).", key, request_seq, is_loading)
+                return False
+            if is_loading:
+                with self._seq_lock:
+                    if self._msg_final_seq.get(key, 0) >= request_seq:
+                        return False
+                self._edit_in_place_only(chat_id, message_id, text, reply_markup)
+            else:
+                self._safe_edit_message(
+                    chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+                )
+                with self._seq_lock:
+                    self._msg_final_seq[key] = max(self._msg_final_seq.get(key, 0), request_seq)
+            return True
+
+    # ------------------------------------------------------------------
+    # Transient cards (TG-01/TG-02: short, fully escaped)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def build_loading_card(target_city: str, is_refresh: bool = False) -> str:
+        label = "🔄 전체 최신 특가" if is_refresh else CITY_LABELS.get(target_city, target_city)
+        return (
+            f"✈️ <b>[{html.escape(label)} 실시간 특가 검색 중...]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⏳ 네이버 항공권 실시간 최저가를 조회하고 있습니다.\n"
+            f"💡 조회가 끝나면 최신 요금과 예약 링크로 자동 갱신됩니다."
+        )
+
+    @staticmethod
+    def build_error_card(target_city: str, reason: str) -> str:
+        label = CITY_LABELS.get(target_city, target_city)
+        return (
+            f"⚠️ <b>[{html.escape(label)} 특가 조회 실패]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{html.escape(reason)}\n"
+            f"🔄 잠시 후 아래 버튼으로 다시 시도해 주세요."
+        )
+
     def handle_callback_query(
         self,
         cq_id: str,
@@ -242,10 +349,12 @@ class TravelInteractiveHandler:
                 f"구독 직전에 발송되었던 최신 주말 항공·숙박 특가 브리핑을 즉시 확인하실 수 있습니다!"
             )
             markup = self.build_selected_target_keyboard(target_norm)
+            s_seq = self._next_request_seq(chat_id, message_id)
             self.worker_pool.submit(
-                self._safe_edit_message,
+                self._edit_if_latest,
                 chat_id=chat_id,
                 message_id=message_id,
+                request_seq=s_seq,
                 text=confirm_html,
                 reply_markup=markup,
             )
@@ -275,19 +384,50 @@ class TravelInteractiveHandler:
             else:
                 NaverFlightLiveClient.invalidate_global_cache()
 
-        # 3. Offload execution to decoupled background worker (C3)
-        self.worker_pool.submit(
-            self._async_execute_and_update,
-            chat_id=chat_id,
-            message_id=message_id,
-            target_city=target_norm,
-            user_id=user_id,
-        )
+        # 3. Register request sequence & show instant in-place loading card (edit-only, no send fallback)
+        request_seq = self._next_request_seq(chat_id, message_id)
+        loading_future: Optional[concurrent.futures.Future] = None
+        try:
+            loading_future = self.ui_pool.submit(
+                self._edit_if_latest,
+                chat_id=chat_id,
+                message_id=message_id,
+                request_seq=request_seq,
+                text=self.build_loading_card(target_norm, is_refresh=is_refresh),
+                reply_markup=self.build_inline_keyboard(current_filter=target_norm),
+                is_loading=True,
+            )
+        except Exception as exc:
+            logger.warning("Loading card submission skipped: %s", exc)
+
+        # 4. Offload execution to decoupled background worker (C3)
+        try:
+            self.worker_pool.submit(
+                self._async_execute_and_update,
+                chat_id=chat_id,
+                message_id=message_id,
+                target_city=target_norm,
+                user_id=user_id,
+                request_seq=request_seq,
+                loading_future=loading_future,
+            )
+        except Exception as exc:
+            logger.error("Worker submission failed for %s: %s", user_id, exc)
+            self.cooldown.release(user_id)
 
     def _async_execute_and_update(
-        self, chat_id: str, message_id: int, target_city: str, user_id: str
+        self,
+        chat_id: str,
+        message_id: int,
+        target_city: str,
+        user_id: str,
+        request_seq: Optional[int] = None,
+        loading_future: Optional[concurrent.futures.Future] = None,
     ) -> None:
-        """Runs in background worker thread to collect deals and edit Telegram message in-place."""
+        """Runs in background worker thread to collect deals and edit Telegram message in-place.
+        Always ends with either the briefing or an error card (never a stuck loading card).
+        """
+        markup = self.build_inline_keyboard(current_filter=target_city)
         try:
             # C-A fix: use real existing methods search_deals and rank_recommendations
             target_dest = None if target_city == "ALL" else target_city
@@ -298,9 +438,18 @@ class TravelInteractiveHandler:
                 top_n=3,
             )
 
-            # M-D fix: if no recommendations found, do NOT overwrite with blank text
+            # Single-city: SSE-verify the hero deal and re-rank (a price surge may promote another date)
+            if recs and target_dest and getattr(self.engine, "live_naver", False):
+                recs = self._verify_hero_with_rerank(all_deals, recs)
+
+            # M-D fix: never overwrite with blank text, but never leave the loading card stuck either
             if not recs:
-                logger.warning("On-demand query yielded empty recommendations for target %s; skipping edit.", target_city)
+                logger.warning("On-demand query yielded empty recommendations for target %s.", target_city)
+                self._finish_with_card(
+                    chat_id, message_id, request_seq, loading_future,
+                    self.build_error_card(target_city, "현재 조회 가능한 직항 특가가 없습니다."),
+                    markup,
+                )
                 return
 
             # Format updated message
@@ -309,20 +458,79 @@ class TravelInteractiveHandler:
                 recommendations=recs[:3],
                 web_report_url=self.report_url,
                 engine=self.engine,
+                target_city=target_city,
             )
-            markup = self.build_inline_keyboard(current_filter=target_city)
 
-            # Safe in-place edit (M-E)
-            self._safe_edit_message(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=new_text,
-                reply_markup=markup,
-            )
+            # Safe in-place edit (M-E), sequence-guarded
+            self._finish_with_card(chat_id, message_id, request_seq, loading_future, new_text, markup)
         except Exception as exc:
             logger.error("Background on-demand update failed for user %s: %s", user_id, exc, exc_info=True)
+            try:
+                self._finish_with_card(
+                    chat_id, message_id, request_seq, loading_future,
+                    self.build_error_card(target_city, "네이버 항공권 조회 중 일시적인 오류가 발생했습니다."),
+                    markup,
+                )
+            except Exception as card_exc:
+                logger.error("Error card edit failed for user %s: %s", user_id, card_exc)
         finally:
             self.cooldown.release(user_id)
+
+    def _finish_with_card(
+        self,
+        chat_id: str,
+        message_id: int,
+        request_seq: Optional[int],
+        loading_future: Optional[concurrent.futures.Future],
+        text: str,
+        markup: dict[str, Any],
+    ) -> None:
+        # Cancel a not-yet-started loading edit; if it is already running, the per-message lock and
+        # final-seq marker in `_edit_if_latest` guarantee it can never overwrite this result.
+        if loading_future is not None:
+            loading_future.cancel()
+        self._edit_if_latest(
+            chat_id=chat_id,
+            message_id=message_id,
+            request_seq=request_seq,
+            text=text,
+            reply_markup=markup,
+        )
+
+    def _verify_hero_with_rerank(
+        self, deals: list[Any], recs: list[TravelRecommendation]
+    ) -> list[TravelRecommendation]:
+        """SSE-verifies the #1 deal, re-ranks, and repeats if a different unverified deal becomes #1.
+        On SSE timeout/empty the deal stays LIVE_PG and is labelled as price-graph data by the formatter.
+        """
+        current = list(deals)
+        attempted: set[tuple[str, str, str]] = set()
+        for _ in range(SSE_RERANK_ROUNDS):
+            if not recs:
+                break
+            hero = recs[0].best_deal
+            k = (hero.destination_code, hero.departure_date, hero.return_date)
+            if hero.data_source != "LIVE_PG" or k in attempted:
+                break
+            attempted.add(k)
+            try:
+                verified = self.engine.ensure_deals_sse_verified([hero])
+            except Exception as exc:
+                logger.warning("Hero SSE verification failed for %s: %s", k, exc)
+                break
+            if not verified or verified[0].data_source != "LIVE_SSE":
+                break
+            upgraded = verified[0]
+            current = [
+                upgraded if (d.destination_code, d.departure_date, d.return_date) == k else d
+                for d in current
+            ]
+            recs = BudgetCalculator.rank_recommendations(
+                destinations=self.engine.destinations,
+                deals=current,
+                top_n=3,
+            )
+        return recs
 
     def _safe_edit_message(
         self,
@@ -332,6 +540,26 @@ class TravelInteractiveHandler:
         reply_markup: Optional[dict[str, Any]] = None,
     ) -> None:
         """Safely edits message with retry-after handling, not-modified idempotency, and send fallback (M-E)."""
+        self._edit_message_core(chat_id, message_id, text, reply_markup, allow_send_fallback=True)
+
+    def _edit_in_place_only(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Edit-only variant for transient loading cards: never sends a new message on failure."""
+        self._edit_message_core(chat_id, message_id, text, reply_markup, allow_send_fallback=False)
+
+    def _edit_message_core(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[dict[str, Any]] = None,
+        allow_send_fallback: bool = True,
+    ) -> None:
         if not chat_id:
             return
 
@@ -387,6 +615,9 @@ class TravelInteractiveHandler:
                     logger.warning("editMessageText network exception: %s", exc)
                     return
 
+        if not allow_send_fallback:
+            return
+
         # Fallback: send fresh message if edit not applicable
         try:
             self.dispatcher.send_text_to_recipient(
@@ -402,3 +633,4 @@ class TravelInteractiveHandler:
     def shutdown(self) -> None:
         """Shuts down background workers cleanly."""
         self.worker_pool.shutdown(wait=False)
+        self.ui_pool.shutdown(wait=False)
