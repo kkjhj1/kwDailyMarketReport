@@ -196,3 +196,54 @@ class BenefitMatch:
     grade: ReliabilityGrade
     checks: list[tuple[str, Optional[bool]]] = field(default_factory=list)  # (조건 설명, True/False/None=확인 필요)
     cautions: list[str] = field(default_factory=list)
+
+
+class MissionStatus(str, Enum):
+    """자녀 대리신청 미션 진행 상태."""
+    NOT_STARTED = "NOT_STARTED"
+    CONSENT_NEEDED = "CONSENT_NEEDED"
+    DOCS_PREPARING = "DOCS_PREPARING"
+    SUBMITTED = "SUBMITTED"
+    RECEIVING = "RECEIVING"
+
+    @property
+    def label(self) -> str:
+        return {
+            MissionStatus.NOT_STARTED: "미착수",
+            MissionStatus.CONSENT_NEEDED: "부모님 확인",
+            MissionStatus.DOCS_PREPARING: "서류 준비",
+            MissionStatus.SUBMITTED: "대리접수 완료",
+            MissionStatus.RECEIVING: "수급 중",
+        }[self]
+
+    @property
+    def badge(self) -> str:
+        return {
+            MissionStatus.NOT_STARTED: "⚪",
+            MissionStatus.CONSENT_NEEDED: "🟡",
+            MissionStatus.DOCS_PREPARING: "🔵",
+            MissionStatus.SUBMITTED: "🟣",
+            MissionStatus.RECEIVING: "🟢",
+        }[self]
+
+
+@dataclass
+class SilverMission:
+    """One parent × one benefit proxy-application mission."""
+    id: int
+    chat_id: int
+    parent_id: int
+    benefit_id: int
+    status: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        MissionStatus(self.status)
+
+    @property
+    def status_label(self) -> str:
+        return MissionStatus(self.status).label
+
+    @property
+    def status_badge(self) -> str:
+        return MissionStatus(self.status).badge

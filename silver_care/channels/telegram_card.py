@@ -9,11 +9,15 @@ from datetime import date
 from typing import Optional, Sequence
 
 from silver_care.models import (
+    BenefitCategory,
     BenefitMatch,
     LivingType,
+    MissionStatus,
     ParentProfile,
     ReliabilityGrade,
     SilverBenefit,
+    SilverMission,
+    TargetIncome,
     sido_name,
 )
 
@@ -181,6 +185,119 @@ def format_benefit_card(
         docs.append("의사 진단서·처방전")
     lines.extend(f"{i}. {esc(d)}" for i, d in enumerate(docs, 1))
     return "\n".join(lines)
+
+
+# ── 자녀 대리신청 1순위 미션 카드 ─────────────────────────────
+PROXY_KIT_DOCS: tuple[str, ...] = (
+    "부모님 신분증 원본",
+    "자녀(신청인) 신분증",
+    "가족관계증명서",
+    "위임장 (부모님 서명)",
+)
+PRE_APPROVAL_WARNING = "🚨 <b>수술·구입 전 사전승인 필수</b> (사후 신청 불가)"
+
+
+def _mission_status(mission: Optional[SilverMission]) -> MissionStatus:
+    return MissionStatus(mission.status) if mission else MissionStatus.NOT_STARTED
+
+
+def format_single_mission_card(
+    parent: ParentProfile,
+    match: BenefitMatch,
+    mission: Optional[SilverMission] = None,
+    mission_index: int = 1,
+    total_missions: int = 3,
+    total_matches: int = 28,
+    ref_year: Optional[int] = None,
+) -> str:
+    """부모님 1명 × 핵심 혜택 1개만 집중 노출 (전체 목록은 별도 버튼)."""
+    b = match.benefit
+    status = _mission_status(mission)
+    lines = [
+        parent_line(parent, ref_year),
+        DIVIDER,
+        f"🎯 <b>자녀가 대신 신청할 1순위 복지</b> ({mission_index}/{total_missions})",
+        f"[{match.grade.badge}] <b>{esc(b.title)}</b>",
+        f"💰 <b>{esc(b.support_amount)}</b>",
+        f"🏛 {esc(b.agency_name)}",
+        f"📌 현재 상태: {status.badge} <b>{status.label}</b>",
+    ]
+    if b.is_pre_approval_required:
+        lines.append(PRE_APPROVAL_WARNING)
+    lines.extend([
+        "",
+        "💡 <i>\"부모님이 가실 필요 없이, 직장인 자녀가 서류를 챙겨 주민센터/공단에서 대신 신청할 수 있어요.\"</i>",
+        "",
+        f"📚 받을 수 있는 혜택 전체 <b>{total_matches}개</b>",
+    ])
+    return "\n".join(lines)
+
+
+def format_no_mission(parent: ParentProfile, ref_year: Optional[int] = None) -> str:
+    return "\n".join([
+        parent_line(parent, ref_year),
+        DIVIDER,
+        "조건에 맞는 혜택이 아직 없어요. 정보를 다시 확인해주세요.",
+    ])
+
+
+def format_mission_status_picker(benefit: SilverBenefit, mission: Optional[SilverMission] = None) -> str:
+    status = _mission_status(mission)
+    return "\n".join([
+        f"📌 <b>{esc(benefit.title)}</b>",
+        f"현재 상태: {status.badge} <b>{status.label}</b>",
+        DIVIDER,
+        "진행 상태를 골라주세요",
+    ])
+
+
+def format_proxy_action_kit(parent: ParentProfile, benefit: SilverBenefit) -> str:
+    """자녀 대리신청 준비물·행정 주의·접수처."""
+    lines = [
+        "🎒 <b>자녀 대리신청 키트</b>",
+        f"📌 <b>{esc(benefit.title)}</b> · {esc(parent.alias)}",
+        DIVIDER,
+        "✅ <b>4대 준비물</b>",
+    ]
+    docs = list(PROXY_KIT_DOCS)
+    if benefit.requires_prescription:
+        docs.append("의사 진단서·처방전")
+    lines.extend(f"{i}. {esc(d)}" for i, d in enumerate(docs, 1))
+    if benefit.target_income != TargetIncome.ALL.value:
+        lines.extend([
+            "",
+            "⚠️ <b>행정 주의</b>: <b>금융정보등 제공동의서</b>는 반드시 부모님 자필 서명·인감 필수 (자녀 대리 서명 불가)",
+        ])
+    if benefit.is_pre_approval_required:
+        lines.extend(["", PRE_APPROVAL_WARNING])
+    lines.append("")
+    if "주민센터" in benefit.agency_name:
+        lines.append("📍 <b>어디로</b>: 부모님 주소지 읍면동 주민센터 복지팀")
+    else:
+        lines.append(f"📍 <b>어디로</b>: {esc(benefit.agency_name)} (부모님 주소지 관할)")
+    return "\n".join(lines)
+
+
+def format_parent_peace_text(parent: ParentProfile, benefit: SilverBenefit) -> str:
+    """부모님 안심 3줄 카톡 (plain text). 호칭·혜택명만 사용 — 출생연도·주소 등 PII 미포함."""
+    alias = (parent.alias or "엄마").strip()
+    if benefit.category == BenefitCategory.FINANCE.value:
+        middle = "매달 통장으로 혜택 나오게 제가 다 챙겨둘게요."
+    else:
+        middle = "받으실 수 있게 제가 챙겨둘게요."
+    if benefit.is_pre_approval_required:
+        last = "병원 가시기 전에 저한테 먼저 말씀만 해주세요 💕"
+    else:
+        last = "신경 쓰지 마시고 편히 계세요 💕"
+    return "\n".join([f"{alias}, {benefit.title} 제가 알아봤어요.", middle, last])
+
+
+def format_parent_peace_card(parent: ParentProfile, benefit: SilverBenefit) -> str:
+    return "\n".join([
+        "💌 <b>부모님 안심 카톡</b> (길게 눌러 복사)",
+        DIVIDER,
+        f"<pre>{esc(format_parent_peace_text(parent, benefit))}</pre>",
+    ])
 
 
 # ── Phone script & KakaoTalk text ─────────────────────────────

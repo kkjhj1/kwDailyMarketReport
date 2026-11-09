@@ -22,6 +22,10 @@ from silver_care.channels.telegram_card import (
     format_kakao_share_html,
     format_kakao_share_text,
     format_main_menu,
+    format_parent_peace_card,
+    format_parent_peace_text,
+    format_proxy_action_kit,
+    format_single_mission_card,
     format_phone_script,
     format_weekly_briefing,
     measure_message,
@@ -33,11 +37,14 @@ from silver_care.interactive import (
     build_detail_keyboard,
     build_list_keyboard,
     build_main_menu_keyboard,
+    build_mission_keyboard,
+    build_mission_status_keyboard,
     build_wizard_keyboard,
     cb,
 )
-from silver_care.matching import evaluate_benefit, match_benefits
+from silver_care.matching import evaluate_benefit, match_benefits, rank_missions, select_primary_mission
 from silver_care.models import (
+    MissionStatus,
     ParentProfile,
     ReliabilityGrade,
     SilverBenefit,
@@ -328,7 +335,8 @@ class TestInteractive:
         assert len(parents) == 1
         p = parents[0]
         assert (p.alias, p.birth_year, p.sido_code, p.sigungu_name, p.living_type) == ("엄마", 1954, "51", "원주시", "ALONE")
-        assert "받을 수 있는 혜택" in ch.calls[-1][2]
+        assert "자녀가 대신 신청할 1순위 복지" in ch.calls[-1][2]  # mission card, not the 28-item list
+        assert "기초연금" in ch.calls[-1][2]
         assert db.get_draft(7) == {}
 
     def test_ack_is_first_call(self, db):
@@ -386,8 +394,8 @@ class TestInteractive:
         bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
         self._register(bot)
         pid = db.list_parents(7)[0].id
-        _tap(bot, cb("L", pid, 99))
-        assert "받을 수 있는 혜택" in ch.calls[-1][2]
+        _tap(bot, cb("all", pid, 99))
+        assert "페이지" in ch.calls[-1][2] and "받을 수 있는 혜택" in ch.calls[-1][2]
 
 
 # ── Weekly dispatch ──────────────────────────────────────────
@@ -545,4 +553,228 @@ class TestWebReport:
         assert len(url_btns) == 1
         assert "silver_latest.html" in url_btns[0]["url"]
         assert "상세 리포트" in url_btns[0]["text"]
+
+
+# ── 실버케어 2.0: 자녀 대리신청 1순위 미션 ─────────────────────
+class TestMissionSelection:
+    def test_basic_pension_is_primary_for_non_receiver(self):
+        parent = _parent(is_pension_receiver=-1)
+        primary = select_primary_mission(match_benefits(SEED_BENEFITS, parent, YEAR), parent)
+        assert primary.benefit.id == 13
+
+    def test_pension_receiver_skips_basic_pension(self):
+        parent = _parent(is_pension_receiver=1, is_low_income=1)
+        ids = [m.benefit.id for m in rank_missions(match_benefits(SEED_BENEFITS, parent, YEAR), parent)]
+        assert 13 not in ids
+        assert ids[:4] == [8, 5, 7, 14]  # 장기요양 → 무릎 → 치매 → 통신비(수급자)
+
+    def test_telecom_requires_known_pension_receiver(self):
+        parent = _parent(is_pension_receiver=-1)
+        ids = [m.benefit.id for m in rank_missions(match_benefits(SEED_BENEFITS, parent, YEAR), parent, 10)]
+        assert 14 not in ids and ids[:4] == [13, 8, 5, 7]
+
+    def test_under_65_falls_back_to_60s_benefits(self):
+        parent = _parent(birth_year=1964)  # 만 61~62세
+        ids = [m.benefit.id for m in rank_missions(match_benefits(SEED_BENEFITS, parent, YEAR), parent)]
+        assert 13 not in ids and 8 not in ids
+        assert ids[:2] == [5, 7]
+
+    def test_rest_ordered_grade_a_first_and_capped_at_five(self):
+        parent = _parent()
+        matches = match_benefits(SEED_BENEFITS, parent, YEAR)
+        ranked = rank_missions(matches, parent)
+        assert len(ranked) == 5 and len({m.benefit.id for m in ranked}) == 5
+        tail = [m.grade.rank for m in rank_missions(matches, parent, 10)[4:]]
+        assert tail == sorted(tail)
+
+    def test_no_matches_returns_none(self):
+        assert select_primary_mission([], _parent()) is None
+        assert rank_missions([], _parent()) == []
+
+
+class TestMissionStorage:
+    def test_default_none_then_upsert(self, db):
+        pid = db.save_parent(_parent(id=0))
+        assert db.get_mission(100, pid, 13) is None
+        m = db.set_mission_status(100, pid, 13, "CONSENT_NEEDED")
+        assert m.status == "CONSENT_NEEDED" and m.status_label == "부모님 확인" and m.status_badge == "🟡"
+        m2 = db.set_mission_status(100, pid, 13, MissionStatus.RECEIVING.value)
+        assert m2.id == m.id and m2.status_label == "수급 중" and m2.status_badge == "🟢"
+        assert [x.benefit_id for x in db.list_missions(100, pid)] == [13]
+
+    def test_full_status_transition(self, db):
+        for s in MissionStatus:
+            assert db.set_mission_status(1, 1, 5, s.value).status == s.value
+        assert len(db.list_missions(1, 1)) == 1
+
+    def test_invalid_status_rejected(self, db):
+        with pytest.raises(ValueError):
+            db.set_mission_status(1, 1, 5, "HACKED")
+        assert db.get_mission(1, 1, 5) is None
+
+    def test_missions_isolated_by_chat(self, db):
+        db.set_mission_status(1, 1, 5, "SUBMITTED")
+        assert db.get_mission(2, 1, 5) is None
+        assert db.list_missions(2, 1) == []
+
+    def test_delete_parent_cascades_missions(self, db):
+        pid = db.save_parent(_parent(id=0))
+        db.set_mission_status(100, pid, 13, "SUBMITTED")
+        db.set_mission_status(100, pid, 8, "DOCS_PREPARING")
+        assert db.delete_parent(pid, 100) is True
+        assert db.list_missions(100, pid) == []
+
+
+class TestMissionFormatting:
+    def _assert_limits(self, text: str):
+        html_len, visible_len = measure_message(text)
+        assert html_len <= TG_MAX_HTML_LEN and visible_len <= TG_MAX_VISIBLE_LEN
+
+    def test_single_mission_card_content(self):
+        parent = _parent()
+        matches = match_benefits(SEED_BENEFITS, parent, YEAR)
+        card = format_single_mission_card(parent, matches[0], None, 1, 5, len(matches), YEAR)
+        assert "자녀가 대신 신청할 1순위 복지" in card and "(1/5)" in card
+        assert "미착수" in card and "⚪" in card
+        assert f"<b>{len(matches)}개</b>" in card
+        assert "대신 신청할 수 있어요" in card
+
+    def test_mission_card_shows_status_and_pre_approval(self, db):
+        parent = _parent(is_low_income=1, is_pension_receiver=1)
+        knee = evaluate_benefit(BY_ID[5], parent, YEAR)
+        mission = db.set_mission_status(100, 1, 5, "SUBMITTED")
+        card = format_single_mission_card(parent, knee, mission, 2, 5, 28, YEAR)
+        assert "대리접수 완료" in card and "🟣" in card and "사전승인" in card
+        assert "사전승인" not in format_single_mission_card(parent, evaluate_benefit(BY_ID[7], parent, YEAR))
+
+    def test_proxy_kit_docs_and_consent_warning(self):
+        parent = _parent(is_low_income=1, is_pension_receiver=1)
+        kit = format_proxy_action_kit(parent, BY_ID[13])
+        for doc in ("부모님 신분증 원본", "자녀(신청인) 신분증", "가족관계증명서", "위임장"):
+            assert doc in kit
+        assert "금융정보등 제공동의서" in kit and "자필" in kit
+        assert "읍면동 주민센터 복지팀" in kit
+        # 소득 무관 혜택에는 금융정보 동의서 경고를 띄우지 않는다
+        assert "금융정보등 제공동의서" not in format_proxy_action_kit(parent, BY_ID[7])
+        knee_kit = format_proxy_action_kit(parent, BY_ID[5])
+        assert "진단서" in knee_kit and "사전승인" in knee_kit
+
+    def test_peace_card_finance_vs_other(self):
+        parent = _parent(alias="아빠")
+        fin = format_parent_peace_text(parent, BY_ID[13])
+        assert fin.startswith("아빠,") and "매달 통장으로" in fin
+        other = format_parent_peace_text(parent, BY_ID[7])
+        assert "받으실 수 있게" in other and "통장" not in other
+        assert len(fin.splitlines()) == 3 and len(other.splitlines()) == 3
+        assert "먼저 말씀" in format_parent_peace_text(parent, BY_ID[5])  # pre-approval
+
+    def test_peace_card_pii_zero(self):
+        parent = _parent(id=424242, chat_id=7820975792, birth_year=1954, sigungu_name="원주시")
+        for b in SEED_BENEFITS:
+            card = format_parent_peace_card(parent, b)
+            for forbidden in ("1954", "원주", "강원", "7820975792", "424242", "chat_id", "위임장", "금융정보"):
+                assert forbidden not in card
+
+    def test_new_cards_escape_and_limits(self):
+        import re
+        evil = _benefit(title="<script>x</script>", support_amount="A & B", agency_name="<b>기관</b>",
+                        target_income="PENSION_70", category="FINANCE")
+        parent = _parent(alias="<엄마>", sigungu_name="<i>구</i>", is_pension_receiver=1)
+        m = evaluate_benefit(evil, parent, YEAR)
+        for text in (format_single_mission_card(parent, m), format_proxy_action_kit(parent, evil),
+                     format_parent_peace_card(parent, evil)):
+            assert "<script>" not in text and "<엄마>" not in text and "<b>기관</b>" not in text
+            assert {t.lower() for t in re.findall(r"</?([a-zA-Z]+)", text)} <= {"b", "i", "code", "pre", "a"}
+        for p in (_parent(), _parent(sido_code="11", is_low_income=1, is_pension_receiver=1)):
+            for m in match_benefits(SEED_BENEFITS, p, YEAR):
+                self._assert_limits(format_single_mission_card(p, m, None, 5, 5, 31, YEAR))
+                self._assert_limits(format_proxy_action_kit(p, m.benefit))
+                self._assert_limits(format_parent_peace_card(p, m.benefit))
+
+    def test_mission_keyboards_within_64_bytes(self):
+        big = 2_147_483_647
+        for mk in (build_mission_keyboard(big, 999, 4, 5), build_mission_status_keyboard(big, 999, "CONSENT_NEEDED")):
+            for data in _all_callbacks(mk):
+                assert len(data.encode("utf-8")) <= MAX_CALLBACK_BYTES
+                assert data.startswith("SC:") and data.isascii()
+
+
+class TestMissionInteractive:
+    def _bot(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        TestInteractive()._register(bot)
+        return ch, bot, db.list_parents(7)[0].id
+
+    def test_L_shows_primary_mission_not_list(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("L", pid, 0))
+        text = ch.calls[-1][2]
+        assert "1순위 복지" in text and "기초연금" in text and "페이지" not in text
+        datas = _all_callbacks(ch.calls[-1][3])
+        assert cb("prx", pid, 13) in datas and cb("all", pid, 0) in datas and cb("nxt", pid, 13, 1) in datas
+
+    def test_next_mission_cycles_up_to_five(self, db):
+        ch, bot, pid = self._bot(db)
+        seen = []
+        for idx in range(6):
+            _tap(bot, cb("nxt", pid, 0, idx))
+            seen.append(ch.calls[-1][2])
+        assert "(1/5)" in seen[0] and "(5/5)" in seen[4]
+        assert "(5/5)" in seen[5]  # out-of-range index is clamped
+        nxt_btns = [d for d in _all_callbacks(ch.calls[-1][3]) if d.startswith("SC:nxt:")]
+        assert nxt_btns and nxt_btns[0].endswith(":0")  # wraps back to the first mission
+
+    def test_status_picker_and_save(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("mst", pid, 13))
+        assert "진행 상태를 골라주세요" in ch.calls[-1][2]
+        assert len([d for d in _all_callbacks(ch.calls[-1][3]) if d.startswith("SC:mss:")]) == 5
+        _tap(bot, cb("mss", pid, 13, "DOCS_PREPARING"))
+        assert db.get_mission(7, pid, 13).status == "DOCS_PREPARING"
+        assert "서류 준비" in ch.calls[-1][2] and "기초연금" in ch.calls[-1][2]  # back on the same mission
+        assert ch.calls[-2] == ("ack", "cb0", "📌 진행 상태를 저장했어요")
+
+    def test_invalid_status_and_foreign_chat_rejected(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("mss", pid, 13, "BOGUS"))
+        assert db.get_mission(7, pid, 13) is None
+        _tap(bot, cb("mss", pid, 13, "SUBMITTED"), chat_id=8)
+        assert db.get_mission(8, pid, 13) is None and db.get_mission(7, pid, 13) is None
+
+    def test_mission_tools_return_to_mission_card(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("prx", pid, 13))
+        assert "자녀 대리신청 키트" in ch.calls[-1][2] and "금융정보등 제공동의서" in ch.calls[-1][2]
+        assert _all_callbacks(ch.calls[-1][3])[0] == cb("mc", pid, 13)
+        _tap(bot, cb("t", pid, 13))
+        assert "통화 대본" in ch.calls[-1][2] and _all_callbacks(ch.calls[-1][3])[0] == cb("mc", pid, 13)
+        _tap(bot, cb("k", pid, 13))
+        assert "<pre>엄마," in ch.calls[-1][2] and "매달 통장으로" in ch.calls[-1][2]
+        _tap(bot, cb("mc", pid, 13))
+        assert "1순위 복지" in ch.calls[-1][2]
+
+    def test_legacy_three_arg_callbacks_return_to_detail(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("t", pid, 1, 2))
+        assert _all_callbacks(ch.calls[-1][3])[0] == cb("d", pid, 1, 2)
+        _tap(bot, cb("k", pid, 1, 2))
+        assert _all_callbacks(ch.calls[-1][3])[0] == cb("d", pid, 1, 2)
+
+    def test_all_list_and_detail_back_use_all(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("all", pid, 0))
+        datas = _all_callbacks(ch.calls[-1][3])
+        assert "페이지" in ch.calls[-1][2]
+        assert cb("all", pid, 1) in datas and cb("L", pid, 0) in datas
+        _tap(bot, cb("d", pid, 1, 1))
+        assert cb("all", pid, 1) in _all_callbacks(ch.calls[-1][3])
+
+    def test_delete_parent_cleans_missions_via_bot(self, db):
+        ch, bot, pid = self._bot(db)
+        _tap(bot, cb("mss", pid, 13, "SUBMITTED"))
+        _tap(bot, cb("x", pid))
+        assert "진행 상태" in ch.calls[-1][2]
+        _tap(bot, cb("xy", pid))
+        assert db.list_missions(7, pid) == []
 

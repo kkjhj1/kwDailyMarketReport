@@ -1,5 +1,5 @@
 """SQLite storage for SilverCare (실버케어).
-Tables: silver_benefits, silver_parents, silver_bookmarks, silver_sessions, silver_dispatch_log.
+Tables: silver_benefits, silver_parents, silver_bookmarks, silver_missions, silver_sessions, silver_dispatch_log.
 Supports ':memory:' for token-free demo / tests ([TG-06]: no production file writes).
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from silver_care.matching import evaluate_benefit, match_benefits
-from silver_care.models import BenefitMatch, ParentProfile, SilverBenefit
+from silver_care.models import BenefitMatch, MissionStatus, ParentProfile, SilverBenefit, SilverMission
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS silver_benefits (
@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS silver_bookmarks (
     created_at TEXT NOT NULL,
     PRIMARY KEY (chat_id, parent_id, benefit_id)
 );
+CREATE TABLE IF NOT EXISTS silver_missions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    parent_id INTEGER NOT NULL,
+    benefit_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'NOT_STARTED',
+    updated_at TEXT NOT NULL,
+    UNIQUE(chat_id, parent_id, benefit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_silver_missions_parent ON silver_missions(chat_id, parent_id);
 CREATE TABLE IF NOT EXISTS silver_sessions (
     chat_id INTEGER PRIMARY KEY,
     draft_json TEXT NOT NULL DEFAULT '{}',
@@ -225,6 +235,9 @@ class SilverCareDatabase:
                 self._conn.execute(
                     "DELETE FROM silver_bookmarks WHERE parent_id = ? AND chat_id = ?", (parent_id, chat_id)
                 )
+                self._conn.execute(
+                    "DELETE FROM silver_missions WHERE parent_id = ? AND chat_id = ?", (parent_id, chat_id)
+                )
             self._conn.commit()
             return cur.rowcount > 0
 
@@ -266,6 +279,45 @@ class SilverCareDatabase:
             (chat_id,),
         )
         return [(r["parent_id"], r["benefit_id"]) for r in rows]
+
+    # ── Missions (자녀 대리신청 진행 상태) ─────────────────────
+    @staticmethod
+    def _row_to_mission(row: sqlite3.Row) -> SilverMission:
+        return SilverMission(
+            id=row["id"], chat_id=row["chat_id"], parent_id=row["parent_id"], benefit_id=row["benefit_id"],
+            status=row["status"], updated_at=row["updated_at"],
+        )
+
+    def get_mission(self, chat_id: int, parent_id: int, benefit_id: int) -> Optional[SilverMission]:
+        rows = self._query(
+            "SELECT * FROM silver_missions WHERE chat_id = ? AND parent_id = ? AND benefit_id = ?",
+            (chat_id, parent_id, benefit_id),
+        )
+        return self._row_to_mission(rows[0]) if rows else None
+
+    def set_mission_status(self, chat_id: int, parent_id: int, benefit_id: int, status: str) -> SilverMission:
+        """Upserts the mission status. Raises ValueError on an unknown status."""
+        status = MissionStatus(status).value
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO silver_missions (chat_id, parent_id, benefit_id, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(chat_id, parent_id, benefit_id) "
+                "DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+                (chat_id, parent_id, benefit_id, status, _now()),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM silver_missions WHERE chat_id = ? AND parent_id = ? AND benefit_id = ?",
+                (chat_id, parent_id, benefit_id),
+            ).fetchone()
+        return self._row_to_mission(row)
+
+    def list_missions(self, chat_id: int, parent_id: int) -> list[SilverMission]:
+        rows = self._query(
+            "SELECT * FROM silver_missions WHERE chat_id = ? AND parent_id = ? ORDER BY benefit_id",
+            (chat_id, parent_id),
+        )
+        return [self._row_to_mission(r) for r in rows]
 
     # ── Sessions (wizard draft + weekly opt-in) ───────────────
     def _ensure_session(self, chat_id: int) -> None:

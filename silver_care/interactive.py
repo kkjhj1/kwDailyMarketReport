@@ -1,7 +1,9 @@
 """Interactive 2-step explorer for SilverCare (실버케어).
 
-Flow: 메인 메뉴 ➔ [1단계] 부모님 호칭·출생연도·시도·시군구·주거·소득 ➔ 후보 리스트
-      ➔ [2단계] 혜택 상세(원클릭 자격확인) ➔ 통화 대본 / 카톡 전송문 / 찜하기
+Flow: 메인 메뉴 ➔ [1단계] 부모님 호칭·출생연도·시도·시군구·주거·소득
+      ➔ [2단계] 자녀 대리신청 1순위 미션 카드 (최대 5개 순환)
+         ➔ 대리신청 키트 / 통화 대본 / 안심 카톡 / 진행 상태
+      ➔ [📚 전체 혜택 목록] 후보 리스트 ➔ 혜택 상세 ➔ 통화 대본 / 카톡 전송문 / 찜하기
 
 [TG-04] callback_data = 'SC:<action>[:<args>]' (ASCII, <= 64 bytes). answerCallbackQuery is always
 called first, before any DB work. Screen updates go through _safe_edit_or_send. Deleting a parent
@@ -18,13 +20,18 @@ from silver_care.channels.telegram_card import (
     format_benefit_card,
     format_bookmarks,
     format_candidate_list,
-    format_kakao_share_html,
     format_main_menu,
+    format_mission_status_picker,
+    format_no_mission,
+    format_parent_peace_card,
     format_phone_script,
+    format_proxy_action_kit,
+    format_single_mission_card,
     format_wizard_prompt,
     page_bounds,
 )
-from silver_care.models import SIDO_NAMES, LivingType, ParentProfile, normalize_sido_code
+from silver_care.matching import MAX_MISSIONS, rank_missions
+from silver_care.models import SIDO_NAMES, LivingType, MissionStatus, ParentProfile, normalize_sido_code
 from silver_care.storage.db import SilverCareDatabase
 
 logger = logging.getLogger(__name__)
@@ -70,7 +77,7 @@ def _short(title: str, limit: int = 18) -> str:
 
 # ── Keyboards ─────────────────────────────────────────────────
 def build_main_menu_keyboard(parents: list[ParentProfile], weekly_on: bool) -> dict[str, Any]:
-    rows = [[_btn(f"👵 {p.alias} 혜택 보기", cb("L", p.id, 0))] for p in parents]
+    rows = [[_btn(f"👵 {p.alias} 복지 미션", cb("L", p.id, 0))] for p in parents]
     rows.append([_btn("➕ 부모님 등록", cb("new")), _btn("⭐ 찜한 혜택", cb("bm"))])
     rows.append([_btn(f"🔔 일요일 효도 브리핑 {'ON' if weekly_on else 'OFF'}", cb("wk"))])
     return _kb(rows)
@@ -106,11 +113,12 @@ def build_list_keyboard(parent: ParentProfile, matches: list, page: int) -> dict
     ]
     pager = []
     if page > 0:
-        pager.append(_btn("◀ 이전", cb("L", parent.id, page - 1)))
+        pager.append(_btn("◀ 이전", cb("all", parent.id, page - 1)))
     if page < last_page:
-        pager.append(_btn("다음 ▶", cb("L", parent.id, page + 1)))
+        pager.append(_btn("다음 ▶", cb("all", parent.id, page + 1)))
     if pager:
         rows.append(pager)
+    rows.append([_btn("🎯 1순위 미션", cb("L", parent.id, 0))])
     rows.append([_btn("🗑 정보 삭제", cb("x", parent.id)), _btn("🏠 메뉴", cb("m"))])
     return _kb(rows)
 
@@ -123,8 +131,35 @@ def build_detail_keyboard(
         [_btn("📞 통화 대본", cb("t", pid, bid, page)), _btn("💌 카톡 전송문", cb("k", pid, bid, page))],
         [{"text": "📊 부모님 복지 상세 리포트 ↗", "url": url}],
         [_btn("⭐ 찜 해제" if bookmarked else "⭐ 찜하기", cb("b", pid, bid, page))],
-        [_btn("◀ 목록", cb("L", pid, page)), _btn("🏠 메뉴", cb("m"))],
+        [_btn("◀ 목록", cb("all", pid, page)), _btn("🏠 메뉴", cb("m"))],
     ])
+
+
+def build_mission_keyboard(pid: int, bid: int, index: int, total: int) -> dict[str, Any]:
+    rows = [
+        [_btn("🎒 대리신청 준비물", cb("prx", pid, bid))],
+        [_btn("📞 통화 대본", cb("t", pid, bid)), _btn("💌 안심 카톡", cb("k", pid, bid))],
+        [_btn("📌 진행 상태 변경", cb("mst", pid, bid))],
+    ]
+    if total > 1:
+        nxt = (index + 1) % total
+        rows.append([_btn(f"▶ 다음 추천 ({nxt + 1}/{total})", cb("nxt", pid, bid, nxt))])
+    rows.append([_btn("📚 전체 혜택 목록", cb("all", pid, 0))])
+    rows.append([_btn("🗑 정보 삭제", cb("x", pid)), _btn("🏠 메뉴", cb("m"))])
+    return _kb(rows)
+
+
+def build_mission_status_keyboard(pid: int, bid: int, current: str) -> dict[str, Any]:
+    rows = [
+        [_btn(f"{'✔ ' if s.value == current else ''}{s.badge} {s.label}", cb("mss", pid, bid, s.value))]
+        for s in MissionStatus
+    ]
+    rows.append([_btn("◀ 미션 카드", cb("mc", pid, bid))])
+    return _kb(rows)
+
+
+def build_back_to_mission_keyboard(pid: int, bid: int) -> dict[str, Any]:
+    return _kb([[_btn("◀ 미션 카드", cb("mc", pid, bid)), _btn("🏠 메뉴", cb("m"))]])
 
 
 def build_back_to_detail_keyboard(pid: int, bid: int, page: int) -> dict[str, Any]:
@@ -182,7 +217,10 @@ class SilverCareInteractiveBot:
     # ---------- callbacks ----------
     @staticmethod
     def _toast(action: str) -> str:
-        return {"b": "⭐ 찜 목록을 업데이트했어요", "xy": "🗑 삭제했어요", "wk": "🔔 알림 설정을 바꿨어요"}.get(action, "")
+        return {
+            "b": "⭐ 찜 목록을 업데이트했어요", "xy": "🗑 삭제했어요", "wk": "🔔 알림 설정을 바꿨어요",
+            "mss": "📌 진행 상태를 저장했어요",
+        }.get(action, "")
 
     def _handle_callback(self, cq: dict[str, Any]) -> None:
         data = str(cq.get("data") or "")
@@ -212,7 +250,24 @@ class SilverCareInteractiveBot:
         elif action in ("a", "dc", "y", "r", "sk", "l", "i"):
             self._wizard_step(chat_id, mid, action, args)
         elif action == "L":
+            self._show_mission(chat_id, mid, int(args[0]), 0)
+        elif action == "all":
             self._show_list(chat_id, mid, int(args[0]), int(args[1]) if len(args) > 1 else 0)
+        elif action == "nxt":
+            self._show_mission(chat_id, mid, int(args[0]), int(args[2]))
+        elif action == "mc":
+            self._show_mission(chat_id, mid, int(args[0]), bid=int(args[1]))
+        elif action == "mst":
+            self._show_mission_status(chat_id, mid, int(args[0]), int(args[1]))
+        elif action == "mss":
+            pid, bid, status = int(args[0]), int(args[1]), MissionStatus(args[2]).value
+            parent = self.db.get_parent(pid, chat_id)
+            if parent and self.db.evaluate(parent, bid, self.ref_year):
+                self.db.set_mission_status(chat_id, pid, bid, status)
+            self._show_mission(chat_id, mid, pid, bid=bid)
+        elif action == "prx" or (action in ("t", "k") and len(args) == 2):
+            # 2-arg t/k come from the mission card → back button returns to the mission card
+            self._show_mission_tool(chat_id, mid, action, int(args[0]), int(args[1]))
         elif action in ("d", "t", "k", "b"):
             pid, bid = int(args[0]), int(args[1])
             page = int(args[2]) if len(args) > 2 else 0
@@ -285,7 +340,7 @@ class SilverCareInteractiveBot:
             )
             pid = self.db.save_parent(parent)
             self.db.clear_draft(chat_id)
-            self._show_list(chat_id, mid, pid, 0)
+            self._show_mission(chat_id, mid, pid, 0)
 
     # ---------- screens ----------
     def _show_menu(self, chat_id: int, mid: Optional[int]) -> None:
@@ -307,6 +362,58 @@ class SilverCareInteractiveBot:
             build_list_keyboard(parent, matches, page),
         )
 
+    def _show_mission(
+        self, chat_id: int, mid: Optional[int], pid: int, index: int = 0, bid: Optional[int] = None
+    ) -> None:
+        """Renders one proxy-application mission card. bid (when ranked) wins over index."""
+        parent = self.db.get_parent(pid, chat_id)
+        if parent is None:
+            self._show_menu(chat_id, mid)
+            return
+        matches = self.db.match_for_parent(parent, self.ref_year)
+        missions = rank_missions(matches, parent, MAX_MISSIONS)
+        if not missions:
+            kb = _kb([[_btn("📚 전체 혜택 목록", cb("all", pid, 0))],
+                      [_btn("🗑 정보 삭제", cb("x", pid)), _btn("🏠 메뉴", cb("m"))]])
+            self._safe_edit_or_send(chat_id, mid, format_no_mission(parent, self.ref_year), kb)
+            return
+        ids = [m.benefit.id for m in missions]
+        index = ids.index(bid) if bid in ids else min(max(0, index), len(missions) - 1)
+        match = missions[index]
+        mission = self.db.get_mission(chat_id, pid, match.benefit.id)
+        text = format_single_mission_card(
+            parent, match, mission, index + 1, len(missions), len(matches), self.ref_year
+        )
+        self._safe_edit_or_send(chat_id, mid, text, build_mission_keyboard(pid, match.benefit.id, index, len(missions)))
+
+    def _show_mission_status(self, chat_id: int, mid: Optional[int], pid: int, bid: int) -> None:
+        parent = self.db.get_parent(pid, chat_id)
+        match = self.db.evaluate(parent, bid, self.ref_year) if parent else None
+        if parent is None or match is None:
+            self._show_menu(chat_id, mid)
+            return
+        mission = self.db.get_mission(chat_id, pid, bid)
+        current = mission.status if mission else MissionStatus.NOT_STARTED.value
+        self._safe_edit_or_send(
+            chat_id, mid, format_mission_status_picker(match.benefit, mission),
+            build_mission_status_keyboard(pid, bid, current),
+        )
+
+    def _show_mission_tool(self, chat_id: int, mid: Optional[int], view: str, pid: int, bid: int) -> None:
+        """대리신청 키트(prx) / 통화 대본(t) / 안심 카톡(k) opened from the mission card."""
+        parent = self.db.get_parent(pid, chat_id)
+        match = self.db.evaluate(parent, bid, self.ref_year) if parent else None
+        if parent is None or match is None:
+            self._show_menu(chat_id, mid)
+            return
+        if view == "prx":
+            text = format_proxy_action_kit(parent, match.benefit)
+        elif view == "t":
+            text = format_phone_script(match.benefit, parent)
+        else:
+            text = format_parent_peace_card(parent, match.benefit)
+        self._safe_edit_or_send(chat_id, mid, text, build_back_to_mission_keyboard(pid, bid))
+
     def _show_benefit(self, chat_id: int, mid: Optional[int], view: str, pid: int, bid: int, page: int) -> None:
         parent = self.db.get_parent(pid, chat_id)
         match = self.db.evaluate(parent, bid, self.ref_year) if parent else None
@@ -316,7 +423,7 @@ class SilverCareInteractiveBot:
         if view == "t":
             text, kb = format_phone_script(match.benefit, parent), build_back_to_detail_keyboard(pid, bid, page)
         elif view == "k":
-            text, kb = format_kakao_share_html(match.benefit, parent.alias), build_back_to_detail_keyboard(pid, bid, page)
+            text, kb = format_parent_peace_card(parent, match.benefit), build_back_to_detail_keyboard(pid, bid, page)
         else:
             marked = self.db.is_bookmarked(chat_id, pid, bid)
             text = format_benefit_card(parent, match, marked, self.ref_year)
@@ -338,7 +445,7 @@ class SilverCareInteractiveBot:
         if parent is None:
             self._show_menu(chat_id, mid)
             return
-        text = f"🗑 <b>{esc(parent.alias)}</b> 정보와 찜 목록을 삭제할까요?\n되돌릴 수 없어요."
+        text = f"🗑 <b>{esc(parent.alias)}</b> 정보와 찜·진행 상태를 삭제할까요?\n되돌릴 수 없어요."
         self._safe_edit_or_send(chat_id, mid, text, build_delete_confirm_keyboard(pid))
 
     # ---------- transport ----------

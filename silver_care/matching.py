@@ -107,3 +107,42 @@ def match_benefits(
     matches = [m for b in benefits if (m := evaluate_benefit(b, parent, ref_year)) is not None]
     matches.sort(key=lambda m: (m.grade.rank, _CATEGORY_ORDER[m.benefit.category], m.benefit.id))
     return matches
+
+
+# ── 자녀 대리신청 1순위 킬러 미션 ─────────────────────────────
+MAX_MISSIONS = 5
+BASIC_PENSION_ID = 13   # 기초연금 (매월 현금)
+LONG_TERM_CARE_ID = 8   # 노인장기요양 등급 (방문요양 85% 국비)
+KNEE_SURGERY_ID = 5     # 무릎 인공관절 수술비 (사전승인 필수)
+DEMENTIA_CHECK_ID = 7   # 치매 조기검진
+TELECOM_DISCOUNT_ID = 14  # 통신비 복지감면 (기초연금 수급자)
+
+
+def _killer_rule_applies(benefit_id: int, parent: ParentProfile) -> bool:
+    """Extra parent conditions on top of eligibility. A match already guarantees min_age/region/income."""
+    if benefit_id == BASIC_PENSION_ID:
+        return parent.is_pension_receiver != 1  # 이미 수급 중이면 미션 불필요
+    if benefit_id == TELECOM_DISCOUNT_ID:
+        return parent.is_pension_receiver == 1
+    return True
+
+
+_KILLER_ORDER = (BASIC_PENSION_ID, LONG_TERM_CARE_ID, KNEE_SURGERY_ID, DEMENTIA_CHECK_ID, TELECOM_DISCOUNT_ID)
+
+
+def rank_missions(
+    matches: Iterable[BenefitMatch], parent: ParentProfile, limit: int = MAX_MISSIONS
+) -> list[BenefitMatch]:
+    """Orders matches as proxy-application missions: killer benefits first, then GRADE_A, then the rest."""
+    matches = [m for m in matches if _killer_rule_applies(m.benefit.id, parent)]
+    by_id = {m.benefit.id: m for m in matches}
+    ranked = [by_id[bid] for bid in _KILLER_ORDER if bid in by_id]
+    ranked += [m for m in matches if m.grade == ReliabilityGrade.GRADE_A and m.benefit.id not in _KILLER_ORDER]
+    ranked += [m for m in matches if m.grade != ReliabilityGrade.GRADE_A and m.benefit.id not in _KILLER_ORDER]
+    return ranked[:max(0, limit)]
+
+
+def select_primary_mission(matches: Iterable[BenefitMatch], parent: ParentProfile) -> Optional[BenefitMatch]:
+    """The single benefit a working child should apply for first on the parent's behalf."""
+    ranked = rank_missions(matches, parent, limit=1)
+    return ranked[0] if ranked else None
