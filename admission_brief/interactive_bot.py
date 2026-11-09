@@ -52,29 +52,47 @@ CATEGORY_CODES: dict[str, EventCategory] = {
 CATEGORY_TO_CODE: dict[EventCategory, str] = {v: k for k, v in CATEGORY_CODES.items()}
 
 
+# Legacy bottom reply-keyboard texts; still matched as text aliases by the message handler.
+LEGACY_REPLY_KEYBOARD_TEXTS: tuple[str, ...] = (
+    "📋 이번 주 필수 To-Do",
+    "⚡ 긴급 속보 & 핫 행사 TOP 3",
+    "💡 1분 입시 팩트체크 (So-What)",
+    "🎪 설명회·박람회 전체보기",
+    "🎓 학년/지역 설정",
+    "❓ 이용 도움말",
+    GLOSSARY_MENU_TEXT,
+    SETTINGS_MENU_TEXT,
+)
+
+
+def build_remove_reply_keyboard() -> dict[str, Any]:
+    """Removes any legacy bottom reply keyboard; menus are served as inline cards + /commands."""
+    return {"remove_keyboard": True}
+
+
 def build_persistent_reply_keyboard() -> dict[str, Any]:
-    """Builds persistent bottom touch keyboard buttons that stay on parent's phone screen."""
+    """Deprecated: kept for un-updated callers; now returns the remove-keyboard payload."""
+    return build_remove_reply_keyboard()
+
+
+def build_main_menu_inline_keyboard() -> dict[str, Any]:
+    """Builds the inline main menu card (2 columns) replacing the legacy bottom reply keyboard."""
     return {
-        "keyboard": [
+        "inline_keyboard": [
             [
-                {"text": "📋 이번 주 필수 To-Do"},
-                {"text": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
+                {"text": "📋 이번 주 To-Do", "callback_data": "adm:todo"},
+                {"text": "⚡ 핫 행사 TOP 3", "callback_data": "adm:hot"},
             ],
             [
-                {"text": "💡 1분 입시 팩트체크 (So-What)"},
-                {"text": "🎪 설명회·박람회 전체보기"},
+                {"text": "💡 입시 팩트체크", "callback_data": "adm:fact"},
+                {"text": "🎪 설명회·박람회", "callback_data": "adm:menu"},
             ],
             [
-                {"text": "🎓 학년/지역 설정"},
-                {"text": "❓ 이용 도움말"},
+                {"text": "📖 입시용어 사전", "callback_data": "adm:gl:menu"},
+                {"text": "⚙️ 자녀·맞춤 설정", "callback_data": "adm:settings"},
             ],
-            [
-                {"text": GLOSSARY_MENU_TEXT},
-                {"text": SETTINGS_MENU_TEXT},
-            ],
-        ],
-        "resize_keyboard": True,
-        "is_persistent": True,
+            [{"text": "❓ 이용 도움말", "callback_data": "adm:help"}],
+        ]
     }
 
 
@@ -358,12 +376,12 @@ class AdmissionInteractiveBot:
         elif clean_text.startswith("/help") or "도움말" in clean_text or "안내" in clean_text or "메뉴" in clean_text:
             self._cmd_help(chat_id)
         else:
-            # Fallback friendly response with persistent keyboard
+            # Fallback friendly response with the inline main menu card
             self.channel.send_message(
                 chat_id,
                 "안녕하세요! 에듀브리프(EduBrief) 입시 비서입니다.\n"
-                "타자를 치실 필요 없이, **아래 화면의 메뉴 버튼**을 손가락으로 탭해 주세요! 👇",
-                reply_markup=build_persistent_reply_keyboard(),
+                "타자를 치실 필요 없이, **아래 메뉴 버튼**을 손가락으로 탭해 주세요! 👇",
+                reply_markup=build_main_menu_inline_keyboard(),
             )
 
     def _cmd_start(self, chat_id: str, first_name: str) -> None:
@@ -634,10 +652,10 @@ class AdmissionInteractiveBot:
             self.channel.send(chat_id, sample_briefing)
 
     def _cmd_help(self, chat_id: str) -> None:
-        """Presents help and official channel links with persistent touch menu."""
+        """Presents help and official channel links with the inline main menu card."""
         help_text = (
             "📌 <b>에듀브리프 (EduBrief) 간편 사용 안내</b>\n\n"
-            "타자를 치실 필요 없이, **화면 하단의 메뉴 버튼**을 손가락으로 누르시면 됩니다!\n\n"
+            "타자를 치실 필요 없이, **아래 메뉴 버튼**을 손가락으로 누르시면 됩니다!\n\n"
             "▪ <b>📋 이번 주 필수 To-Do</b>: 내 아이 학년별 이번 주 꼭 실천해야 할 3가지\n"
             "▪ <b>⚡ 긴급 속보 & 핫 행사 TOP 3</b>: 실시간 정책 발표 및 선착순 마감 임박 행사\n"
             "▪ <b>💡 1분 입시 팩트체크</b>: 교육부 발표 및 대입 개편안의 실질 득실 (So-What)\n"
@@ -648,7 +666,7 @@ class AdmissionInteractiveBot:
         self.channel.send_message(
             chat_id,
             help_text,
-            reply_markup=build_persistent_reply_keyboard(),
+            reply_markup=build_main_menu_inline_keyboard(),
         )
 
     def _cmd_events_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
@@ -830,8 +848,8 @@ class AdmissionInteractiveBot:
                 self._send_welcome_todo(chat_id, grade)
                 self.channel.send_message(
                     chat_id,
-                    "💡 언제든지 화면 아래의 고정 메뉴 버튼을 탭하여 다른 정보도 확인하실 수 있습니다:",
-                    reply_markup=build_persistent_reply_keyboard(),
+                    "💡 언제든지 /help 를 입력하시면 메인 메뉴 카드를 다시 보실 수 있습니다.",
+                    reply_markup=build_remove_reply_keyboard(),
                 )
 
         # 3. Settings Menu Navigation
@@ -855,6 +873,10 @@ class AdmissionInteractiveBot:
             self._cmd_hot_events(chat_id)
         elif data == "adm:todo":
             self._cmd_todo(chat_id)
+        elif data == "adm:fact":
+            self._cmd_factcheck(chat_id)
+        elif data == "adm:help":
+            self._cmd_help(chat_id)
 
         # 5. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
         elif data == "adm:menu":

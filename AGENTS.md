@@ -1,94 +1,37 @@
-# ============================================================
-# PROJECT CONSTITUTION: Multi-Bot Intelligence Platform
-# Scope: Project-Specific (c:\Users\환진\.gemini\antigravity\scratch\market_brief_starter)
-# Version: 2.4 (Two-Phase Multi-AI & PROD-LIVE Trigger Context Edition)
-# ============================================================
+# PROJECT CONSTITUTION: Multi-Bot Intelligence Platform (v3.0 Slim)
 
-## 1. 프로젝트 개요 및 멀티봇 파이프라인
-- **프로젝트 명**: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
-- **운영 인프라 환경**:
-  - **운영 메인 서버**: **오라클 클라우드(OCI) VM** (`161.33.196.211`, `systemd` 서비스 `multibot.service`, 포트 `8002`, 24/7 상시 가동)
-  - **웹 대시보드 및 정적 리포트 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
-  - **클라우드 퇴역 완료**: Render Cloud는 완전히 폐기되었으며 일체 사용하지 않음
-- **주요 파이프라인 및 구성 서비스**:
-  - **시황 브리핑 (`telegram_bot_runner.py`)**: 일일 장전 브리핑(오전 06:30 KST 자동 실행) 및 긴급 변동성 브리핑(장중 ±3% 이상 급등락 감지 시 발송)
-  - **트래블 패스파인더 (`travel_bot_runner.py`)**: 네이버 실시간 항공/숙소/예산 검증 및 6개월 특가 브리핑
-  - **입시 나침반 (`admission_bot_runner.py`)**: 주간 대입 일정 큐레이션 및 인터랙티브 상담
-  - **통합 포털 허브 (`portal_bot_runner.py`)**: 회원 등급(FREE/GREEN/RED/BLACK) 기반 구독 슬롯 제어 허브
-  - **웹 리포트 정적 페이지 퍼블리싱**: GitHub Pages (`https://kkjhj1.github.io/kwDailyMarketReport/`)
-  - **시황 및 멀티봇 발송 현황 관리자 콘솔**: `admin_server.py`
+## 1. 개요 & 운영 인프라
+- 프로젝트: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
+- 운영 서버: OCI VM `161.33.196.211`, `systemd` `multibot.service`, 포트 `8002`, 24/7
+- 웹 리포트: GitHub Pages `https://kkjhj1.github.io/kwDailyMarketReport/`
+- Render Cloud: 퇴역 완료, 사용 금지
+- 봇: `telegram_bot_runner.py`(시황, 06:30 KST·±3% 긴급), `travel_bot_runner.py`, `admission_bot_runner.py`, `portal_bot_runner.py`(FREE/GREEN/RED/BLACK), 관리자 콘솔 `admin_server.py`
 
-## 2. 포트 및 개발 환경 가드 (전역 헌법 [DEV-PORT] 준수)
-- **기본 관리자 포트**: `8002` (환경변수 `ADMIN_PORT=8002` 참조)
-- **가용 포트 스마트 전환**:
-  - 관리자 콘솔(`admin_server.py`)은 독립 Single-Page 도구이므로 `find_available_port(8002)`를 통해 8002 포트 충돌 시 즉시 다음 가용 포트(8003, 8004...)로 안전 전환한다.
-  - 포트가 전환될 경우 브라우저 접속을 위해 콘솔 및 터미널에 `[PORT FALLBACK]`과 함께 실제 열린 `http://127.0.0.1:<PORT>` URL을 반드시 명시한다.
-- **다중 프로젝트 포트 격리 규약**:
-  - `pension_platform`: 8000
-  - `market_brief_starter`: 8002
-  - 향후 신규 프로젝트: 8003+
+## 2. 포트 가드 (전역 [DEV-PORT])
+- 기본 `ADMIN_PORT=8002`. 충돌 시 `find_available_port(8002)`로 8003+ 전환하고 `[PORT FALLBACK]` + 실제 `http://127.0.0.1:<PORT>` 출력
+- 격리: `pension_platform` 8000 / `market_brief_starter` 8002 / 신규 8003+
 
-## 3. 텔레그램 봇 실전 수칙 및 운영 발송 통제 (Mandatory Telegram & Live Rules)
-- **[TG-01] 용량 상한 & 고정 슬림 템플릿**:
-  - 가시 텍스트(태그 제외) **1,800자 이내**, HTML 원문(`len`) **3,500자 이내**를 엄수한다(4,096자 절벽 및 임의 항목 삭제식 가변 축약 금지). 상세 표·설명은 웹 리포트 링크로 분리한다.
-- **[TG-02] Strict HTML Escape**:
-  - 모든 동적·외부 수집 문자열은 예외 없이 `html.escape()` 처리 후 주입하며, 텔레그램 허용 태그(`<b>`, `<i>`, `<code>`, `<pre>`, `<a href="...">`) 외 태그 사용을 금한다.
-- **[TG-03] 1행 1정보 & 인앱 웹(`360px`) 연동**:
-  - 모바일 3초 스캔이 가능하도록 `이모지 + 핵심명사 + 수치(Bold)` 단문으로 구성하고 장황한 괄호·원본 URL 노출을 금한다.
-  - 텔레그램에서 연결되는 웹 리포트는 `360px` 뷰포트 가로 오버플로우 제로(`minmax(0, 1fr)`, 터치 타깃 `44px` 이상)를 보장한다.
-- **[TG-04] 0.1초 콜백 응답(MUST) & `64-Byte` 규약**:
-  - 인라인 버튼 수신 즉시 `answerCallbackQuery`를 **무조건 선행 호출**하여 로딩 스피너를 제거한다.
-  - `callback_data`는 **64 bytes 이하 영문 축약 코드(`도메인:액션:ID`)**만 사용하며, 화면 수정은 `_safe_edit_or_send`(`message is not modified` 무시 및 폴백 포함)를 통하고 파괴적 액션(구독 해지 등)은 제자리 2단계 확인(`In-Place Confirm`)을 거친다.
-- **[TG-05] Safe Dispatcher (429 Rate Limit 방어)**:
-  - 다수 수신자 발송 시 단순 루프 직발송을 금하며, `SafeTelegramDispatcher`와 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) 및 지수 백오프 재시도를 적용하여 Rate Limit(429) 및 네트워크 타임아웃 중복 발송을 원천 차단한다. 본 디스패처는 `[PROD-LIVE]` 게이트를 통과한 정상 작업만 전달받아 발송한다.
-- **[TG-06] 토큰 프리 `--demo` & 운영 자산 무오염**:
-  - 모든 봇 러너는 실제 토큰 없이 1초 내 콘솔 검증이 가능한 `--demo` 플래그를 제공해야 하며, 데모·테스트 실행 중 운영 DB(`*.sqlite3`) 및 배포 폴더(`reports/`)에 파일을 기록하지 않는다(`:memory:` 또는 `scratch/` 격리).
-  - *[현행 과제]*: `travel_bot_runner.py`와 `portal_bot_runner.py`는 `--demo` 완비 상태이나, 미구현된 `telegram_bot_runner.py`와 `admission_bot_runner.py`는 향후 L2 작업 시 `--demo`를 최우선 구현 과제로 둔다.
-- **[TG-07] 제로 브레이킹(Zero-Breaking Policy) & 선행 컴파일 검증**:
-  - GitHub Actions에서 실행 중인 기존 `telegram_bot_runner.py --auto-schedule --live-naver` 등 크론 CLI 워크플로우에 영향을 주지 않도록 하위 호환성을 100% 보장한다.
-  - 코드 수정 직후 반드시 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고하며, 완료 보고 시 실제 실행 명령과 실측 결과를 반드시 제시한다(미실행 검증 보고 금지).
-- **[PROD-LIVE] 실사용자 Telegram 발송 및 재발송 절대 통제 (Mandatory Live Gate)**:
-  - **실사용자 발송 기본 거부 (Deny-by-Default)**: 운영(Production) 환경, 실제 텔레그램 채널, 실구독자 대상 메시지는 기본 거부된다. 개발·배포·테스트 중에는 실제 발송 플래그 실행을 금지하며, 반드시 `--demo` 또는 모의(Dry-run) 모드만 사용한다. 관리자 수동 발송(`MANUAL`)은 대상과 사유를 기록하고 사용자의 명시적 승인이 있을 때만 단 1회 실행한다.
-  - **서버 재기동 시 보상성 자동 재발송(Redelivery) 원천 금지 (Trigger Context)**: 서비스 시작, `systemd restart`, 배포 완료 시의 초기화(`STARTUP_INIT`) 컨텍스트에서는 과거 미발송 슬롯에 대한 자동 보상 발송을 일체 금지(0건 강제)하며, 오직 현재 시각 이후의 미래 슬롯만 예약한다. 정시 스케줄러(`CRON_TICK`)에 의해 정상 시작된 작업은 데이터 수집이나 리포트 생성이 다소 지연되더라도 동일 세션(`execution_id`) 안에서 유효기간(TTL 2시간) 내 정상 발송을 완료할 수 있다.
-  - **발송 원장(SSOT) 단일화 및 UNKNOWN 격리**: 발송 여부의 단일 진실 공급원(SSOT)은 실제 운영 DB인 `alerts.sqlite3`의 배달 원장(`delivery_jobs`, `delivery_job_recipients`)만 사용한다(`portal.sqlite3`는 구독 대상 산출용으로만 사용). 동일 슬롯에 `SENT` 또는 네트워크 응답 불명확(`UNKNOWN`) 기록이 1건이라도 존재하면 발송 완료로 간주하여 자동 재발송을 원천 차단한다. 원격 OCI VM 상태 조회 실패나 로컬 DB와의 불일치 발생 시 즉시 발송 게이트를 `BLOCKED`(Fail-Closed) 처리한다.
+## 3. 시행령 위임 (`.agents/rules/`)
+- `telegram-safety.md`: [TG-01]~[TG-07] 메시지 용량·escape·콜백·429·`--demo`·제로 브레이킹
+- `data-delivery-integrity.md`: [PROD-LIVE] 실발송 통제, STARTUP_INIT/CRON_TICK, SSOT·UNKNOWN 격리
+- `web-report-ui.md`: 360px 무오버플로우, 44px 터치 타깃
+- 해당 영역 작업 시 반드시 전문을 읽고 준수한다.
 
-## 4. 멀티 AI 2단계 강제 파이프라인 (Two-Phase Multi-AI Protocol)
+## 4. 절대 금지선
+- 운영 DB(`*.sqlite3`), 배포 폴더(`reports/`), `.env` 임의 수정 금지
+- 실사용자 텔레그램 실발송 금지(Deny-by-Default). 개발·테스트는 `--demo`/Dry-run만
+- 코드 수정 후 `python -m py_compile` + 관련 `pytest` 실측 통과 전 완료 보고 금지
 
-### 4.1 위험도별 라우팅 및 게이트 원칙
-- **L0 (문구, 주석, 오타, 마크다운)**: Gemini 단독 처리 (외부 호출 전면 금지, 토큰 소모 0%).
-- **L1 (단일 파일 국소 버그, 단일 테스트 보완)**: GPT 설계 생략, Gemini ➔ Claude(Write Lease) 직행 구현.
-- **L2/L3 (비즈니스 로직, 메시지 템플릿, 웹 UI, DB 스키마, 기획안 리팩토링, 대규모 리팩토링)**:
-  - **[Phase 1: 기획·아키텍처 자율 선행 감사 (Non-Destructive)]**:
-    1. **Gemini (요구정리)**: 사용자 요청 분석, 1차 명세 및 `scratch/handoff_to_gpt.md` 작성.
-    2. **GPT (수석 감사관 - codex CLI)**: 산식·DB·상태·불변조건·UI/UX 감사를 **사용자 승인 대기 없이 즉시 자동 실행** (`-s read-only`).
-    3. **Fail-Closed 원칙**: GPT 감사 산출물(`scratch/gpt_architecture.md`)이 없는 L2/L3 계획의 임의 제안·확정·사용자 승인 요청은 일체 금지한다 (`AUDIT_INCOMPLETE`).
-    4. **Gemini (계획서 확정 및 보고)**: GPT 감사가 반영된 **「확정 계획서(Artifact)」**를 생성하여 사용자에게 보고.
-  - **[Phase 2: 실제 개발 착수 게이트 (Destructive / Two-Phase Gate [AUTH-01])]**:
-    5. **사용자 승인 게이트**: 최신 GPT 감사 계획서에 대한 사용자의 명확한 자연어 개발 착수 승인(예: "개발 진행해", "개발진행하라", "그대로 진행") 확인 후 착수 (단순 맞장구는 승인으로 보지 않음).
-    6. **Gemini 코딩 절대 락(Lock)**: Phase 2 진입 즉시 Gemini의 모든 파일 수정 도구(`edit_file`, `write_file`) 및 쉘 파일 수정 명령 호출을 물리적으로 엄금한다.
-    7. **Claude (시니어 구현 - claude CLI)**: Single-Writer Lease 권한을 부여받아 실제 코드 작성 및 단위 테스트 실행.
-    8. **Claude 실패 시 대체 금지**: Claude 구현 실패 시 Gemini가 코딩을 가로채지 못하며, `IMPLEMENTATION_FAILED` 또는 `BLOCKED` 상태로 사용자에게 즉각 보고한다.
-    9. **Gemini (최종 판결 & 통합)**: git diff 기계적 신선 대조(Fresh Read) 및 7대 수칙 검증 후 최종 통합 완료.
+## 5. 멀티 AI 2단계 파이프라인
+- 라우팅: L0(문구·주석) Gemini 단독 / L1(단일 파일 국소 수정) Gemini→Claude 직행 / L2·L3(로직·템플릿·UI·DB·대규모 리팩토링) 아래 2단계
+- Phase 1 (비파괴): Gemini 요구정리 → `scratch/handoff_to_gpt.md` → GPT 감사(read-only, 승인 대기 없이 자동) → `scratch/gpt_architecture.md` → Gemini 확정 계획서 보고. 감사 산출물 없는 계획 제안·승인 요청 금지(`AUDIT_INCOMPLETE`)
+- Phase 2 (파괴, [AUTH-01]): 사용자의 명확한 착수 승인("개발 진행해" 등, 단순 맞장구 제외) 후 Claude가 Single-Writer Lease로 구현. Gemini 파일 수정 금지, Claude 실패 시 대체 금지(`IMPLEMENTATION_FAILED`/`BLOCKED` 보고)
+- 최종 판결: 착수 전 `git rev-parse HEAD`·`git status --short`로 기준점 고정, 반환 후 Gemini가 `git diff` Fresh Read로 시행령·불변조건 준수 판정. L3 배포·운영 DB 마이그레이션은 감사 누락/테스트 실패 시 중단(Fail-Closed)
+- Handoff: 전체 소스 복사 금지, 대상 인터페이스만 1~2KB 압축. Claude는 `allowed_paths`만 수정, 완료 시 Drift Self-Report 제출
 
-### 4.2 외부 에이전트 CLI 실행 표준 및 Handoff 규약
-
-#### ① GPT 아키텍처 수석 설계 호출 (Read-Only)
 ```powershell
+# GPT 감사 (read-only)
 Get-Content -Raw "scratch\handoff_to_gpt.md" -Encoding UTF8 | codex exec --skip-git-repo-check -s read-only -o "scratch\gpt_architecture.md" -
-```
-- **Handoff 및 산출물**: 전체 소스 복사를 금하고 대상 인터페이스만 1~2KB로 압축 전달(`Targeted Handoff`). 결과물에는 불변조건(Invariants), DB/수식 계약, 엣지케이스, 구현 금지사항을 명시한다.
-
-#### ② Claude 시니어 구현 호출 (Lease 범위 내 Write 허용)
-```powershell
+# Claude 구현 (Lease)
 Get-Content -Raw "scratch\handoff_to_claude.md" -Encoding UTF8 | claude -p --tools "Read,Grep,Glob,Edit,Write,Bash" --permission-prompts none --no-session-persistence
 ```
-- **Claude 작업 수칙**:
-  - `allowed_paths`에 명시된 파일만 수정하며, `forbidden_paths`(.env, *.sqlite3, reports/)는 절대 수정 금지.
-  - 수정 직후 스스로 `python -m py_compile` 및 관련 `pytest` 통과 확인 후 결과 요약 제출.
-  - 완료 시 변경 내역과 함께 **"설계와 달라진 점(Drift Self-Report)"**을 필수 제출.
-  - Claude 작업 중 Gemini는 파일 수정을 일체 중단하고 대기 (Single-Writer Lease).
-
-### 4.3 Git 상태 동기화 및 최종 판결 (Fresh Read & Anti-Drift)
-- 작업 착수 전 `git rev-parse HEAD` 및 `git status --short`로 기준점을 고정한다.
-- Claude 작업 반환 즉시 Gemini는 실제 `git diff`를 통해 변경분을 신선하게 대조(Fresh Read)하고, 7대 수칙(`[TG-01]`~`[TG-07]`, `[PROD-LIVE]`) 및 불변조건 준수 여부를 최종 판정하여 통합한다.
-- **Fail-Closed**: L3 배포 및 운영 DB 마이그레이션은 외부 감사가 누락되거나 테스트가 실패한 경우 즉시 작업을 중단한다.

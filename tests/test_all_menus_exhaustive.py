@@ -29,7 +29,9 @@ from portal_hub import (
 )
 from portal_hub.interactive import (
     USER_STATES,
+    LEGACY_REPLY_KEYBOARD_TEXTS,
     build_persistent_reply_keyboard,
+    build_remove_reply_keyboard,
     build_slot_gauge,
     render_inquiry_prompt_view,
     render_support_center_view,
@@ -39,6 +41,7 @@ from portal_hub.interactive import (
 from admission_brief.interactive_bot import (
     AdmissionInteractiveBot,
     build_grade_inline_keyboard,
+    build_main_menu_inline_keyboard as build_admission_main_menu,
     build_persistent_reply_keyboard as build_admission_reply_keyboard,
     build_region_inline_keyboard,
 )
@@ -253,9 +256,12 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             MENU_TIER_COMMANDS,
         )
 
-        # Verify bottom reply keyboard buttons are in mapped command sets
-        persistent_kb = build_persistent_reply_keyboard()
-        kb_texts = [btn["text"] for row in persistent_kb["keyboard"] for btn in row]
+        # Bottom reply keyboard is retired: both builders return the remove payload
+        self.assertEqual(build_remove_reply_keyboard(), {"remove_keyboard": True})
+        self.assertEqual(build_persistent_reply_keyboard(), {"remove_keyboard": True})
+
+        # Legacy bottom-keyboard texts must still map to menu actions (text aliases)
+        kb_texts = list(LEGACY_REPLY_KEYBOARD_TEXTS)
         self.assertEqual(len(kb_texts), 4)
 
         for btn_text in kb_texts:
@@ -462,8 +468,11 @@ class ExhaustiveAdmissionBotMenuTests(unittest.TestCase):
             self.bot.handle_update({"callback_query": cb})
             self.channel.answer_callback_query.assert_called_once()
             self.channel.edit_message_text.assert_called_once()
-            # Also sends persistent reply keyboard
+            # Also sends one notice that removes any legacy bottom reply keyboard
             self.channel.send_message.assert_called_once()
+            self.assertEqual(
+                self.channel.send_message.call_args[1]["reply_markup"], {"remove_keyboard": True}
+            )
             profile = self.db.get_subscriber(self.chat_id)
             self.assertEqual(profile.target_region.value, reg_code)
 
@@ -490,6 +499,30 @@ class ExhaustiveAdmissionBotMenuTests(unittest.TestCase):
                 self.channel.send_message.assert_called_once()
                 msg = self.channel.send_message.call_args[0][1]
                 self.assertIn(expected_keyword, msg)
+                markup = self.channel.send_message.call_args[1].get("reply_markup") or {}
+                self.assertNotIn("keyboard", markup)
+
+    def test_main_menu_inline_card_callbacks(self):
+        """Help/fallback show the inline main card; new adm:help / adm:fact callbacks route correctly."""
+        self.bot.handle_update({"message": {"chat": {"id": int(self.chat_id)}, "text": "ㅁㄴㅇㄹ"}})
+        markup = self.channel.send_message.call_args[1]["reply_markup"]
+        self.assertEqual(markup, build_admission_main_menu())
+        self.assertEqual(build_admission_reply_keyboard(), {"remove_keyboard": True})
+
+        for data, expected in (("adm:help", "간편 사용 안내"), ("adm:fact", None)):
+            self.channel.reset_mock()
+            cb = {
+                "id": f"cb_{data}",
+                "data": data,
+                "from": {"id": int(self.chat_id)},
+                "message": {"message_id": 503, "chat": {"id": int(self.chat_id)}},
+            }
+            self.bot.handle_update({"callback_query": cb})
+            self.channel.answer_callback_query.assert_called_once()
+            sent = self.channel.send_message.call_args_list + self.channel.send.call_args_list
+            self.assertTrue(sent, f"{data} produced no message")
+            if expected:
+                self.assertIn(expected, self.channel.send_message.call_args[0][1])
 
 
 def clean_text_in_set(clean: str, target_set: set[str]) -> bool:

@@ -22,22 +22,23 @@ from market_brief.link_gate import GATE_REGISTRY, build_gate_button
 logger = logging.getLogger(__name__)
 
 
+# Legacy bottom reply-keyboard texts; still matched as text aliases by match_menu_action.
+LEGACY_REPLY_KEYBOARD_TEXTS: tuple[str, ...] = (
+    "📋 내 구독 관리",
+    "📂 봇 둘러보기",
+    "💎 내 등급 혜택",
+    "❓ 이용 도움말",
+)
+
+
+def build_remove_reply_keyboard() -> dict[str, Any]:
+    """Removes any legacy bottom reply keyboard; menus are served as inline cards + /commands."""
+    return {"remove_keyboard": True}
+
+
 def build_persistent_reply_keyboard() -> dict[str, Any]:
-    """Builds persistent 2x2 bottom touch buttons pinned to mobile Telegram screen."""
-    return {
-        "keyboard": [
-            [
-                {"text": "📋 내 구독 관리"},
-                {"text": "📂 봇 둘러보기"},
-            ],
-            [
-                {"text": "💎 내 등급 혜택"},
-                {"text": "❓ 이용 도움말"},
-            ],
-        ],
-        "resize_keyboard": True,
-        "is_persistent": True,
-    }
+    """Deprecated: kept for un-updated callers; now returns the remove-keyboard payload."""
+    return build_remove_reply_keyboard()
 
 
 def build_slot_gauge(active_count: int, tier: UserTier) -> str:

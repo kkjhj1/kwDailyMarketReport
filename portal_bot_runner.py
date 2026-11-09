@@ -54,7 +54,7 @@ from portal_hub import (
 )
 from portal_hub.interactive import (
     USER_STATES,
-    build_persistent_reply_keyboard,
+    build_remove_reply_keyboard,
     build_slot_gauge,
     send_admin_new_user_alert,
 )
@@ -230,7 +230,7 @@ def run_polling(token: str) -> None:
     except Exception as exc:
         logger.warning("초기 offset 조회 실패: %s", exc)
         offset = 0
-    reply_kb = build_persistent_reply_keyboard()
+    reply_kb = build_remove_reply_keyboard()
 
     while True:
         try:
@@ -324,7 +324,8 @@ def run_polling(token: str) -> None:
                     if action == "START":
                         subs = db.get_user_subscriptions(user_id)
                         reply_text, markup = render_main_menu(user, subs)
-                        client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=reply_kb)
+                        # Clear any legacy bottom reply keyboard, then render the inline main card
+                        client.send_message(chat_id, "🏠 메인 메뉴를 불러옵니다.", reply_markup=reply_kb)
                         client.send_message(chat_id, reply_text, reply_markup=markup)
 
                     elif action == "SUBS":

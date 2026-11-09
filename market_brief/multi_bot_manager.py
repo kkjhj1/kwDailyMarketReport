@@ -1569,9 +1569,11 @@ class DynamicBotManager:
                     logger.debug("set_my_commands fallback: %s", exc)
 
             if action == "START":
-                from portal_hub.interactive import build_persistent_reply_keyboard
-                # Send persistent 2x2 reply keyboard pinned to mobile screen
-                portal_client.send_message(chat_id, "👇 아래 메뉴를 선택하세요.", reply_markup=build_persistent_reply_keyboard())
+                from portal_hub.interactive import build_remove_reply_keyboard
+                try:
+                    portal_client.send_message(chat_id, "🏠 메인 메뉴를 불러옵니다.", reply_markup=build_remove_reply_keyboard())
+                except Exception:
+                    pass
                 subs = portal_db.get_user_subscriptions(user_id)
                 t_out, m_out = render_main_menu(user, subs)
             elif action == "SUBS":

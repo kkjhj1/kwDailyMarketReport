@@ -16,7 +16,10 @@ from admission_brief.interactive_bot import (
     build_events_category_keyboard,
     build_events_page_keyboard,
     build_grade_inline_keyboard,
+    LEGACY_REPLY_KEYBOARD_TEXTS,
+    build_main_menu_inline_keyboard,
     build_persistent_reply_keyboard,
+    build_remove_reply_keyboard,
     format_events_page_html,
 )
 from admission_brief.models import (
@@ -175,19 +178,29 @@ def test_interactive_bot_todo_command():
     assert briefing.briefing_type == BriefingType.WEEKLY_TODO
 
 
-def test_build_persistent_reply_keyboard():
-    kb = build_persistent_reply_keyboard()
-    assert kb["resize_keyboard"] is True
-    assert kb["is_persistent"] is True
-    all_btn_texts = [btn["text"] for row in kb["keyboard"] for btn in row]
-    assert "📋 이번 주 필수 To-Do" in all_btn_texts
-    assert "⚡ 긴급 속보 & 핫 행사 TOP 3" in all_btn_texts
-    assert "💡 1분 입시 팩트체크 (So-What)" in all_btn_texts
-    assert "🎪 설명회·박람회 전체보기" in all_btn_texts
-    assert "🎓 학년/지역 설정" in all_btn_texts
-    assert "❓ 이용 도움말" in all_btn_texts
-    assert "📖 1초 입시용어 사전" in all_btn_texts
-    assert [len(row) for row in kb["keyboard"]] in ([2, 2, 2], [2, 2, 2, 2])
+def test_reply_keyboard_removed_and_deprecated_alias_safe():
+    assert build_remove_reply_keyboard() == {"remove_keyboard": True}
+    # Deprecated alias must never re-pin a bottom reply keyboard
+    assert build_persistent_reply_keyboard() == {"remove_keyboard": True}
+
+
+def test_main_menu_inline_keyboard_routes_to_known_callbacks():
+    kb = build_main_menu_inline_keyboard()
+    assert "keyboard" not in kb
+    cbs = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+    assert set(cbs) == {"adm:todo", "adm:hot", "adm:fact", "adm:menu", "adm:gl:menu", "adm:settings", "adm:help"}
+    assert all(len(row) <= 2 for row in kb["inline_keyboard"])
+    assert all(len(cb.encode("utf-8")) <= 64 for cb in cbs)
+
+
+def test_legacy_reply_keyboard_texts_still_listed():
+    assert "📋 이번 주 필수 To-Do" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "⚡ 긴급 속보 & 핫 행사 TOP 3" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "💡 1분 입시 팩트체크 (So-What)" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "🎪 설명회·박람회 전체보기" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "🎓 학년/지역 설정" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "❓ 이용 도움말" in LEGACY_REPLY_KEYBOARD_TEXTS
+    assert "📖 1초 입시용어 사전" in LEGACY_REPLY_KEYBOARD_TEXTS
 
 
 def test_interactive_bot_korean_text_touch_buttons():
