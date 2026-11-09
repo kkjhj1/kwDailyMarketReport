@@ -214,24 +214,25 @@ def format_glossary_entry_html(entry: GlossaryEntry) -> str:
     ])
 
 
-def build_grade_inline_keyboard() -> dict[str, Any]:
+def build_grade_inline_keyboard(include_back: bool = False) -> dict[str, Any]:
     """Builds inline keyboard markup for grade selection."""
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "📘 중등 / 예비고1", "callback_data": "grade:MIDDLE"},
-            ],
-            [
-                {"text": "📗 고1 ~ 고2", "callback_data": "grade:HIGH_1_2"},
-            ],
-            [
-                {"text": "📕 고3 / N수생", "callback_data": "grade:HIGH_3_N"},
-            ],
-            [
-                {"text": "🌐 전학년 공통 알림", "callback_data": "grade:ALL"},
-            ],
-        ]
-    }
+    rows = [
+        [
+            {"text": "📘 중등 / 예비고1", "callback_data": "grade:MIDDLE"},
+        ],
+        [
+            {"text": "📗 고1 ~ 고2", "callback_data": "grade:HIGH_1_2"},
+        ],
+        [
+            {"text": "📕 고3 / N수생", "callback_data": "grade:HIGH_3_N"},
+        ],
+        [
+            {"text": "🌐 전학년 공통 알림", "callback_data": "grade:ALL"},
+        ],
+    ]
+    if include_back:
+        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}])
+    return {"inline_keyboard": rows}
 
 
 REGION_SHORT: dict[TargetRegion, str] = {
@@ -262,27 +263,28 @@ def build_child_add_keyboard(slot: int) -> dict[str, Any]:
     }
 
 
-def build_region_inline_keyboard() -> dict[str, Any]:
+def build_region_inline_keyboard(include_back: bool = False) -> dict[str, Any]:
     """Builds inline keyboard markup for region selection."""
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🌐 온라인/유튜브 라이브만", "callback_data": "region:ONLINE"},
-            ],
-            [
-                {"text": "📍 서울 (대치·목동·중계)", "callback_data": "region:SEOUL"},
-            ],
-            [
-                {"text": "📍 경기·인천 (분당·일산·평촌)", "callback_data": "region:GYEONGGI"},
-            ],
-            [
-                {"text": "📍 비수도권 / 지방 거점", "callback_data": "region:LOCAL"},
-            ],
-            [
-                {"text": "🏢 전국 전체 (온·오프라인)", "callback_data": "region:ALL"},
-            ],
-        ]
-    }
+    rows = [
+        [
+            {"text": "🌐 온라인/유튜브 라이브만", "callback_data": "region:ONLINE"},
+        ],
+        [
+            {"text": "📍 서울 (대치·목동·중계)", "callback_data": "region:SEOUL"},
+        ],
+        [
+            {"text": "📍 경기·인천 (분당·일산·평촌)", "callback_data": "region:GYEONGGI"},
+        ],
+        [
+            {"text": "📍 비수도권 / 지방 거점", "callback_data": "region:LOCAL"},
+        ],
+        [
+            {"text": "🏢 전국 전체 (온·오프라인)", "callback_data": "region:ALL"},
+        ],
+    ]
+    if include_back:
+        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}])
+    return {"inline_keyboard": rows}
 
 
 class AdmissionInteractiveBot:
@@ -380,21 +382,23 @@ class AdmissionInteractiveBot:
             reply_markup=build_grade_inline_keyboard(),
         )
 
-    def _cmd_grade(self, chat_id: str) -> None:
+    def _cmd_grade(self, chat_id: str, message_id: Optional[int] = None) -> None:
         """Presents grade selection inline keyboard."""
-        self.channel.send_message(
-            chat_id,
-            "변경하실 <b>자녀분의 현재 학년</b>을 선택해 주세요:",
-            reply_markup=build_grade_inline_keyboard(),
-        )
+        text = "변경하실 <b>자녀분의 현재 학년</b>을 선택해 주세요:"
+        markup = build_grade_inline_keyboard(include_back=bool(message_id))
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
 
-    def _cmd_region(self, chat_id: str) -> None:
+    def _cmd_region(self, chat_id: str, message_id: Optional[int] = None) -> None:
         """Presents region selection inline keyboard."""
-        self.channel.send_message(
-            chat_id,
-            "희망하시는 <b>설명회 참여 지역 또는 온라인 전용 여부</b>를 선택해 주세요:",
-            reply_markup=build_region_inline_keyboard(),
-        )
+        text = "희망하시는 <b>설명회 참여 지역 또는 온라인 전용 여부</b>를 선택해 주세요:"
+        markup = build_region_inline_keyboard(include_back=bool(message_id))
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
 
     def _cmd_settings(self, chat_id: str, message_id: Optional[int] = None, notice: str = "") -> None:
         """Presents grade/region configuration plus the registered children (multi-child switch)."""
@@ -722,6 +726,12 @@ class AdmissionInteractiveBot:
                 idx, grade = int(parts[3]), TargetGrade(parts[4])
                 if 0 <= idx < len(CHILD_ALIASES):
                     return f"✅ {CHILD_ALIASES[idx]} ({grade.label}) 모드로 전환되었습니다!"
+            if data == "menu:grade" or data.startswith("info:retarget"):
+                return "🎓 학년 선택 메뉴를 불러옵니다."
+            if data == "menu:region":
+                return "📍 지역 선택 메뉴를 불러옵니다."
+            if data == "adm:settings":
+                return "⚙️ 맞춤 알림 설정을 불러옵니다."
         except (ValueError, IndexError):
             return "⚠️ 알 수 없는 선택입니다."
         return ""
@@ -825,10 +835,10 @@ class AdmissionInteractiveBot:
                 )
 
         # 3. Settings Menu Navigation
-        elif data == "menu:grade":
-            self._cmd_grade(chat_id)
+        elif data == "menu:grade" or data.startswith("info:retarget"):
+            self._cmd_grade(chat_id, message_id)
         elif data == "menu:region":
-            self._cmd_region(chat_id)
+            self._cmd_region(chat_id, message_id)
         elif data == "adm:settings":
             self._cmd_settings(chat_id, message_id)
 

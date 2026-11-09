@@ -33,7 +33,7 @@ from travel_brief.naver_live import NaverFlightLiveClient
 logger = logging.getLogger(__name__)
 
 USER_COOLDOWN_SECONDS = 3.0
-GLOBAL_REFRESH_COOLDOWN_SECONDS = 300.0  # 5 minutes minimum between full live scrapes
+GLOBAL_REFRESH_COOLDOWN_SECONDS = 30.0  # fast on-demand refresh (~5s) -> short global guard
 MAX_TRACKED_MESSAGES = 5000  # LRU bound for per-message sequence/lock registries
 SSE_RERANK_ROUNDS = 2
 
@@ -83,8 +83,8 @@ class UserCooldownManager:
             if is_force_refresh and not is_admin:
                 elapsed_global = now - self._last_global_refresh
                 if elapsed_global < GLOBAL_REFRESH_COOLDOWN_SECONDS:
-                    wait_min = int((GLOBAL_REFRESH_COOLDOWN_SECONDS - elapsed_global) // 60) + 1
-                    return False, f"전체 새로고침은 {wait_min}분 후에 가능합니다 (기존 캐시 제공)."
+                    wait_sec = int(GLOBAL_REFRESH_COOLDOWN_SECONDS - elapsed_global) + 1
+                    return False, f"전체 새로고침은 {wait_sec}초 후에 가능합니다 (기존 캐시 제공)."
 
             # Acquire state
             self._last_click[user_id] = now
@@ -431,15 +431,15 @@ class TravelInteractiveHandler:
         try:
             # C-A fix: use real existing methods search_deals and rank_recommendations
             target_dest = None if target_city == "ALL" else target_city
-            all_deals = self.engine.search_deals(dest_code=target_dest, months_ahead=6)
+            all_deals = self.engine.search_deals(dest_code=target_dest, months_ahead=6, fast_live=True)
             recs = BudgetCalculator.rank_recommendations(
                 destinations=self.engine.destinations,
                 deals=all_deals,
                 top_n=3,
             )
 
-            # Single-city: SSE-verify the hero deal and re-rank (a price surge may promote another date)
-            if recs and target_dest and getattr(self.engine, "live_naver", False):
+            # SSE-verify the hero deal and re-rank (a price surge may promote another date)
+            if recs and getattr(self.engine, "live_naver", False):
                 recs = self._verify_hero_with_rerank(all_deals, recs)
 
             # M-D fix: never overwrite with blank text, but never leave the loading card stuck either

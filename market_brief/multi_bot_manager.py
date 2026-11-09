@@ -160,8 +160,78 @@ class TelegramBotTransport:
         except Exception as exc:
             logger.debug(f"answerCallbackQuery ignored error: {exc}")
 
+    def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        try:
+            res = self.api_call("setMyCommands", {"commands": commands}, timeout=8)
+            return bool(res.get("ok"))
+        except Exception as exc:
+            logger.warning(f"Failed to setMyCommands: {exc}")
+            return False
+
+    def set_chat_menu_button(self, menu_button: dict[str, Any] | None = None) -> bool:
+        try:
+            payload = {"menu_button": menu_button or {"type": "commands"}}
+            res = self.api_call("setChatMenuButton", payload, timeout=8)
+            return bool(res.get("ok"))
+        except Exception as exc:
+            logger.warning(f"Failed to setChatMenuButton: {exc}")
+            return False
+
 
 COMMON_BRIEFING_BOTS: set[str] = {"brief_bot"}
+
+OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
+    "menu_bot": [
+        {"command": "start", "description": "🏠 메인 포털 홈"},
+        {"command": "subs", "description": "📋 내 구독 센터"},
+        {"command": "category", "description": "📂 카테고리 둘러보기"},
+        {"command": "tiers", "description": "💎 등급 혜택 안내"},
+        {"command": "support", "description": "💬 고객센터 / 문의"},
+        {"command": "help", "description": "❓ 이용 도움말"},
+    ],
+    "brief_bot": [
+        {"command": "start", "description": "🏠 시황 브리핑 홈"},
+        {"command": "briefing", "description": "📈 모닝/마감 시황 요약"},
+        {"command": "market", "description": "📊 글로벌 증시 현황"},
+        {"command": "help", "description": "❓ 이용 안내"},
+    ],
+    "travel_bot": [
+        {"command": "start", "description": "🏠 여행 특가 홈"},
+        {"command": "hotdeal", "description": "✈️ 주말 6개월 최저가 특가"},
+        {"command": "recommend", "description": "🎯 AI 맞춤 추천 여행지"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
+    "admission_bot": [
+        {"command": "start", "description": "🏠 입시 나침반 홈"},
+        {"command": "briefing", "description": "📊 이번 주 추천 리포트"},
+        {"command": "todo", "description": "📋 학년별 To-Do 체크리스트"},
+        {"command": "events", "description": "🎪 설명회·박람회 일정"},
+        {"command": "glossary", "description": "📖 1초 입시용어 사전"},
+        {"command": "settings", "description": "⚙️ 자녀 및 맞춤 설정"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
+    "silver_bot": [
+        {"command": "start", "description": "🏠 실버케어 홈"},
+        {"command": "parents", "description": "📋 부모님 등록/관리"},
+        {"command": "bookmarks", "description": "⭐️ 찜한 혜택 모아보기"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
+    "kids_bot": [
+        {"command": "start", "description": "🏠 자녀 안심 홈"},
+        {"command": "fever", "description": "🌡️ 열나요 응급 가이드"},
+        {"command": "hospital", "description": "🏥 달빛어린이병원 찾기"},
+        {"command": "weekend", "description": "🎪 주말 체험/나들이"},
+        {"command": "dday", "description": "⏰ 선착순 예약 D-Day"},
+        {"command": "child", "description": "📋 아이 프로필 등록/관리"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
+    "yolo_bot": [
+        {"command": "start", "description": "🏠 욜로 라이프 홈"},
+        {"command": "weekend", "description": "🏄 이번 주말 핫플레이스"},
+        {"command": "curation", "description": "🎯 나홀로 라이프스타일 큐레이션"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
+}
 
 TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
     "admission_bot": {
@@ -1586,14 +1656,7 @@ class DynamicBotManager:
         return False, "not_travel_interactive_event"
 
     def _dispatch_admission_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
-        """Dispatches domain-specific admission callbacks (`adm:`, `grade:`, `region:`, `menu:`) to AdmissionInteractiveBot."""
-        if "callback_query" not in item:
-            return False, "not_admission_callback"
-        cq = item["callback_query"]
-        cb_data = str(cq.get("data") or "")
-        if not cb_data.startswith(("adm:", "grade:", "region:", "menu:")):
-            return False, "not_admission_domain_callback"
-
+        """Dispatches domain-specific admission callbacks and messages to AdmissionInteractiveBot."""
         try:
             from admission_brief.channels.telegram import TelegramChannel as AdmTelegramChannel
             from admission_brief.interactive_bot import AdmissionInteractiveBot
@@ -1603,10 +1666,28 @@ class DynamicBotManager:
 
         adm_db_path = getattr(self.engine.db, "db_path", None) or ":memory:"
         adm_db = AdmissionDatabase(db_path=str(adm_db_path))
-        adm_channel = AdmTelegramChannel(bot_token=bot_token, opener=opener)
-        adm_bot = AdmissionInteractiveBot(channel=adm_channel, db=adm_db)
-        adm_bot.handle_update(item)
-        return True, "admission_callback_handled"
+
+        if "callback_query" in item:
+            cq = item["callback_query"]
+            cb_data = str(cq.get("data") or "")
+            if cb_data.startswith(("adm:", "grade:", "region:", "menu:", "info:retarget")):
+                adm_channel = AdmTelegramChannel(bot_token=bot_token, opener=opener)
+                adm_bot = AdmissionInteractiveBot(channel=adm_channel, db=adm_db)
+                adm_bot.handle_update(item)
+                return True, "admission_callback_handled"
+
+        if "message" in item:
+            msg = item["message"]
+            text = (msg.get("text") or "").strip()
+            if text in {"/stop", "구독해지", "해지"}:
+                return False, "stop_to_manager"
+            if text:
+                adm_channel = AdmTelegramChannel(bot_token=bot_token, opener=opener)
+                adm_bot = AdmissionInteractiveBot(channel=adm_channel, db=adm_db)
+                adm_bot.handle_update(item)
+                return True, "admission_message_handled"
+
+        return False, "not_admission_event"
 
     def _dispatch_silver_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
         """Dispatches domain-specific SilverCare callbacks (`SC:`) and commands to SilverCareInteractiveBot."""
@@ -1968,6 +2049,14 @@ class DynamicBotManager:
         # Start newly added or updated workers
         for bid, tok in desired.items():
             if bid not in self._tasks:
+                cmds = OFFICIAL_BOT_COMMANDS.get(bid)
+                if cmds:
+                    try:
+                        trans = TelegramBotTransport(tok)
+                        trans.set_my_commands(cmds)
+                        trans.set_chat_menu_button({"type": "commands"})
+                    except Exception as exc:
+                        logger.debug("set_my_commands failed on %s: %s", bid, exc)
                 task = asyncio.create_task(self._poll_loop_for_bot(bid), name=f"bot_worker_{bid}")
                 self._tasks[bid] = (tok, task)
 

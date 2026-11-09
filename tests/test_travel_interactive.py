@@ -358,6 +358,74 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
             return [_mk_deal(c, "2026-11-20", "2026-11-23", 300000 + i * 1000) for i, c in enumerate(sorted(destinations))]
         return _collect
 
+    def test_fast_mode_skips_heavy_sse_batch(self):
+        from datetime import date, timedelta
+
+        dests = dict(self.engine.destinations)
+        start = date(2026, 11, 20)
+        slots = [
+            (start + timedelta(days=7 * w), start + timedelta(days=7 * w + 3), "금", "월", 3)
+            for w in range(24)  # ~6 months of weekends -> full mode would queue dozens of SSE targets
+        ]
+
+        def fake_pg(code, slots_arg):
+            base = 200000 + sorted(dests).index(code) * 10000
+            return {
+                (dep.isoformat(), ret.isoformat()): (base + i * 1000, base + i * 1000 + 20000)
+                for i, (dep, ret, _, _, _) in enumerate(slots_arg)
+            }
+
+        sse_calls: list = []
+
+        def fake_sse(code, dep_i, ret_i, cookie_header=""):
+            sse_calls.append((code, dep_i))
+            return None  # SSE miss keeps LIVE_PG; we only count targets here
+
+        def run(fast: bool):
+            sse_calls.clear()
+            with patch.object(self.client, "fetch_city_batch_pg", side_effect=fake_pg),                  patch.object(self.client, "_fetch_session_cookie_header", return_value=""),                  patch.object(self.client, "fetch_live_sse_slot", side_effect=fake_sse):
+                t0 = time.monotonic()
+                deals = self.client.fetch_all_weekend_deals(
+                    dests, slots, self.holiday_fn, ref_date=start, months_ahead=6, fast_mode=fast
+                )
+                return deals, list(sse_calls), time.monotonic() - t0
+
+        fast_deals, fast_sse, fast_elapsed = run(True)
+        self.assertEqual(len(fast_deals), len(dests) * len(slots))  # full PG matrix still returned
+        self.assertLessEqual(len(fast_sse), 6)
+        self.assertEqual(len({c for c, _ in fast_sse}), len(fast_sse))  # at most 1 SSE per destination
+        self.assertTrue(all(dep == start.isoformat() for _, dep in fast_sse))  # cheapest slot per city
+        self.assertLess(fast_elapsed, 2.0)
+
+        # Fast entries live in their own namespace: a full (06:30 batch) request must re-collect
+        full_deals, full_sse, _ = run(False)
+        self.assertGreater(len(full_sse), len(fast_sse))
+        self.assertEqual(len(full_deals), len(fast_deals))
+
+        # ...while a later fast request reuses the fresh full-batch entry without any network I/O
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=AssertionError("must hit cache")):
+            reused = self.client.fetch_all_weekend_deals(
+                dests, slots, self.holiday_fn, ref_date=start, months_ahead=6, fast_mode=True
+            )
+        self.assertEqual(len(reused), len(full_deals))
+
+    def test_on_demand_all_refresh_uses_fast_live_and_verifies_hero(self):
+        engine = MagicMock()
+        engine.destinations = self.engine.destinations
+        engine.live_naver = True
+        engine.search_deals = MagicMock(return_value=[_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")])
+        engine.ensure_deals_sse_verified = MagicMock(side_effect=lambda deals: list(deals))
+        handler = TravelInteractiveHandler(bot_token="test", engine=engine)
+        handler._finish_with_card = MagicMock()
+        try:
+            with patch("travel_bot_runner.format_telegram_briefing", return_value="ok"):
+                handler._async_execute_and_update("c1", 1, "ALL", "u1", request_seq=1)
+            engine.search_deals.assert_called_once_with(dest_code=None, months_ahead=6, fast_live=True)
+            engine.ensure_deals_sse_verified.assert_called()  # ALL hero is SSE-verified too
+            handler._finish_with_card.assert_called_once()
+        finally:
+            handler.shutdown()
+
     def test_city_cache_isolation_nrt_then_kix_fuk(self):
         calls: list = []
         with patch.object(self.client, "_collect_live_deals_uncached", side_effect=self._fake_collect(calls)):
@@ -597,7 +665,7 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
             with patch.object(engine, "search_deals", wraps=engine.search_deals) as spy_search:
                 all_msg = format_telegram_briefing(all_recs, engine=engine, target_city="ALL")
             # Monthly picks come from the caller-warmed cache key (ref_date=None), not get_6month_matrix
-            spy_search.assert_called_once_with(months_ahead=6)
+            spy_search.assert_called_once_with(months_ahead=6, fast_live=True)
             self.assertIn("주말 해외여행 6개월 특가 나침반", all_msg.split("\n")[0])  # not single-city header
         for msg in (single, all_msg):
             import re

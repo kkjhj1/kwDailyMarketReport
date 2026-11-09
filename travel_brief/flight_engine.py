@@ -275,8 +275,11 @@ class FlightEngine:
         months_ahead: int = 6,
         super_deals_only: bool = False,
         ref_date: Optional[date] = None,
+        fast_live: bool = False,
     ) -> list[FlightDeal]:
-        """Search flight deals across destinations and weekend dates."""
+        """Search flight deals across destinations and weekend dates.
+        `fast_live=True` limits live SSE verification to the cheapest slot per destination (on-demand UX).
+        """
         slots = self.generate_weekend_slots(ref_date=ref_date, months_ahead=months_ahead)
         if dest_code:
             code = dest_code.strip().upper()
@@ -296,6 +299,7 @@ class FlightEngine:
                 holiday_fn=self.get_peak_holiday_info,
                 ref_date=ref_date,
                 months_ahead=months_ahead,
+                fast_mode=fast_live,
             )
             if live_all:
                 target_codes = {t.code for t in targets}

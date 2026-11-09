@@ -268,7 +268,7 @@ def format_telegram_briefing(
         # On-demand all-city query: reuse the deal list the caller just warmed (same cache key,
         # no network I/O on a warm cache) and skip the synchronous monthly SSE loop for responsiveness.
         f_engine = engine or FlightEngine()
-        matrix = _build_month_matrix(f_engine, f_engine.search_deals(months_ahead=6))
+        matrix = _build_month_matrix(f_engine, f_engine.search_deals(months_ahead=6, fast_live=True))
         all_months, monthly_picks = _pick_monthly_best(f_engine, matrix)
     else:
         f_engine = engine or FlightEngine()

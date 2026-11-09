@@ -519,3 +519,116 @@ def test_send_reply_markup_overrides_booking_button():
 
     channel.send("1", briefing)
     assert sent["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://sdij.com/test"
+
+
+def _msg(text, chat_id=888):
+    return {
+        "update_id": 901,
+        "message": {
+            "message_id": 50,
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": chat_id, "first_name": "학부모"},
+            "text": text,
+        },
+    }
+
+
+def test_menu_grade_edits_message_in_place_with_back_button():
+    """Tapping '🎓 학년 변경하기' (menu:grade) must edit message in place and offer back button."""
+    mock_channel = MagicMock(spec=TelegramChannel)
+    db = AdmissionDatabase(db_path=":memory:")
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("menu:grade", cb_id="cb_test_id", chat_id="888", message_id=555))
+    mock_channel.answer_callback_query.assert_called_once_with("cb_test_id", text="🎓 학년 선택 메뉴를 불러옵니다.")
+    mock_channel.edit_message_text.assert_called_once()
+    args, kwargs = mock_channel.edit_message_text.call_args
+    assert args[0] == "888" and args[1] == 555
+    assert "자녀분의 현재 학년" in args[2]
+
+    # Verify grade options and back button are included
+    kb = kwargs["reply_markup"]
+    callbacks = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+    assert "grade:MIDDLE" in callbacks
+    assert "grade:HIGH_3_N" in callbacks
+    assert "adm:settings" in callbacks
+
+
+def test_info_retarget_edits_message_in_place():
+    """Tapping '🔄 자녀 학년 다시 선택하기' (info:retarget:admission_bot) must edit in place."""
+    mock_channel = MagicMock(spec=TelegramChannel)
+    db = AdmissionDatabase(db_path=":memory:")
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    bot.handle_update(_cb("info:retarget:admission_bot", cb_id="cb_test_id", chat_id="888", message_id=777))
+    mock_channel.answer_callback_query.assert_called_once_with("cb_test_id", text="🎓 학년 선택 메뉴를 불러옵니다.")
+    mock_channel.edit_message_text.assert_called_once()
+    args, kwargs = mock_channel.edit_message_text.call_args
+    assert args[0] == "888" and args[1] == 777
+    assert "자녀분의 현재 학년" in args[2]
+
+
+def test_grade_change_messages_and_touch_keyboard():
+    """Touch buttons like '🎓 학년/지역 설정' and text '학년변경' must present the appropriate menu."""
+    mock_channel = MagicMock(spec=TelegramChannel)
+    db = AdmissionDatabase(db_path=":memory:")
+    bot = AdmissionInteractiveBot(channel=mock_channel, db=db)
+
+    # 1. '🎓 학년/지역 설정' opens settings
+    bot.handle_update(_msg("🎓 학년/지역 설정", chat_id="888"))
+    mock_channel.send_message.assert_called_once()
+    args, kwargs = mock_channel.send_message.call_args
+    assert args[0] == "888" and "맞춤 알림 설정 현황" in args[1]
+
+    # 2. '학년변경' presents grade keyboard
+    mock_channel.reset_mock()
+    bot.handle_update(_msg("학년변경", chat_id="888"))
+    mock_channel.send_message.assert_called_once()
+    args, kwargs = mock_channel.send_message.call_args
+    assert args[0] == "888" and "자녀분의 현재 학년" in args[1]
+
+
+def test_multi_bot_manager_dispatches_admission_message_and_callbacks(tmp_path):
+    """MultiBotManager must dispatch both messages and callbacks to AdmissionInteractiveBot."""
+    from market_brief.multi_bot_manager import DynamicBotManager
+    from market_brief.storage.db import MarketBriefDatabase
+    from market_brief.subscription_engine import SubscriptionEngine
+
+    db = MarketBriefDatabase(db_path=str(tmp_path / "test.sqlite3"))
+    engine = SubscriptionEngine(db)
+    manager = DynamicBotManager(engine)
+
+    mock_opener = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps({"ok": True, "result": {"message_id": 100}}).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
+    mock_opener.return_value = mock_resp
+
+    # 1. Callback dispatch
+    cb_item = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb1",
+            "from": {"id": 12345},
+            "message": {"message_id": 99, "chat": {"id": 12345}},
+            "data": "menu:grade",
+        },
+    }
+    handled, reason = manager._dispatch_admission_bot_update("fake_token", cb_item, opener=mock_opener)
+    assert handled is True
+    assert reason == "admission_callback_handled"
+
+    # 2. Message dispatch
+    msg_item = {
+        "update_id": 2,
+        "message": {
+            "message_id": 100,
+            "chat": {"id": 12345, "type": "private"},
+            "from": {"id": 12345, "first_name": "학부모"},
+            "text": "🎓 학년/지역 설정",
+        },
+    }
+    handled, reason = manager._dispatch_admission_bot_update("fake_token", msg_item, opener=mock_opener)
+    assert handled is True
+    assert reason == "admission_message_handled"
+

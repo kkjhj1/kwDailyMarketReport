@@ -49,6 +49,10 @@ STALE_FALLBACK_SECONDS = 43200  # 12 hours emergency stale fallback on network o
 FAIL_CACHE_TTL_SECONDS = 60.0  # 60s circuit breaker during upstream outage
 MAX_COLLECTION_DEADLINE_SECONDS = 25.0  # Hard deadline for follower wait
 KST = timezone(timedelta(hours=9))
+# Fast (on-demand) collections live in a separate cache namespace so the full 06:30 batch never
+# consumes their thinner SSE coverage; fast lookups still reuse a fresh full-batch entry first.
+FAST_CACHE_REF_SUFFIX = "#fast"
+FAST_MODE_MAX_SSE_TARGETS = 6
 
 IATA_AIRLINE_KO: dict[str, str] = {
     "7C": "제주항공",
@@ -667,41 +671,33 @@ class NaverFlightLiveClient:
         holiday_fn: Callable[[date, Optional[date]], tuple[bool, str, float]],
         ref_date: Optional[date] = None,
         months_ahead: int = 6,
+        fast_mode: bool = False,
     ) -> list[FlightDeal]:
         """Executes full 2-stage live Naver collection with thread-safe Future Single-Flight,
         narrowed cache locking, KST baseline date, and Post-SSE Re-Rank protection.
+        `fast_mode=True` (Telegram on-demand) SSE-verifies only the cheapest deal per destination.
         """
         if ref_date is None:
             eff_ref = datetime.now(KST).date().isoformat()
         else:
             eff_ref = ref_date.isoformat()
-        mem_key: _CacheKey = (eff_ref, months_ahead, _dests_tuple(destinations.keys()))
+        full_key: _CacheKey = (eff_ref, months_ahead, _dests_tuple(destinations.keys()))
+        mem_key: _CacheKey = (
+            (eff_ref + FAST_CACHE_REF_SUFFIX, months_ahead, full_key[2]) if fast_mode else full_key
+        )
         disk_key = _disk_key_for(mem_key)
 
         is_leader = False
         fut: concurrent.futures.Future[list[FlightDeal]]
 
         with _CACHE_LOCK:
-            now = time.time()
             cached = _MEM_CACHE.get(mem_key)
-            if cached and (now - cached[0]) <= CACHE_TTL_SECONDS:
-                return list(cached[1])
-
-            # Superset memory slicing: a fresh entry covering all requested cities (O(n), no network I/O)
-            for sup_key, (ts, sup_deals) in list(_MEM_CACHE.items()):
-                if (
-                    sup_key[:2] == mem_key[:2]
-                    and set(mem_key[2]) < set(sup_key[2])
-                    and (now - ts) <= CACHE_TTL_SECONDS
-                ):
-                    sliced = _slice_superset(mem_key[2], sup_deals)
-                    if sliced:
-                        return sliced
-
-            disk_fresh = self._load_disk_cache(disk_key, max_age_sec=CACHE_TTL_SECONDS)
-            if disk_fresh:
-                _MEM_CACHE[mem_key] = (time.time(), disk_fresh)
-                return list(disk_fresh)
+            # A fresh full-batch entry is a strict upgrade over a fast collection, so check it first.
+            lookup_keys = [full_key, mem_key] if fast_mode else [mem_key]
+            for key in lookup_keys:
+                fresh = self._fresh_lookup_locked(key)
+                if fresh:
+                    return fresh
 
             # Circuit breaker: check failure cache (60s)
             fail_entry = _FAIL_CACHE.get(mem_key)
@@ -737,7 +733,10 @@ class NaverFlightLiveClient:
         # Leader execution path: perform network I/O strictly outside the lock
         deals: list[FlightDeal] = []
         try:
-            deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
+            if fast_mode:
+                deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn, fast_mode=True)
+            else:
+                deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
             if deals:
                 with _CACHE_LOCK:
                     # Epoch guard: a refresh happened mid-flight -> do not resurrect pre-refresh data as fresh.
@@ -774,6 +773,30 @@ class NaverFlightLiveClient:
             logger.warning("Using emergency stale live cache (<12h) due to upstream outage.")
             return stale
         return []
+
+    def _fresh_lookup_locked(self, mem_key: _CacheKey) -> Optional[list[FlightDeal]]:
+        """Fresh-TTL lookup: exact memory -> superset memory slice -> disk. Caller holds lock."""
+        now = time.time()
+        cached = _MEM_CACHE.get(mem_key)
+        if cached and (now - cached[0]) <= CACHE_TTL_SECONDS:
+            return list(cached[1])
+
+        # Superset memory slicing: a fresh entry covering all requested cities (O(n), no network I/O)
+        for sup_key, (ts, sup_deals) in list(_MEM_CACHE.items()):
+            if (
+                sup_key[:2] == mem_key[:2]
+                and set(mem_key[2]) < set(sup_key[2])
+                and (now - ts) <= CACHE_TTL_SECONDS
+            ):
+                sliced = _slice_superset(mem_key[2], sup_deals)
+                if sliced:
+                    return sliced
+
+        disk_fresh = self._load_disk_cache(_disk_key_for(mem_key), max_age_sec=CACHE_TTL_SECONDS)
+        if disk_fresh:
+            _MEM_CACHE[mem_key] = (time.time(), disk_fresh)
+            return list(disk_fresh)
+        return None
 
     def _stale_fallback_locked(
         self,
@@ -819,6 +842,7 @@ class NaverFlightLiveClient:
         destinations: dict[str, DestinationMeta],
         slots: list[tuple[date, date, str, str, int]],
         holiday_fn: Callable[[date, Optional[date]], tuple[bool, str, float]],
+        fast_mode: bool = False,
     ) -> list[FlightDeal]:
         slot_meta_map: dict[tuple[str, str], tuple[date, date, str, str, int]] = {
             (dep.isoformat(), ret.isoformat()): (dep, ret, dep_dow, ret_dow, nights)
@@ -884,6 +908,34 @@ class NaverFlightLiveClient:
             return []
 
         cookie_hdr = self._fetch_session_cookie_header()
+
+        if fast_mode:
+            # On-demand: Telegram shows only TOP 3, so SSE-verify just the cheapest slot per destination
+            # (~6 calls instead of ~42) and skip promotion rounds; the caller re-verifies its hero.
+            city_best: dict[str, FlightDeal] = {}
+            for d in deals_by_key.values():
+                cur = city_best.get(d.destination_code)
+                if cur is None or d.price_krw < cur.price_krw:
+                    city_best[d.destination_code] = d
+            fast_targets = sorted(city_best.values(), key=lambda d: d.price_krw)[:FAST_MODE_MAX_SSE_TARGETS]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
+                fut_map = {
+                    ex.submit(
+                        self.fetch_live_sse_slot, d.destination_code, d.departure_date, d.return_date, cookie_hdr
+                    ): d
+                    for d in fast_targets
+                }
+                for fut in concurrent.futures.as_completed(fut_map):
+                    base_deal = fut_map[fut]
+                    sse_res = fut.result()
+                    if sse_res:
+                        key = (base_deal.destination_code, base_deal.departure_date, base_deal.return_date)
+                        deals_by_key[key] = self.apply_sse_to_deal(
+                            base_deal, destinations[base_deal.destination_code], sse_res
+                        )
+            fast_deals = list(deals_by_key.values())
+            fast_deals.sort(key=lambda d: d.price_krw)
+            return fast_deals
 
         # Select Stage 2 SSE priority targets:
         # (a) Top-2 cheapest + Top-1 best-season per destination
