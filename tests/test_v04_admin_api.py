@@ -385,6 +385,15 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("'/healthz'", html)
         for bot_id in ("menu_bot", "brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot"):
             self.assertIn(f"'{bot_id}'", html)
+        # 3-item overhaul assertions
+        self.assertIn('#botHealthStrip', html)
+        self.assertIn('display: none !important', html)
+        self.assertIn('id="userSubPaneUsers"', html)
+        self.assertIn('id="userSubPaneUpgrades"', html)
+        self.assertIn('id="userSubTabUpgradeBadge"', html)
+        self.assertIn("switchUserSubTab", html)
+        self.assertIn("📥", html)
+        self.assertIn("대화 수신", html)
 
     def test_healthz_endpoint(self):
         """Validates that /healthz returns 200 OK for Uptime ping monitors."""

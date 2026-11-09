@@ -394,6 +394,52 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
 
+    /* 🚥 Bot Health Strip Visually Hidden for Maximum Open Screen */
+    #botHealthStrip {
+      display: none !important;
+    }
+
+    /* 👥 User Subtabs (44px Accessible Touch Target) */
+    .user-subtabs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .user-subtab-btn {
+      min-height: 44px;
+      padding: 0 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      touch-action: manipulation;
+      user-select: none;
+    }
+    .user-subtab-btn:hover {
+      background: #f8fafc;
+      color: var(--text);
+      border-color: #cbd5e1;
+    }
+    .user-subtab-btn.active {
+      background: #eff6ff;
+      color: var(--primary);
+      border-color: var(--primary);
+      box-shadow: 0 0 0 1px var(--primary);
+      font-weight: 800;
+    }
+    .user-subpane {
+      width: 100%;
+    }
+
     /* 📡 7-Bot Master-Detail Dashboard (1/4 Size Ultra-Compact Strip) */
     .bot-master-strip {
       display: grid;
@@ -942,16 +988,18 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         display: none;
       }
       .header-actions .btn {
-        width: 34px;
-        height: 34px;
-        min-height: 34px;
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        min-width: 44px;
         padding: 0;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 14px;
+        font-size: 17px;
         border-radius: 8px;
         flex-shrink: 0;
+        touch-action: manipulation;
       }
       .header-actions .btn .btn-text {
         display: none !important;
@@ -1757,23 +1805,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span class="pill" title="실시간 정상 작동"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
-      <button class="btn btn-sm btn-ghost" id="btnAdminToken" onclick="openAdminTokenModal()" title="관리자 API 인증키 설정">
+      <button class="btn btn-sm btn-ghost" id="btnAdminToken" onclick="openAdminTokenModal()" title="관리자 API 인증키 설정" aria-label="관리자 API 인증키 설정">
         <span>🔑</span> <span class="btn-text" id="adminTokenBtnLabel">인증키</span>
       </button>
-      <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="전체 봇 대화 즉시 수신">
-        <span>🔄</span> <span class="btn-text">대화 즉시 수신</span>
+      <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="텔레그램 서버 대화 즉시 수신" aria-label="텔레그램 서버 대화 즉시 수신">
+        <span>📥</span> <span class="btn-text">대화 수신</span>
       </button>
-      <button class="btn btn-sm btn-primary" onclick="refreshCurrentTab()" title="새로고침">
-        <span>🔃</span> <span class="btn-text">새로고침</span>
+      <button class="btn btn-sm btn-primary" onclick="refreshCurrentTab()" title="관리자 화면 새로고침" aria-label="관리자 화면 새로고침">
+        <span>🔄</span> <span class="btn-text">새로고침</span>
       </button>
     </div>
   </header>
 
-  <!-- 7-Bot Traffic Lights (Countdown Removed as Requested) -->
-  <div id="botHealthStrip" class="bot-health-strip" style="justify-content:center; padding:5px 12px;">
-    <div id="botTrafficLights" class="bot-traffic-lights">
-      <span class="bot-light-chip">⏳ 봇 상태 확인 중...</span>
-    </div>
+  <!-- 7-Bot Traffic Lights (Visually Hidden for Open Screen) -->
+  <div id="botHealthStrip" class="bot-health-strip" style="display:none;" aria-hidden="true">
+    <div id="botTrafficLights" class="bot-traffic-lights"></div>
     <div id="schedulerTimer" style="display:none;" aria-hidden="true"></div>
   </div>
 
@@ -1824,38 +1870,64 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- TAB 1: USERS & TIER MANAGEMENT (DEFAULT FIRST TAB)                  -->
     <!-- =================================================================== -->
     <section id="pane-users" class="tab-pane active">
-      <div class="card">
-        <div class="card-header" style="margin-bottom:12px;">
-          <div>
-            <h2 class="card-title">👥 회원 등급 및 봇 구독 현황</h2>
-            <span style="display:none;" aria-hidden="true">유저 실명 (별칭) / ID</span>
+      <!-- User Subtabs Switcher (44px Touch Target) -->
+      <div class="user-subtabs">
+        <button class="user-subtab-btn active" data-user-subtab="users" onclick="switchUserSubTab('users')" type="button" aria-selected="true" aria-controls="userSubPaneUsers">
+          <span>👤 유저 현황</span>
+        </button>
+        <button class="user-subtab-btn" data-user-subtab="upgrades" onclick="switchUserSubTab('upgrades')" type="button" aria-selected="false" aria-controls="userSubPaneUpgrades">
+          <span>⭐ 등업 관리</span>
+          <span id="userSubTabUpgradeBadge" class="tab-badge" style="display:none;"></span>
+        </button>
+      </div>
+
+      <!-- Subpane 1: User Status & Directory -->
+      <div id="userSubPaneUsers" class="user-subpane">
+        <div class="card">
+          <div class="card-header" style="margin-bottom:12px;">
+            <div>
+              <h2 class="card-title">👥 회원 등급 및 봇 구독 현황</h2>
+              <span style="display:none;" aria-hidden="true">유저 실명 (별칭) / ID</span>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
+              <button class="btn btn-outline" style="background:#f0fdf4; color:#166534; border-color:#bbf7d0; font-weight:700;" onclick="triggerProfileBatchSync()" title="수동 수정 실명은 보존하고 텔레그램 프로필을 조회하여 실명을 동기화합니다.">🔄 프로필 실명 일괄 동기화</button>
+            </div>
           </div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
-            <button class="btn btn-outline" style="background:#f0fdf4; color:#166534; border-color:#bbf7d0; font-weight:700;" onclick="triggerProfileBatchSync()" title="수동 수정 실명은 보존하고 텔레그램 프로필을 조회하여 실명을 동기화합니다.">🔄 프로필 실명 일괄 동기화</button>
+
+          <!-- Search & Filter Bar -->
+          <div class="user-filter-bar">
+            <div class="filter-chips">
+              <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체<span class="desktop-only"> 보기</span></button>
+              <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트<span class="desktop-only"> (1슬롯)</span></button>
+              <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린<span class="desktop-only"> (3슬롯)</span></button>
+              <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드<span class="desktop-only"> (5슬롯)</span></button>
+              <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙<span class="desktop-only"> (무제한)</span></button>
+            </div>
+            <div class="user-search-wrap">
+              <input type="text" id="userSearch" class="form-input" placeholder="🔍 이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />
+            </div>
+          </div>
+
+          <!-- Accordion User List (44px Slim 1-Line Header + Drawer) -->
+          <div id="userAccordionContainer" class="user-accordion-list">
+            <div style="text-align:center; padding:32px; color:var(--text-muted);">회원 목록을 불러오는 중...</div>
           </div>
         </div>
+      </div>
 
-        <!-- 🔔 등급 업그레이드 신청 대기 큐 섹션 -->
-        <div id="upgradeRequestsSection" style="margin-bottom: 20px;"></div>
-
-        <!-- Search & Filter Bar -->
-        <div class="user-filter-bar">
-          <div class="filter-chips">
-            <button class="filter-btn active" data-tier="" onclick="filterTier('')">전체<span class="desktop-only"> 보기</span></button>
-            <button class="filter-btn" data-tier="WHITE" onclick="filterTier('WHITE')">⚪ 화이트<span class="desktop-only"> (1슬롯)</span></button>
-            <button class="filter-btn" data-tier="GREEN" onclick="filterTier('GREEN')">🟢 그린<span class="desktop-only"> (3슬롯)</span></button>
-            <button class="filter-btn" data-tier="RED" onclick="filterTier('RED')">🔴 레드<span class="desktop-only"> (5슬롯)</span></button>
-            <button class="filter-btn" data-tier="BLACK" onclick="filterTier('BLACK')">⚫ 블랙<span class="desktop-only"> (무제한)</span></button>
+      <!-- Subpane 2: Dedicated Upgrade Requests Management -->
+      <div id="userSubPaneUpgrades" class="user-subpane" style="display:none;">
+        <div class="card">
+          <div class="card-header" style="margin-bottom:12px;">
+            <div>
+              <h2 class="card-title">⭐ 회원 등급 업그레이드 심사 관리</h2>
+              <p class="card-desc" style="font-size:12.5px; color:var(--text-muted); margin:4px 0 0 0;">봇에서 접수된 회원의 등급 상향 신청을 심사하여 승인 또는 반려합니다.</p>
+            </div>
           </div>
-          <div class="user-search-wrap">
-            <input type="text" id="userSearch" class="form-input" placeholder="🔍 이름, ID, 메모 검색..." oninput="debouncedSearchUsers()" />
-          </div>
-        </div>
 
-        <!-- Accordion User List (44px Slim 1-Line Header + Drawer) -->
-        <div id="userAccordionContainer" class="user-accordion-list">
-          <div style="text-align:center; padding:32px; color:var(--text-muted);">회원 목록을 불러오는 중...</div>
+          <!-- 🔔 등급 업그레이드 신청 대기 큐 섹션 -->
+          <div id="upgradeRequestsSection"></div>
         </div>
       </div>
     </section>
@@ -2419,6 +2491,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function refreshCurrentTab() {
+      toast('🔄 관리자 화면 새로고침');
       switchTab(S.activeTab);
     }
 
@@ -2434,8 +2507,22 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     // =========================================================================
-    // TAB 1: USERS
+    // TAB 1: USERS & SUBTABS
     // =========================================================================
+    function switchUserSubTab(subtab) {
+      const isUsers = (subtab === 'users');
+      const paneUsers = document.getElementById('userSubPaneUsers');
+      const paneUpgrades = document.getElementById('userSubPaneUpgrades');
+      if (paneUsers) paneUsers.style.display = isUsers ? 'block' : 'none';
+      if (paneUpgrades) paneUpgrades.style.display = isUsers ? 'none' : 'block';
+
+      document.querySelectorAll('.user-subtab-btn').forEach(btn => {
+        const active = (btn.dataset.userSubtab === subtab);
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    }
+
     function filterTier(t) {
       S.tierFilter = t;
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.tier === t));
@@ -3865,9 +3952,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function syncAllBots() {
+      toast('📥 텔레그램 최신 대화 동기화 중...');
       try {
         const res = await req('/api/platform/bots/sync-all', { method: 'POST' });
-        toast(`🔄 대화 동기화 완료 (${res.total_processed}건 처리)`);
+        toast(`✅ 대화 동기화 완료 (${res.total_processed}건 처리)`);
         refreshCurrentTab();
       } catch (e) {
         toast(e.message);
@@ -3908,7 +3996,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     // PENDING UPGRADE BADGES
     // =========================================================================
     function updatePendingBadges(count) {
-      ['userPendingBadge', 'bnavPendingBadge'].forEach(id => {
+      ['userPendingBadge', 'bnavPendingBadge', 'userSubTabUpgradeBadge'].forEach(id => {
         const badge = document.getElementById(id);
         if (!badge) return;
         if (count > 0) {
@@ -3927,6 +4015,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     const DEEPLINK_TABS = ['users', 'bots', 'dashboard', 'history'];
 
     function highlightRequestCard(reqId) {
+      switchUserSubTab('upgrades');
       const safeId = String(reqId).replace(/[^0-9A-Za-z_-]/g, '');
       if (!safeId) return;
       let card = document.querySelector('[data-req-card-id="' + safeId + '"]');
@@ -3968,7 +4057,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
       let tab = (params.get('tab') || '').toLowerCase();
       const reqId = params.get('req_id');
-      if (tab === 'upgrade' || (!tab && reqId)) tab = 'users';
+      const isUpgradeTarget = (tab === 'upgrade' || Boolean(reqId));
+      if (isUpgradeTarget) tab = 'users';
       if (!DEEPLINK_TABS.includes(tab)) tab = 'users';
 
       // Strip one-shot deep-link & token params so they don't remain exposed in URL bar
@@ -3984,6 +4074,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       await switchTab(tab);
+      if (isUpgradeTarget) {
+        switchUserSubTab('upgrades');
+      }
       if (tab === 'users' && reqId) highlightRequestCard(reqId);
     }
 
