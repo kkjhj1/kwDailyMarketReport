@@ -394,29 +394,33 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
 
-    /* 📡 7-Bot Master-Detail Dashboard */
+    /* 📡 7-Bot Master-Detail Dashboard (1/4 Size Ultra-Compact Strip) */
     .bot-master-strip {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 14px;
+      gap: 6px;
+      margin-top: 6px;
     }
     .bot-master-tile {
       background: #fff;
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 12px;
+      border-radius: 8px;
+      padding: 0 10px;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
+      align-items: center;
       justify-content: space-between;
       gap: 6px;
       cursor: pointer;
-      transition: all 0.18s ease;
-      min-height: 52px;
+      transition: all 0.15s ease;
+      height: 34px;
+      min-height: 44px;
       text-align: left;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
       user-select: none;
       min-width: 0;
+      width: 100%;
+      box-sizing: border-box;
     }
     .bot-master-tile:hover {
       border-color: #93c5fd;
@@ -425,14 +429,18 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .bot-master-tile.is-selected {
       border-color: var(--primary);
       background: #eff6ff;
-      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.22);
     }
-    .bot-master-tile-header {
+    .bot-master-tile-main {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 4px;
+      gap: 5px;
       min-width: 0;
+      overflow: hidden;
+    }
+    .bot-master-tile-emoji {
+      font-size: 15px;
+      flex-shrink: 0;
     }
     .bot-master-tile-name {
       font-size: 13px;
@@ -442,35 +450,32 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .bot-master-tile-status {
+    .bot-master-tile-meta {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
       font-size: 11px;
       font-weight: 700;
-      white-space: nowrap;
-    }
-    .bot-master-tile-sub {
-      font-size: 11.5px;
       color: var(--text-muted);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
     }
     .bot-detail-inspector {
       background: #fff;
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 22px;
+      border-radius: 12px;
+      padding: 16px;
       box-shadow: var(--shadow);
-      margin-top: 14px;
+      margin-top: 10px;
     }
     .bot-inspector-header {
       display: flex;
       justify-content: space-between;
-      align-items: flex-start;
-      gap: 16px;
+      align-items: center;
+      gap: 12px;
       flex-wrap: wrap;
-      padding-bottom: 16px;
+      padding-bottom: 12px;
       border-bottom: 1px solid var(--border);
-      margin-bottom: 18px;
+      margin-bottom: 12px;
     }
     .bot-inspector-actions {
       display: flex;
@@ -481,16 +486,40 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .bot-inline-preview {
       background: #f8fafc;
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px;
+      border-radius: 8px;
+      padding: 12px;
       font-family: monospace;
-      font-size: 13px;
-      line-height: 1.6;
+      font-size: 12.5px;
+      line-height: 1.5;
       white-space: pre-wrap;
       word-break: break-all;
       overflow-wrap: anywhere;
-      max-height: 380px;
+      max-height: 220px;
       overflow-y: auto;
+    }
+
+    /* 📊 1-Row Compact KPI Banner */
+    .kpi-compact-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      align-items: center;
+    }
+    .kpi-compact-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .kpi-compact-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .kpi-compact-val {
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--text);
     }
 
     /* Bot Cards Grid */
@@ -1153,14 +1182,14 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         cursor: pointer;
       }
 
-      /* Bot Master-Detail Mobile */
+      /* Bot Master-Detail Mobile (1/4 Size Compact Strip) */
       .bot-master-strip {
-        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) !important;
-        gap: 8px !important;
+        grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)) !important;
+        gap: 6px !important;
       }
       .bot-master-tile {
-        min-height: 48px !important;
-        padding: 8px 10px !important;
+        min-height: 44px !important;
+        padding: 0 8px !important;
       }
       .bot-inspector-header {
         flex-direction: column !important;
@@ -1169,13 +1198,17 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       .bot-inspector-actions {
         display: grid !important;
         grid-template-columns: 1fr !important;
-        gap: 8px !important;
+        gap: 6px !important;
         width: 100% !important;
       }
       .bot-inspector-actions .btn {
         min-height: 44px !important;
-        font-size: 13.5px !important;
+        font-size: 13px !important;
         width: 100% !important;
+      }
+      .kpi-compact-strip {
+        grid-template-columns: 1fr !important;
+        gap: 8px !important;
       }
 
       /* Bot Grid 1-column on mobile */
@@ -1736,12 +1769,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </header>
 
-  <!-- 7-Bot Traffic Lights & Scheduler Countdown -->
-  <div id="botHealthStrip" class="bot-health-strip">
+  <!-- 7-Bot Traffic Lights (Countdown Removed as Requested) -->
+  <div id="botHealthStrip" class="bot-health-strip" style="justify-content:center; padding:5px 12px;">
     <div id="botTrafficLights" class="bot-traffic-lights">
       <span class="bot-light-chip">⏳ 봇 상태 확인 중...</span>
     </div>
-    <div id="schedulerTimer" class="scheduler-timer-wrap">⏰ 다음 발송: 확인 중...</div>
+    <div id="schedulerTimer" style="display:none;" aria-hidden="true"></div>
   </div>
 
   <!-- 3 Core Tabs -->
@@ -1792,11 +1825,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- =================================================================== -->
     <section id="pane-users" class="tab-pane active">
       <div class="card">
-        <div class="card-header">
+        <div class="card-header" style="margin-bottom:12px;">
           <div>
             <h2 class="card-title">👥 회원 등급 및 봇 구독 현황</h2>
             <span style="display:none;" aria-hidden="true">유저 실명 (별칭) / ID</span>
-            <p class="card-desc">각 유저의 등급(화이트 1개 / 그린 3개 / 레드 5개 / 블랙 무제한)을 드롭다운으로 즉시 변경하고, 사용 중인 봇 슬롯을 관리합니다.</p>
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
@@ -1834,12 +1866,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <section id="pane-bots" class="tab-pane">
       <!-- 📡 7대 봇 실시간 통합 상황판 (Master Status Strip) -->
       <div class="card" style="margin-bottom:16px;">
-        <div class="card-header" style="margin-bottom:0;">
+        <div class="card-header" style="margin-bottom:0; padding-bottom:6px;">
           <div>
             <h2 class="card-title">📡 7대 봇 실시간 통합 상황판 &amp; 원클릭 즉시 발송 센터</h2>
-            <p class="card-desc">7대 봇의 실시간 폴링 및 토큰 연결 상태를 한눈에 모니터링하고, 원하는 봇을 클릭하여 상세 브리핑 생성 및 즉시 발송을 제어합니다.</p>
           </div>
-          <button class="btn btn-primary" onclick="openNewBotModal()">➕ 새 정보봇 추가</button>
+          <button class="btn btn-sm btn-primary" onclick="openNewBotModal()">➕ 새 정보봇 추가</button>
         </div>
         <div id="botMasterStrip" class="bot-master-strip">
           <div style="grid-column: 1 / -1; text-align:center; padding:20px; color:var(--text-muted);">봇 상태를 불러오는 중...</div>
@@ -1856,22 +1887,23 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- TAB 3: CLEAN DASHBOARD & OPERATIONS                                 -->
     <!-- =================================================================== -->
     <section id="pane-dashboard" class="tab-pane">
-      <!-- 3 Clean KPI Cards -->
-      <div class="kpi-grid">
-        <div class="card" style="margin-bottom:0;">
-          <div style="font-size:12px; font-weight:700; color:var(--text-muted);">전체 회원 수</div>
-          <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiUsers">0명</div>
-          <div style="font-size:12px; color:var(--text-muted);" id="kpiUsersSub">정상 이용 중</div>
-        </div>
-        <div class="card" style="margin-bottom:0;">
-          <div style="font-size:12px; font-weight:700; color:var(--text-muted);">총 활성 구독 연결 수</div>
-          <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiSubs">0건</div>
-          <div style="font-size:12px; color:var(--text-muted);">유저 × 정보봇 활성 합계</div>
-        </div>
-        <div class="card" style="margin-bottom:0;">
-          <div style="font-size:12px; font-weight:700; color:var(--text-muted);">운영 중인 정보봇</div>
-          <div style="font-size:32px; font-weight:800; margin:6px 0;" id="kpiBots">0개</div>
-          <div style="font-size:12px; color:var(--text-muted);" id="kpiBotsSub">정보봇 6개 (포털 메뉴봇 1개 별도)</div>
+      <!-- 1-Row 3-Stat Compact KPI Card -->
+      <div class="card" style="margin-bottom:12px; padding:12px 18px;">
+        <div class="kpi-compact-strip">
+          <div class="kpi-compact-item">
+            <span class="kpi-compact-label">👥 전체 회원 수</span>
+            <span class="kpi-compact-val" id="kpiUsers">0명</span>
+            <span id="kpiUsersSub" style="display:none;" aria-hidden="true"></span>
+          </div>
+          <div class="kpi-compact-item">
+            <span class="kpi-compact-label">⚡ 총 활성 구독 연결</span>
+            <span class="kpi-compact-val" id="kpiSubs">0건</span>
+          </div>
+          <div class="kpi-compact-item">
+            <span class="kpi-compact-label">🤖 운영 중 정보봇</span>
+            <span class="kpi-compact-val" id="kpiBots">0개</span>
+            <span id="kpiBotsSub" style="display:none;" aria-hidden="true"></span>
+          </div>
         </div>
       </div>
 
@@ -1920,10 +1952,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- =================================================================== -->
     <section id="pane-history" class="tab-pane">
       <div class="card">
-        <div class="card-header">
+        <div class="card-header" style="margin-bottom:10px;">
           <div>
             <h2 class="card-title">📜 이력 센터 (발송 및 플랫폼 감사)</h2>
-            <p class="card-desc">정기·수동·긴급 봇 발송 결과와 유저 정보·등급·구독 변경 감사 이력을 한 곳에서 추적합니다.</p>
           </div>
         </div>
 
@@ -2985,13 +3016,13 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     // TAB 2: 7-BOT MASTER-DETAIL STATUS DASHBOARD & DIRECT BROADCAST
     // =========================================================================
     const FIXED_7_BOT_SLOTS = [
-      { id: 'menu_bot', aliases: ['menu_bot', 'portal_bot'], label: '통합 메뉴', emoji: '🧭' },
-      { id: 'brief_bot', aliases: ['brief_bot'], label: '시황 브리핑', emoji: '📈' },
-      { id: 'travel_bot', aliases: ['travel_bot'], label: '여행 특가', emoji: '✈️' },
-      { id: 'admission_bot', aliases: ['admission_bot', 'edu_bot'], label: '입시 나침반', emoji: '🎓' },
-      { id: 'silver_bot', aliases: ['silver_bot'], label: '실버케어', emoji: '👵' },
-      { id: 'kids_bot', aliases: ['kids_bot'], label: '자녀 나침반', emoji: '👶' },
-      { id: 'yolo_bot', aliases: ['yolo_bot'], label: '욜로 라이프', emoji: '🏄' },
+      { id: 'menu_bot', aliases: ['menu_bot', 'portal_bot'], label: '메뉴', emoji: '🧭' },
+      { id: 'brief_bot', aliases: ['brief_bot'], label: '시황', emoji: '📈' },
+      { id: 'travel_bot', aliases: ['travel_bot'], label: '여행', emoji: '✈️' },
+      { id: 'admission_bot', aliases: ['admission_bot', 'edu_bot'], label: '입시', emoji: '🎓' },
+      { id: 'silver_bot', aliases: ['silver_bot'], label: '실버', emoji: '👵' },
+      { id: 'kids_bot', aliases: ['kids_bot'], label: '자녀', emoji: '👶' },
+      { id: 'yolo_bot', aliases: ['yolo_bot'], label: '욜로', emoji: '🏄' },
     ];
 
     let currentBriefingData = {
@@ -3043,24 +3074,24 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         const isSelected = S.selectedBotId === botId;
         const isMenu = bot && bot.bot_type === 'MENU';
 
+        const dotEmoji = status.up ? '🟢' : (status.text.includes('토큰') ? '🟠' : '🔴');
+        const shortLabel = slot.label || (name.length > 4 ? name.slice(0, 4) : name);
         return `
-          <div class="bot-master-tile ${isSelected ? 'is-selected' : ''}"
-               data-bot-id="${esc(botId)}"
-               role="button"
-               tabindex="0"
-               aria-pressed="${isSelected ? 'true' : 'false'}"
-               onclick="selectBot('${esc(botId)}')"
-               onkeydown="if(event.key==='Enter'||event.key===' ') { selectBot('${esc(botId)}'); event.preventDefault(); }">
-            <div class="bot-master-tile-header">
-              <span style="font-size:20px; flex-shrink:0;">${esc(emoji)}</span>
-              <span class="bot-master-tile-status" style="color:${status.color};">${esc(status.text)}</span>
-            </div>
-            <div class="bot-master-tile-name" title="${esc(name)}">${esc(name)}</div>
-            <div class="bot-master-tile-sub">
-              <span>${isMenu ? '포털허브' : `${subCount}명 구독`}</span>
-              ${bot && bot.telegram_username ? `<span style="font-size:10.5px; color:var(--primary);">@${esc(bot.telegram_username)}</span>` : ''}
-            </div>
-          </div>
+          <button class="bot-master-tile ${isSelected ? 'is-selected' : ''}"
+                  data-bot-id="${esc(botId)}"
+                  type="button"
+                  aria-pressed="${isSelected ? 'true' : 'false'}"
+                  onclick="selectBot('${esc(botId)}')"
+                  title="${esc(name)} (${status.text}, ${isMenu ? '포털' : subCount + '명'})">
+            <span class="bot-master-tile-main">
+              <span class="bot-master-tile-emoji">${esc(emoji)}</span>
+              <span class="bot-master-tile-name">${esc(shortLabel)}</span>
+            </span>
+            <span class="bot-master-tile-meta">
+              <span>${dotEmoji}</span>
+              <span>${isMenu ? '포털' : `${subCount}명`}</span>
+            </span>
+          </button>
         `;
       }).join('');
     }
@@ -3099,18 +3130,13 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
       inspector.innerHTML = `
         <div class="bot-inspector-header">
-          <div style="display:flex; align-items:center; gap:14px; min-width:0;">
-            <span style="font-size:38px; flex-shrink:0;">${esc(bot.icon_emoji)}</span>
-            <div style="min-width:0;">
-              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                <h3 style="font-size:18px; font-weight:800; margin:0;">${esc(bot.name)}</h3>
-                <span style="font-size:12px; font-weight:700; color:var(--primary);">${uname}</span>
-                <span style="font-size:12px; font-weight:700; color:${status.color};">${esc(status.text)}</span>
-                ${subBadge}
-              </div>
-              <div style="font-size:12.5px; color:var(--text-muted); margin-top:4px;">
-                <b>카테고리:</b> ${esc(bot.category)} · <b>설명:</b> ${esc(bot.description || '설명 없음')}
-              </div>
+          <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+            <span style="font-size:26px; flex-shrink:0;">${esc(bot.icon_emoji)}</span>
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <h3 style="font-size:16px; font-weight:800; margin:0;">${esc(bot.name)}</h3>
+              <span style="font-size:12px; font-weight:700; color:var(--primary);">${uname}</span>
+              <span style="font-size:12px; font-weight:700; color:${status.color};">${esc(status.text)}</span>
+              ${subBadge}
             </div>
           </div>
           <div class="bot-inspector-actions">
@@ -3118,16 +3144,16 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               🚀 ${isMenu ? '포털 카탈로그' : '정규 브리핑'} 발송 센터
             </button>
             <button class="btn btn-sm btn-dark" onclick="openSimModal('${esc(bot.bot_id)}')">
-              🧪 유저 시점 시뮬레이터
+              🧪 시뮬레이터
             </button>
             <button class="btn btn-sm" onclick="openEditBotModal('${esc(bot.bot_id)}')">
-              ⚙️ 설정 및 토큰 수정
+              ⚙️ 봇 설정
             </button>
           </div>
         </div>
 
         <!-- 📄 Inline Live Briefing Preview Section -->
-        <div style="margin-top:14px;">
+        <div style="margin-top:10px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
             <div style="font-size:13.5px; font-weight:800; color:var(--text);">
               📄 [${esc(bot.name)}] 실시간 브리핑 미리보기
@@ -3437,13 +3463,20 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           kpiBotsSubEl.textContent = `정보봇 ${infoBotsCount}개 (포털 메뉴봇 1개 별도)`;
         }
 
-        // Tier Bars
-        document.getElementById('tierDistList').innerHTML = ov.tier_distribution.map(t => `
-          <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-            <span>${tierBadge(t.tier_code)} <span style="font-size:12.5px; color:var(--text-muted);">${esc(t.description.slice(0, 24))}...</span></span>
-            <span style="font-weight:800; font-size:14px;">${t.user_count}명</span>
-          </div>
-        `).join('');
+        // Tier Bars: Slim Badge + Gauge + Pct (Verbose Description Removed)
+        const totalU = Number(ov.total_users || 0);
+        document.getElementById('tierDistList').innerHTML = ov.tier_distribution.map(t => {
+          const pct = totalU > 0 ? Math.round((t.user_count / totalU) * 100) : 0;
+          return `
+            <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); font-size:12.5px;">
+              <span style="min-width:74px; flex-shrink:0;">${tierBadge(t.tier_code)}</span>
+              <div style="flex:1; background:#f1f5f9; height:7px; border-radius:4px; overflow:hidden;">
+                <div style="width:${pct}%; height:100%; background:var(--primary); border-radius:4px;"></div>
+              </div>
+              <span style="font-weight:800; min-width:65px; text-align:right;">${t.user_count}명 <span style="font-size:11px; color:var(--text-muted); font-weight:600;">(${pct}%)</span></span>
+            </div>
+          `;
+        }).join('');
 
         // Bot Rankings
         document.getElementById('botRankList').innerHTML = ov.bot_rankings.map(b => `

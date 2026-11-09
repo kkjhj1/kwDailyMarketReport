@@ -560,6 +560,15 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("renderBotDetailInspector", html)
         self.assertIn("loadInlineBriefingPreview", html)
         self.assertIn("bot-master-tile", html)
+        self.assertIn("bot-master-tile-meta", html)
+        # Check compact 1/4 size bot strip labels (<= 4 chars)
+        self.assertIn("label: '메뉴'", html)
+        self.assertIn("label: '시황'", html)
+        self.assertIn("label: '여행'", html)
+        self.assertIn("label: '입시'", html)
+        # Check 1-row compact KPI strip and hidden countdown
+        self.assertIn("kpi-compact-strip", html)
+        self.assertIn('id="schedulerTimer" style="display:none;"', html)
 
 
 if __name__ == "__main__":
