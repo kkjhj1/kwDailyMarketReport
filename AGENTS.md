@@ -3,7 +3,7 @@
 ## 1. 개요 & 운영 인프라
 - 프로젝트: `kwDailyMarketReport` / `market_brief_starter` (Multi-Bot Platform v2.0)
 - 운영 서버: OCI VM `161.33.196.211`, `systemd` `multibot.service`, 포트 `8002`, 24/7
-- 웹 리포트: GitHub Pages `https://kkjhj1.github.io/kwDailyMarketReport/`
+- 웹 리포트: 오라클 클라우드 VM 자체 서빙 (`http://161.33.196.211:8002/reports/`)
 - Render Cloud: 퇴역 완료, 사용 금지
 - 봇: `telegram_bot_runner.py`(시황, 06:30 KST·±3% 긴급), `travel_bot_runner.py`, `admission_bot_runner.py`, `portal_bot_runner.py`(FREE/GREEN/RED/BLACK), 관리자 콘솔 `admin_server.py`
 
@@ -13,14 +13,15 @@
 
 ## 3. 시행령 위임 (`.agents/rules/`)
 - `telegram-safety.md`: [TG-01]~[TG-07] 메시지 용량·escape·콜백·429·`--demo`·제로 브레이킹
-- `data-delivery-integrity.md`: [PROD-LIVE] 실발송 통제, STARTUP_INIT/CRON_TICK, SSOT·UNKNOWN 격리
+- `data-delivery-integrity.md`: [PROD-LIVE] 실발송 사전 승인, 15분 정시 윈도우, 재기동 보상 발송 금지, Dual-DB SSOT, 긴급변동 감시 일원화
 - `web-report-ui.md`: 360px 무오버플로우, 44px 터치 타깃
 - 해당 영역 작업 시 반드시 전문을 읽고 준수한다.
 
 ## 4. 절대 금지선
 - 운영 DB(`*.sqlite3`), 배포 폴더(`reports/`), `.env` 임의 수정 금지
-- 실사용자 텔레그램 실발송 금지(Deny-by-Default). 개발·테스트는 `--demo`/Dry-run만
-- 코드 수정 후 `python -m py_compile` + 관련 `pytest` 실측 통과 전 완료 보고 금지
+- 실사용자 텔레그램 실발송 금지(Deny-by-Default). 개발·테스트는 `--demo`/Dry-run만 사용하며, 발송·재발송은 반드시 사용자 사전 승인 후 진행
+- 서버 재기동/배포 시 정시 15분 윈도우 외 보상성 자동 재발송(Compensatory Redelivery) 절대 금지
+- 코드 수정 후 `python -m py_compile` + 관련 테스트 실측 통과 전 완료 보고 금지
 
 ## 5. 멀티 AI 2단계 파이프라인
 - 라우팅: L0(문구·주석) Gemini 단독 / L1(단일 파일 국소 수정) Gemini→Claude 직행 / L2·L3(로직·템플릿·UI·DB·대규모 리팩토링) 아래 2단계

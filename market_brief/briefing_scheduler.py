@@ -1,9 +1,12 @@
-"""Internal Scheduled Dispatcher for Daily Market Brief v2.0.
+"""Internal Scheduled Dispatcher for Daily Market Brief v2.0 & Urgent Volatility Daemon.
 
-Runs as a 24/7 background asyncio task inside FastAPI (Render Web Service).
+Runs as a 24/7 background asyncio task inside FastAPI (Oracle Cloud VM / multibot.service).
 Fires morning briefing at 06:30 KST and closing briefing at 15:40 KST on KR trading days.
-All blocking synchronous I/O (DB, HTTP quotes, HTML render, Telegram dispatcher)
-is isolated to worker threads via asyncio.to_thread.
+Monitors ±3.0% sudden breaches during regular KR trading hours (09:00~15:30 KST).
+
+Enforces:
+- [PROD-LIVE] Zero Accidental Redelivery: Strict 15-minute start window (06:30~06:45, 15:40~15:55).
+- Dual-DB Consistency: Cross-checks both portal.sqlite3 and alerts.sqlite3.
 """
 from __future__ import annotations
 
@@ -17,7 +20,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from market_brief.alert_store import AlertStore
 from market_brief.calendar_manager import MarketCalendar
+from market_brief.pipeline import DEFAULT_SYMBOLS, MarketBriefingPipeline
 from market_brief.storage.db import MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
 from market_brief.subscription_engine import SubscriptionEngine
@@ -122,9 +127,16 @@ class InternalBriefingScheduler:
     """Asyncio background daemon scheduler running inside FastAPI lifespan."""
 
     MORNING_START = time(6, 30)
-    MORNING_CUTOFF = time(8, 50)
+    MORNING_WINDOW_END = time(6, 45)  # Strict 15-minute start window
+    MORNING_CUTOFF = time(8, 50)      # Hard expiration
+
     CLOSING_START = time(15, 40)
-    CLOSING_CUTOFF = time(18, 0)
+    CLOSING_WINDOW_END = time(15, 55)  # Strict 15-minute start window
+    CLOSING_CUTOFF = time(18, 0)       # Hard expiration
+
+    URGENT_MARKET_OPEN = time(9, 0)
+    URGENT_MARKET_CLOSE = time(15, 30)
+    URGENT_CHECK_INTERVAL_SEC = 900.0  # 15 minutes
 
     def __init__(
         self,
@@ -145,6 +157,7 @@ class InternalBriefingScheduler:
         self.calendar = calendar or MarketCalendar()
         self.deliverer = deliverer or MarketBriefingDeliverer(root_dir, get_report_base_url)
         self.poll_interval = poll_interval
+        self.alert_store = AlertStore(root_dir / "alerts.sqlite3")
 
         self.runner_id = f"oracle_scheduler_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         self._running = False
@@ -160,6 +173,7 @@ class InternalBriefingScheduler:
         self._last_run_status: Optional[str] = None
         self._last_error: Optional[str] = None
         self._retry_counts: Dict[str, int] = {}
+        self._last_urgent_check: Optional[datetime] = None
 
     def is_enabled(self) -> bool:
         env_val = os.environ.get("ENABLE_BRIEFING_SCHEDULER", "true").strip().lower()
@@ -171,7 +185,7 @@ class InternalBriefingScheduler:
         self._running = True
         self._has_crashed = False
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._main_loop(), name="render_briefing_scheduler")
+        self._task = asyncio.create_task(self._main_loop(), name="oracle_briefing_scheduler")
         logger.info(f"⏰ [BriefingScheduler] Started internal daemon (runner_id={self.runner_id})")
 
     async def stop(self, timeout: float = 10.0) -> None:
@@ -182,22 +196,16 @@ class InternalBriefingScheduler:
         self._stop_event.set()
         if self._task:
             try:
-                await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
+                await asyncio.wait_for(self._task, timeout=timeout)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._task.cancel()
-                try:
-                    await self._task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._task = None
-        logger.info("✅ [BriefingScheduler] Stopped successfully.")
+        logger.info("✅ [BriefingScheduler] Daemon stopped.")
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
-            now_kst = datetime.now(KST)
-            next_trigger = self.calculate_next_trigger_kst(now_kst)
+            next_dt = self.calculate_next_trigger_kst()
             return {
-                "is_running": self._running and (self._task is not None and not self._task.done()),
+                "is_running": self._running,
                 "is_enabled": self.is_enabled(),
                 "has_crashed": self._has_crashed,
                 "runner_id": self.runner_id,
@@ -209,11 +217,12 @@ class InternalBriefingScheduler:
                     "status": self._last_run_status,
                 } if self._last_run_kind else None,
                 "last_error": self._last_error,
-                "next_scheduled_kst": next_trigger.strftime("%Y-%m-%d %H:%M:%S KST") if next_trigger else None,
+                "next_scheduled_kst": next_dt.strftime("%Y-%m-%d %H:%M:%S KST") if next_dt else None,
             }
 
-    def calculate_next_trigger_kst(self, now_kst: datetime) -> Optional[datetime]:
-        """Calculates exact timestamp for next scheduled briefing (06:30 or 15:40 on KR trading day)."""
+    def calculate_next_trigger_kst(self, from_kst: Optional[datetime] = None) -> Optional[datetime]:
+        """Calculates next regular briefing timestamp in KST."""
+        now_kst = from_kst or datetime.now(KST)
         target_date = now_kst.date()
 
         for _ in range(14):  # Check up to 14 days ahead
@@ -227,6 +236,24 @@ class InternalBriefingScheduler:
             target_date += timedelta(days=1)
         return None
 
+    get_next_scheduled_kst = calculate_next_trigger_kst
+
+    def is_briefing_already_sent(self, kind: str, target_date: date) -> bool:
+        """Dual-DB Cross Check: Returns True if marked sent in EITHER portal.sqlite3 OR alerts.sqlite3."""
+        try:
+            if self.db.is_regular_briefing_sent(kind, target_date):
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking portal.sqlite3 for {kind}: {e}")
+
+        try:
+            if self.alert_store.is_regular_briefing_sent(kind, target_date):
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking alerts.sqlite3 for {kind}: {e}")
+
+        return False
+
     async def _main_loop(self) -> None:
         logger.info(f"🚀 [BriefingScheduler] Main loop running. Next check every {self.poll_interval}s.")
         while self._running:
@@ -237,6 +264,7 @@ class InternalBriefingScheduler:
 
                 if self.is_enabled():
                     await self._check_and_trigger(now_kst)
+                    await self._check_urgent_volatility(now_kst)
 
             except asyncio.CancelledError:
                 break
@@ -258,15 +286,73 @@ class InternalBriefingScheduler:
 
         current_time = now_kst.time()
 
-        # Morning Briefing Window (06:30 ~ 08:50 KST)
-        if self.MORNING_START <= current_time <= self.MORNING_CUTOFF:
-            if not await asyncio.to_thread(self.db.is_regular_briefing_sent, "morning", today):
+        # Morning Briefing: Only trigger within strict 15-minute start window (06:30 ~ 06:45 KST)
+        if self.MORNING_START <= current_time <= self.MORNING_WINDOW_END:
+            if not await asyncio.to_thread(self.is_briefing_already_sent, "morning", today):
                 await self._run_briefing_job("morning", now_kst)
+        elif self.MORNING_WINDOW_END < current_time <= self.MORNING_CUTOFF:
+            # Server restart after 06:45: strictly block compensatory auto-redelivery
+            pass
 
-        # Closing Briefing Window (15:40 ~ 18:00 KST)
-        elif self.CLOSING_START <= current_time <= self.CLOSING_CUTOFF:
-            if not await asyncio.to_thread(self.db.is_regular_briefing_sent, "closing", today):
+        # Closing Briefing: Only trigger within strict 15-minute start window (15:40 ~ 15:55 KST)
+        elif self.CLOSING_START <= current_time <= self.CLOSING_WINDOW_END:
+            if not await asyncio.to_thread(self.is_briefing_already_sent, "closing", today):
                 await self._run_briefing_job("closing", now_kst)
+        elif self.CLOSING_WINDOW_END < current_time <= self.CLOSING_CUTOFF:
+            # Server restart after 15:55: strictly block compensatory auto-redelivery
+            pass
+
+    async def _check_urgent_volatility(self, now_kst: datetime) -> None:
+        """In-process check for ±3.0% market sudden breaches during KR regular session (09:00~15:30 KST)."""
+        today = now_kst.date()
+        if not self.calendar.is_trading_day("KR", today):
+            return
+
+        current_time = now_kst.time()
+        if not (self.URGENT_MARKET_OPEN <= current_time <= self.URGENT_MARKET_CLOSE):
+            return
+
+        # Throttle to every URGENT_CHECK_INTERVAL_SEC (15 mins)
+        if self._last_urgent_check is not None:
+            elapsed = (now_kst - self._last_urgent_check).total_seconds()
+            if elapsed < (self.URGENT_CHECK_INTERVAL_SEC - 30.0):
+                return
+
+        self._last_urgent_check = now_kst
+        logger.info(f"🔍 [BriefingScheduler] Running in-process ±3% urgent volatility check at {now_kst.strftime('%H:%M:%S')} KST")
+
+        try:
+            await asyncio.to_thread(self._run_urgent_check_sync, now_kst)
+        except Exception as e:
+            logger.error(f"Error during in-process urgent volatility check: {e}", exc_info=True)
+
+    def _run_urgent_check_sync(self, now_kst: datetime) -> None:
+        token = self.get_bot_token()
+        if not token:
+            return
+
+        pipeline = MarketBriefingPipeline(
+            token=token,
+            channel="telegram",
+            calendar=self.calendar,
+            alert_db_path=self.root_dir / "alerts.sqlite3",
+            report_base_url=self.get_report_base_url(),
+        )
+
+        quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
+        recipients = [r.chat_id for r in self.db.get_active_recipients(topic="FINANCE")]
+        if not recipients:
+            admin_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+            if admin_chat:
+                recipients = [c.strip() for c in admin_chat.split(",") if c.strip()]
+
+        if not recipients:
+            return
+
+        triggered = pipeline.check_and_send_urgent_alerts(quotes, recipients, now=now_kst)
+        if triggered:
+            for q, _, r_path in triggered:
+                logger.info(f"🚨 [BriefingScheduler] ±3% sudden breach alert dispatched: {q.symbol} -> {r_path}")
 
     async def _run_briefing_job(self, kind: str, now_kst: datetime) -> None:
         today_str = now_kst.date().isoformat()
@@ -306,6 +392,11 @@ class InternalBriefingScheduler:
         # 4. Fetch active recipients
         recipients = await asyncio.to_thread(self.db.get_active_recipients, "FINANCE")
         if not recipients:
+            admin_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+            if admin_chat:
+                recipients = [Recipient(chat_id=c.strip(), name="Admin", subscribed_topics="FINANCE") for c in admin_chat.split(",") if c.strip()]
+
+        if not recipients:
             logger.warning(f"[Scheduler] No active FINANCE recipients for {batch_key}")
             await asyncio.to_thread(self.db.fail_job, job.job_id, "NO_ACTIVE_RECIPIENTS")
             self._record_run_result(kind, now_kst, "FAILED: NO_RECIPIENTS", "Zero active recipients")
@@ -325,12 +416,12 @@ class InternalBriefingScheduler:
         try:
             success, fail, unknown, report_rel_path = await asyncio.to_thread(
                 self.deliverer.deliver,
-                db=self.db,
-                job_id=job.job_id,
-                token=token,
-                recipients=recipients,
-                kind=kind,
-                now_kst=now_kst,
+                self.db,
+                job.job_id,
+                token,
+                recipients,
+                kind,
+                now_kst,
             )
 
             # Determine final status
@@ -354,9 +445,13 @@ class InternalBriefingScheduler:
                 report_path=report_rel_path,
             )
 
-            # Sync legacy alert_reservations for backward compatibility
+            # Sync legacy alert_reservations for backward compatibility & Dual-DB consistency
             if success > 0:
                 await asyncio.to_thread(self.db.reserve_regular_briefing, kind, now_kst.date())
+                try:
+                    self.alert_store.reserve_regular_briefing(kind, now_kst.date())
+                except Exception as exc:
+                    logger.warning(f"Failed to record briefing to AlertStore: {exc}")
 
             status_str = f"{final_status.value} (Sent: {success}/{len(recipients)}, Fail: {fail}, Unknown: {unknown})"
             logger.info(f"🚀 [Scheduler] Completed dispatch for {batch_key}: {status_str}")
