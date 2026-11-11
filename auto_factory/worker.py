@@ -60,6 +60,7 @@ from .worktree import (
     SupervisorLocked,
     WorktreeManager,
     _FileLock,
+    _assert_no_link_or_reparse_ancestors,
     _is_link_or_reparse,
     default_state_dir,
     safe_write_atomic,
@@ -75,6 +76,33 @@ SUCCESS_OUTCOMES = frozenset({"AWAITING_MERGE", "SINGLE_PROVIDER_REVIEW_REQUIRED
 
 class StopRequested(Exception):
     pass
+
+
+AUDIT_CLONE_PREFIX = "af_audit_"
+_AUDIT_CLONE_MKDIR_ATTEMPTS = 16
+
+
+def _make_audit_clone_dir(base_dir: str | os.PathLike | None) -> Path:
+    """Create a fresh, empty directory for a disposable audit clone.
+
+    POSIX: `tempfile.mkdtemp` (mode 0o700). Windows: `mkdtemp` writes an explicit owner-only DACL
+    that strips inherited ACEs, so Codex's restricted `windows.sandbox=unelevated` token cannot read
+    the clone (os error 5). There we create the directory with a plain `os.mkdir` (no 0o700) so the
+    parent's inherited ACL is preserved, after rejecting link/reparse ancestors of the parent.
+    """
+    if os.name != "nt":
+        return Path(tempfile.mkdtemp(prefix=AUDIT_CLONE_PREFIX, dir=base_dir))
+    parent = Path(base_dir) if base_dir is not None else Path(tempfile.gettempdir())
+    parent.mkdir(parents=True, exist_ok=True)
+    parent = _assert_no_link_or_reparse_ancestors(parent)
+    for _ in range(_AUDIT_CLONE_MKDIR_ATTEMPTS):
+        cand = parent / f"{AUDIT_CLONE_PREFIX}{uuid.uuid4().hex[:12]}"
+        try:
+            os.mkdir(cand)  # atomic create; default mode keeps inherited parent ACEs on Windows
+        except FileExistsError:
+            continue
+        return cand
+    raise FileExistsError(f"could not create a unique audit clone dir under {parent}")
 
 
 class PipelineWorker:
@@ -364,12 +392,13 @@ class PipelineWorker:
         base = task["base_sha"]
         result, problem, consumed = None, None, 0.0
         main_before = self.wtm.main_snapshot()
-        if self.audit_tmp_dir is not None:
-            self.audit_tmp_dir.mkdir(parents=True, exist_ok=True)
-        clone_dir = Path(tempfile.mkdtemp(prefix="af_audit_", dir=self.audit_tmp_dir))
+        clone_dir: Path | None = None
         try:
             clone = clone_before = None
             try:
+                if self.audit_tmp_dir is not None:
+                    self.audit_tmp_dir.mkdir(parents=True, exist_ok=True)
+                clone_dir = _make_audit_clone_dir(self.audit_tmp_dir)
                 clone = self.wtm.create_disposable_clone(base, clone_dir)
                 clone_before = self.wtm.clone_snapshot(clone)
             except Exception as exc:
@@ -387,10 +416,11 @@ class PipelineWorker:
                     problem = f"AUDITOR_MUTATED_REPO: main repository changed during audit by {provider}"
         finally:
             self.db.settle(provider, self.units, consumed)
-            try:
-                self.wtm.remove_disposable_clone(clone_dir)
-            except Exception as exc:  # never AWAITING_START_AUTH with a leftover clone
-                problem = f"AUDITOR_CLEANUP_FAILED: {type(exc).__name__}: {exc}"
+            if clone_dir is not None:
+                try:
+                    self.wtm.remove_disposable_clone(clone_dir)
+                except Exception as exc:  # never AWAITING_START_AUTH with a leftover clone
+                    problem = f"AUDITOR_CLEANUP_FAILED: {type(exc).__name__}: {exc}"
         return result, problem
 
     def _plan_ready(self, task: dict[str, Any]) -> bool:

@@ -2626,6 +2626,16 @@ def _audit_out(**over):
     return step
 
 
+class _OsNameProxy:
+    """Stand-in for `worker_mod.os` that overrides only `name` (patching the real os.name breaks pathlib)."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
 def _clones_left(tmp_path):
     d = tmp_path / "clones"
     return sorted(os.listdir(d)) if d.exists() else []
@@ -2871,3 +2881,95 @@ class TestAutoAuditL2:
         tid = submit(db, "logic change", risk="L2")
         assert w.process_task(tid) == "BLOCKED" and "AUDIT_INCOMPLETE" in db.events(tid)[-1]["reason"]
         assert all(a.calls == [] for a in w.adapters.values())
+
+    # ---- disposable audit clone dir: Windows must keep inherited ACLs (codex unelevated sandbox reads)
+    def test_make_audit_clone_dir_unique_under_base_and_cleaned(self, tmp_path, repo):
+        base = tmp_path / "clones" / "nested"  # parent created on demand
+        made = [worker_mod._make_audit_clone_dir(base) for _ in range(5)]
+        assert len({p.name for p in made}) == 5
+        for p in made:
+            assert p.is_dir() and p.name.startswith("af_audit_") and os.listdir(p) == []
+            assert os.path.normcase(str(p.resolve().parent)) == os.path.normcase(str(base.resolve()))
+        wtm = WorktreeManager(repo)
+        for p in made:
+            wtm.remove_disposable_clone(p)
+        assert os.listdir(base) == []
+
+    def test_make_audit_clone_dir_posix_branch_uses_mkdtemp(self, tmp_path, monkeypatch):
+        calls = []
+        real_mkdtemp = worker_mod.tempfile.mkdtemp
+
+        def spy(prefix=None, dir=None, **kw):
+            calls.append((prefix, dir))
+            return real_mkdtemp(prefix=prefix, dir=dir)
+
+        monkeypatch.setattr(worker_mod.tempfile, "mkdtemp", spy)
+        monkeypatch.setattr(worker_mod, "os", _OsNameProxy("posix"))  # only worker's view of os.name
+        p = worker_mod._make_audit_clone_dir(tmp_path)
+        monkeypatch.undo()
+        assert calls == [("af_audit_", tmp_path)] and p.is_dir() and p.parent == tmp_path
+        if sys.platform != "win32":
+            assert (os.stat(p).st_mode & 0o777) == 0o700
+
+    def test_make_audit_clone_dir_windows_branch_retries_collision(self, tmp_path, monkeypatch):
+        names = iter(["aaaaaaaaaaaa", "aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+
+        def no_mkdtemp(*a, **k):
+            raise AssertionError("mkdtemp must not be used on nt")
+
+        monkeypatch.setattr(worker_mod, "os", _OsNameProxy("nt"))
+        monkeypatch.setattr(worker_mod.tempfile, "mkdtemp", no_mkdtemp)
+        monkeypatch.setattr(worker_mod.uuid, "uuid4", lambda: _types.SimpleNamespace(hex=next(names) + "0" * 20))
+        first = worker_mod._make_audit_clone_dir(tmp_path)
+        second = worker_mod._make_audit_clone_dir(tmp_path)  # collides once, then succeeds
+        assert (first.name, second.name) == ("af_audit_aaaaaaaaaaaa", "af_audit_bbbbbbbbbbbb")
+        monkeypatch.setattr(worker_mod.uuid, "uuid4", lambda: _types.SimpleNamespace(hex="a" * 32))
+        with pytest.raises(FileExistsError):
+            worker_mod._make_audit_clone_dir(tmp_path)  # exhausted -> raises, never reuses an existing dir
+        assert sorted(os.listdir(tmp_path)) == ["af_audit_aaaaaaaaaaaa", "af_audit_bbbbbbbbbbbb"]
+
+    def test_make_audit_clone_dir_rejects_unsafe_parent(self, tmp_path, monkeypatch):
+        calls = []
+
+        def unsafe(path):
+            calls.append(Path(path))
+            raise UnsafePathError(f"symlink/reparse point in path: {path}")
+
+        monkeypatch.setattr(worker_mod, "os", _OsNameProxy("nt"))
+        monkeypatch.setattr(worker_mod, "_assert_no_link_or_reparse_ancestors", unsafe)
+        with pytest.raises(UnsafePathError):
+            worker_mod._make_audit_clone_dir(tmp_path / "clones")
+        assert calls == [tmp_path / "clones"] and os.listdir(tmp_path / "clones") == []
+
+    def test_clone_dir_failure_blocks_as_clone_failed(self, tmp_path, repo, db, monkeypatch):
+        w = make_auto_worker(tmp_path, repo, db)
+        removed = []
+
+        def boom(base_dir):
+            raise UnsafePathError("symlink/reparse point in path: x")
+
+        monkeypatch.setattr(worker_mod, "_make_audit_clone_dir", boom)
+        monkeypatch.setattr(w.wtm, "remove_disposable_clone", lambda p: removed.append(p))
+        tid = submit(db, "logic change", risk="L2")
+        assert w.process_task(tid) == "BLOCKED"  # no crash of the worker loop
+        reason = db.events(tid)[-1]["reason"]
+        assert "AUDIT_CLONE_FAILED" in reason and "UnsafePathError" in reason
+        assert removed == [] and w.adapters["codex"].calls == [] and db.artifacts(tid, "audit") == []
+
+    def test_audit_clone_dir_keeps_inherited_acl_on_windows(self, tmp_path):
+        base = tmp_path / "clones"
+        clone_dir = worker_mod._make_audit_clone_dir(base)
+        stripped = Path(worker_mod.tempfile.mkdtemp(prefix="af_strip_", dir=base))
+        assert clone_dir.is_dir() and stripped.is_dir()
+        if sys.platform == "win32":
+            def aces(p):
+                out = subprocess.run(["icacls", str(p)], capture_output=True, text=True, errors="replace",
+                                     timeout=30)
+                assert out.returncode == 0, out.stdout + out.stderr
+                return [ln for ln in out.stdout.splitlines() if ":(" in ln]
+
+            ours, theirs = aces(clone_dir), aces(stripped)
+            assert ours and all("(I)" in ace for ace in ours)  # inherited from parent, not re-written
+            assert theirs and not any("(I)" in ace for ace in theirs)  # mkdtemp(0o700) strips inheritance
+        else:
+            assert (os.stat(clone_dir).st_mode & 0o777) == 0o700
