@@ -559,6 +559,9 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn('id="adminTokenModal"', html)
         self.assertIn("openAdminTokenModal", html)
         self.assertIn("saveAdminTokenFromModal", html)
+        self.assertIn("updateAdminTokenBadge", html)
+        self.assertRegex(html, r"#btnAdminToken\s*\{\s*display:\s*none\s*!important;")
+        self.assertIn('id="btnAdminToken" style="display:none;" aria-hidden="true"', html)
 
     def test_bot_master_detail_ui_present(self):
         html = self.client.get("/").text

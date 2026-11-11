@@ -399,6 +399,11 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       display: none !important;
     }
 
+    /* 🔑 Admin Token Button Visually Hidden */
+    #btnAdminToken {
+      display: none !important;
+    }
+
     /* 👥 User Subtabs (44px Accessible Touch Target) */
     .user-subtabs {
       display: grid;
@@ -1805,7 +1810,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span class="pill" title="실시간 정상 작동"><span class="dot"></span> <span id="topStatusText">실시간 정상 작동</span></span>
-      <button class="btn btn-sm btn-ghost" id="btnAdminToken" onclick="openAdminTokenModal()" title="관리자 API 인증키 설정" aria-label="관리자 API 인증키 설정">
+      <button class="btn btn-sm btn-ghost" id="btnAdminToken" style="display:none;" aria-hidden="true" onclick="openAdminTokenModal()" title="관리자 API 인증키 설정" aria-label="관리자 API 인증키 설정">
         <span>🔑</span> <span class="btn-text" id="adminTokenBtnLabel">인증키</span>
       </button>
       <button class="btn btn-sm btn-dark" onclick="syncAllBots()" title="텔레그램 서버 대화 즉시 수신" aria-label="텔레그램 서버 대화 즉시 수신">
