@@ -18,6 +18,8 @@ from silver_care.models import (
     SilverBenefit,
     SilverMission,
     TargetIncome,
+    age_band_label,
+    age_band_of,
     sido_name,
 )
 
@@ -65,7 +67,19 @@ def age_range_label(parent: ParentProfile, ref_year: Optional[int] = None) -> st
     return f"만 {reached - 1}~{reached}세"
 
 
+def parent_age_label(parent: ParentProfile, ref_year: Optional[int] = None) -> str:
+    """'만 65세 이상' / '만 60~64세' — 호칭 없는 연령대 기준선."""
+    return age_band_label(age_band_of(parent.age_in(_ref_year(ref_year))))
+
+
+def parent_name(parent: ParentProfile, ref_year: Optional[int] = None) -> str:
+    """Display name (plain): 등록 호칭, 없으면 연령대 기준선."""
+    return parent.alias or parent_age_label(parent, ref_year)
+
+
 def parent_line(parent: ParentProfile, ref_year: Optional[int] = None) -> str:
+    if parent.is_age_only:
+        return f"👵 <b>{parent_age_label(parent, ref_year)}</b> 부모님 · 📍 전국 공통"
     living = LivingType(parent.living_type).label
     return (
         f"👵 <b>{esc(parent.alias)}</b> · {parent.birth_year}년생 ({age_range_label(parent, ref_year)})\n"
@@ -78,23 +92,17 @@ def grade_tag(grade: ReliabilityGrade) -> str:
 
 
 # ── Main menu ─────────────────────────────────────────────────
-def format_main_menu(parents: Sequence[ParentProfile], ref_year: Optional[int] = None) -> str:
-    lines = [
-        "👵 <b>실버케어 · 부모님 복지 비서</b>",
-        "동사무소·보건소 혜택, 자녀가 대신 챙겨요",
+MAIN_TITLE = "👵 <b>실버케어 · 부모님 복지 대리신청 비서</b>"
+
+
+def format_main_menu(parents: Sequence[ParentProfile] = (), ref_year: Optional[int] = None) -> str:
+    """호칭·지역 설문 없이 연령대 버튼 2개로 바로 진입. parents는 하위호환용 (미표시)."""
+    return "\n".join([
+        MAIN_TITLE,
+        "동사무소 갈 필요 없이, 자녀가 대신 신청하는 2026 핵심 복지입니다.",
         DIVIDER,
-    ]
-    if parents:
-        lines.append("📋 <b>등록된 부모님</b>")
-        for p in parents:
-            lines.append(f"▪ <b>{esc(p.alias)}</b> · {p.birth_year}년생 · {esc(p.region_label)}")
-    else:
-        lines.append("➕ 부모님 정보를 등록하면 받을 수 있는 혜택을 골라드려요")
-    lines.extend([
-        "",
-        "🟢 조건 일치 · 🟡 신청 후보 · 🔵 지자체 확인",
+        "부모님 연령대를 선택하시면 즉시 대리신청 서류와 방법을 안내해 드립니다.",
     ])
-    return "\n".join(lines)
 
 
 # ── Wizard prompts ────────────────────────────────────────────
@@ -172,7 +180,7 @@ def format_benefit_card(
         f"🏛 {esc(b.agency_name)}",
         f"🗓 {esc(b.application_period)}",
         DIVIDER,
-        f"✅ <b>{esc(parent.alias)} 자격 확인</b>",
+        f"✅ <b>{esc(parent_name(parent, ref_year))} 자격 확인</b>",
     ]
     for label, ok in match.checks:
         lines.append(f"{_CHECK_ICON[ok]} {esc(label)}")
@@ -210,13 +218,13 @@ def format_single_mission_card(
     total_matches: int = 28,
     ref_year: Optional[int] = None,
 ) -> str:
-    """부모님 1명 × 핵심 혜택 1개만 집중 노출 (전체 목록은 별도 버튼)."""
+    """연령대 기준 핵심 혜택 1개만 집중 노출 (호칭 미표시, 전체 목록은 별도 버튼)."""
     b = match.benefit
     status = _mission_status(mission)
     lines = [
-        parent_line(parent, ref_year),
+        MAIN_TITLE,
         DIVIDER,
-        f"🎯 <b>자녀가 대신 신청할 1순위 복지</b> ({mission_index}/{total_missions})",
+        f"🎯 <b>{parent_age_label(parent, ref_year)} 자녀가 대신 신청할 1순위 복지</b> ({mission_index}/{total_missions})",
         f"[{match.grade.badge}] <b>{esc(b.title)}</b>",
         f"💰 <b>{esc(b.support_amount)}</b>",
         f"🏛 {esc(b.agency_name)}",
@@ -228,16 +236,16 @@ def format_single_mission_card(
         "",
         "💡 <i>\"부모님이 가실 필요 없이, 직장인 자녀가 서류를 챙겨 주민센터/공단에서 대신 신청할 수 있어요.\"</i>",
         "",
-        f"📚 받을 수 있는 혜택 전체 <b>{total_matches}개</b>",
+        f"📚 전체 혜택 <b>{total_matches}개</b>",
     ])
     return "\n".join(lines)
 
 
 def format_no_mission(parent: ParentProfile, ref_year: Optional[int] = None) -> str:
     return "\n".join([
-        parent_line(parent, ref_year),
+        MAIN_TITLE,
         DIVIDER,
-        "조건에 맞는 혜택이 아직 없어요. 정보를 다시 확인해주세요.",
+        f"🎯 <b>{parent_age_label(parent, ref_year)}</b> 조건에 맞는 혜택이 아직 없어요. 연령대를 다시 선택해주세요.",
     ])
 
 
@@ -255,7 +263,7 @@ def format_proxy_action_kit(parent: ParentProfile, benefit: SilverBenefit) -> st
     """자녀 대리신청 준비물·행정 주의·접수처."""
     lines = [
         "🎒 <b>자녀 대리신청 키트</b>",
-        f"📌 <b>{esc(benefit.title)}</b> · {esc(parent.alias)}",
+        f"📌 <b>{esc(benefit.title)}</b>" + (f" · {esc(parent.alias)}" if parent.alias else ""),
         DIVIDER,
         "✅ <b>4대 준비물</b>",
     ]
@@ -278,32 +286,34 @@ def format_proxy_action_kit(parent: ParentProfile, benefit: SilverBenefit) -> st
     return "\n".join(lines)
 
 
-def format_parent_peace_text(parent: ParentProfile, benefit: SilverBenefit) -> str:
-    """부모님 안심 3줄 카톡 (plain text). 호칭·혜택명만 사용 — 출생연도·주소 등 PII 미포함."""
-    alias = (parent.alias or "엄마").strip()
+def format_parent_peace_text(benefit: SilverBenefit) -> str:
+    """부모님 안심 2줄 카톡 (plain text). 호칭 없이 '이번에 …'로 시작 — 혜택명 외 PII 미포함."""
     if benefit.category == BenefitCategory.FINANCE.value:
-        middle = "매달 통장으로 혜택 나오게 제가 다 챙겨둘게요."
+        action = f"이번에 {benefit.title} 알아보고 매달 통장으로 혜택 나오게 제가 신청해둘게요."
+    elif benefit.is_pre_approval_required:
+        action = f"이번에 {benefit.title} 알아봤는데 병원 가시기 전에 제가 미리 신청해둘게요."
     else:
-        middle = "받으실 수 있게 제가 챙겨둘게요."
-    if benefit.is_pre_approval_required:
-        last = "병원 가시기 전에 저한테 먼저 말씀만 해주세요 💕"
-    else:
-        last = "신경 쓰지 마시고 편히 계세요 💕"
-    return "\n".join([f"{alias}, {benefit.title} 제가 알아봤어요.", middle, last])
+        action = f"이번에 {benefit.title} 알아봤는데 제가 신청해둘게요."
+    return "\n".join([
+        action,
+        "서류는 제가 다 알아서 챙길 테니 따로 신경 쓰지 마시고 편히 계세요 💕",
+    ])
 
 
-def format_parent_peace_card(parent: ParentProfile, benefit: SilverBenefit) -> str:
+def format_parent_peace_card(benefit: SilverBenefit) -> str:
     return "\n".join([
         "💌 <b>부모님 안심 카톡</b> (길게 눌러 복사)",
         DIVIDER,
-        f"<pre>{esc(format_parent_peace_text(parent, benefit))}</pre>",
+        f"<pre>{esc(format_parent_peace_text(benefit))}</pre>",
     ])
 
 
 # ── Phone script & KakaoTalk text ─────────────────────────────
 def format_phone_script(benefit: SilverBenefit, parent: Optional[ParentProfile] = None) -> str:
     """동사무소 복지팀 직통 통화 대본 (HTML)."""
-    if parent is not None:
+    if parent is not None and parent.is_age_only:
+        intro = f"저는 {parent_age_label(parent)} 어르신 자녀입니다."
+    elif parent is not None:
         who = f"{parent.region_label} 사시는 {parent.birth_year}년생 어르신"
         intro = f"저는 {who}의 자녀입니다. 부모님은 {_LIVING_PHRASE[parent.living_type]}."
     else:
@@ -357,7 +367,7 @@ def format_bookmarks(items: Sequence[tuple[ParentProfile, SilverBenefit]]) -> st
     if not items:
         lines.append("아직 찜한 혜택이 없어요. 혜택 상세에서 ⭐를 눌러주세요.")
     for p, b in items:
-        lines.append(f"▪ <b>{esc(b.title)}</b> · {esc(p.alias)}")
+        lines.append(f"▪ <b>{esc(b.title)}</b> · {esc(parent_name(p))}")
     return "\n".join(lines)
 
 
@@ -370,7 +380,7 @@ def format_weekly_briefing(
 ) -> str:
     lines = [f"💌 <b>이번 주 효도 브리핑</b>{(' · ' + esc(week_label)) if week_label else ''}", DIVIDER]
     for parent, matches in list(sections)[:WEEKLY_MAX_PARENTS]:
-        lines.append(f"👵 <b>{esc(parent.alias)}</b> · {esc(parent.region_label)}")
+        lines.append(f"👵 <b>{esc(parent_name(parent, ref_year))}</b> · {esc(parent.region_label)}")
         if not matches:
             lines.append("   └ 새로 확인할 혜택이 없어요")
         for m in list(matches)[:WEEKLY_ITEMS_PER_PARENT]:

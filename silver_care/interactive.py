@@ -1,17 +1,19 @@
 """Interactive 2-step explorer for SilverCare (실버케어).
 
-Flow: 메인 메뉴 ➔ [1단계] 부모님 호칭·출생연도·시도·시군구·주거·소득
-      ➔ [2단계] 자녀 대리신청 1순위 미션 카드 (최대 5개 순환)
+Flow: 메인 메뉴 ➔ [1-클릭] 연령대 (만 65세 이상 / 만 60~64세) — 호칭·지역 설문 없음
+      ➔ 자녀 대리신청 1순위 미션 카드 (최대 5개 순환)
          ➔ 대리신청 키트 / 통화 대본 / 안심 카톡 / 진행 상태
       ➔ [📚 전체 혜택 목록] 후보 리스트 ➔ 혜택 상세 ➔ 통화 대본 / 카톡 전송문 / 찜하기
 
 [TG-04] callback_data = 'SC:<action>[:<args>]' (ASCII, <= 64 bytes). answerCallbackQuery is always
 called first, before any DB work. Screen updates go through _safe_edit_or_send. Deleting a parent
-profile uses an in-place 2-step confirm.
+profile uses an in-place 2-step confirm. The legacy 7-step wizard (SC:new) is still routed for
+backward compatibility but is no longer offered from the menu.
 """
 from __future__ import annotations
 import logging
 import re
+from datetime import date
 from typing import Any, Optional
 
 from silver_care.channels.telegram_card import (
@@ -29,9 +31,19 @@ from silver_care.channels.telegram_card import (
     format_single_mission_card,
     format_wizard_prompt,
     page_bounds,
+    parent_name,
 )
 from silver_care.matching import MAX_MISSIONS, rank_missions
-from silver_care.models import SIDO_NAMES, LivingType, MissionStatus, ParentProfile, normalize_sido_code
+from silver_care.models import (
+    AGE_BAND_PROBE_AGE,
+    SIDO_NAMES,
+    LivingType,
+    MissionStatus,
+    ParentProfile,
+    age_band_birth_year,
+    age_band_of,
+    normalize_sido_code,
+)
 from silver_care.storage.db import SilverCareDatabase
 
 logger = logging.getLogger(__name__)
@@ -76,11 +88,15 @@ def _short(title: str, limit: int = 18) -> str:
 
 
 # ── Keyboards ─────────────────────────────────────────────────
-def build_main_menu_keyboard(parents: list[ParentProfile], weekly_on: bool) -> dict[str, Any]:
-    rows = [[_btn(f"👵 {p.alias} 복지 미션", cb("L", p.id, 0))] for p in parents]
-    rows.append([_btn("➕ 부모님 등록", cb("new")), _btn("⭐ 찜한 혜택", cb("bm"))])
-    rows.append([_btn(f"🔔 일요일 효도 브리핑 {'ON' if weekly_on else 'OFF'}", cb("wk"))])
-    return _kb(rows)
+def build_main_menu_keyboard(
+    parents: list[ParentProfile] = (), weekly_on: bool = False, ref_year: Optional[int] = None
+) -> dict[str, Any]:
+    """연령대 1-클릭 버튼 2개만 노출. parents/weekly_on은 하위호환용 (미사용)."""
+    year = ref_year or date.today().year
+    return _kb([
+        [_btn(f"🟢 만 65세 이상 ({year - 65}년 이전 출생) ➔ 핵심 복지 85%", cb("age", 65))],
+        [_btn(f"🟡 만 60~64세 ({year - 64}~{year - 60}년생)", cb("age", 60))],
+    ])
 
 
 def build_wizard_keyboard(step: str, draft: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -145,7 +161,7 @@ def build_mission_keyboard(pid: int, bid: int, index: int, total: int) -> dict[s
         nxt = (index + 1) % total
         rows.append([_btn(f"▶ 다음 추천 ({nxt + 1}/{total})", cb("nxt", pid, bid, nxt))])
     rows.append([_btn("📚 전체 혜택 목록", cb("all", pid, 0))])
-    rows.append([_btn("🗑 정보 삭제", cb("x", pid)), _btn("🏠 메뉴", cb("m"))])
+    rows.append([_btn("🔄 연령대 다시 선택", cb("m"))])
     return _kb(rows)
 
 
@@ -245,6 +261,8 @@ class SilverCareInteractiveBot:
         if action == "m":
             self.db.clear_draft(chat_id)
             self._show_menu(chat_id, mid)
+        elif action == "age":
+            self._select_age_band(chat_id, mid, int(args[0]))
         elif action == "new":
             self._advance(chat_id, mid, {}, "alias")
         elif action in ("a", "dc", "y", "r", "sk", "l", "i"):
@@ -288,6 +306,24 @@ class SilverCareInteractiveBot:
             self._show_menu(chat_id, mid)
         else:
             self._show_menu(chat_id, mid)
+
+    # ---------- 연령대 1-클릭 ----------
+    def _select_age_band(self, chat_id: int, mid: Optional[int], band: int) -> None:
+        """Reuses (or creates) this chat's alias-less nationwide profile for the band ➔ 1순위 미션."""
+        if band not in AGE_BAND_PROBE_AGE:
+            raise ValueError(band)
+        year = self.ref_year or date.today().year
+        self.db.clear_draft(chat_id)
+        existing = [
+            p for p in self.db.list_parents(chat_id) if p.is_age_only and age_band_of(p.age_in(year)) == band
+        ]
+        if existing:
+            pid = existing[0].id
+        else:
+            pid = self.db.save_parent(ParentProfile(
+                id=0, chat_id=chat_id, alias="", birth_year=age_band_birth_year(band, year), sido_code="ALL",
+            ))
+        self._show_mission(chat_id, mid, pid, 0)
 
     # ---------- wizard ----------
     def _advance(self, chat_id: int, mid: Optional[int], draft: dict[str, Any], step: str) -> None:
@@ -347,7 +383,7 @@ class SilverCareInteractiveBot:
         parents = self.db.list_parents(chat_id)
         self._safe_edit_or_send(
             chat_id, mid, format_main_menu(parents, self.ref_year),
-            build_main_menu_keyboard(parents, self.db.is_weekly_opt_in(chat_id)),
+            build_main_menu_keyboard(parents, self.db.is_weekly_opt_in(chat_id), self.ref_year),
         )
 
     def _show_list(self, chat_id: int, mid: Optional[int], pid: int, page: int) -> None:
@@ -374,7 +410,7 @@ class SilverCareInteractiveBot:
         missions = rank_missions(matches, parent, MAX_MISSIONS)
         if not missions:
             kb = _kb([[_btn("📚 전체 혜택 목록", cb("all", pid, 0))],
-                      [_btn("🗑 정보 삭제", cb("x", pid)), _btn("🏠 메뉴", cb("m"))]])
+                      [_btn("🔄 연령대 다시 선택", cb("m"))]])
             self._safe_edit_or_send(chat_id, mid, format_no_mission(parent, self.ref_year), kb)
             return
         ids = [m.benefit.id for m in missions]
@@ -411,7 +447,7 @@ class SilverCareInteractiveBot:
         elif view == "t":
             text = format_phone_script(match.benefit, parent)
         else:
-            text = format_parent_peace_card(parent, match.benefit)
+            text = format_parent_peace_card(match.benefit)
         self._safe_edit_or_send(chat_id, mid, text, build_back_to_mission_keyboard(pid, bid))
 
     def _show_benefit(self, chat_id: int, mid: Optional[int], view: str, pid: int, bid: int, page: int) -> None:
@@ -423,7 +459,7 @@ class SilverCareInteractiveBot:
         if view == "t":
             text, kb = format_phone_script(match.benefit, parent), build_back_to_detail_keyboard(pid, bid, page)
         elif view == "k":
-            text, kb = format_parent_peace_card(parent, match.benefit), build_back_to_detail_keyboard(pid, bid, page)
+            text, kb = format_parent_peace_card(match.benefit), build_back_to_detail_keyboard(pid, bid, page)
         else:
             marked = self.db.is_bookmarked(chat_id, pid, bid)
             text = format_benefit_card(parent, match, marked, self.ref_year)
@@ -436,7 +472,7 @@ class SilverCareInteractiveBot:
             parent, benefit = self.db.get_parent(pid, chat_id), self.db.get_benefit(bid)
             if parent and benefit:
                 items.append((parent, benefit))
-                rows.append([_btn(f"⭐ {_short(benefit.title)} · {parent.alias}", cb("d", pid, bid, 0))])
+                rows.append([_btn(f"⭐ {_short(benefit.title)} · {parent_name(parent, self.ref_year)}", cb("d", pid, bid, 0))])
         rows.append([_btn("🏠 메뉴", cb("m"))])
         self._safe_edit_or_send(chat_id, mid, format_bookmarks(items), _kb(rows))
 
@@ -445,7 +481,7 @@ class SilverCareInteractiveBot:
         if parent is None:
             self._show_menu(chat_id, mid)
             return
-        text = f"🗑 <b>{esc(parent.alias)}</b> 정보와 찜·진행 상태를 삭제할까요?\n되돌릴 수 없어요."
+        text = f"🗑 <b>{esc(parent_name(parent, self.ref_year))}</b> 정보와 찜·진행 상태를 삭제할까요?\n되돌릴 수 없어요."
         self._safe_edit_or_send(chat_id, mid, text, build_delete_confirm_keyboard(pid))
 
     # ---------- transport ----------

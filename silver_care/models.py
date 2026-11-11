@@ -44,6 +44,25 @@ def sido_name(code: str) -> str:
     return SIDO_NAMES.get(norm, norm)
 
 
+# 1-클릭 연령대 기준선: band ➔ 가상 프로필 기준 나이 (2026년 기준 1958년생 / 1964년생)
+AGE_BAND_PROBE_AGE: dict[int, int] = {65: 68, 60: 62}
+
+
+def age_band_of(age_reached: int) -> int:
+    """올해 도달 만 나이 ➔ 연령대 기준선 (65 / 60 / 0=60세 미만)."""
+    if age_reached >= 65:
+        return 65
+    return 60 if age_reached >= 60 else 0
+
+
+def age_band_label(band: int) -> str:
+    return {65: "만 65세 이상", 60: "만 60~64세"}.get(band, "만 60세 미만")
+
+
+def age_band_birth_year(band: int, year: int) -> int:
+    return year - AGE_BAND_PROBE_AGE[band]
+
+
 class JurisdictionType(str, Enum):
     NATIONAL = "NATIONAL"  # 전국 공통 (중앙정부·건강보험)
     LOCAL = "LOCAL"        # 지자체 조례·자체 사업
@@ -177,6 +196,11 @@ class ParentProfile:
     def age_in(self, year: int) -> int:
         """해당 연도 중 도달하는 만 나이 (생일이 지나면 이 나이)."""
         return year - self.birth_year
+
+    @property
+    def is_age_only(self) -> bool:
+        """연령대 1-클릭으로 만든 가상 프로필 (호칭 없음 · 전국 공통)."""
+        return not self.alias and self.sido_code == "ALL"
 
     @property
     def age(self) -> int:

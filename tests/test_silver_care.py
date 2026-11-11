@@ -356,7 +356,7 @@ class TestInteractive:
         _tap(bot, cb("t", pid, 1, 0))
         assert "통화 대본" in ch.calls[-1][2]
         _tap(bot, cb("k", pid, 1, 0))
-        assert "<pre>엄마," in ch.calls[-1][2]
+        assert "<pre>이번에 " in ch.calls[-1][2] and "엄마" not in ch.calls[-1][2]
 
     def test_other_chat_cannot_access_parent(self, db):
         ch = FakeChannel()
@@ -364,7 +364,7 @@ class TestInteractive:
         self._register(bot, chat_id=7)
         pid = db.list_parents(7)[0].id
         _tap(bot, cb("d", pid, 1, 0), chat_id=8)
-        assert "부모님 복지 비서" in ch.calls[-1][2]  # bounced to menu
+        assert "부모님 복지 대리신청 비서" in ch.calls[-1][2]  # bounced to menu
         _tap(bot, cb("b", pid, 1, 0), chat_id=8)
         assert db.list_bookmarks(8) == [] and db.list_bookmarks(7) == []
         _tap(bot, cb("xy", pid), chat_id=8)
@@ -660,18 +660,24 @@ class TestMissionFormatting:
         assert "진단서" in knee_kit and "사전승인" in knee_kit
 
     def test_peace_card_finance_vs_other(self):
-        parent = _parent(alias="아빠")
-        fin = format_parent_peace_text(parent, BY_ID[13])
-        assert fin.startswith("아빠,") and "매달 통장으로" in fin
-        other = format_parent_peace_text(parent, BY_ID[7])
-        assert "받으실 수 있게" in other and "통장" not in other
-        assert len(fin.splitlines()) == 3 and len(other.splitlines()) == 3
-        assert "먼저 말씀" in format_parent_peace_text(parent, BY_ID[5])  # pre-approval
+        fin = format_parent_peace_text(BY_ID[13])
+        assert fin.startswith("이번에 기초연금 알아보고") and "매달 통장으로" in fin
+        other = format_parent_peace_text(BY_ID[7])
+        assert other.startswith(f"이번에 {BY_ID[7].title} 알아봤는데 제가 신청해둘게요.") and "통장" not in other
+        assert len(fin.splitlines()) == 2 and len(other.splitlines()) == 2
+        assert "병원 가시기 전에 제가 미리 신청" in format_parent_peace_text(BY_ID[5])  # pre-approval
+
+    def test_peace_text_has_no_honorific(self):
+        for b in SEED_BENEFITS:
+            text = format_parent_peace_text(b)
+            assert text.startswith(f"이번에 {b.title} ")
+            for alias in ("엄마", "아빠", "어머님", "아버님", "{alias}"):
+                assert alias not in text
 
     def test_peace_card_pii_zero(self):
         parent = _parent(id=424242, chat_id=7820975792, birth_year=1954, sigungu_name="원주시")
         for b in SEED_BENEFITS:
-            card = format_parent_peace_card(parent, b)
+            card = format_parent_peace_card(b)
             for forbidden in ("1954", "원주", "강원", "7820975792", "424242", "chat_id", "위임장", "금융정보"):
                 assert forbidden not in card
 
@@ -682,14 +688,14 @@ class TestMissionFormatting:
         parent = _parent(alias="<엄마>", sigungu_name="<i>구</i>", is_pension_receiver=1)
         m = evaluate_benefit(evil, parent, YEAR)
         for text in (format_single_mission_card(parent, m), format_proxy_action_kit(parent, evil),
-                     format_parent_peace_card(parent, evil)):
+                     format_parent_peace_card(evil)):
             assert "<script>" not in text and "<엄마>" not in text and "<b>기관</b>" not in text
             assert {t.lower() for t in re.findall(r"</?([a-zA-Z]+)", text)} <= {"b", "i", "code", "pre", "a"}
         for p in (_parent(), _parent(sido_code="11", is_low_income=1, is_pension_receiver=1)):
             for m in match_benefits(SEED_BENEFITS, p, YEAR):
                 self._assert_limits(format_single_mission_card(p, m, None, 5, 5, 31, YEAR))
                 self._assert_limits(format_proxy_action_kit(p, m.benefit))
-                self._assert_limits(format_parent_peace_card(p, m.benefit))
+                self._assert_limits(format_parent_peace_card(m.benefit))
 
     def test_mission_keyboards_within_64_bytes(self):
         big = 2_147_483_647
@@ -750,7 +756,7 @@ class TestMissionInteractive:
         _tap(bot, cb("t", pid, 13))
         assert "통화 대본" in ch.calls[-1][2] and _all_callbacks(ch.calls[-1][3])[0] == cb("mc", pid, 13)
         _tap(bot, cb("k", pid, 13))
-        assert "<pre>엄마," in ch.calls[-1][2] and "매달 통장으로" in ch.calls[-1][2]
+        assert "<pre>이번에 기초연금" in ch.calls[-1][2] and "매달 통장으로" in ch.calls[-1][2]
         _tap(bot, cb("mc", pid, 13))
         assert "1순위 복지" in ch.calls[-1][2]
 
@@ -778,3 +784,69 @@ class TestMissionInteractive:
         _tap(bot, cb("xy", pid))
         assert db.list_missions(7, pid) == []
 
+
+
+# ── 실버케어 3.0: 연령대 1-클릭 (호칭·설문 제로) ─────────────
+class TestAgeQuickStart:
+    def test_main_menu_offers_only_two_age_buttons(self):
+        mk = build_main_menu_keyboard([_parent()], True, YEAR)
+        assert _all_callbacks(mk) == [cb("age", 65), cb("age", 60)]
+        labels = json.dumps(mk, ensure_ascii=False)
+        assert "1961년 이전 출생" in labels and "1962~1966년생" in labels
+        menu = format_main_menu([_parent()], YEAR)
+        assert "부모님 복지 대리신청 비서" in menu and "엄마" not in menu
+
+    def test_start_shows_age_menu_without_wizard(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        bot.handle_update({"message": {"chat": {"id": 7}, "text": "/start"}})
+        assert "연령대를 선택" in ch.calls[-1][2] and "1/6" not in ch.calls[-1][2]
+        assert _all_callbacks(ch.calls[-1][3]) == [cb("age", 65), cb("age", 60)]
+
+    def test_age_65_jumps_to_basic_pension(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        _tap(bot, cb("age", 65))
+        text = ch.calls[-1][2]
+        assert "만 65세 이상 자녀가 대신 신청할 1순위 복지" in text and "기초연금" in text
+        assert "엄마" not in text and "년생" not in text
+        p = db.list_parents(7)[0]
+        assert (p.alias, p.birth_year, p.sido_code) == ("", 1958, "ALL") and p.is_age_only
+        datas = _all_callbacks(ch.calls[-1][3])
+        assert cb("prx", p.id, 13) in datas and cb("m") in datas
+        assert "🔄 연령대 다시 선택" in json.dumps(ch.calls[-1][3], ensure_ascii=False)
+        _tap(bot, cb("age", 65))  # second tap reuses the same profile
+        assert len(db.list_parents(7)) == 1
+
+    def test_age_60_jumps_to_knee_surgery(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        _tap(bot, cb("age", 60))
+        text = ch.calls[-1][2]
+        assert "만 60~64세 자녀가 대신 신청할 1순위 복지" in text and BY_ID[5].title in text
+        assert "기초연금" not in text
+        p = db.list_parents(7)[0]
+        assert (p.alias, p.birth_year, p.sido_code) == ("", 1964, "ALL")
+        _tap(bot, cb("age", 65))
+        assert len(db.list_parents(7)) == 2
+
+    def test_age_tools_have_no_honorific(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        _tap(bot, cb("age", 65))
+        pid = db.list_parents(7)[0].id
+        _tap(bot, cb("k", pid, 13))
+        assert "<pre>이번에 기초연금" in ch.calls[-1][2]
+        _tap(bot, cb("t", pid, 13))
+        script = ch.calls[-1][2]
+        assert "만 65세 이상 어르신 자녀" in script and "ALL" not in script and "전국 사시는" not in script
+        _tap(bot, cb("prx", pid, 13))
+        assert "</b> · " not in ch.calls[-1][2].splitlines()[1]
+        _tap(bot, cb("all", pid, 0))
+        assert "만 65세 이상" in ch.calls[-1][2] and "전국 공통" in ch.calls[-1][2]
+
+    def test_invalid_age_band_falls_back_to_menu(self, db):
+        ch = FakeChannel()
+        bot = SilverCareInteractiveBot(ch, db, ref_year=YEAR)
+        _tap(bot, "SC:age:70")
+        assert db.list_parents(7) == [] and "연령대를 선택" in ch.calls[-1][2]
