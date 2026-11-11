@@ -286,14 +286,20 @@ class TestTravelInteractive(unittest.TestCase):
             }
         }
         
-        handled, reason = manager._dispatch_travel_bot_update("fake_travel_token", item)
-        self.assertTrue(handled)
-        self.assertEqual(reason, "travel_message_handled")
-        mock_tg.send_message.assert_called_once()
-        call_args = mock_tg.send_message.call_args[1]
-        self.assertEqual(call_args["chat_id"], "12345")
-        self.assertIn("트래블 패스파인더", call_args["text"])
-        self.assertIn("inline_keyboard", call_args["reply_markup"])
+        try:
+            handled, reason = manager._dispatch_travel_bot_update("fake_travel_token", item)
+            self.assertTrue(handled)
+            self.assertEqual(reason, "travel_message_handled")
+            # P0: the real TelegramChannel API is send_text (send_message never existed)
+            mock_tg.send_message.assert_not_called()
+            mock_tg.send_text.assert_called_once()
+            args, kwargs = mock_tg.send_text.call_args
+            self.assertEqual(args[0], "12345")
+            self.assertIn("트래블 패스파인더", args[1])
+            self.assertEqual(kwargs["parse_mode"], "HTML")
+            self.assertIn("inline_keyboard", kwargs["reply_markup"])
+        finally:
+            manager._travel_handler.shutdown()
 
 
 def _mk_deal(code: str, dep: str, ret: str, price: int, source: str = "LIVE_PG", name: str = ""):
@@ -417,6 +423,8 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
         engine.ensure_deals_sse_verified = MagicMock(side_effect=lambda deals: list(deals))
         handler = TravelInteractiveHandler(bot_token="test", engine=engine)
         handler._finish_with_card = MagicMock()
+        handler.fx_client = MagicMock()
+        handler.fx_client.get_many.return_value = {}
         try:
             with patch("travel_bot_runner.format_telegram_briefing", return_value="ok"):
                 handler._async_execute_and_update("c1", 1, "ALL", "u1", request_seq=1)
@@ -579,10 +587,12 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
             self.assertLessEqual(len(self.loading_edits), 1)
             if self.loading_edits:
                 self.assertIn("실시간 특가 검색 중", self.loading_edits[0])
-            self.assertEqual(handler._msg_seq[("c9", 11)], 1)
+            self.assertEqual(handler._msg_states[("c9", 11)].generation, 1)
+            self.assertEqual(handler._msg_states[("c9", 11)].phase, "DONE")
+            self.assertEqual(handler._msg_states[("c9", 11)].active_workers, 0)
             # Blocked click (cooldown / in-progress) must not bump the sequence
             handler.handle_callback_query("cq2", "c9", 11, "trv:q:NRT", {"id": 901})
-            self.assertEqual(handler._msg_seq[("c9", 11)], 1)
+            self.assertEqual(handler._msg_states[("c9", 11)].generation, 1)
         finally:
             handler.shutdown()
 
@@ -672,6 +682,661 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
 
             self.assertLessEqual(len(msg), 3500)
             self.assertLessEqual(len(re.sub(r"<[^>]+>", "", msg)), 1800)
+
+
+# ----------------------------------------------------------------------
+# v2.3 integration: CityCatalog / scope cache / FX / TG-01 / Zero-Stuck / routing
+# ----------------------------------------------------------------------
+class _FakeResp:
+    def __init__(self, payload):
+        self._b = payload if isinstance(payload, bytes) else __import__("json").dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fx_opener(routes: dict, calls: list | None = None):
+    """routes: {(CUR, "spot"|"chart"): payload | Exception}"""
+
+    def opener(req, timeout=None):
+        url = req.full_url
+        kind = "spot" if "productDetail" in url else "chart"
+        cur = url.split("FX_", 1)[1][:3]
+        if calls is not None:
+            calls.append((cur, kind, timeout))
+        val = routes.get((cur, kind))
+        if val is None:
+            raise AssertionError(f"unexpected FX url {url}")
+        if isinstance(val, BaseException):
+            raise val
+        return _FakeResp(val)
+
+    return opener
+
+
+def _spot(close, full_name, ratio="-0.49"):
+    return {"result": {"closePrice": close, "fluctuationsRatio": ratio, "fullName": full_name,
+                       "localTradedAt": "2026-11-11T10:00:00+09:00"}}
+
+
+def _chart(*closes):
+    return {"result": {"priceInfos": [{"localDate": f"2026-0{8 + i % 2}-01", "closePrice": c} for i, c in enumerate(closes)]}}
+
+
+FX_ROUTES_OK = {
+    ("JPY", "spot"): _spot("912.34", "일본 JPY 100"),
+    ("JPY", "chart"): _chart(940.0, 930.0, 950.0),  # avg 940 -> -2.94% GREEN
+    ("VND", "spot"): _spot("5.42", "베트남 VND 100"),
+    ("VND", "chart"): _chart(5.40, 5.44),  # avg 5.42 -> 0% YELLOW
+    ("IDR", "spot"): _spot("8.70", "인도네시아 IDR 100"),
+    ("IDR", "chart"): _chart(8.50),  # +2.35% ORANGE
+    ("USD", "spot"): _spot("1,339.40", None),
+    ("USD", "chart"): _chart(1339.40),
+}
+
+
+def _make_manager():
+    import tempfile
+    from market_brief.multi_bot_manager import DynamicBotManager, SubscriptionEngine, MultiBotInteractionRouter
+    from market_brief.storage.db import MarketBriefDatabase
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+    tmp.close()
+    db = MarketBriefDatabase(db_path=tmp.name)
+    sub_engine = SubscriptionEngine(db)
+    return DynamicBotManager(sub_engine, MultiBotInteractionRouter(sub_engine))
+
+
+class TestTravelV23Integration(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import travel_brief.naver_live as nl
+
+        self.nl = nl
+        with nl._CACHE_LOCK:
+            nl._MEM_CACHE.clear()
+            nl._IN_FLIGHT.clear()
+            nl._FAIL_CACHE.clear()
+            nl._STALE_BACKUP.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.client = nl.NaverFlightLiveClient(cache_path=Path(self._tmp.name) / "live_cache.json")
+        self.engine = FlightEngine(live_naver=False)
+        self.handlers: list = []
+
+    def tearDown(self):
+        for h in self.handlers:
+            h.shutdown()
+        with self.nl._CACHE_LOCK:
+            self.nl._MEM_CACHE.clear()
+            self.nl._IN_FLIGHT.clear()
+            self.nl._FAIL_CACHE.clear()
+            self.nl._STALE_BACKUP.clear()
+        self._tmp.cleanup()
+
+    def _handler(self, engine=None, capture=True):
+        h = TravelInteractiveHandler(bot_token="dummy_token", engine=engine or self.engine)
+        h.tg = MagicMock()
+        h.tg.send_text.return_value = "501"
+        self.handlers.append(h)
+        self.edits: list = []
+        self.loading_edits: list = []
+        if capture:
+            h._safe_edit_message = lambda chat_id, message_id, text, reply_markup=None: self.edits.append((message_id, text))
+            h._edit_in_place_only = lambda chat_id, message_id, text, reply_markup=None: self.loading_edits.append((message_id, text))
+        return h
+
+    def _catalog(self):
+        from travel_brief.city_catalog import CityCatalog
+
+        return CityCatalog(self.engine.destinations)
+
+    # 1. NFKC / whitespace / punctuation / case normalization
+    def test_01_catalog_normalization(self):
+        cat = self._catalog()
+        for q in ("ＣＴＳ", "cts", " 삿  포로 ", "삿​포로", "SAPPORO", "Sap-poro", "(삿포로)", "삿포로 여행"):
+            self.assertEqual(cat.resolve(q).code, "CTS", q)
+        for q in ("호찌민", "호치민", "Ho Chi Minh", "ho.chi.minh", "사이공"):
+            self.assertEqual(cat.resolve(q).code, "SGN", q)
+        self.assertEqual(cat.resolve("나뜨랑").code, "CXR")
+        self.assertEqual(cat.resolve("TYO").code, "NRT")
+        self.assertEqual(cat.resolve("오사카").metadata_quality, "CURATED")
+
+    # 2. 삿포로 / 신치토세 / CTS -> CTS
+    def test_02_sapporo_aliases_resolve_to_cts(self):
+        cat = self._catalog()
+        for q in ("삿포로", "신치토세", "CTS"):
+            res = cat.resolve(q)
+            self.assertEqual(res.code, "CTS")
+            self.assertEqual(res.metadata_quality, "FALLBACK")
+            self.assertIn("삿포로", res.display_name)
+        self.assertGreaterEqual(len(cat.fallback_codes), 25)
+        for code in ("OKA", "NGO", "MYJ", "CEB", "KLO", "HAN", "SGN", "BKI", "PQC", "CNX", "HNL", "SPN",
+                     "HKG", "MFM", "KHH", "TAO", "PVG", "PEK", "CDG", "LHR", "FCO", "SYD"):
+            self.assertTrue(cat.is_known_code(code), code)
+
+    # 3. Unregistered 3-letter codes are rejected
+    def test_03_unknown_iata_rejected(self):
+        cat = self._catalog()
+        for q in ("XYZ", "abc", "QQQ", "LAX"):
+            self.assertIsNone(cat.resolve(q), q)
+        h = self._handler()
+        self.assertIsNone(h.normalize_filter("XYZ"))
+        h.worker_pool.submit = MagicMock()
+        h.handle_callback_query("cq", "c1", 3, "trv:q:XYZ", {"id": 7})
+        h.worker_pool.submit.assert_not_called()
+        self.assertIn("지원하지 않는", h.tg.answer_callback.call_args[1]["text"])
+        self.assertEqual(h.build_inline_keyboard("XYZ")["inline_keyboard"][0][0]["callback_data"], "trv:r:ALL")
+
+    # 4. Custom city never leaks into ALL results / engine / cache keys
+    def test_04_custom_city_isolated_from_all(self):
+        from datetime import date
+
+        cat = self._catalog()
+        custom = cat.custom_destinations_for("CTS")
+        offline_cts = self.engine.search_deals(dest_code="CTS", custom_destinations=custom, ref_date=date(2026, 11, 20))
+        self.assertTrue(offline_cts)
+        self.assertEqual({d.destination_code for d in offline_cts}, {"CTS"})
+        self.assertNotIn("CTS", self.engine.destinations)
+        self.assertEqual(self.engine.search_deals(dest_code="CTS", ref_date=date(2026, 11, 20)), [])
+        offline_all = self.engine.search_deals(custom_destinations=custom, ref_date=date(2026, 11, 20))
+        self.assertNotIn("CTS", {d.destination_code for d in offline_all})
+
+        live = FlightEngine(live_naver=True)
+        live._live_client = self.client
+        calls: list = []
+
+        def fake_collect(destinations, slots, holiday_fn, fast_mode=False):
+            calls.append(tuple(sorted(destinations)))
+            return [_mk_deal(c, "2026-11-26", "2026-11-29", 300000) for c in sorted(destinations)]
+
+        with patch.object(self.client, "_collect_live_deals_uncached", side_effect=fake_collect):
+            cts = live.search_deals(dest_code="CTS", custom_destinations=custom, ref_date=date(2026, 11, 20), fast_live=True)
+            all_deals = live.search_deals(ref_date=date(2026, 11, 20), fast_live=True)
+        self.assertEqual({d.destination_code for d in cts}, {"CTS"})
+        self.assertNotIn("CTS", {d.destination_code for d in all_deals})
+        self.assertEqual(calls[0], ("CTS",))
+        self.assertNotIn("CTS", calls[1])
+        with self.nl._CACHE_LOCK:
+            for key in self.nl._MEM_CACHE:
+                self.assertFalse("CTS" in key[2] and len(key[2]) > 1, key)
+        self.assertNotIn("CTS", live.destinations)
+
+    # 5. trv:r:CTS cooldown + scope-only cache invalidation
+    def test_05_refresh_scope_cooldown_and_invalidation(self):
+        engine = FlightEngine(live_naver=False)
+        engine._live_client = self.client
+        curated = tuple(sorted(engine.destinations))
+        all_key = ("2026-11-20", 6, curated)
+        cts_key = ("2026-11-20#fast", 6, ("CTS",))
+        all_deals = [_mk_deal(c, "2026-11-26", "2026-11-29", 300000) for c in curated]
+        cts_deals = [_mk_deal("CTS", "2026-11-26", "2026-11-29", 410000)]
+        with self.nl._CACHE_LOCK:
+            self.nl._MEM_CACHE[all_key] = (time.time(), all_deals)
+            self.nl._MEM_CACHE[cts_key] = (time.time(), cts_deals)
+        self.client._save_disk_cache(self.nl._disk_key_for(all_key), all_deals)
+        self.client._save_disk_cache(self.nl._disk_key_for(cts_key), cts_deals)
+
+        h = self._handler(engine=engine)
+        h._async_execute_and_update = MagicMock()
+        h.handle_callback_query("cq1", "c1", 5, "trv:r:CTS", {"id": 1001})
+        with self.nl._CACHE_LOCK:
+            self.assertIn(all_key, self.nl._MEM_CACHE)  # ALL untouched
+            self.assertNotIn(cts_key, self.nl._MEM_CACHE)
+            self.assertIn(cts_key, self.nl._STALE_BACKUP)
+        ttl = self.nl.CACHE_TTL_SECONDS
+        self.assertIsNotNone(self.client._load_disk_cache(self.nl._disk_key_for(all_key), max_age_sec=ttl))
+        self.assertIsNone(self.client._load_disk_cache(self.nl._disk_key_for(cts_key), max_age_sec=ttl))
+        self.assertIsNotNone(self.client._load_disk_cache(
+            self.nl._disk_key_for(cts_key), max_age_sec=self.nl.STALE_FALLBACK_SECONDS, allow_backup=True))
+        # Refresh button keeps its scope
+        self.assertEqual(h.build_inline_keyboard("CTS")["inline_keyboard"][0][0]["callback_data"], "trv:r:CTS")
+
+        # Per-scope cooldown: another user's CTS refresh is throttled, ALL refresh is not
+        h.handle_callback_query("cq2", "c2", 6, "trv:r:CTS", {"id": 1002})
+        self.assertIn("CTS 새로고침은", h.tg.answer_callback.call_args[1]["text"])
+        with self.nl._CACHE_LOCK:
+            self.nl._MEM_CACHE[cts_key] = (time.time(), cts_deals)
+        h.handle_callback_query("cq3", "c3", 7, "trv:r:ALL", {"id": 1003})
+        self.assertIn("조회 중", h.tg.answer_callback.call_args[1]["text"])
+        with self.nl._CACHE_LOCK:
+            self.assertNotIn(all_key, self.nl._MEM_CACHE)
+            self.assertIn(cts_key, self.nl._MEM_CACHE)  # ALL refresh never touches custom scope
+
+    # 6. Every callback_data <= 64 UTF-8 bytes
+    def test_06_all_callbacks_within_64_bytes(self):
+        h = self._handler()
+        cat = h.catalog
+        boards = [h.build_inline_keyboard("ALL"), h.build_onboarding_keyboard()]
+        for code in sorted(cat.curated_codes | cat.fallback_codes):
+            boards.append(h.build_inline_keyboard(code))
+            boards.append(h.build_selected_target_keyboard(code))
+        seen_guide = False
+        for kb in boards:
+            for row in kb["inline_keyboard"]:
+                for btn in row:
+                    cb = btn.get("callback_data")
+                    if cb:
+                        self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
+                        self.assertTrue(cb.startswith("trv:"))
+                        seen_guide = seen_guide or cb == "trv:c:guide"
+        self.assertTrue(seen_guide)
+        self.assertEqual(h.build_inline_keyboard("ALL")["inline_keyboard"][-2][0]["callback_data"], "trv:c:guide")
+
+    # 7. JPY/VND/IDR are 100-unit quotes, others 1-unit
+    def test_07_fx_hundred_unit_parsing(self):
+        from travel_brief.fx_client import FXClient, parse_spot_payload, quote_unit_for
+
+        self.assertEqual(parse_spot_payload("USD", _spot("1,339.40", None))["spot"], 1339.40)
+        client = FXClient(opener=_fx_opener(FX_ROUTES_OK))
+        out = client.get_many(["JPY", "VND", "IDR"])
+        self.assertEqual({c: q.quote_unit for c, q in out.items()}, {"JPY": 100, "VND": 100, "IDR": 100})
+        self.assertAlmostEqual(out["JPY"].spot, 912.34)
+        self.assertAlmostEqual(out["VND"].per_10k_krw, 542.0)
+        self.assertEqual(out["JPY"].full_name, "일본 JPY 100")
+        usd = FXClient(opener=_fx_opener(FX_ROUTES_OK)).get("USD")
+        self.assertEqual(usd.quote_unit, 1)
+        self.assertEqual(quote_unit_for("THB"), 1)
+        self.assertIsNone(usd.per_10k_krw)
+
+    # 8. 3M average + signal boundaries (same quote unit)
+    def test_08_fx_average_and_signal_boundaries(self):
+        from travel_brief.fx_client import FXClient, build_quote, classify_signal, parse_chart_average
+
+        self.assertEqual(classify_signal(-1.5), "GREEN")
+        self.assertEqual(classify_signal(-1.4999), "GREEN")  # rounds to -1.50
+        self.assertEqual(classify_signal(-1.49), "YELLOW")
+        self.assertEqual(classify_signal(1.49), "YELLOW")
+        self.assertEqual(classify_signal(1.5), "ORANGE")
+        self.assertEqual(build_quote("JPY", {"spot": 98.5}, 100.0).signal, "GREEN")
+        self.assertEqual(build_quote("JPY", {"spot": 101.5}, 100.0).signal, "ORANGE")
+        self.assertEqual(build_quote("JPY", {"spot": 100.0}, 100.0).signal, "YELLOW")
+        self.assertAlmostEqual(parse_chart_average(_chart(940.0, 930.0, 950.0)), 940.0)
+        out = FXClient(opener=_fx_opener(FX_ROUTES_OK)).get_many(["JPY", "VND", "IDR"])
+        self.assertAlmostEqual(out["JPY"].avg_3m, 940.0)
+        self.assertEqual(out["JPY"].diff_vs_3m_pct, round((912.34 / 940.0 - 1) * 100, 2))
+        self.assertEqual([out[c].signal for c in ("JPY", "VND", "IDR")], ["GREEN", "YELLOW", "ORANGE"])
+
+    # 9. Timeout / malformed / partial failure + TTL cache + 3-currency parallel cap
+    def test_09_fx_failures_and_cache(self):
+        from travel_brief.fx_client import FXClient
+
+        routes = dict(FX_ROUTES_OK)
+        routes[("VND", "spot")] = TimeoutError("timed out")
+        routes[("THB", "spot")] = b"<html>not json"
+        routes[("IDR", "chart")] = {"result": {"priceInfos": "broken"}}
+        calls: list = []
+        client = FXClient(opener=_fx_opener(routes, calls))
+        out = client.get_many(["JPY", "VND", "THB"])
+        self.assertEqual(set(out), {"JPY"})
+        self.assertTrue(all(t == 2.0 for _, _, t in calls))
+        partial = client.get_many(["IDR"])["IDR"]  # chart malformed -> spot only, no signal
+        self.assertIsNone(partial.signal)
+        self.assertAlmostEqual(partial.spot, 8.70)
+        n = len(calls)
+        client.get_many(["JPY", "IDR"])
+        self.assertEqual(len(calls), n)  # TTL hit
+        self.assertEqual(len(client.get_many(["JPY", "KRW", "IDR", "USD", "VND"])), 3)  # <= 3 currencies
+        self.assertEqual(FXClient(opener=_fx_opener({})).get_many(["JPY"]), {})  # total failure -> empty
+
+    # 10. FX unavailable -> briefing renders normally
+    def test_10_briefing_without_fx(self):
+        from travel_bot_runner import fits_tg01, format_telegram_briefing
+        from travel_brief.fx_client import FXClient
+
+        h = self._handler()
+        h.fx_enabled = True
+        h.fx_client = FXClient(opener=_fx_opener({}))
+        seq = h._next_request_seq("c1", 30)
+        h._async_execute_and_update("c1", 30, "FUK", "u1", request_seq=seq)
+        self.assertEqual(len(self.edits), 1)
+        self.assertIn("후쿠오카 주말 특가 나침반", self.edits[0][1])
+        self.assertNotIn("환율", self.edits[0][1])
+
+        h.fx_client = MagicMock()
+        h.fx_client.get_many.side_effect = RuntimeError("fx down")
+        seq = h._next_request_seq("c1", 30)
+        h._async_execute_and_update("c1", 30, "FUK", "u1", request_seq=seq)
+        self.assertIn("후쿠오카 주말 특가 나침반", self.edits[-1][1])
+
+        recs = self._recs("FUK")
+        for fx in (None, {}):
+            msg = format_telegram_briefing(recs, engine=self.engine, target_city="FUK", fx_map=fx)
+            self.assertTrue(fits_tg01(msg))
+            self.assertNotIn("💱", msg)
+
+        h.fx_client = FXClient(opener=_fx_opener(FX_ROUTES_OK))
+        seq = h._next_request_seq("c1", 30)
+        h._async_execute_and_update("c1", 30, "FUK", "u1", request_seq=seq)
+        self.assertIn("100엔 = 912.3원", self.edits[-1][1])
+        self.assertIn("🟢 환율 꿀구간", self.edits[-1][1])
+
+    def _recs(self, code, **deal_kwargs):
+        from datetime import date
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        deals = self.engine.search_deals(dest_code=code, months_ahead=6, ref_date=date(2026, 11, 20))
+        return BudgetCalculator.rank_recommendations(self.engine.destinations, deals, top_n=3)
+
+    def _live_rec(self, code, price, baseline):
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        deal = _mk_deal(code, "2026-12-03", "2026-12-06", price, source="LIVE_SSE")
+        deal.baseline_krw = baseline
+        meta = self.engine.destinations.get(code) or self._catalog().get(code).meta
+        return BudgetCalculator.evaluate_deal(meta, deal)
+
+    # 11. Savings < 30,000원 are not displayed
+    def test_11_savings_threshold(self):
+        from travel_bot_runner import build_motivation_parts, format_telegram_briefing
+
+        below = self._live_rec("NRT", 351000, 380000)  # 29,000
+        exact = self._live_rec("NRT", 350000, 380000)  # 30,000
+        self.assertFalse(any("💸" in p for p in build_motivation_parts(below.destination, below.best_deal)))
+        self.assertTrue(any("💸" in p for p in build_motivation_parts(exact.destination, exact.best_deal)))
+        self.assertNotIn("💸", format_telegram_briefing([below], engine=self.engine, target_city="NRT"))
+        self.assertIn("💸 평소 시세보다 약 3만 원 저렴", format_telegram_briefing([exact], engine=self.engine, target_city="NRT"))
+        # Offline estimates never claim savings (DATA-01)
+        off = self._recs("NRT")[0]
+        self.assertFalse(any("💸" in p for p in build_motivation_parts(off.destination, off.best_deal)))
+
+    # 12. Short-haul (<= 2.5h) motivation
+    def test_12_short_haul_motivation(self):
+        from travel_bot_runner import build_motivation_parts
+
+        fuk = self._live_rec("FUK", 250000, 260000)
+        dad = self._live_rec("DAD", 380000, 400000)
+        tpe = self._live_rec("TPE", 330000, 340000)  # exactly 2.5h
+        self.assertTrue(any("단거리" in p for p in build_motivation_parts(fuk.destination, fuk.best_deal)))
+        self.assertTrue(any("단거리" in p for p in build_motivation_parts(tpe.destination, tpe.best_deal)))
+        self.assertFalse(any("단거리" in p for p in build_motivation_parts(dad.destination, dad.best_deal)))
+
+    # 13. CURATED vs FALLBACK hook / honesty
+    def test_13_curated_vs_fallback_hooks(self):
+        from travel_bot_runner import build_motivation_parts, format_telegram_briefing
+
+        fuk = self._live_rec("FUK", 200000, 260000)
+        self.assertTrue(fuk.destination.experience_hook)
+        self.assertTrue(any("🎯" in p for p in build_motivation_parts(fuk.destination, fuk.best_deal)))
+        cts = self._live_rec("CTS", 200000, 380000)
+        self.assertEqual(cts.destination.metadata_quality, "FALLBACK")
+        parts = build_motivation_parts(cts.destination, cts.best_deal)
+        self.assertFalse(any("🎯" in p or "💸" in p for p in parts))
+        msg = format_telegram_briefing([cts], engine=self.engine, target_city="CTS")
+        for needle in ("삿포로 주말 특가 나침반", "입국 조건 확인 필요", "실시간 요금·재고 확인 필요", "시내 3성급 호텔 기준", "기본 메타 기준"):
+            self.assertIn(needle, msg)
+        meta = cts.destination
+        self.assertEqual((meta.best_months, meta.caution_months, meta.caution_note), ([], [], "계절 정보 확인 필요"))
+        self.assertTrue(meta.flight_baseline_krw > 0 and meta.hotel_night_avg_krw > 0 and meta.daily_meal_transit_krw > 0)
+
+    def _worst_case_recs(self, url_len=600):
+        from dataclasses import replace
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        recs = []
+        for i, code in enumerate(("FUK", "NRT", "KIX")):
+            meta = replace(
+                self.engine.destinations[code],
+                name=f"<b>도시&'\"{i}" * 30,
+                recommended_hotel_name="그랜드<호텔>&리조트" * 40,
+                recommended_hotel_grade="5성<급>&" * 20,
+                tips="팁<>&설명" * 60,
+                visa_info="비자<>&규정" * 40,
+                experience_hook="체험<>&" * 50,
+                hotel_budget_segment="세그먼트" * 10,
+            )
+            deal = _mk_deal(code, "2026-12-03", "2026-12-06", 250000 + i, source="LIVE_SSE")
+            deal.airline = "항공<사>&" * 20
+            deal.popular_fare_krw = 400000
+            deal.popular_airline = "인기<항공>" * 10
+            deal.is_peak_holiday = True
+            deal.holiday_name = "연휴<>&" * 30
+            rec = BudgetCalculator.evaluate_deal(meta, deal)
+            rec.naver_flight_url = "https://m-flight.naver.com/x?" + "a=1&" * (url_len // 4)
+            rec.hotel_search_url = "https://m-hotel.naver.com/x?" + "b=2&" * (url_len // 4)
+            recs.append(rec)
+        return recs
+
+    # 14. Worst-case HTML <= 3500 & visible <= 1800 with escaping
+    def test_14_tg01_worst_case_limits(self):
+        import re
+        from travel_bot_runner import fits_tg01, format_telegram_briefing, visible_text_len
+        from travel_brief.fx_client import FXClient
+
+        fx = FXClient(opener=_fx_opener(FX_ROUTES_OK)).get_many(["JPY", "VND", "IDR"])
+        for url_len in (100, 600, 6000):
+            recs = self._worst_case_recs(url_len)
+            for target in (None, "ALL", "FUK"):
+                msg = format_telegram_briefing(recs, engine=self.engine, target_city=target, fx_map=fx)
+                self.assertLessEqual(len(msg), 3500, (url_len, target))
+                self.assertLessEqual(visible_text_len(msg), 1800, (url_len, target))
+                self.assertTrue(fits_tg01(msg))
+                tags = set(re.findall(r"</?([a-zA-Z]+)", msg))
+                self.assertTrue(tags <= {"b", "i", "a", "code"}, tags)
+                self.assertNotIn("<호텔>", msg)
+                self.assertNotIn("<b>도시", msg)
+
+    # 15. Compact formatter preserves TOP 3 (city · price · schedule · flight link)
+    def test_15_compact_preserves_top3(self):
+        import re
+        from travel_bot_runner import format_telegram_briefing
+
+        # Realistic Naver deep-link length (~200 chars); absurd URLs are covered by test_14's hard cap.
+        msg = format_telegram_briefing(self._worst_case_recs(200), engine=self.engine, target_city="ALL")
+        visible = re.sub(r"<[^>]+>", "", msg)
+        for i in (1, 2, 3):
+            self.assertIn(f"\n{i}. ", visible)
+        for code in ("FUK", "NRT", "KIX"):
+            self.assertIn(f"({code})", visible)
+        self.assertEqual(msg.count("[✈️ 항공권 최저가]"), 3)
+        self.assertEqual(msg.count("2026-12-03(목)"), 3)
+        self.assertGreaterEqual(msg.count("250,00"), 3)
+
+    # 16. BudgetCalculator & hotel total invariants (also for FALLBACK meta)
+    def test_16_budget_invariants(self):
+        from travel_brief.models import BudgetBreakdown
+
+        cat = self._catalog()
+        for meta in (self.engine.destinations["FUK"], cat.get("CTS").meta, cat.get("CDG").meta):
+            for mult in (1.0, 1.30):
+                b = BudgetBreakdown.calculate(meta, 412345, nights=3, hotel_multiplier=mult)
+                self.assertEqual(b.days, 4)
+                self.assertEqual(b.hotel_night_krw * b.nights, b.hotel_total_krw)
+                self.assertEqual(b.meal_transit_total_krw, meta.daily_meal_transit_krw * 4)
+                self.assertEqual(b.total_per_person_krw, 412345 + b.hotel_total_krw + b.meal_transit_total_krw)
+                self.assertEqual(b.estimated_for_two_krw, 412345 * 2 + b.hotel_total_krw + b.meal_transit_total_krw * 2)
+                if mult == 1.0:
+                    self.assertEqual(b.hotel_total_krw, meta.hotel_night_avg_krw * 3)
+
+    def _http_error(self, code, desc):
+        import io
+        import urllib.error
+
+        return urllib.error.HTTPError(
+            "https://api.telegram.org/x", code, desc, {}, io.BytesIO(('{"description": "%s"}' % desc).encode())
+        )
+
+    # 17. editMessageText 400 / timeout -> HTML send fallback
+    def test_17_edit_failure_falls_back_to_html_send(self):
+        h = self._handler(capture=False)
+        for err in (self._http_error(400, "Bad Request: can't parse entities"), TimeoutError("timed out")):
+            h.tg.reset_mock()
+            h.tg.send_text.return_value = "900"
+            with patch("travel_brief.interactive.urllib.request.urlopen", side_effect=err):
+                ok = h._safe_edit_message("c1", 44, "<b>결과</b>", {"inline_keyboard": []})
+            self.assertTrue(ok)
+            h.tg.send_text.assert_called_once()
+            self.assertEqual(h.tg.send_text.call_args[1]["parse_mode"], "HTML")
+        # "not modified" is success without any send
+        h.tg.reset_mock()
+        with patch("travel_brief.interactive.urllib.request.urlopen",
+                   side_effect=self._http_error(400, "Bad Request: message is not modified")):
+            self.assertTrue(h._safe_edit_message("c1", 44, "x"))
+        h.tg.send_text.assert_not_called()
+        # Loading cards never send new messages
+        with patch("travel_brief.interactive.urllib.request.urlopen", side_effect=TimeoutError("t")):
+            self.assertFalse(h._edit_in_place_only("c1", 44, "loading"))
+        h.tg.send_text.assert_not_called()
+
+    # 18. HTML send fallback failure -> plain-text fallback
+    def test_18_html_send_failure_falls_back_to_plain(self):
+        h = self._handler(capture=False)
+        h.tg.send_text.side_effect = [RuntimeError("Telegram HTTP 400 (sendMessage): can't parse"), "901"]
+        with patch("travel_brief.interactive.urllib.request.urlopen", side_effect=self._http_error(400, "Bad Request")):
+            ok = h._safe_edit_message("c1", 45, "<b>요금 &amp; 일정</b>")
+        self.assertTrue(ok)
+        second = h.tg.send_text.call_args_list[1]
+        self.assertEqual(second[1]["parse_mode"], "")
+        self.assertEqual(second[0][1], "요금 & 일정")
+        h.tg.send_text.side_effect = RuntimeError("down")
+        with patch("travel_brief.interactive.urllib.request.urlopen", side_effect=TimeoutError("t")):
+            self.assertFalse(h._safe_edit_message("c1", 45, "<b>x</b>"))
+
+    def _wait_for(self, cond, timeout=3.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if cond():
+                return True
+            time.sleep(0.02)
+        return cond()
+
+    # 19. Worker submit failure -> immediate error card; watchdog -> timeout card (latest generation only)
+    def test_19_submit_failure_and_watchdog(self):
+        import concurrent.futures
+
+        h = self._handler()
+        h.worker_pool.submit = MagicMock(side_effect=RuntimeError("pool down"))
+        h.handle_callback_query("cq1", "c1", 50, "trv:q:FUK", {"id": 2001})
+        self.assertTrue(any("특가 조회 실패" in t and "시작하지 못했습니다" in t for _, t in self.edits))
+        st = h._msg_states[("c1", 50)]
+        self.assertEqual((st.active_workers, st.phase, st.watchdog), (0, "DONE", None))
+        self.assertNotIn("2001", h.cooldown._in_progress_users)
+
+        h2 = self._handler()
+        h2.watchdog_seconds = 0.15
+        h2.worker_pool.submit = MagicMock(return_value=concurrent.futures.Future())  # never completes
+        h2.handle_callback_query("cq2", "c2", 60, "trv:q:FUK", {"id": 2002})
+        h2.handle_callback_query("cq3", "c2", 60, "trv:q:NRT", {"id": 2003})  # newer generation
+        self.assertTrue(self._wait_for(lambda: any("조회 시간 초과" in t for _, t in self.edits)))
+        time.sleep(0.3)
+        timeouts = [t for _, t in self.edits if "조회 시간 초과" in t]
+        self.assertEqual(len(timeouts), 1)
+        self.assertIn("도쿄", timeouts[0])
+        self.assertEqual(h2._msg_states[("c2", 60)].phase, "TIMEOUT")
+        self.assertNotIn("2003", h2.cooldown._in_progress_users)
+
+    # 20. Messages with active workers are never LRU-evicted
+    def test_20_active_worker_not_evicted(self):
+        h = self._handler()
+        h.max_tracked_messages = 2
+        h._next_request_seq("c", 1)
+        lock_a = h._get_msg_lock("c", 1)
+        h._worker_enter(("c", 1))
+        for mid in (2, 3, 4):
+            h._next_request_seq("c", mid)
+        self.assertIn(("c", 1), h._msg_states)
+        self.assertNotIn(("c", 2), h._msg_states)
+        self.assertIs(h._get_msg_lock("c", 1), lock_a)
+        h._worker_exit(("c", 1))
+        h._next_request_seq("c", 5)
+        self.assertNotIn(("c", 1), h._msg_states)
+        self.assertLessEqual(len(h._msg_states), 2)
+
+    # 21. Older generation never overwrites a newer result
+    def test_21_older_generation_cannot_overwrite(self):
+        from travel_brief.interactive import MessageState
+
+        self.assertEqual(
+            set(MessageState.__dataclass_fields__) >= {"generation", "phase", "lock", "active_workers", "deadline"}, True
+        )
+        h = self._handler()
+        old = h._next_request_seq("c1", 70)
+        new = h._next_request_seq("c1", 70)
+        self.assertTrue(h._edit_if_latest("c1", 70, new, "NEW"))
+        self.assertFalse(h._edit_if_latest("c1", 70, old, "OLD"))
+        self.assertFalse(h._edit_if_latest("c1", 70, new, "LOADING", is_loading=True))
+        self.assertEqual([t for _, t in self.edits], ["NEW"])
+        self.assertGreater(h._msg_states[("c1", 70)].deadline, time.monotonic())
+
+    # 22. Standalone runner & manager route text through the identical entry
+    def test_22_standalone_and_manager_routing_identical(self):
+        import inspect
+        import travel_bot_runner
+        from market_brief.multi_bot_manager import DynamicBotManager
+        from travel_brief.interactive import dispatch_travel_update
+
+        item = {"update_id": 5, "message": {"message_id": 9, "chat": {"id": 777, "type": "private", "first_name": "여행자"},
+                                            "from": {"id": 777, "first_name": "여행자"}, "text": "삿포로"}}
+        calls: list = []
+
+        def fake(self_, *args, **kwargs):
+            calls.append((args, kwargs.get("sender_name")))
+            return True, "travel_search_started"
+
+        manager = _make_manager()
+        with patch.object(TravelInteractiveHandler, "handle_text_message", autospec=True, side_effect=fake), \
+             patch("travel_brief.interactive.TelegramChannel"):
+            self.assertEqual(manager._dispatch_travel_bot_update("tok", item), (True, "travel_message_handled"))
+            standalone = self._handler()
+            dispatch_travel_update(standalone, item, on_subscribe=lambda *_: None, on_unsubscribe=lambda *_: None)
+        manager._travel_handler.shutdown()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(calls[0][0][:4], ("777", 9, "777", "삿포로"))
+        self.assertIn("dispatch_travel_update(", inspect.getsource(travel_bot_runner.run_polling_mode))
+        self.assertNotIn("send_message", inspect.getsource(DynamicBotManager._dispatch_travel_bot_update))
+        # Manager without an unsubscribe hook delegates /stop back to its router
+        with patch("travel_brief.interactive.TelegramChannel"):
+            stop_item = dict(item, message=dict(item["message"], text="/stop"))
+            self.assertEqual(manager._dispatch_travel_bot_update("tok", stop_item), (False, "travel_stop_delegated"))
+        manager._travel_handler.shutdown()
+
+    # 23. /start@BotName, trv:c:guide → AWAITING_CITY, direct city input → loading send → edit
+    def test_23_commands_guide_and_direct_city(self):
+        from travel_brief.interactive import STATE_AWAITING_CITY, STATE_IDLE
+
+        h = self._handler()
+        subs: list = []
+        self.assertEqual(
+            h.handle_text_message("c1", 1, "u1", "/start@KwTravelBot", {}, on_subscribe=lambda c, n: subs.append(c)),
+            (True, "travel_start"),
+        )
+        self.assertEqual(subs, ["c1"])
+        args, kwargs = h.tg.send_text.call_args
+        self.assertIn("트래블 패스파인더", args[1])
+        self.assertIn("trv:c:guide", str(kwargs["reply_markup"]))
+        self.assertEqual(h.handle_text_message("c1", 2, "u1", "/HELP@KwTravelBot", {}), (True, "travel_help"))
+
+        h.handle_callback_query("cq", "c1", 3, "trv:c:guide", {"id": "u1"})
+        self.assertEqual(h.get_chat_state("c1"), STATE_AWAITING_CITY)
+        h.ui_pool.shutdown(wait=True)
+        self.assertIn("기타 지역 직접 검색", h.tg.send_text.call_args[0][1])
+
+        h.tg.send_text.reset_mock()
+        self.assertEqual(h.handle_text_message("c1", 4, "u1", "몰디브 여행", {}), (True, "travel_help_unknown_city"))
+        self.assertIn("아직 지원하지 않는", h.tg.send_text.call_args[0][1])
+        self.assertEqual(h.handle_text_message("c1", 4, "u1", "XYZ", {}), (True, "travel_help_unknown_city"))
+        self.assertEqual(h.get_chat_state("c1"), STATE_AWAITING_CITY)
+
+        h.tg.send_text.reset_mock()
+        h.tg.send_text.return_value = "501"
+        self.assertEqual(h.handle_text_message("c1", 5, "u1", "@KwTravelBot  신치토세", {}), (True, "travel_search_started"))
+        self.assertEqual(h.get_chat_state("c1"), STATE_IDLE)
+        loading = h.tg.send_text.call_args_list[0]
+        self.assertIn("삿포로 실시간 특가 검색 중", loading[0][1])
+        self.assertEqual(loading[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "trv:r:CTS")
+        h.worker_pool.shutdown(wait=True)
+        final = [(mid, t) for mid, t in self.edits if mid == 501]
+        self.assertEqual(len(final), 1)
+        self.assertIn("삿포로 주말 특가 나침반", final[0][1])
+        self.assertIn("(CTS)", final[0][1])
+        self.assertEqual(h._msg_states[("c1", 501)].phase, "DONE")
+        self.assertNotIn("CTS", h.engine.destinations)
 
 
 if __name__ == "__main__":

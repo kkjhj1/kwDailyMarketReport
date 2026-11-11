@@ -26,6 +26,12 @@ class DestinationMeta:
     flight_min_floor_krw: int = 0
     airlines: list[str] = field(default_factory=list)
     hotel_budget_segment: str = "3성급 가성비 비즈니스 호텔"
+    metadata_quality: str = "CURATED"  # "CURATED" (검증 JSON) | "FALLBACK" (카탈로그 보수적 기본값)
+    experience_hook: str = ""  # CURATED 전용 한 줄 체험 포인트 (FALLBACK은 과장 금지로 비움)
+
+    @property
+    def is_curated(self) -> bool:
+        return self.metadata_quality == "CURATED"
 
     def is_best_month(self, month: int) -> bool:
         return month in self.best_months

@@ -54,6 +54,10 @@ from travel_brief.web_report import WebReportGenerator, build_travel_snapshot
 from travel_brief.storage.db import TravelBriefDatabase
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
+from travel_brief.fx_client import FXQuote
+
+MIN_SAVING_DISPLAY_KRW = 30_000
+SHORT_HAUL_HOURS = 2.5
 
 
 def get_travel_bot_token() -> str:
@@ -91,19 +95,101 @@ def resolve_travel_report_url() -> str:
     return "http://161.33.196.211:8002/reports/travel_latest.html"
 
 
+TG01_MAX_HTML = 3500
+TG01_MAX_VISIBLE = 1800
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def visible_text_len(rendered: str) -> int:
+    """Conservative visible length (tags stripped, entities counted as written)."""
+    return len(_TAG_RE.sub("", rendered))
+
+
+def fits_tg01(rendered: str) -> bool:
+    return len(rendered) <= TG01_MAX_HTML and visible_text_len(rendered) <= TG01_MAX_VISIBLE
+
+
+def _clip(raw: str, limit: int) -> str:
+    """Clips plain text *before* escaping so HTML entities are never cut in half."""
+    raw = raw or ""
+    return raw if len(raw) <= limit else raw[: max(1, limit - 1)] + "…"
+
+
+def _fmt_fx_spot(spot: float) -> str:
+    return f"{spot:,.1f}" if spot >= 100 else f"{spot:,.2f}"
+
+
+def format_fx_single_line(quote: Optional[FXQuote], compact: bool = False) -> str:
+    """Single-city FX header line (spot + 3M signal + VND/IDR 1만 단위 보조표기)."""
+    if quote is None:
+        return ""
+    unit = f"{quote.quote_unit}{quote.unit_name}"
+    if compact:
+        sig = f" {quote.signal_label.split(' ')[0]}" if quote.signal else ""
+        return f"💱 {html.escape(unit)} {_fmt_fx_spot(quote.spot)}원{sig}"
+    line = f"💱 <b>환율:</b> {html.escape(unit)} = {_fmt_fx_spot(quote.spot)}원"
+    if quote.per_10k_krw is not None:
+        line += f" (1만{html.escape(quote.unit_name)} ≈ {quote.per_10k_krw:,.0f}원)"
+    if quote.signal and quote.diff_vs_3m_pct is not None:
+        line += f" · 3개월 평균 대비 {quote.diff_vs_3m_pct:+.1f}% {html.escape(quote.signal_label)}"
+    return line
+
+
+def format_fx_summary_line(
+    recommendations: list[TravelRecommendation], fx_map: Optional[dict[str, FXQuote]], compact: bool = False
+) -> str:
+    """ALL TOP 3 compact multi-currency summary (one line, failed currencies omitted)."""
+    if not fx_map:
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for rec in recommendations[:3]:
+        cur = (rec.destination.currency or "").upper()
+        q = fx_map.get(cur)
+        if q is None or cur in seen:
+            continue
+        seen.add(cur)
+        name = html.escape(q.unit_name)
+        if q.signal and q.diff_vs_3m_pct is not None:
+            icon = q.signal_label.split(" ")[0]
+            parts.append(f"{name}{icon}" if compact else f"{name} {icon}{q.diff_vs_3m_pct:+.1f}%")
+        elif not compact:
+            parts.append(f"{name} {_fmt_fx_spot(q.spot)}원/{q.quote_unit}")
+    if not parts:
+        return ""
+    return ("💱 " if compact else "💱 <b>환율(3개월 평균 대비):</b> ") + " · ".join(parts)
+
+
+def build_motivation_parts(dest: DestinationMeta, deal: FlightDeal, compact: bool = False) -> list[str]:
+    """Measured-data motivation only (DATA-01): live savings >= 30,000원 (CURATED baseline only),
+    short-haul <= 2.5h, and CURATED experience hook (FALLBACK cities never get hype)."""
+    parts: list[str] = []
+    if deal.is_live and dest.is_curated and deal.baseline_krw > 0:
+        saving = deal.baseline_krw - deal.price_min_krw
+        if saving >= MIN_SAVING_DISPLAY_KRW:
+            parts.append(f"💸 평소 시세보다 약 {round_man(saving)}만 원 저렴")
+    if 0 < dest.flight_time_hours <= SHORT_HAUL_HOURS:
+        parts.append(f"⏱️ 비행 약 {dest.flight_time_hours:g}시간 단거리")
+    if not compact and dest.is_curated and dest.experience_hook:
+        parts.append(f"🎯 {html.escape(_clip(dest.experience_hook, 40))}")
+    return parts
+
+
 def format_telegram_briefing(
     recommendations: list[TravelRecommendation],
     web_report_url: str = "http://161.33.196.211:8002/reports/travel_latest.html",
     engine: Optional[FlightEngine] = None,
     snapshot: Optional[TravelSnapshot] = None,
     target_city: Optional[str] = None,
+    fx_map: Optional[dict[str, FXQuote]] = None,
 ) -> str:
-    """Format mobile-optimized Telegram message with concise hierarchy and <=4096 single-message guarantee.
+    """Format mobile-optimized Telegram message under the strict TG-01 caps (HTML<=3500, visible<=1800).
 
     `target_city`:
       - None  : scheduled/legacy briefing (full 6-month monthly summary incl. SSE verification).
       - "ALL" : on-demand all-city query (monthly summary from the already-warm deal cache, no extra SSE).
       - code  : on-demand single-city query (single-city header, no monthly matrix / SSE).
+    `fx_map`: pre-fetched {currency: FXQuote} injected by the worker (no network I/O here; Fail-Open).
     """
     now_str = snapshot.generated_at if snapshot else datetime.now().strftime("%Y-%m-%d %H:%M")
     is_live_mode = any(r.best_deal.is_live for r in recommendations[:3])
@@ -117,8 +203,9 @@ def format_telegram_briefing(
         if single_city_meta is None and engine is not None:
             single_city_meta = engine.destinations.get(target_norm)
 
+    hotel_note = "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>"
     if single_city_meta is not None:
-        city_name = html.escape(single_city_meta.name)
+        city_name = html.escape(_clip(single_city_meta.name, 24))
         city_code = html.escape(single_city_meta.code)
         hero = recommendations[0].best_deal if recommendations else None
         if hero is not None and hero.data_source == "LIVE_SSE":
@@ -130,43 +217,56 @@ def format_telegram_briefing(
         else:
             source_tag = ""
             fare_note = "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>"
-        header_lines = [
-            f"✈️ <b>[{city_name} 주말 특가 나침반{source_tag}]</b>",
-            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
-            fare_note,
-            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
-            "──────────────────",
-            f"🔥 <b>{city_name} ({city_code}) 추천 최저가 일정 TOP {min(len(recommendations), 3)}</b>",
-        ]
+        title_line = f"✈️ <b>[{city_name} 주말 특가 나침반{source_tag}]</b>"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)"
+        notes = [fare_note, hotel_note]
+        if not single_city_meta.is_curated:
+            notes.append("ℹ️ <i>기본 메타 기준: 계절·입국 조건·숙소는 링크에서 확인 필요</i>")
+        top_title = f"🔥 <b>{city_name} ({city_code}) 추천 최저가 일정 TOP {min(len(recommendations), 3)}</b>"
     elif is_live_mode:
-        header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>",
-            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)",
-            "💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>",
-            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
-            "──────────────────",
-            "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>",
-        ]
+        title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)"
+        notes = ["💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>", hotel_note]
+        top_title = "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>"
     else:
-        header_lines = [
-            "✈️ <b>[주말 해외여행 6개월 특가 나침반]</b>",
-            f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드",
-            "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>",
-            "💡 <i>숙소: 3성급 비즈니스 기준예산 (추천호텔 실시간 요금 상이)</i>",
-            "──────────────────",
-            "🔥 <b>이번 주 가성비 BEST TOP 3</b>",
-        ]
+        title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반]</b>"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드"
+        notes = ["💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>", hotel_note]
+        top_title = "🔥 <b>이번 주 가성비 BEST TOP 3</b>"
 
-    def _build_body(include_banner_note: bool = True, include_monthly_airline: bool = True, monthly_limit: int = 6, top_limit: int = 3) -> str:
-        lines = list(header_lines)
-        for i, rec in enumerate(recommendations[:top_limit], 1):
+    fx_map = fx_map or {}
+
+    def _fx_line(compact: bool) -> str:
+        if single_city_meta is not None:
+            return format_fx_single_line(fx_map.get((single_city_meta.currency or "").upper()), compact=compact)
+        return format_fx_summary_line(recommendations, fx_map, compact=compact)
+
+    safe_web_url = html.escape(web_report_url, quote=True)
+
+    def _build_body(
+        include_banner_note: bool = True,
+        include_monthly_airline: bool = True,
+        monthly_limit: int = 6,
+        fx_mode: str = "full",
+        motivation_mode: str = "full",
+        include_hotel_extras: bool = True,
+        include_two_person: bool = True,
+    ) -> str:
+        lines = [title_line, basis_line]
+        if fx_mode != "none":
+            fx_line = _fx_line(compact=(fx_mode == "short"))
+            if fx_line:
+                lines.append(fx_line)
+        lines.extend(notes)
+        lines.extend(["──────────────────", top_title])
+        for i, rec in enumerate(recommendations[:3], 1):
             dest = rec.destination
             deal = rec.best_deal
             budget = rec.budget
 
             season_icon = "✨" if rec.season_status == "BEST_SEASON" else ("⚠️" if rec.season_status == "CAUTION" else "🌤️")
             if deal.is_peak_holiday and deal.price_diff_pct >= 5.0:
-                deal_tag = f" [🚨 {html.escape(deal.holiday_name or '연휴 성수기')} {deal.price_diff_pct:+.0f}%]"
+                deal_tag = f" [🚨 {html.escape(_clip(deal.holiday_name or '연휴 성수기', 16))} {deal.price_diff_pct:+.0f}%]"
             elif deal.is_super_deal:
                 deal_tag = f" [🔥 초특가 {deal.price_diff_pct:+.0f}%]"
             elif deal.discount_pct >= 7.0:
@@ -174,15 +274,16 @@ def format_telegram_briefing(
             else:
                 deal_tag = ""
 
-            chatgpt_link = AIPromptGenerator.get_chatgpt_deep_link(
-                AIPromptGenerator.build_compact_prompt(dest, deal, budget)
-            )
-
             hotel_raw = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else f"{dest.name} 추천 호텔"
-            hotel_name_str = html.escape(hotel_raw)
-            hotel_grade_str = f" ({html.escape(dest.recommended_hotel_grade)})" if dest.recommended_hotel_grade else ""
-            feat_raw = dest.recommended_hotel_features.split(",")[0].strip() if dest.recommended_hotel_features else ""
-            hotel_feat_str = f" · {html.escape(feat_raw)}" if feat_raw else ""
+            hotel_name_str = html.escape(_clip(hotel_raw, 30))
+            hotel_grade_str = f" ({html.escape(_clip(dest.recommended_hotel_grade, 20))})" if dest.recommended_hotel_grade else ""
+            # FALLBACK hotels always disclose "실시간 요금·재고 확인 필요"; curated ones keep the legacy line.
+            feat_raw = (
+                dest.recommended_hotel_features.split(",")[0].strip()
+                if (dest.recommended_hotel_features and not dest.is_curated)
+                else ""
+            )
+            hotel_feat_str = f" · {html.escape(_clip(feat_raw, 24))}" if (feat_raw and include_hotel_extras) else ""
 
             naver_flight_link = rec.naver_flight_url or FlightEngine.build_naver_flight_url(
                 deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
@@ -190,14 +291,12 @@ def format_telegram_briefing(
             hotel_search_link = rec.hotel_search_url or FlightEngine.build_naver_hotel_url(
                 hotel_raw, deal.departure_date, deal.return_date
             )
-
             safe_flight_url = html.escape(naver_flight_link, quote=True)
             safe_hotel_url = html.escape(hotel_search_link, quote=True)
-            safe_ai_url = html.escape(chatgpt_link, quote=True)
 
             tip_clean = dest.tips.split(",")[0].strip() if dest.tips else ""
-            tip_str = f" · {html.escape(tip_clean)}" if tip_clean else ""
-            safe_airline = html.escape(deal.airline)
+            tip_str = f" · {html.escape(_clip(tip_clean, 40))}" if tip_clean else ""
+            safe_airline = html.escape(_clip(deal.airline, 20))
 
             if deal.data_source == "LIVE_SSE":
                 fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · {html.escape(deal.live_payment_note)})"
@@ -213,7 +312,7 @@ def format_telegram_briefing(
             )
 
             sched_lines = [
-                f"\n<b>{i}. {html.escape(dest.name)} ({html.escape(dest.code)})</b> {season_icon}{deal_tag}",
+                f"\n<b>{i}. {html.escape(_clip(dest.name, 24))} ({html.escape(dest.code)})</b> {season_icon}{deal_tag}",
                 f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)",
             ]
             if deal.data_source == "LIVE_SSE" and (deal.exact_ret_time or deal.next_day_arrival):
@@ -223,17 +322,33 @@ def format_telegram_briefing(
 
             sched_lines.append(fare_line)
             if include_banner_note and deal.popular_banner_note:
-                sched_lines.append(f"    └ 💡 <i>네이버 상단 배너 대신 '가격 낮은 순' 1위 실측가</i>")
+                sched_lines.append("    └ 💡 <i>네이버 상단 배너 대신 '가격 낮은 순' 1위 실측가</i>")
+            if motivation_mode != "none":
+                motive = build_motivation_parts(dest, deal, compact=(motivation_mode == "short"))
+                if motive:
+                    sched_lines.append(f"  • 포인트: {' · '.join(motive)}")
 
-            visa_short = dest.visa_info.split("(")[0].strip() if dest.visa_info else "무비자"
             sched_lines.extend([
                 f"  • 숙소 예산: <b>{html.escape(dest.hotel_budget_segment)}</b> 3박 약 {h_man}만 원",
-                f"    └ 추천 호텔: {hotel_name_str}{hotel_grade_str} (실제 요금 링크 확인)",
+                f"    └ 추천 호텔: {hotel_name_str}{hotel_grade_str}{hotel_feat_str} (실제 요금 링크 확인)",
                 f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
-                f"    └ 2인 동행 시: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1인당 {share_1p}만)",
-                f"  • 참고: {html.escape(visa_short)}{tip_str}",
-                f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 숙소 실시간 요금]</a> · <a href="{safe_ai_url}">[🤖 AI 맞춤일정]</a>',
             ])
+            if include_two_person:
+                sched_lines.append(f"    └ 2인 동행 시: 약 {round_man(budget.estimated_for_two_krw)}만 원 (1인당 {share_1p}만)")
+            if include_hotel_extras:
+                visa_short = dest.visa_info.split("(")[0].strip() if dest.visa_info else "무비자"
+                sched_lines.append(f"  • 참고: {html.escape(_clip(visa_short, 30))}{tip_str}")
+                chatgpt_link = AIPromptGenerator.get_chatgpt_deep_link(
+                    AIPromptGenerator.build_compact_prompt(dest, deal, budget)
+                )
+                safe_ai_url = html.escape(chatgpt_link, quote=True)
+                sched_lines.append(
+                    f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 숙소 실시간 요금]</a> · <a href="{safe_ai_url}">[🤖 AI 맞춤일정]</a>'
+                )
+            else:
+                sched_lines.append(
+                    f'  👉 <a href="{safe_flight_url}">[✈️ 항공권 최저가]</a> · <a href="{safe_hotel_url}">[🏨 숙소 실시간 요금]</a>'
+                )
             lines.extend(sched_lines)
 
         if monthly_limit > 0 and all_months:
@@ -248,11 +363,32 @@ def format_telegram_briefing(
                     f"  • <b>{m_short}</b>: {html.escape(c_dest.name)} <b>{p_disp}</b> ({dep_short} {c_deal.departure_day_of_week}~{c_deal.return_day_of_week}{airline_disp})"
                 )
 
-        safe_web_url = html.escape(web_report_url, quote=True)
         lines.extend([
             "\n──────────────────",
             f'🗂️ <b>모바일·PC 상세 웹 리포트:</b>\n👉 <a href="{safe_web_url}">월별 큰글씨 카드 &amp; 6개월 전체 비교표 열기</a>',
         ])
+        return "\n".join(lines)
+
+    def _build_slim(name_limit: int, with_links: bool, with_report: bool) -> str:
+        """TOP 3 preserving slim template: city · price · schedule · flight link only."""
+        lines = [title_line, basis_line, "──────────────────", top_title]
+        for i, rec in enumerate(recommendations[:3], 1):
+            deal = rec.best_deal
+            price = deal.exact_price_str if deal.is_live else deal.price_band_str
+            lines.append(
+                f"\n<b>{i}. {html.escape(_clip(rec.destination.name, name_limit))} ({html.escape(rec.destination.code)})</b>"
+                f" · <b>{html.escape(price)}</b>"
+            )
+            lines.append(
+                f"  📅 {deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})"
+            )
+            if with_links:
+                link = rec.naver_flight_url or FlightEngine.build_naver_flight_url(
+                    deal.origin_code, deal.destination_code, deal.departure_date, deal.return_date
+                )
+                lines.append(f'  👉 <a href="{html.escape(link, quote=True)}">[✈️ 항공권 최저가]</a>')
+        if with_report:
+            lines.append(f'\n🗂️ <a href="{safe_web_url}">상세 웹 리포트 열기</a>')
         return "\n".join(lines)
 
     # Build concise, readable 6-month monthly best value summary directly in Telegram
@@ -281,30 +417,29 @@ def format_telegram_briefing(
                 for (m, d_meta, _), v_deal in zip(monthly_picks, verified_m_deals)
             ]
 
-    for top_lim, banner_opt, m_air_opt, m_lim in (
-        (3, True, True, 6),
-        (3, True, False, 6),
-        (3, False, False, 6),
-        (3, False, False, 3),
-        (3, False, False, 0),
-        (2, False, False, 0),
-        (1, False, False, 0),
-    ):
-        rendered = _build_body(
-            include_banner_note=banner_opt,
-            include_monthly_airline=m_air_opt,
-            monthly_limit=m_lim,
-            top_limit=top_lim,
-        )
-        visible = re.sub(r'<[^>]+>', '', rendered)
-        # TG-01 strict goal: HTML <= 3500 & visible <= 1800; hard limit <= 4096
-        if len(rendered) <= 3500 and len(visible) <= 1800:
+    # TG-01 trimming ladder: ① 월별/배너 → ② FX·동기부여 → ③ 호텔특징·비자·AI → ④ 2인 설명
+    # → ⑤ TOP 3 보존 슬림 → ⑥ 강제 상한. Never returns a message above the caps.
+    base = dict(include_banner_note=False, include_monthly_airline=False)
+    no_month = dict(base, monthly_limit=0)
+    ladder = (
+        dict(),
+        base,
+        dict(base, monthly_limit=3),
+        no_month,
+        dict(no_month, fx_mode="short", motivation_mode="short"),
+        dict(no_month, fx_mode="none", motivation_mode="none"),
+        dict(no_month, fx_mode="none", motivation_mode="none", include_hotel_extras=False),
+        dict(no_month, fx_mode="none", motivation_mode="none", include_hotel_extras=False, include_two_person=False),
+    )
+    for opts in ladder:
+        rendered = _build_body(**opts)
+        if fits_tg01(rendered):
             return rendered
-        if len(rendered) <= 4096:
-            last_valid = rendered
-    if 'last_valid' in locals():
-        return last_valid
-    raise ValueError(f"Formatted Telegram message ({len(rendered)} chars) exceeds Telegram 4096-char limit")
+    for name_limit, with_links, with_report in ((24, True, True), (12, True, False), (12, False, False)):
+        rendered = _build_slim(name_limit, with_links, with_report)
+        if fits_tg01(rendered):
+            return rendered
+    return "✈️ <b>[주말 특가 나침반]</b>\n특가 요약이 너무 길어 표시를 줄였습니다. 아래 버튼으로 다시 조회해 주세요."
 
 
 def _build_month_matrix(
@@ -499,43 +634,16 @@ def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
         print("✅ Demo On-Demand Poller verification passed cleanly.")
         return
 
-    print(f"🚀 Starting Travel Pathfinder Interactive Poller (v2.2, live_naver={live_naver})...")
+    print(f"🚀 Starting Travel Pathfinder Interactive Poller (v2.3, live_naver={live_naver})...")
     db_path = BASE_DIR / "alerts.sqlite3"
     db = TravelBriefDatabase(db_path=db_path)
     engine = FlightEngine(live_naver=live_naver)
-    from travel_brief.interactive import TravelInteractiveHandler
+    from travel_brief.interactive import TravelInteractiveHandler, dispatch_travel_update
     handler = TravelInteractiveHandler(bot_token=token, engine=engine)
-    dispatcher = SafeTelegramDispatcher()
     last_offset = db.get_telegram_offset()
 
     import json
     import urllib.request
-
-    def _async_send_welcome(chat_id: str, sender_name: str) -> None:
-        try:
-            all_deals = engine.search_deals(dest_code=None, months_ahead=6)
-            recs = BudgetCalculator.rank_recommendations(
-                destinations=engine.destinations,
-                deals=all_deals,
-                top_n=3,
-            )
-            if not recs:
-                return
-            welcome_text = format_telegram_briefing(
-                recommendations=recs[:3],
-                web_report_url=handler.report_url,
-                engine=engine,
-            )
-            kb = handler.build_inline_keyboard()
-            dispatcher.send_text_to_recipient(
-                tg=handler.tg,
-                chat_id=chat_id,
-                text=welcome_text,
-                parse_mode="HTML",
-                reply_markup=kb,
-            )
-        except Exception as exc:
-            logger.error("Async welcome dispatch failed for %s: %s", chat_id, exc)
 
     print(f"📡 Polling active on bot (offset: {last_offset}). Press Ctrl+C to stop.")
     try:
@@ -557,64 +665,14 @@ def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
                     if up_id > last_offset:
                         last_offset = up_id
 
-                    if "callback_query" in item:
-                        cq = item["callback_query"]
-                        cq_id = str(cq.get("id", ""))
-                        sender = cq.get("from", {}) or {}
-                        msg = cq.get("message", {}) or {}
-                        chat = msg.get("chat", {}) or sender
-                        chat_id = str(chat.get("id") or sender.get("id") or "")
-                        msg_id = int(msg.get("message_id") or 0)
-                        cb_data = str(cq.get("data") or "")
-
-                        if cb_data.startswith("trv:"):
-                            handler.handle_callback_query(
-                                cq_id=cq_id,
-                                chat_id=chat_id,
-                                message_id=msg_id,
-                                callback_data=cb_data,
-                                from_user=sender,
-                            )
-
-                    elif "message" in item:
-                        msg = item["message"]
-                        chat = msg.get("chat", {}) or {}
-                        chat_id = str(chat.get("id") or "")
-                        text = (msg.get("text") or "").strip().lower()
-                        sender = msg.get("from", {}) or chat
-                        sender_name = chat.get("title") or chat.get("first_name") or f"사용자_{chat_id[-4:]}"
-
-                        if not chat_id or not text:
-                            continue
-
-                        if text in {"/stop", "/구독취소", "/unsubscribe"}:
-                            db.deactivate_recipient(chat_id, reason="USER_STOP_COMMAND")
-                            dispatcher.send_text_to_recipient(
-                                tg=handler.tg,
-                                chat_id=chat_id,
-                                text="👋 여행 특가 구독이 해지되었습니다. 언제든 <code>/start</code>를 누르면 다시 받아보실 수 있습니다.",
-                                parse_mode="HTML",
-                            )
-                        elif text in {"/start", "/구독", "안녕"}:
-                            db.add_recipient(chat_id, name=sender_name, topic="TRAVEL")
-                            onboarding_html = (
-                                f"🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"🎯 <b>[1단계: 관심 여행지 선택]</b>\n"
-                                f"아래 버튼에서 원하시는 여행지를 선택하신 후 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르면 "
-                                f"구독 직전에 발송되었던 최신 주말 항공·숙박 특가를 즉시 확인하실 수 있습니다 👇"
-                            )
-                            dispatcher.send_text_to_recipient(
-                                tg=handler.tg,
-                                chat_id=chat_id,
-                                text=onboarding_html,
-                                parse_mode="HTML",
-                                reply_markup=handler.build_onboarding_keyboard(),
-                            )
-                        elif text in {"/여행", "/today", "/특가"}:
-                            db.add_recipient(chat_id, name=sender_name, topic="TRAVEL")
-                            # Offload welcome brief to worker pool so polling loop NEVER blocks (C-B)
-                            handler.worker_pool.submit(_async_send_welcome, chat_id, sender_name)
+                    # Single routing entry shared with DynamicBotManager (handle_callback_query /
+                    # handle_text_message); subscription hooks bind this runner's recipient DB.
+                    dispatch_travel_update(
+                        handler,
+                        item,
+                        on_subscribe=lambda cid, name: db.add_recipient(cid, name=name, topic="TRAVEL"),
+                        on_unsubscribe=lambda cid: db.deactivate_recipient(cid, reason="USER_STOP_COMMAND"),
+                    )
                 except Exception as item_exc:
                     logger.warning("Error processing update item: %s", item_exc)
 

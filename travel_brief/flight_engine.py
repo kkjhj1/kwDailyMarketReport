@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from travel_brief.city_catalog import CURATED_EXPERIENCE_HOOKS
 from travel_brief.models import DestinationMeta, FlightDeal, format_departure_time_slot
 
 
@@ -66,6 +67,8 @@ class FlightEngine:
                 flight_min_floor_krw=item.get("flight_min_floor_krw", 0),
                 airlines=item.get("airlines", []),
                 hotel_budget_segment=item.get("hotel_budget_segment", "3성급 가성비 비즈니스 호텔"),
+                metadata_quality=item.get("metadata_quality", "CURATED"),
+                experience_hook=item.get("experience_hook") or CURATED_EXPERIENCE_HOOKS.get(item["code"], ""),
             )
             self.destinations[meta.code] = meta
 
@@ -276,15 +279,20 @@ class FlightEngine:
         super_deals_only: bool = False,
         ref_date: Optional[date] = None,
         fast_live: bool = False,
+        custom_destinations: Optional[dict[str, DestinationMeta]] = None,
     ) -> list[FlightDeal]:
         """Search flight deals across destinations and weekend dates.
         `fast_live=True` limits live SSE verification to the cheapest slot per destination (on-demand UX).
+        `custom_destinations` is a request-scoped mapping (e.g. CityCatalog FALLBACK city) used only when
+        `dest_code` targets it; it never mutates `self.destinations` and never joins the ALL search.
         """
         slots = self.generate_weekend_slots(ref_date=ref_date, months_ahead=months_ahead)
         if dest_code:
             code = dest_code.strip().upper()
             if code in self.destinations:
                 targets = [self.destinations[code]]
+            elif custom_destinations and code in custom_destinations:
+                targets = [custom_destinations[code]]
             else:
                 # Explicitly handle invalid destination code instead of silent fallback to all
                 return []
@@ -365,11 +373,56 @@ class FlightEngine:
         deals.sort(key=lambda d: d.price_krw)
         return deals
 
-    def ensure_deals_sse_verified(self, deals: list[FlightDeal]) -> list[FlightDeal]:
+    def ensure_deals_sse_verified(
+        self,
+        deals: list[FlightDeal],
+        custom_destinations: Optional[dict[str, DestinationMeta]] = None,
+    ) -> list[FlightDeal]:
         """Ensures any display-selected deals are upgraded from LIVE_PG to LIVE_SSE when live mode is active."""
         if not self.live_naver or self._live_client is None or not deals:
             return deals
-        return self._live_client.ensure_deals_sse_verified(deals, self.destinations)
+        dest_map = {**custom_destinations, **self.destinations} if custom_destinations else self.destinations
+        return self._live_client.ensure_deals_sse_verified(deals, dest_map)
+
+    def invalidate_scope(self, scope_codes: set[str] | list[str] | tuple[str, ...]) -> None:
+        """Scope-isolated refresh: demotes only cache entries whose destination set intersects `scope_codes`.
+        `trv:r:CTS` -> {"CTS"} leaves the 10-city ALL entries fresh; `trv:r:ALL` -> curated codes leaves
+        custom-city entries fresh. Pre-refresh in-flight leaders can no longer repopulate fresh caches.
+        """
+        from travel_brief import naver_live as nl
+
+        scope = {c.upper() for c in scope_codes if c}
+        if not scope:
+            return
+        live_client = self._live_client if self._live_client is not None else nl.NaverFlightLiveClient()
+        cache_path = Path(live_client.cache_path)
+
+        def _hit(key_codes) -> bool:
+            return bool(scope.intersection(key_codes))
+
+        with nl._CACHE_LOCK:
+            # Epoch bump detaches pre-refresh leaders (other scopes only lose one cache write, never data).
+            nl._CACHE_EPOCH += 1
+            for k in [k for k in nl._MEM_CACHE if _hit(k[2])]:
+                nl._STALE_BACKUP[k] = nl._MEM_CACHE.pop(k)
+            for k in [k for k in nl._FAIL_CACHE if _hit(k[2])]:
+                nl._FAIL_CACHE.pop(k, None)
+            for k in [k for k in nl._IN_FLIGHT if _hit(k[2])]:
+                nl._IN_FLIGHT.pop(k, None)
+            try:
+                if cache_path.exists():
+                    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                    entries, backup = nl._normalize_disk_payload(raw)
+                    moved = False
+                    for dk in list(entries):
+                        parsed = nl._parse_disk_key(dk)
+                        if parsed is None or _hit(parsed[2]):
+                            backup[dk] = entries.pop(dk)
+                            moved = True
+                    if moved:
+                        nl._write_disk_payload(cache_path, entries, backup)
+            except Exception:
+                pass
 
     def get_cheapest_deal_per_destination(
         self, months_ahead: int = 6, ref_date: Optional[date] = None

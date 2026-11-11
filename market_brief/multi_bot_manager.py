@@ -1606,7 +1606,7 @@ class DynamicBotManager:
     def _dispatch_travel_bot_update(self, bot_token: str, item: dict[str, Any]) -> tuple[bool, str]:
         """Dispatches update to travel_brief's interactive on-demand handler."""
         try:
-            from travel_brief.interactive import TravelInteractiveHandler
+            from travel_brief.interactive import TravelInteractiveHandler, dispatch_travel_update
         except ImportError:
             return False, "travel_interactive_not_available"
 
@@ -1618,44 +1618,9 @@ class DynamicBotManager:
             handler = TravelInteractiveHandler(bot_token=bot_token, engine=FlightEngine(live_naver=live_flag))
             self._travel_handler = handler
 
-        if "callback_query" in item:
-            cq = item["callback_query"]
-            cq_id = str(cq.get("id", ""))
-            sender = cq.get("from", {}) or {}
-            msg = cq.get("message", {}) or {}
-            chat = msg.get("chat", {}) or sender
-            chat_id = str(chat.get("id") or sender.get("id") or "")
-            msg_id = int(msg.get("message_id") or 0)
-            cb_data = str(cq.get("data") or "")
-
-            if cb_data.startswith("trv:"):
-                handler.handle_callback_query(
-                    cq_id=cq_id,
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    callback_data=cb_data,
-                    from_user=sender,
-                )
-                return True, "travel_callback_handled"
-
-        elif "message" in item:
-            msg = item["message"]
-            chat = msg.get("chat", {}) or {}
-            sender = msg.get("from", {}) or chat
-            chat_id = str(chat.get("id") or sender.get("id") or "")
-            text = (msg.get("text") or "").strip()
-            if chat_id and text:
-                welcome_html = (
-                    "✈️ <b>[트래블 패스파인더] 주말 해외여행 6개월 특가 나침반</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
-                    "🎯 <b>관심 여행지를 선택해 주세요.</b>\n"
-                    "선택 즉시 네이버 실시간 최저가 항공권 및 3성급 가성비 숙소 패키지가 안내됩니다."
-                )
-                markup = handler.build_onboarding_keyboard()
-                handler.tg.send_message(chat_id=chat_id, text=welcome_html, parse_mode="HTML", reply_markup=markup)
-                return True, "travel_message_handled"
-
-        return False, "not_travel_interactive_event"
+        # Same single entry as `travel_bot_runner --poll` (handler.handle_text_message / handle_callback_query).
+        # /stop is delegated back (handled=False) so the router performs the real unsubscribe.
+        return dispatch_travel_update(handler, item)
 
     def _dispatch_admission_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
         """Dispatches domain-specific admission callbacks and messages to AdmissionInteractiveBot."""
