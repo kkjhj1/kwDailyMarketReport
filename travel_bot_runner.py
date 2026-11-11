@@ -613,7 +613,123 @@ def run_briefing(
     return success_count > 0
 
 
-def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
+def make_travel_unsubscribe_hook(db: TravelBriefDatabase):
+    """Standalone `/stop`: TRAVEL recipient + every price watch deactivated in one transaction;
+    the platform `subscriptions` row (if present in the same DB) is cancelled too."""
+
+    def _unsubscribe(chat_id: str) -> dict:
+        return db.deactivate_recipient_and_watches(chat_id, reason="USER_STOP_COMMAND", cancel_subscription=True)
+
+    return _unsubscribe
+
+
+DEMO_WATCH_CHATS = ("demo_watch_chat_1", "demo_watch_chat_2")
+
+
+def _demo_watch_quote_fetcher(code: str, custom: Optional[dict], max_target: int) -> list[FlightDeal]:
+    """Deterministic synthetic quotes: one pushable LIVE_SSE+FRESH fare per city plus PG / STALE decoys."""
+
+    def deal(dep: str, ret: str, dep_dow: str, ret_dow: str, price: int, source: str, freshness: str = "FRESH"):
+        return FlightDeal(
+            destination_code=code, destination_name=code, origin_code="ICN",
+            departure_date=dep, return_date=ret, departure_day_of_week=dep_dow, return_day_of_week=ret_dow,
+            nights=3, airline="데모 직항", price_krw=price, baseline_krw=price + 60_000,
+            data_source=source, freshness=freshness,
+        )
+
+    base = {"FUK": 210_000, "NRT": 260_000, "CTS": 330_000}.get(code, 300_000)
+    return [
+        deal("2027-01-14", "2027-01-17", "목", "일", base, "LIVE_SSE"),
+        deal("2027-01-15", "2027-01-18", "금", "월", base + 20_000, "LIVE_SSE"),
+        deal("2027-01-21", "2027-01-24", "목", "일", base - 40_000, "LIVE_PG"),
+        deal("2027-01-22", "2027-01-25", "금", "월", base - 50_000, "LIVE_SSE", "STALE"),
+    ]
+
+
+def _seed_demo_watch_db(db: TravelBriefDatabase) -> None:
+    for chat_id in DEMO_WATCH_CHATS:
+        db.add_recipient(chat_id, name=f"데모_{chat_id[-1]}", topic="TRAVEL")
+    db.upsert_travel_watch(DEMO_WATCH_CHATS[0], "FUK", 230_000, preset_kind="DEAL")
+    db.upsert_travel_watch(DEMO_WATCH_CHATS[0], "CTS", 300_000, preset_kind="CUSTOM")  # above target -> no alert
+    db.upsert_travel_watch(DEMO_WATCH_CHATS[1], "NRT", 290_000, preset_kind="FLOOR", day_pattern="FRI_MON")
+
+
+def run_watch_check(
+    demo: bool = False,
+    dry_run: bool = False,
+    live_naver: bool = False,
+    db_path: Optional[str] = None,
+) -> dict:
+    """Cron tick for travel price watches (`run_cron.sh travel_watches`). Never triggered at service startup.
+    `--demo`: isolated in-memory DB + synthetic LIVE_SSE quotes + recording sender (zero Telegram calls,
+    the default `alerts.sqlite3` is never opened).
+    """
+    from travel_brief.watch_engine import WatchCheckEngine, make_live_quote_fetcher
+
+    print("=" * 60)
+    if demo:
+        print("🎮 Travel Watch Check (DEMO: isolated :memory: DB, synthetic quotes, no Telegram)")
+        db = TravelBriefDatabase(db_path=":memory:")
+        _seed_demo_watch_db(db)
+        outbox: list[tuple[str, str]] = []
+
+        def demo_sender(chat_id: str, text: str, markup: dict):
+            outbox.append((chat_id, text))
+            return "SENT", 9000 + len(outbox), None
+
+        engine = WatchCheckEngine(
+            db, _demo_watch_quote_fetcher, sender=None if dry_run else demo_sender,
+            dry_run=dry_run, lease_owner="demo",
+        )
+        first = engine.run_once()
+        second = engine.run_once()  # same quotes again -> ledger cooldown must suppress every resend
+        for chat_id, text in outbox:
+            print(f"\n--- [DEMO ALERT -> {chat_id}] ---\n{text}")
+        print(f"\nTick #1: {first.summary()}")
+        print(f"Tick #2 (cooldown re-check): {second.summary()}")
+        db.close()
+        print("✅ Demo watch check finished without touching alerts.sqlite3 or Telegram.")
+        return {"first": first.summary(), "second": second.summary(), "outbox": len(outbox)}
+
+    effective_live = bool(live_naver or os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1")
+    path = str(db_path or (BASE_DIR / "alerts.sqlite3"))
+    print(f"🔔 Travel Watch Check (live_naver={effective_live}, dry_run={dry_run}, db={path})")
+    if not effective_live:
+        print("⚠️ live_naver is off: offline estimates are never pushable, so no alert can trigger.")
+    db = TravelBriefDatabase(db_path=path)
+    flight_engine = FlightEngine(live_naver=effective_live)
+    sender = None
+    if not dry_run:
+        token = get_travel_bot_token()
+        if not token:
+            print("❌ Travel Bot Token not configured; watch check aborted (no fallback sends).")
+            return {"aborted": "NO_TOKEN"}
+        tg = TelegramChannel(bot_token=token)
+        dispatcher = SafeTelegramDispatcher()
+
+        def sender(chat_id: str, text: str, markup: dict):
+            return dispatcher.send_text_to_recipient(
+                tg=tg, chat_id=chat_id, text=text, parse_mode="HTML", db=db, reply_markup=markup
+            )
+
+    from travel_brief.city_catalog import CityCatalog
+
+    engine = WatchCheckEngine(
+        db,
+        make_live_quote_fetcher(flight_engine),
+        sender=sender,
+        catalog=CityCatalog(flight_engine.destinations),
+        dry_run=dry_run,
+    )
+    result = engine.run_once()
+    for ev in result.events:
+        print(f"  [{ev['status']}] watch={ev['watch_id']} {ev['dest_code']} {ev['dep_date']}~{ev['ret_date']} "
+              f"{ev['price_krw']:,}원 (target {ev['target_price_krw']:,}원)")
+    print(f"Watch tick summary: {result.summary()}")
+    return result.summary()
+
+
+def run_polling_mode(demo: bool = False, live_naver: bool = True, db_path: Optional[str] = None) -> None:
     """Runs long-polling daemon for on-demand interactive travel queries.
     Equipped with 0.1s callback ACK, Single-Flight caching, and decoupled background workers.
     """
@@ -635,11 +751,10 @@ def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
         return
 
     print(f"🚀 Starting Travel Pathfinder Interactive Poller (v2.3, live_naver={live_naver})...")
-    db_path = BASE_DIR / "alerts.sqlite3"
-    db = TravelBriefDatabase(db_path=db_path)
+    db = TravelBriefDatabase(db_path=str(db_path or (BASE_DIR / "alerts.sqlite3")))
     engine = FlightEngine(live_naver=live_naver)
     from travel_brief.interactive import TravelInteractiveHandler, dispatch_travel_update
-    handler = TravelInteractiveHandler(bot_token=token, engine=engine)
+    handler = TravelInteractiveHandler(bot_token=token, engine=engine, db=db)
     last_offset = db.get_telegram_offset()
 
     import json
@@ -671,7 +786,7 @@ def run_polling_mode(demo: bool = False, live_naver: bool = True) -> None:
                         handler,
                         item,
                         on_subscribe=lambda cid, name: db.add_recipient(cid, name=name, topic="TRAVEL"),
-                        on_unsubscribe=lambda cid: db.deactivate_recipient(cid, reason="USER_STOP_COMMAND"),
+                        on_unsubscribe=make_travel_unsubscribe_hook(db),
                     )
                 except Exception as item_exc:
                     logger.warning("Error processing update item: %s", item_exc)
@@ -695,13 +810,17 @@ def main():
     parser.add_argument("--auto-schedule", action="store_true", help="Run in periodic daemon schedule mode")
     parser.add_argument("--live-naver", action="store_true", help="Fetch real-time nonstop fares from Naver Flights")
     parser.add_argument("--poll", action="store_true", help="Run in on-demand interactive polling mode")
+    parser.add_argument("--check-watches", action="store_true", help="Run one travel price-watch alert tick (cron)")
+    parser.add_argument("--db-path", type=str, default=None, help="SQLite path (default: alerts.sqlite3; ignored by --demo)")
 
     args = parser.parse_args()
 
     recipients_list = [r.strip() for r in args.recipients.split(",") if r.strip()] if args.recipients else None
 
-    if args.poll:
-        run_polling_mode(demo=args.demo, live_naver=args.live_naver)
+    if args.check_watches:
+        run_watch_check(demo=args.demo, dry_run=args.dry_run, live_naver=args.live_naver, db_path=args.db_path)
+    elif args.poll:
+        run_polling_mode(demo=args.demo, live_naver=args.live_naver, db_path=args.db_path)
     elif args.auto_schedule:
         print("⏰ Starting Travel Briefing daemon scheduler...")
         run_briefing(

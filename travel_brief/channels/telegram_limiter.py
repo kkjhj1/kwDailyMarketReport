@@ -18,6 +18,16 @@ from travel_brief.storage.models import Recipient
 
 logger = logging.getLogger(__name__)
 
+# Lower-cased exception substrings meaning "the request may have reached Telegram" -> UNKNOWN, never retried.
+AMBIGUOUS_NETWORK_MARKERS = (
+    "timed out",
+    "connection reset",
+    "remotedisconnected",
+    "connection aborted",
+    "connectionreseterror",
+    "connectionabortederror",
+)
+
 
 class TelegramRateLimiter:
     """Enforces Telegram's official rate limits:
@@ -161,6 +171,9 @@ class SafeTelegramDispatcher:
                     if db and hasattr(db, "deactivate_recipient"):
                         db.deactivate_recipient(chat_id_clean, reason="INVALID_CHAT_OR_USER_DEACTIVATED")
                     return "FAILED", None, f"400 Invalid: {err_str}"
+                typed_err = f"{type(exc).__name__} {lower_err}".lower()
+                if any(marker in typed_err for marker in AMBIGUOUS_NETWORK_MARKERS):
+                    return "UNKNOWN", None, f"Network Timeout / Ambiguous Delivery: {err_str}"
                 return "FAILED", None, err_str
         return "FAILED", None, "Max retries exceeded"
 

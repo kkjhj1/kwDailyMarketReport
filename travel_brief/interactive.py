@@ -20,10 +20,12 @@ import os
 import re
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 
 from travel_brief.channels.telegram import TelegramChannel
@@ -46,6 +48,20 @@ WATCHDOG_SECONDS = 45.0
 
 STATE_IDLE = "IDLE"
 STATE_AWAITING_CITY = "AWAITING_CITY"
+STATE_AWAITING_WATCH_PRICE = "AWAITING_WATCH_PRICE"
+CHAT_STATE_TTL_SECONDS = 300.0
+MAX_CHAT_STATES = MAX_TRACKED_CHATS
+MAX_TRACKED_WATCH_CARDS = 2000
+
+WATCH_PRICE_MIN_KRW = 50_000
+WATCH_PRICE_MAX_KRW = 5_000_000
+WATCH_QUICK_ADD_CODES = ("NRT", "KIX", "FUK", "TPE", "DAD", "BKK")
+WATCH_DAY_LABELS = {"ANY": "전체 요일", "FRI_MON": "금~월", "THU_SUN": "목~일"}
+WATCH_PRESET_LABELS = {"DEAL": "실속 특가", "FLOOR": "바닥가", "CUSTOM": "직접 입력"}
+CANCEL_COMMANDS = {"/cancel", "/취소"}
+
+_PRICE_TEXT_RE = re.compile(r"^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,4}))?(만)?(?:원)?(?:이하|미만)?$")
+_PRICE_LIKE_RE = re.compile(r"^[-+]?[\d,.]+(?:만)?(?:원)?(?:이하|미만)?$")
 
 CITY_CODE_ALIASES: dict[str, str] = {
     "TYO": "NRT",
@@ -77,6 +93,61 @@ _MENTION_RE = re.compile(r"(^|\s)@[A-Za-z0-9_]{3,}")
 def html_to_plain(text: str) -> str:
     """Plain-text rendering for the last-resort `parse_mode=""` fallback."""
     return html.unescape(_TAG_RE.sub("", text or ""))
+
+
+def _compact_price_text(text: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or ""))
+
+
+def looks_like_price_text(text: str) -> bool:
+    """True for number-ish input (`25`, `25만원`, `-3`, `2,500`) that must be answered by the price parser."""
+    return bool(_PRICE_LIKE_RE.match(_compact_price_text(text)))
+
+
+def parse_watch_price_krw(text: str) -> Optional[int]:
+    """Parses a target fare. `25` / `25만` / `25.5만원` (<= 999, 만원 unit) and `250000` / `250,000원`
+    (>= 10,000 won) are accepted; ambiguous 1,000~9,999 values, negatives, zero, and anything outside
+    [50,000, 5,000,000] KRW return None.
+    """
+    m = _PRICE_TEXT_RE.match(_compact_price_text(text))
+    if not m:
+        return None
+    int_part, frac, man = m.group(1), m.group(2), m.group(3)
+    has_comma = "," in int_part
+    try:
+        number = Decimal(int_part.replace(",", "") + (f".{frac}" if frac else ""))
+    except InvalidOperation:
+        return None
+    if man:
+        value = number * 10_000
+    elif number <= 999 and not has_comma:
+        value = number * 10_000
+    elif number >= 10_000 and not frac:
+        value = number
+    else:
+        return None  # e.g. "2,500" / "1000": unit is ambiguous
+    if value != value.to_integral_value():
+        return None
+    won = int(value)
+    if won < WATCH_PRICE_MIN_KRW or won > WATCH_PRICE_MAX_KRW:
+        return None
+    return won
+
+
+def _man_label(krw: int) -> str:
+    man = krw / 10_000
+    return f"{man:,.0f}만 원" if man == int(man) else f"{man:,.1f}만 원"
+
+
+def callback_fits(data: str) -> bool:
+    return len(data.encode("utf-8")) <= 64
+
+
+@dataclass
+class ChatState:
+    state: str
+    expires_at: float
+    dest_code: str = ""
 
 
 @dataclass
@@ -208,8 +279,14 @@ class TravelInteractiveHandler:
         report_url: str = "http://161.33.196.211:8002/reports/travel_latest.html",
         fx_client: Optional[FXClient] = None,
         fx_enabled: Optional[bool] = None,
+        db: Any = None,
+        db_path: Optional[str] = None,
     ):
         self.bot_token = bot_token
+        if db is None and db_path:
+            from travel_brief.storage.db import TravelBriefDatabase
+            db = TravelBriefDatabase(db_path=str(db_path))
+        self.db = db  # TravelBriefDatabase for price watches (None -> watch menu answers "unavailable")
         self.engine = engine or FlightEngine()
         self.report_url = report_url
         self.cooldown = UserCooldownManager()
@@ -232,7 +309,10 @@ class TravelInteractiveHandler:
         # Per-message state: (chat_id, message_id) -> MessageState (generation guard + edit lock).
         self._seq_lock = threading.Lock()
         self._msg_states: OrderedDict[tuple[str, int], MessageState] = OrderedDict()
-        self._chat_states: OrderedDict[str, str] = OrderedDict()
+        # Conversation state: (chat_id, user_id) -> ChatState (TTL, bounded LRU)
+        self._chat_states: OrderedDict[tuple[str, str], ChatState] = OrderedDict()
+        self.chat_state_ttl = CHAT_STATE_TTL_SECONDS
+        self._watch_cards: OrderedDict[tuple[str, int], None] = OrderedDict()
         self._closed = False
 
     def _load_admin_ids(self) -> set[str]:
@@ -256,8 +336,10 @@ class TravelInteractiveHandler:
         res = self.catalog.get(code)
         return res.display_name if res else code
 
-    def build_inline_keyboard(self, current_filter: str = "ALL") -> dict[str, Any]:
-        """Constructs mobile-optimized slim keyboard within 64-byte callback_data limits."""
+    def build_inline_keyboard(self, current_filter: str = "ALL", chat_id: Optional[str] = None) -> dict[str, Any]:
+        """Constructs mobile-optimized slim keyboard within 64-byte callback_data limits.
+        `chat_id` (optional) only personalises the watch button badge.
+        """
         scope = self.normalize_filter(current_filter) or "ALL"
         return {
             "inline_keyboard": [
@@ -274,6 +356,7 @@ class TravelInteractiveHandler:
                     {"text": "🇻🇳 다낭", "callback_data": "trv:q:DAD"},
                     {"text": "🇹🇭 방콕", "callback_data": "trv:q:BKK"},
                 ],
+                [self._watch_entry_button(scope, chat_id)],
                 [
                     {"text": "🔍 기타 지역 직접 검색", "callback_data": "trv:c:guide"},
                 ],
@@ -282,6 +365,26 @@ class TravelInteractiveHandler:
                 ],
             ]
         }
+
+    def _watch_entry_button(self, scope: str, chat_id: Optional[str] = None) -> dict[str, Any]:
+        """ALL never registers a watch: it opens the per-city list. A city opens its own watch card."""
+        if scope == "ALL":
+            return {"text": "🔔 내 알림 / 도시별 설정", "callback_data": "trv:w:l"}
+        watch = self._get_watch(chat_id, scope) if chat_id else None
+        if watch and watch.get("is_active"):
+            text = f"🔔 알림 설정중 ({_man_label(int(watch['target_price_krw']))})"
+        else:
+            text = "🔔 이 도시 특가 알림 설정"
+        return {"text": text, "callback_data": f"trv:w:m:{scope}"}
+
+    def _get_watch(self, chat_id: Optional[str], code: str) -> Optional[dict[str, Any]]:
+        if self.db is None or not chat_id:
+            return None
+        try:
+            return self.db.get_travel_watch(str(chat_id), code)
+        except Exception as exc:
+            logger.warning("Watch lookup failed for %s/%s: %s", chat_id, code, exc)
+            return None
 
     def build_onboarding_keyboard(self) -> dict[str, Any]:
         """Step 1 onboarding target-selection keyboard for new subscribers (64-byte safe `trv:s:<CITY>`)."""
@@ -487,7 +590,7 @@ class TravelInteractiveHandler:
         logger.warning("Travel watchdog fired for %s (seq=%s, target=%s).", key, seq, target)
         self.cooldown.release(user_id)
         delivered = self._edit_if_latest(
-            chat_id, message_id, seq, self.build_timeout_card(target), self.build_inline_keyboard(target)
+            chat_id, message_id, seq, self.build_timeout_card(target), self.build_inline_keyboard(target, chat_id=chat_id)
         )
         if delivered:
             with self._seq_lock:
@@ -565,19 +668,59 @@ class TravelInteractiveHandler:
     # ------------------------------------------------------------------
     # Conversation state
     # ------------------------------------------------------------------
-    def get_chat_state(self, chat_id: str) -> str:
-        with self._seq_lock:
-            return self._chat_states.get(str(chat_id), STATE_IDLE)
+    @staticmethod
+    def _state_key(chat_id: str, user_id: Optional[str]) -> tuple[str, str]:
+        cid = str(chat_id)
+        return cid, str(user_id or cid)
 
-    def _set_chat_state(self, chat_id: str, state: str) -> None:
+    def get_chat_context(self, chat_id: str, user_id: Optional[str] = None) -> Optional[ChatState]:
+        """Live (non-expired) state for `(chat_id, user_id)`; expired entries are dropped on read."""
+        key = self._state_key(chat_id, user_id)
         with self._seq_lock:
-            key = str(chat_id)
-            if state == STATE_IDLE:
+            st = self._chat_states.get(key)
+            if st is None:
+                return None
+            if st.expires_at <= time.monotonic():
                 self._chat_states.pop(key, None)
+                return None
+            return st
+
+    def get_chat_state(self, chat_id: str, user_id: Optional[str] = None) -> str:
+        """State for `(chat_id, user_id)`; without `user_id`, the most recent live state of any chat member."""
+        if user_id is not None:
+            st = self.get_chat_context(chat_id, user_id)
+            return st.state if st else STATE_IDLE
+        cid = str(chat_id)
+        now = time.monotonic()
+        with self._seq_lock:
+            for (c, _u), st in reversed(self._chat_states.items()):
+                if c == cid and st.expires_at > now:
+                    return st.state
+        return STATE_IDLE
+
+    def _set_chat_state(
+        self,
+        chat_id: str,
+        state: str,
+        user_id: Optional[str] = None,
+        dest_code: str = "",
+        ttl: Optional[float] = None,
+    ) -> None:
+        """IDLE with `user_id=None` clears every member state of the chat (e.g. /stop)."""
+        with self._seq_lock:
+            if state == STATE_IDLE:
+                if user_id is None:
+                    cid = str(chat_id)
+                    for k in [k for k in self._chat_states if k[0] == cid]:
+                        self._chat_states.pop(k, None)
+                else:
+                    self._chat_states.pop(self._state_key(chat_id, user_id), None)
                 return
-            self._chat_states[key] = state
+            key = self._state_key(chat_id, user_id)
+            expires = time.monotonic() + (self.chat_state_ttl if ttl is None else ttl)
+            self._chat_states[key] = ChatState(state=state, expires_at=expires, dest_code=dest_code)
             self._chat_states.move_to_end(key)
-            while len(self._chat_states) > MAX_TRACKED_CHATS:
+            while len(self._chat_states) > MAX_CHAT_STATES:
                 self._chat_states.popitem(last=False)
 
     # ------------------------------------------------------------------
@@ -607,8 +750,13 @@ class TravelInteractiveHandler:
 
         if action == "c":
             self._answer(cq_id, "🔍 가고 싶은 도시 이름을 입력해 주세요!")
-            self._set_chat_state(chat_id, STATE_AWAITING_CITY)
+            self._set_chat_state(chat_id, STATE_AWAITING_CITY, user_id=user_id)
             self._submit_ui(self._send_card, chat_id, self.build_city_guide_card())
+            return
+
+        # Price watch flows (`trv:w:*`) never fall into the search/stale path; answered immediately.
+        if action == "w":
+            self._handle_watch_callback(cq_id, str(chat_id), int(message_id or 0), user_id, parts)
             return
 
         target_norm = self.normalize_filter(target)
@@ -687,6 +835,13 @@ class TravelInteractiveHandler:
         first = raw.split()[0]
         if first.startswith("/"):
             cmd = first.split("@", 1)[0].casefold()
+            # Any command first clears this user's pending input (AWAITING_CITY / AWAITING_WATCH_PRICE).
+            pending = self.get_chat_context(chat_id, user_id)
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            if cmd in CANCEL_COMMANDS:
+                notice = "✅ 입력을 취소했어요." if pending else "ℹ️ 진행 중인 입력이 없어요."
+                self._send_card(chat_id, notice, self.build_inline_keyboard("ALL", chat_id=chat_id))
+                return True, "travel_cancel"
             if cmd in START_COMMANDS:
                 return self._handle_start(chat_id, sender_name, on_subscribe)
             if cmd in STOP_COMMANDS:
@@ -705,10 +860,10 @@ class TravelInteractiveHandler:
             if cmd in SEARCH_ALL_COMMANDS:
                 if on_subscribe is not None:
                     self._call_subscribe(on_subscribe, chat_id, sender_name)
-                self._set_chat_state(chat_id, STATE_IDLE)
+                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
                 return self._start_text_search(chat_id, user_id, "ALL")
             if cmd in GUIDE_COMMANDS:
-                self._set_chat_state(chat_id, STATE_AWAITING_CITY)
+                self._set_chat_state(chat_id, STATE_AWAITING_CITY, user_id=user_id)
                 self._send_card(chat_id, self.build_city_guide_card())
                 return True, "travel_guide"
             self._send_card(chat_id, self.build_help_card(), self.build_inline_keyboard("ALL"))
@@ -718,17 +873,25 @@ class TravelInteractiveHandler:
         if not query:
             self._send_card(chat_id, self.build_help_card(), self.build_inline_keyboard("ALL"))
             return True, "travel_help"
+
+        ctx = self.get_chat_context(chat_id, user_id)
+        if ctx is not None and ctx.state == STATE_AWAITING_WATCH_PRICE:
+            handled = self._handle_watch_price_input(chat_id, user_id, query, ctx)
+            if handled is not None:
+                return handled
+            # A recognised city / ALL keyword escapes the price prompt into the normal search below.
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
         if query in START_WORDS:
             return self._handle_start(chat_id, sender_name, on_subscribe)
         if query.casefold().replace(" ", "") in ALL_WORDS:
-            self._set_chat_state(chat_id, STATE_IDLE)
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
             return self._start_text_search(chat_id, user_id, "ALL")
 
         res = self.catalog.resolve(query)
         if res is None:
             self._send_card(chat_id, self.build_help_card(query), self.build_inline_keyboard("ALL"))
             return True, "travel_help_unknown_city"
-        self._set_chat_state(chat_id, STATE_IDLE)
+        self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
         return self._start_text_search(chat_id, user_id, res.code)
 
     def _handle_start(
@@ -753,7 +916,7 @@ class TravelInteractiveHandler:
             self._send_card(chat_id, f"⏳ {html.escape(toast)}")
             return True, "travel_search_throttled"
         loading_id = self._send_card(
-            chat_id, self.build_loading_card(code), self.build_inline_keyboard(current_filter=code)
+            chat_id, self.build_loading_card(code), self.build_inline_keyboard(current_filter=code, chat_id=chat_id)
         )
         try:
             msg_id = int(loading_id) if loading_id is not None else 0
@@ -764,6 +927,333 @@ class TravelInteractiveHandler:
             return True, "travel_loading_send_failed"
         self._launch_search(chat_id, msg_id, code, user_id, is_refresh=False, show_loading=False)
         return True, "travel_search_started"
+
+    # ------------------------------------------------------------------
+    # Price watches (`trv:w:*`)
+    # ------------------------------------------------------------------
+    _WATCH_TOASTS = {
+        "m": "🔔 알림 설정을 불러옵니다.",
+        "p": "✅ 알림을 저장하는 중입니다...",
+        "t": "⚙️ 알림 옵션을 변경합니다.",
+        "i": "✍️ 목표가를 채팅창에 입력해 주세요.",
+        "l": "📋 내 알림 목록을 불러옵니다.",
+        "x": "🗑️ 삭제 여부를 확인해 주세요.",
+        "X": "🗑️ 알림을 삭제했습니다.",
+    }
+
+    def _handle_watch_callback(
+        self, cq_id: str, chat_id: str, message_id: int, user_id: str, parts: list[str]
+    ) -> None:
+        sub = parts[2] if len(parts) > 2 else ""
+        if sub not in self._WATCH_TOASTS:
+            self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+            return
+        if self.db is None:
+            self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+            return
+        code = ""
+        if sub != "l":
+            raw = parts[3] if len(parts) > 3 else ""
+            norm = self.normalize_filter(raw) if raw else None
+            if not norm or norm == "ALL":
+                self._answer(cq_id, "지원하지 않는 지역입니다. 도시를 먼저 선택해 주세요.")
+                return
+            code = norm
+        arg = parts[4] if len(parts) > 4 else ""
+        if sub == "p" and arg not in ("D", "F"):
+            self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+            return
+        if sub == "t" and arg not in ("day", "pk"):
+            self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+            return
+
+        self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
+        if sub == "i":
+            self._set_chat_state(chat_id, STATE_AWAITING_WATCH_PRICE, user_id=user_id, dest_code=code)
+        else:
+            st = self.get_chat_context(chat_id, user_id)
+            if st is not None and st.state == STATE_AWAITING_WATCH_PRICE:
+                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+        self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg)
+
+    def _run_watch_action(self, chat_id: str, message_id: int, sub: str, code: str, arg: str) -> None:
+        try:
+            if sub == "m":
+                text, markup = self.build_watch_manage_card(chat_id, code)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=self._is_watch_card(chat_id, message_id))
+            elif sub == "l":
+                text, markup = self.build_watch_list_card(chat_id)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=self._is_watch_card(chat_id, message_id))
+            elif sub == "p":
+                text, markup = self._save_preset_watch(chat_id, code, arg)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "t":
+                watch = self.db.toggle_travel_watch_option(chat_id, code, arg)
+                if watch is None:
+                    text, markup = self.build_watch_manage_card(chat_id, code, notice="ℹ️ 활성화된 알림이 없어 설정 화면으로 이동했어요.")
+                else:
+                    text, markup = self.build_watch_saved_card(watch, title="⚙️ 알림 옵션이 변경되었습니다")
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "i":
+                text, markup = self.build_watch_input_card(code)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "x":
+                text, markup = self.build_watch_delete_confirm_card(code)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "X":
+                removed = self.db.deactivate_travel_watch(chat_id, code)
+                notice = (
+                    f"🗑️ {html.escape(self.label_for(code))} 알림을 삭제했어요."
+                    if removed else "ℹ️ 이미 삭제되었거나 활성화된 알림이 없어요."
+                )
+                text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                self._render_watch_card(chat_id, message_id, text, markup)
+        except Exception as exc:
+            logger.error("Watch action %s/%s failed for %s: %s", sub, code, chat_id, exc, exc_info=True)
+            self._render_watch_card(
+                chat_id, message_id,
+                "⚠️ 알림 설정 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+                {"inline_keyboard": [[{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}]]},
+            )
+
+    def _save_preset_watch(self, chat_id: str, code: str, arg: str) -> tuple[str, dict[str, Any]]:
+        presets = self.watch_reference_prices(code)
+        kind = "DEAL" if arg == "D" else "FLOOR"
+        target = presets.get(kind)
+        if not target:
+            return self.build_watch_manage_card(
+                chat_id, code, notice="ℹ️ 이 도시는 기준가 정보가 없어 목표가를 직접 입력해 주세요."
+            )
+        return self._save_watch(chat_id, code, target, kind)
+
+    def _save_watch(self, chat_id: str, code: str, target: int, kind: str) -> tuple[str, dict[str, Any]]:
+        from travel_brief.storage.db import WatchLimitError
+
+        try:
+            watch = self.db.upsert_travel_watch(chat_id, code, target, preset_kind=kind)
+        except WatchLimitError as exc:
+            text, markup = self.build_watch_list_card(
+                chat_id,
+                notice=f"⚠️ 특가 알림은 최대 {exc.limit}개까지 설정할 수 있어요. 기존 알림을 정리한 뒤 다시 시도해 주세요.",
+            )
+            return text, markup
+        return self.build_watch_saved_card(watch, title="✅ 특가 알림이 설정되었습니다")
+
+    def _handle_watch_price_input(
+        self, chat_id: str, user_id: str, query: str, ctx: ChatState
+    ) -> Optional[tuple[bool, str]]:
+        """Returns a result when the text was consumed by the price prompt, or None to fall through
+        to the normal search (a recognised city / ALL keyword escapes the prompt)."""
+        code = ctx.dest_code
+        if looks_like_price_text(query):
+            target = parse_watch_price_krw(query)
+            if target is None:
+                self._send_card(chat_id, self.build_watch_price_error_card(code, query))
+                return True, "travel_watch_price_invalid"
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            if self.db is None:
+                self._send_card(chat_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+                return True, "travel_watch_unavailable"
+            text, markup = self._save_watch(chat_id, code, target, "CUSTOM")
+            self._render_watch_card(chat_id, 0, text, markup, edit=False)
+            return True, "travel_watch_saved"
+        if query.casefold().replace(" ", "") in ALL_WORDS or self.catalog.resolve(query) is not None:
+            return None
+        self._send_card(chat_id, self.build_watch_price_error_card(code, query))
+        return True, "travel_watch_price_invalid"
+
+    def watch_reference_prices(self, code: str) -> dict[str, int]:
+        """FLOOR (바닥가) / DEAL (실속 특가) / BASELINE (평균가) for a curated or fallback city.
+        Values outside the allowed watch range are omitted (manual input only)."""
+        res = self.catalog.get(code)
+        meta = res.meta if res else None
+        if meta is None:
+            return {}
+        baseline = int(meta.flight_baseline_krw or 0)
+        floor = int(meta.flight_min_floor_krw or 0) or (round(int(baseline * 0.80), -3) if baseline > 0 else 0)
+        deal = int(meta.flight_deal_threshold_krw or 0)
+        out: dict[str, int] = {}
+        for k, v in (("FLOOR", floor), ("DEAL", deal), ("BASELINE", baseline)):
+            if WATCH_PRICE_MIN_KRW <= v <= WATCH_PRICE_MAX_KRW:
+                out[k] = v
+        return out
+
+    def _watch_options_line(self, watch: dict[str, Any]) -> str:
+        day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
+        peak = "연휴 포함" if watch.get("include_peak") else "연휴 제외"
+        return f"{day} · {peak}"
+
+    def build_watch_manage_card(
+        self, chat_id: str, code: str, notice: str = ""
+    ) -> tuple[str, dict[str, Any]]:
+        label = self.label_for(code)
+        refs = self.watch_reference_prices(code)
+        res = self.catalog.get(code)
+        watch = self._get_watch(chat_id, code)
+        active = bool(watch and watch.get("is_active"))
+        lines = []
+        if notice:
+            lines.append(notice)
+        lines += [f"🔔 <b>[{html.escape(label)} 특가 알림 설정]</b>", "━━━━━━━━━━━━━━━━━━"]
+        if refs:
+            basis = "" if (res and res.metadata_quality == "CURATED") else " · 기본 메타 기준 추정"
+            lines.append(f"📊 <b>참고 시세</b> (왕복 직항 1인{basis})")
+            if "FLOOR" in refs:
+                lines.append(f"• 바닥가: {_man_label(refs['FLOOR'])}")
+            if "DEAL" in refs:
+                lines.append(f"• 실속 특가: {_man_label(refs['DEAL'])}")
+            if "BASELINE" in refs:
+                lines.append(f"• 평균가: {_man_label(refs['BASELINE'])}")
+        else:
+            lines.append("📊 이 도시는 참고 시세가 없어요. 목표가를 직접 입력해 주세요.")
+        if active:
+            lines.append(
+                f"✅ 현재 알림: <b>{int(watch['target_price_krw']):,}원 이하</b> · {self._watch_options_line(watch)}"
+            )
+        lines.append("👇 네이버 실시간 최저가가 목표가 이하로 떨어지면 알려드려요.")
+        lines.append("💡 실시간 관측 요금만 알림 대상이며, 결제 단계에서 변동될 수 있어요.")
+
+        rows: list[list[dict[str, Any]]] = []
+        preset_row = []
+        if "DEAL" in refs:
+            preset_row.append({"text": f"🎯 실속 특가 {_man_label(refs['DEAL'])} 이하", "callback_data": f"trv:w:p:{code}:D"})
+        if "FLOOR" in refs:
+            preset_row.append({"text": f"🪙 바닥가 {_man_label(refs['FLOOR'])} 이하", "callback_data": f"trv:w:p:{code}:F"})
+        if preset_row:
+            rows.append(preset_row)
+        rows.append([{"text": "✍️ 목표가 직접 입력", "callback_data": f"trv:w:i:{code}"}])
+        if active:
+            day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
+            peak = "포함" if watch.get("include_peak") else "제외"
+            rows.append([
+                {"text": f"🗓️ 요일: {day}", "callback_data": f"trv:w:t:{code}:day"},
+                {"text": f"🎉 연휴: {peak}", "callback_data": f"trv:w:t:{code}:pk"},
+            ])
+            rows.append([{"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"}])
+        rows.append([{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_saved_card(self, watch: dict[str, Any], title: str) -> tuple[str, dict[str, Any]]:
+        code = watch["dest_code"]
+        label = self.label_for(code)
+        kind = WATCH_PRESET_LABELS.get(watch.get("preset_kind") or "", "")
+        day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
+        peak = "포함" if watch.get("include_peak") else "제외"
+        lines = [
+            f"{title}",
+            f"🔔 <b>[{html.escape(label)}]</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🎯 목표가: <b>{int(watch['target_price_krw']):,}원 이하</b>" + (f" ({kind})" if kind else ""),
+            f"🗓️ 요일: {day}",
+            f"🎉 연휴·성수기: {peak}",
+            "⏰ 실시간 관측 최저가가 목표가 이하가 되면 알려드려요 (같은 일정은 7일에 1번).",
+        ]
+        rows = [
+            [{"text": f"🗓️ 요일: {day} (변경)", "callback_data": f"trv:w:t:{code}:day"}],
+            [{"text": f"🎉 연휴·성수기: {peak} (변경)", "callback_data": f"trv:w:t:{code}:pk"}],
+            [
+                {"text": "✍️ 목표가 변경", "callback_data": f"trv:w:i:{code}"},
+                {"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"},
+            ],
+            [{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}],
+        ]
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_list_card(self, chat_id: str, notice: str = "") -> tuple[str, dict[str, Any]]:
+        from travel_brief.storage.db import WATCH_MAX_ACTIVE_PER_CHAT
+
+        watches = self.db.list_travel_watches(chat_id=chat_id, active_only=True)[:WATCH_MAX_ACTIVE_PER_CHAT]
+        lines = []
+        if notice:
+            lines.append(notice)
+        lines += [
+            f"📋 <b>[내 특가 알림]</b> ({len(watches)}/{WATCH_MAX_ACTIVE_PER_CHAT})",
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        rows: list[list[dict[str, Any]]] = []
+        if not watches:
+            lines.append("아직 설정한 알림이 없어요. 아래 도시를 눌러 바로 시작해 보세요 👇")
+        for i, w in enumerate(watches, 1):
+            label = self.label_for(w["dest_code"])
+            seen = w.get("last_seen_price_krw")
+            seen_txt = f" · 최근 {_man_label(int(seen))}" if seen else ""
+            lines.append(
+                f"{i}. {html.escape(label)} · {_man_label(int(w['target_price_krw']))} 이하 · "
+                f"{self._watch_options_line(w)}{seen_txt}"
+            )
+            rows.append([
+                {"text": f"⚙️ {label}", "callback_data": f"trv:w:m:{w['dest_code']}"},
+                {"text": "🗑️ 삭제", "callback_data": f"trv:w:x:{w['dest_code']}"},
+            ])
+        if len(watches) < 3:
+            watched = {w["dest_code"] for w in watches}
+            quick = [c for c in WATCH_QUICK_ADD_CODES if c not in watched and self.catalog.get(c)][:3]
+            if quick:
+                rows.append([{"text": f"➕ {self.label_for(c)}", "callback_data": f"trv:w:m:{c}"} for c in quick])
+        rows.append([{"text": "🔍 다른 도시 검색", "callback_data": "trv:c:guide"}])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_input_card(self, code: str) -> tuple[str, dict[str, Any]]:
+        label = self.label_for(code)
+        minutes = max(1, int(self.chat_state_ttl // 60))
+        text = (
+            f"✍️ <b>[{html.escape(label)} 목표가 직접 입력]</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"왕복 항공권 목표가를 채팅창에 입력해 주세요 ({minutes}분 안에).\n"
+            "예) <code>25</code> · <code>25만</code> · <code>250000</code>\n"
+            "• 허용 범위: 5만 ~ 500만 원\n"
+            "• 취소: /cancel"
+        )
+        return text, {"inline_keyboard": [[{"text": "↩️ 취소", "callback_data": f"trv:w:m:{code}"}]]}
+
+    def build_watch_price_error_card(self, code: str, raw: str) -> str:
+        shown = raw if len(raw) <= 20 else raw[:19] + "…"
+        label = self.label_for(code) if code else "선택한 도시"
+        return (
+            f"⚠️ '<b>{html.escape(shown)}</b>'은(는) 목표가로 인식할 수 없어요.\n"
+            f"{html.escape(label)} 목표가를 <code>25</code>, <code>25만</code>, <code>250000</code> 처럼 입력해 주세요.\n"
+            "• 허용 범위: 5만 ~ 500만 원 · 취소: /cancel"
+        )
+
+    def build_watch_delete_confirm_card(self, code: str) -> tuple[str, dict[str, Any]]:
+        label = self.label_for(code)
+        text = f"🗑️ 정말 <b>{html.escape(label)}</b> 알림을 삭제할까요?"
+        return text, {
+            "inline_keyboard": [[
+                {"text": "✅ 네, 삭제", "callback_data": f"trv:w:X:{code}"},
+                {"text": "↩️ 취소/목록", "callback_data": "trv:w:l"},
+            ]]
+        }
+
+    def _is_watch_card(self, chat_id: str, message_id: int) -> bool:
+        with self._seq_lock:
+            return (str(chat_id), int(message_id or 0)) in self._watch_cards
+
+    def _remember_watch_card(self, chat_id: str, message_id: Any) -> None:
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            return
+        if mid <= 0:
+            return
+        key = (str(chat_id), mid)
+        with self._seq_lock:
+            self._watch_cards[key] = None
+            self._watch_cards.move_to_end(key)
+            while len(self._watch_cards) > MAX_TRACKED_WATCH_CARDS:
+                self._watch_cards.popitem(last=False)
+
+    def _render_watch_card(
+        self, chat_id: str, message_id: int, text: str, markup: dict[str, Any], edit: bool = True
+    ) -> None:
+        """Edits watch cards in place; entry points from search results / alerts open a fresh card so the
+        original briefing or alert stays readable."""
+        if edit and message_id and message_id > 0:
+            seq = self._next_request_seq(chat_id, message_id)
+            if self._edit_if_latest(chat_id, message_id, seq, text, markup):
+                self._remember_watch_card(chat_id, message_id)
+            return
+        self._remember_watch_card(chat_id, self._send_card(chat_id, text, markup))
 
     # ------------------------------------------------------------------
     # Search pipeline
@@ -791,7 +1281,7 @@ class TravelInteractiveHandler:
     ) -> None:
         key = (str(chat_id), int(message_id or 0))
         request_seq = self._next_request_seq(chat_id, message_id)
-        markup = self.build_inline_keyboard(current_filter=target)
+        markup = self.build_inline_keyboard(current_filter=target, chat_id=chat_id)
 
         loading_future: Optional[concurrent.futures.Future] = None
         if show_loading:
@@ -857,7 +1347,7 @@ class TravelInteractiveHandler:
         Always ends with either the briefing or an error card (never a stuck loading card).
         """
         key = (str(chat_id), int(message_id or 0))
-        markup = self.build_inline_keyboard(current_filter=target_city)
+        markup = self.build_inline_keyboard(current_filter=target_city, chat_id=chat_id)
         try:
             target_dest = None if target_city == "ALL" else target_city
             custom = self.catalog.custom_destinations_for(target_dest) if target_dest else None

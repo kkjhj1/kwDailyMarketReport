@@ -30,6 +30,10 @@ case "$TASK" in
     travel_weekly)
         "$APP_DIR/venv/bin/python" travel_bot_runner.py --live-naver --send-brief >> "$LOG_FILE" 2>&1
         ;;
+    travel_watches)
+        # 여행 특가 알림 tick: OS cron 전용 (multibot.service 기동 시 자동 실행 금지 [PROD-LIVE])
+        "$APP_DIR/venv/bin/python" travel_bot_runner.py --check-watches --live-naver >> "$LOG_FILE" 2>&1
+        ;;
     admission_collect)
         "$APP_DIR/venv/bin/python" admission_bot_runner.py --collect >> "$LOG_FILE" 2>&1
         ;;

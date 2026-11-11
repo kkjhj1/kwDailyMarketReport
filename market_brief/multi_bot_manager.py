@@ -320,6 +320,16 @@ TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 
+# Menu-bot callbacks that cancel the travel subscription -> travel price watches are switched off too.
+TRAVEL_MENU_UNSUB_CALLBACKS = ("menu:unsub:travel_bot", "info:unsub:travel_bot", "sub:do_unsub:travel_bot")
+
+
+def parse_travel_text_chat(item: dict[str, Any]) -> str:
+    msg = item.get("message") or {}
+    chat = msg.get("chat", {}) or msg.get("from", {}) or {}
+    return str(chat.get("id") or "")
+
+
 class MultiBotInteractionRouter:
     """Pure, deterministic interaction router shared by live Telegram bots and the Admin Simulator."""
 
@@ -1613,14 +1623,67 @@ class DynamicBotManager:
         handler = getattr(self, "_travel_handler", None)
         is_testing = os.environ.get("PYTEST_CURRENT_TEST") is not None
         live_flag = (not is_testing) and (os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0")
-        if handler is None or getattr(handler, "bot_token", "") != bot_token:
+        travel_db = self._get_travel_db()
+        if handler is None or getattr(handler, "bot_token", "") != bot_token or getattr(handler, "db", None) is not travel_db:
             from travel_brief.flight_engine import FlightEngine
-            handler = TravelInteractiveHandler(bot_token=bot_token, engine=FlightEngine(live_naver=live_flag))
+            handler = TravelInteractiveHandler(
+                bot_token=bot_token, engine=FlightEngine(live_naver=live_flag), db=travel_db
+            )
             self._travel_handler = handler
 
         # Same single entry as `travel_bot_runner --poll` (handler.handle_text_message / handle_callback_query).
-        # /stop is delegated back (handled=False) so the router performs the real unsubscribe.
-        return dispatch_travel_update(handler, item)
+        # /stop is delegated back (handled=False) so the router performs the real unsubscribe; the travel
+        # recipient topic + every price watch is deactivated first (never revived by /start).
+        handled, reason = dispatch_travel_update(handler, item, on_subscribe=self._travel_subscribe_hook)
+        if not handled:
+            stop_chat = None
+            if reason == "travel_stop_delegated":
+                stop_chat = parse_travel_text_chat(item)
+            elif reason == "not_travel_callback":
+                cq = item.get("callback_query") or {}
+                if str(cq.get("data") or "") == "info:unsub:travel_bot":
+                    msg = cq.get("message", {}) or {}
+                    chat = msg.get("chat", {}) or cq.get("from", {}) or {}
+                    stop_chat = str(chat.get("id") or "")
+            if stop_chat:
+                self._deactivate_travel_for_stop(stop_chat, recipient=True)
+        return handled, reason
+
+    def _travel_subscribe_hook(self, chat_id: str, sender_name: str = "") -> None:
+        """Direct /start (or first use) on travel_bot re-activates `subscriptions` + TRAVEL recipient via the
+        tier-quota-aware engine. Previously deactivated price watches stay inactive."""
+        engine = getattr(self, "engine", None)
+        if engine is None or not hasattr(engine, "attempt_subscribe"):
+            return
+        try:
+            res = engine.attempt_subscribe(str(chat_id), "travel_bot", full_name=sender_name or "")
+            if not (res or {}).get("success"):
+                logger.warning("travel_bot re-subscribe not applied for %s: %s", chat_id, (res or {}).get("code"))
+        except Exception as exc:
+            logger.warning("travel_bot re-subscribe failed for %s: %s", chat_id, exc)
+
+    def _get_travel_db(self):
+        """Travel watch tables live in the shared platform DB (same file as `subscriptions` / `recipients`)."""
+        from travel_brief.storage.db import TravelBriefDatabase
+
+        base_path = str(getattr(self.engine.db, "db_path", None) or ":memory:")
+        travel_db = getattr(self, "_travel_db", None)
+        if travel_db is None or getattr(travel_db, "db_path", None) != base_path:
+            travel_db = TravelBriefDatabase(db_path=base_path)
+            self._travel_db = travel_db
+        return travel_db
+
+    def _deactivate_travel_for_stop(self, chat_id: str, recipient: bool = True) -> None:
+        try:
+            travel_db = self._get_travel_db()
+            if recipient:
+                res = travel_db.deactivate_recipient_and_watches(chat_id, reason="TRAVEL_STOP")
+                logger.info("[travel_bot] /stop deactivated travel recipient/watches for %s: %s", chat_id, res)
+            else:
+                n = travel_db.deactivate_all_watches_for_chat(chat_id)
+                logger.info("[travel_bot] menu unsubscribe deactivated %d watches for %s", n, chat_id)
+        except Exception as exc:
+            logger.warning("[travel_bot] watch deactivation failed for %s: %s", chat_id, exc)
 
     def _dispatch_admission_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
         """Dispatches domain-specific admission callbacks and messages to AdmissionInteractiveBot."""
@@ -1862,6 +1925,11 @@ class DynamicBotManager:
                         continue
 
             if bot.bot_id == "menu_bot":
+                cq_menu = item.get("callback_query") or {}
+                if str(cq_menu.get("data") or "").startswith(TRAVEL_MENU_UNSUB_CALLBACKS):
+                    menu_chat = (cq_menu.get("message", {}) or {}).get("chat", {}) or cq_menu.get("from", {}) or {}
+                    if menu_chat.get("id"):
+                        self._deactivate_travel_for_stop(str(menu_chat["id"]), recipient=False)
                 handled, reason = self._dispatch_portal_menu_update(bot.token, item)
                 if handled:
                     processed += 1
