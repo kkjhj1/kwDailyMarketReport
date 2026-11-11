@@ -4,8 +4,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import json
 import os
+import shutil
 import sys
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 import urllib.request
 import urllib.error
@@ -22,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import uvicorn
 
 from market_brief.admin_ui import ADMIN_DASHBOARD_HTML
@@ -33,6 +35,12 @@ from market_brief.market_data.naver_provider import fetch_naver_market_news
 from market_brief.multi_bot_manager import DynamicBotManager, MultiBotInteractionRouter, TelegramBotTransport
 from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
 from market_brief.briefing_scheduler import InternalBriefingScheduler
+from market_brief.schedule_manager import (
+    STATUS_HTTP as SCHEDULE_STATUS_HTTP,
+    LinuxCrontabDriver,
+    ScheduleManager,
+    UnavailableCrontabDriver,
+)
 from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
 from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
@@ -105,6 +113,29 @@ class RecipientRequest(BaseModel):
     channel: str = "TELEGRAM"
     group_tag: str = "GENERAL"
     subscribed_topics: str = "FINANCE"
+
+
+class ScheduleConfigRequest(BaseModel):
+    """Client schedule payload. No command / cron-expression fields are accepted (extra=forbid)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    times_kst: list[str]
+    days_mode: str = "DAILY"
+    weekdays: list[int] = []
+    confirm_migration: bool = False
+
+
+class SchedulePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    enabled: bool = True
+    times_kst: list[str]
+    days_mode: str = "DAILY"
+    weekdays: list[int] = []
+    count: int = 3
 
 
 class RecipientNameUpdateRequest(BaseModel):
@@ -261,9 +292,18 @@ def create_admin_app(
     db_path: str = "alerts.sqlite3",
     env_path: Path | None = None,
     enable_bot_workers: bool = False,
+    crontab_driver: Any | None = None,
 ) -> FastAPI:
     env_file = env_path or (ROOT / ".env")
     db = MarketBriefDatabase(db_path=db_path, env_path=env_file)
+    if crontab_driver is None:
+        # [VERIFY-02] Real OS crontab only on the Linux service host, never under pytest / Windows dev.
+        if sys.platform.startswith("linux") and "pytest" not in sys.modules and shutil.which("crontab"):
+            crontab_driver = LinuxCrontabDriver(ROOT)
+        else:
+            crontab_driver = UnavailableCrontabDriver()
+    schedule_app_dir = getattr(crontab_driver, "app_dir", None) or ROOT.as_posix()
+    schedule_manager = ScheduleManager(db, crontab_driver, app_dir=schedule_app_dir)
     sub_engine = SubscriptionEngine(db)
     router = MultiBotInteractionRouter(sub_engine)
     bot_manager = DynamicBotManager(sub_engine, router)
@@ -302,6 +342,7 @@ def create_admin_app(
     app.state.sub_engine = sub_engine
     app.state.router = router
     app.state.bot_manager = bot_manager
+    app.state.schedule_manager = schedule_manager
 
     adm_db = AdmissionDatabase(db_path=db_path) if _HAS_ADMISSION_MODULE else None
     adm_curator = AICurator() if _HAS_ADMISSION_MODULE else None
@@ -1436,6 +1477,33 @@ def create_admin_app(
     def save_settings(req: ThresholdRequest):
         db.set_setting("thresholds", json.dumps(req.thresholds, ensure_ascii=False), updated_by="ADMIN_WEB")
         return {"success": True}
+
+    # =========================================================================
+    # ⏰ Admin Cron Schedule Management ([PROD-LIVE]: save never executes / dispatches)
+    # =========================================================================
+
+    @app.get("/api/platform/schedules")
+    def get_platform_schedules(request: Request):
+        verify_admin_token(request)
+        return schedule_manager.get_overview()
+
+    @app.post("/api/platform/schedules/preview")
+    def preview_platform_schedule(req: SchedulePreviewRequest, request: Request):
+        verify_admin_token(request)
+        payload = req.model_dump(exclude={"task_id", "count"})
+        result = schedule_manager.preview(req.task_id, payload, count=req.count)
+        if result["status"] in ("UNKNOWN_TASK", "READ_ONLY"):
+            return JSONResponse(status_code=SCHEDULE_STATUS_HTTP[result["status"]], content=result)
+        return result
+
+    @app.put("/api/platform/schedules/{task_id}")
+    def update_platform_schedule(task_id: str, req: ScheduleConfigRequest, request: Request):
+        verify_admin_token(request)
+        if os.environ.get("SCHEDULE_REQUIRE_TOKEN", "").lower() == "true" and not os.environ.get("ADMIN_API_TOKEN", "").strip():
+            raise HTTPException(status_code=503, detail="SCHEDULE_REQUIRE_TOKEN=true 이지만 ADMIN_API_TOKEN이 설정되지 않아 저장을 거부합니다.")
+        payload = req.model_dump(exclude={"confirm_migration"})
+        result = schedule_manager.apply(task_id, payload, confirm_migration=req.confirm_migration, updated_by="ADMIN_WEB")
+        return JSONResponse(status_code=SCHEDULE_STATUS_HTTP.get(result["status"], 500), content=result)
 
     # =========================================================================
     # Travel Brief Bot APIs (Multi-Bot Integration)

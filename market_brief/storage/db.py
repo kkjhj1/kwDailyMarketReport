@@ -177,6 +177,21 @@ class MarketBriefDatabase:
                 )"""
             )
 
+            # 6-1. Admin cron schedule sync journal (PENDING -> APPLIED / SYNC_FAILED / ROLLED_BACK / DIVERGED)
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS bot_schedules_pending (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    payload_json TEXT NOT NULL,
+                    snapshot_crontab TEXT,
+                    snapshot_hash TEXT,
+                    target_hash TEXT,
+                    error_detail TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+
             # 7. Telegram Update Sync Offset
             db.execute(
                 """CREATE TABLE IF NOT EXISTS telegram_sync_state (
@@ -850,6 +865,65 @@ class MarketBriefDatabase:
                    VALUES (?, ?, ?, ?, ?)""",
                 (v, key, value, updated_by, reason),
             )
+
+    # =========================================================================
+    # Admin Cron Schedule Sync Journal
+    # =========================================================================
+
+    def record_schedule_pending(
+        self,
+        task_id: str,
+        payload_json: str,
+        snapshot_crontab: str,
+        snapshot_hash: str,
+        target_hash: str,
+    ) -> int:
+        with self._connect() as db:
+            cursor = db.execute(
+                """INSERT INTO bot_schedules_pending
+                   (task_id, status, payload_json, snapshot_crontab, snapshot_hash, target_hash, updated_at)
+                   VALUES (?, 'PENDING', ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (task_id, payload_json, snapshot_crontab, snapshot_hash, target_hash),
+            )
+            return int(cursor.lastrowid)
+
+    def finalize_schedule_journal(
+        self,
+        journal_id: int,
+        status: str,
+        error_detail: str | None = None,
+        canonical_value: str | None = None,
+        updated_by: str = "ADMIN_WEB",
+        reason: str | None = None,
+    ) -> None:
+        """Updates the journal; when canonical_value is given, the canonical `bot_schedules`
+        setting, its config history row and the journal status commit in one transaction."""
+        with self._connect() as db:
+            if canonical_value is not None:
+                db.execute(
+                    """INSERT OR REPLACE INTO system_settings (setting_key, setting_value, description, updated_at)
+                       VALUES ('bot_schedules', ?, '관리자 콘솔 자동 실행 주기 (ADMIN-MANAGED crontab SSOT)', CURRENT_TIMESTAMP)""",
+                    (canonical_value,),
+                )
+                v = db.execute(
+                    "SELECT COALESCE(MAX(config_version), 0) + 1 FROM system_config_history WHERE setting_key = 'bot_schedules'"
+                ).fetchone()[0]
+                db.execute(
+                    """INSERT INTO system_config_history (config_version, setting_key, setting_value, updated_by, reason)
+                       VALUES (?, 'bot_schedules', ?, ?, ?)""",
+                    (v, canonical_value, updated_by, reason),
+                )
+            db.execute(
+                """UPDATE bot_schedules_pending
+                   SET status = ?, error_detail = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (status, error_detail, journal_id),
+            )
+
+    def get_latest_schedule_journal(self) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM bot_schedules_pending ORDER BY id DESC LIMIT 1").fetchone()
+            return dict(row) if row else None
 
     def get_recent_jobs(self, limit: int = 15) -> list[dict[str, Any]]:
         with self._connect() as db:

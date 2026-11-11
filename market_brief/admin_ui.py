@@ -1738,6 +1738,39 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
     }
+
+    /* ⏰ 자동 실행 주기 관리 (360px zero-overflow, 44px touch targets) */
+    #scheduleManagerCard, #scheduleManagerCard * { box-sizing: border-box; }
+    #scheduleManagerCard { margin-top: 16px; max-width: 100%; overflow-wrap: anywhere; }
+    .sched-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    @media (min-width: 900px) { .sched-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .sched-task { border: 1px solid var(--border); border-radius: 10px; padding: 14px; min-width: 0; background: #fff; }
+    .sched-task.sched-featured { grid-column: 1 / -1; border-color: #93c5fd; background: var(--primary-soft); }
+    .sched-task.sched-readonly { background: var(--surface-sub); }
+    .sched-task-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .sched-task-title { font-size: 14.5px; font-weight: 800; min-width: 0; }
+    .sched-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; min-width: 0; }
+    .sched-row-label { width: 100%; font-size: 12px; font-weight: 700; color: #334155; }
+    .sched-touch { min-height: 44px; min-width: 44px; }
+    .sched-chip { min-height: 44px; min-width: 44px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border-dark); background: #fff; font-size: 13px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; }
+    .sched-chip.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .sched-time-chip { cursor: default; background: #fff; }
+    .sched-time-del { min-height: 44px; min-width: 44px; border: none; background: transparent; color: var(--danger); font-size: 15px; cursor: pointer; margin-right: -10px; }
+    .sched-switch { min-height: 44px; min-width: 88px; border-radius: 999px; border: 1px solid var(--border-dark); font-weight: 800; cursor: pointer; padding: 6px 14px; }
+    .sched-switch.on { background: var(--success); color: #fff; border-color: var(--success); }
+    .sched-switch.off { background: #e2e8f0; color: #475569; }
+    .sched-time-input { min-height: 44px; flex: 1 1 120px; min-width: 0; max-width: 180px; }
+    .sched-pre { white-space: pre-wrap; word-break: break-all; overflow-x: auto; max-width: 100%; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px; font-size: 11.5px; margin: 6px 0; }
+    .sched-preview { border-top: 1px dashed var(--border-dark); margin-top: 10px; padding-top: 8px; font-size: 12.5px; min-width: 0; }
+    .sched-banner { border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; font-weight: 600; }
+    .sched-banner.ok { background: var(--success-soft); color: #047857; }
+    .sched-banner.warn { background: var(--warning-soft); color: #b45309; }
+    .sched-banner.err { background: var(--danger-soft); color: #b91c1c; }
+    .sched-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 999px; background: #e2e8f0; color: #334155; }
+    .sched-badge.warn { background: #fef3c7; color: #b45309; }
+    .sched-badge.ok { background: #d1fae5; color: #047857; }
+    .sched-msg-warn { color: #b45309; }
+    .sched-msg-err { color: #b91c1c; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -1957,6 +1990,21 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       <!-- 🔍 선택 봇 전용 상세 제어 센터 (Detail Inspector) -->
       <div id="botDetailInspector" class="bot-detail-inspector">
         <div style="text-align:center; padding:32px; color:var(--text-muted);">봇을 선택해주세요.</div>
+      </div>
+
+      <!-- ⏰ 자동 실행 주기 관리 (ADMIN-MANAGED crontab, 저장 시 즉시 실행·발송 없음) -->
+      <div id="scheduleManagerCard" class="card">
+        <div class="card-header">
+          <div style="min-width:0;">
+            <h2 class="card-title">⏰ 자동 실행 주기 관리</h2>
+            <p class="card-desc">OS cron 자동 실행 시각을 관리합니다. 저장해도 작업이 즉시 실행·발송되지 않습니다.</p>
+          </div>
+          <button class="btn sched-touch" onclick="loadSchedules()">🔄 새로고침</button>
+        </div>
+        <div id="schedStatusBanner"></div>
+        <div id="schedTaskList" class="sched-grid">
+          <div style="grid-column: 1 / -1; text-align:center; padding:16px; color:var(--text-muted);">실행 주기를 불러오는 중...</div>
+        </div>
       </div>
     </section>
 
@@ -3342,6 +3390,243 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       } catch (e) {
         toast('봇 목록 로드 실패: ' + e.message);
       }
+      loadSchedules();
+    }
+
+    // =====================================================================
+    // ⏰ 자동 실행 주기 관리 (cron 0=일 .. 6=토)
+    // =====================================================================
+    const SCH = { data: null, drafts: {}, previews: {}, previewTimers: {}, pendingMigration: null };
+    const SCH_DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+    const SCH_PRESETS = [
+      { id: 'basic3', label: '기본 3회 (07:30·12:30·18:30)', times: ['07:30', '12:30', '18:30'] },
+      { id: 'every4h', label: '4시간 간격', times: ['07:30', '11:30', '15:30', '19:30'] },
+      { id: 'every2h', label: '2시간 간격 (7회)', times: ['08:00', '10:00', '12:00', '14:00', '16:00', '18:00', '20:00'] },
+    ];
+    const SCH_NL = String.fromCharCode(10);
+
+    async function schedReq(url, opts = {}) {
+      const headers = { 'Content-Type': 'application/json' };
+      const token = (localStorage.getItem('admin_api_token') || new URLSearchParams(window.location.search).get('token') || new URLSearchParams(window.location.search).get('admin_token') || '').trim();
+      if (token) headers['X-Admin-Token'] = token;
+      const res = await fetch(url, { method: opts.method || 'GET', headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+      if (res.status === 401 && !opts._retriedAuth) {
+        const saved = await openAdminTokenModal('관리자 인증이 필요한 작업입니다.');
+        if (saved) return schedReq(url, { ...opts, _retriedAuth: true });
+      }
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    async function loadSchedules() {
+      const list = document.getElementById('schedTaskList');
+      if (!list) return;
+      try {
+        const r = await schedReq('/api/platform/schedules');
+        if (!r.ok) throw new Error(r.data.detail || ('HTTP ' + r.status));
+        SCH.data = r.data;
+        SCH.drafts = {};
+        SCH.previews = {};
+        (r.data.tasks || []).forEach(t => {
+          if (t.editable) SCH.drafts[t.task_id] = JSON.parse(JSON.stringify(t.config));
+        });
+        renderScheduleBanner();
+        renderScheduleCards();
+      } catch (e) {
+        list.innerHTML = `<div class="sched-banner err" style="grid-column: 1 / -1;">실행 주기 로드 실패: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function renderScheduleBanner() {
+      const box = document.getElementById('schedStatusBanner');
+      const d = SCH.data;
+      if (!box || !d) return;
+      const parts = [];
+      if (d.db_backup_protected) parts.push('<div class="sched-banner ok">🛡️ 04:00 DB 백업 보호됨 (관리 블록 밖 라인은 그대로 유지)</div>');
+      if (d.crontab_status !== 'OK') {
+        parts.push('<div class="sched-banner err">⛔ CRONTAB_UNAVAILABLE: 이 서버에서는 OS crontab을 읽거나 쓸 수 없습니다. 미리보기만 가능하며 저장되지 않습니다.</div>');
+      }
+      if (d.diverged) {
+        parts.push('<div class="sched-banner err">🚨 DIVERGED: 이전 동기화에서 crontab과 DB가 어긋났습니다. 서버 crontab을 수동 점검하기 전까지 저장이 차단됩니다.</div>');
+      }
+      if (d.migration_state === 'MIGRATION_CONFLICT') {
+        parts.push(`<div class="sched-banner err">⛔ MIGRATION_CONFLICT: ${esc(d.conflict_reason || '관리 마커 손상')} — 자동 덮어쓰기를 거부합니다.</div>`);
+      } else if (d.migration_state === 'MIGRATION_REQUIRED') {
+        const lines = (d.unmanaged_task_lines || []).map(u => u.line).join(SCH_NL);
+        parts.push(`<div class="sched-banner warn">📦 MIGRATION_REQUIRED: 관리되지 않은 기존 cron ${(d.unmanaged_task_lines || []).length}줄이 있습니다. 첫 저장 시 현재 운영 시각 그대로 관리 블록으로 편입됩니다.<pre class="sched-pre">${esc(lines)}</pre></div>`);
+      } else if (d.sync_state === 'DRIFT') {
+        parts.push('<div class="sched-banner warn">⚠️ crontab 관리 블록이 DB 설정과 다릅니다 (DRIFT).</div>');
+      }
+      (d.policy_warnings || []).forEach(w => parts.push(`<div class="sched-banner warn">⚠️ ${esc(w)}</div>`));
+      if (SCH.pendingMigration) {
+        const pm = SCH.pendingMigration;
+        parts.push(`<div class="sched-banner warn">🔁 [${esc(pm.taskId)}] 저장 전 기존 크론 편입 승인이 필요합니다.<pre class="sched-pre">${esc((pm.diff || []).join(SCH_NL))}</pre><button class="btn btn-primary sched-touch" onclick="schedSave('${esc(pm.taskId)}', true)">기존 크론 편입 후 저장</button> <button class="btn sched-touch" onclick="SCH.pendingMigration=null; renderScheduleBanner();">취소</button></div>`);
+      }
+      box.innerHTML = parts.join('');
+    }
+
+    function renderScheduleCards() {
+      const list = document.getElementById('schedTaskList');
+      const d = SCH.data;
+      if (!list || !d) return;
+      const tasks = d.tasks || [];
+      const editable = tasks.filter(t => t.editable);
+      const readonly = tasks.filter(t => !t.editable);
+      let html = editable.map(t => renderScheduleEditor(t)).join('');
+      if (readonly.length) html += renderScheduleReadOnly(readonly);
+      list.innerHTML = html;
+      editable.forEach(t => renderSchedulePreview(t.task_id));
+    }
+
+    function renderScheduleEditor(t) {
+      const id = t.task_id;
+      const dr = SCH.drafts[id] || t.config;
+      const featured = id === 'travel_watches';
+      const srcBadge = t.source === 'CATALOG_DEFAULT' ? '<span class="sched-badge warn">미등록</span>' : (t.source === 'CRONTAB_UNMANAGED' ? '<span class="sched-badge warn">기존 cron</span>' : '<span class="sched-badge ok">관리 중</span>');
+      const presets = featured ? `<div class="sched-row"><div class="sched-row-label">프리셋</div>${SCH_PRESETS.map(p => `<button class="sched-chip" onclick="schedApplyPreset('${id}', '${p.id}')">${esc(p.label)}</button>`).join('')}</div>` : '';
+      const modes = [['DAILY', '매일'], ['WEEKDAYS', '평일'], ['CUSTOM', '직접 요일']];
+      const modeChips = modes.map(m => `<button class="sched-chip ${dr.days_mode === m[0] ? 'active' : ''}" onclick="schedSetDays('${id}', '${m[0]}')">${m[1]}</button>`).join('');
+      const dowChips = dr.days_mode === 'CUSTOM' ? `<div class="sched-row">${SCH_DOW_LABELS.map((lbl, dow) => `<button class="sched-chip ${(dr.weekdays || []).includes(dow) ? 'active' : ''}" onclick="schedToggleWeekday('${id}', ${dow})">${lbl}</button>`).join('')}</div>` : '';
+      const timeChips = (dr.times_kst || []).map(tm => `<span class="sched-chip sched-time-chip">${esc(tm)}<button class="sched-time-del" aria-label="${esc(tm)} 삭제" onclick="schedRemoveTime('${id}', '${esc(tm)}')">✕</button></span>`).join('') || '<span class="sched-msg-warn">실행 시각이 없습니다.</span>';
+      return `<div class="sched-task ${featured ? 'sched-featured' : ''}" id="schedTask-${id}">
+        <div class="sched-task-head">
+          <div class="sched-task-title">${featured ? '⭐ ' : ''}${esc(t.label)} ${srcBadge}</div>
+          <button class="sched-switch ${dr.enabled ? 'on' : 'off'}" onclick="schedToggle('${id}')" aria-pressed="${dr.enabled ? 'true' : 'false'}">${dr.enabled ? 'ON' : 'OFF'}</button>
+        </div>
+        <div class="card-desc">${esc(t.description)}</div>
+        ${presets}
+        <div class="sched-row"><div class="sched-row-label">요일</div>${modeChips}</div>
+        ${dowChips}
+        <div class="sched-row"><div class="sched-row-label">실행 시각 (KST)</div>${timeChips}</div>
+        <div class="sched-row">
+          <input type="time" class="form-input sched-time-input" id="schedTimeInput-${id}" step="60" />
+          <button class="btn sched-touch" onclick="schedAddTime('${id}')">➕ 시각 추가</button>
+        </div>
+        <div class="sched-row">
+          <button class="btn sched-touch" onclick="schedPreview('${id}')">👁️ 미리보기</button>
+          <button class="btn btn-primary sched-touch" onclick="schedSave('${id}', false)" ${SCH.data && SCH.data.crontab_status !== 'OK' ? 'disabled title="CRONTAB_UNAVAILABLE"' : ''}>💾 저장</button>
+        </div>
+        <div class="sched-preview" id="schedPreview-${id}"></div>
+      </div>`;
+    }
+
+    function renderScheduleReadOnly(tasks) {
+      const rows = tasks.map(t => {
+        const exprs = (t.live_cron_exprs && t.live_cron_exprs.length) ? t.live_cron_exprs : t.cron_exprs;
+        const badge = t.mismatch ? '<span class="sched-badge warn">기본값과 불일치</span>' : '<span class="sched-badge ok">일치</span>';
+        const warn = (t.policy_warnings || []).map(w => `<div class="sched-msg-warn">⚠️ ${esc(w)}</div>`).join('');
+        return `<div style="margin:8px 0; min-width:0;">
+          <div style="font-weight:800; font-size:13px;">${esc(t.label)} ${badge}</div>
+          <div class="card-desc">${esc(t.internal_scheduler_note)}</div>
+          <pre class="sched-pre">${esc((exprs || []).join(SCH_NL) || '(OS cron 미등록)')}</pre>
+          ${warn}
+        </div>`;
+      }).join('');
+      return `<div class="sched-task sched-readonly" id="schedReadOnlyDualPath">
+        <div class="sched-task-head"><div class="sched-task-title">📈 시황봇 (읽기 전용 · 이중 경로)</div><span class="sched-badge">READ_ONLY_DUAL_PATH</span></div>
+        <div class="card-desc">시황봇은 내부 데몬(multibot.service)과 OS cron fallback이 함께 동작합니다. 이 화면에서는 OS cron만 단독으로 끄거나 시간을 변경할 수 없습니다.</div>
+        ${rows}
+      </div>`;
+    }
+
+    function schedDraft(id) {
+      return SCH.drafts[id];
+    }
+
+    function schedChanged(id) {
+      const card = document.getElementById('schedTask-' + id);
+      const t = (SCH.data.tasks || []).find(x => x.task_id === id);
+      if (card && t) card.outerHTML = renderScheduleEditor(t);
+      clearTimeout(SCH.previewTimers[id]);
+      SCH.previewTimers[id] = setTimeout(() => schedPreview(id), 300);
+    }
+
+    function schedToggle(id) { const d = schedDraft(id); d.enabled = !d.enabled; schedChanged(id); }
+    function schedApplyPreset(id, presetId) {
+      const p = SCH_PRESETS.find(x => x.id === presetId);
+      if (!p) return;
+      schedDraft(id).times_kst = p.times.slice();
+      schedChanged(id);
+    }
+    function schedSetDays(id, mode) {
+      const d = schedDraft(id);
+      d.days_mode = mode;
+      if (mode === 'DAILY') d.weekdays = [0, 1, 2, 3, 4, 5, 6];
+      else if (mode === 'WEEKDAYS') d.weekdays = [1, 2, 3, 4, 5];
+      else if (!d.weekdays || !d.weekdays.length || d.weekdays.length === 7) d.weekdays = [1, 2, 3, 4, 5];
+      schedChanged(id);
+    }
+    function schedToggleWeekday(id, dow) {
+      const d = schedDraft(id);
+      const set = new Set(d.weekdays || []);
+      if (set.has(dow)) set.delete(dow); else set.add(dow);
+      d.weekdays = Array.from(set).sort((a, b) => a - b);
+      schedChanged(id);
+    }
+    function schedRemoveTime(id, tm) {
+      const d = schedDraft(id);
+      d.times_kst = (d.times_kst || []).filter(x => x !== tm);
+      schedChanged(id);
+    }
+    function schedAddTime(id) {
+      const input = document.getElementById('schedTimeInput-' + id);
+      const v = (input && input.value || '').slice(0, 5);
+      if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(v)) { toast('HH:MM 형식의 시각을 입력하세요.'); return; }
+      const d = schedDraft(id);
+      const set = new Set(d.times_kst || []);
+      set.add(v);
+      d.times_kst = Array.from(set).sort();
+      schedChanged(id);
+    }
+
+    async function schedPreview(id) {
+      const d = schedDraft(id);
+      if (!d) return;
+      const r = await schedReq('/api/platform/schedules/preview', { method: 'POST', body: { task_id: id, enabled: !!d.enabled, times_kst: d.times_kst || [], days_mode: d.days_mode, weekdays: d.weekdays || [], count: 3 } });
+      SCH.previews[id] = r.data;
+      renderSchedulePreview(id);
+    }
+
+    function renderSchedulePreview(id) {
+      const box = document.getElementById('schedPreview-' + id);
+      const p = SCH.previews[id];
+      if (!box) return;
+      if (!p) {
+        const t = (SCH.data.tasks || []).find(x => x.task_id === id);
+        if (!t) { box.innerHTML = ''; return; }
+        box.innerHTML = `<div><b>현재 cron</b><pre class="sched-pre">${esc((t.cron_lines || []).join(SCH_NL) || '(없음)')}</pre></div>
+          <div><b>다음 실행 (KST)</b>: ${t.next_runs_kst && t.next_runs_kst.length ? t.next_runs_kst.map(esc).join(' · ') : '없음 (OFF)'}</div>`;
+        return;
+      }
+      const errs = (p.errors || []).map(e => `<div class="sched-msg-err">⛔ ${esc(typeof e === 'string' ? e : JSON.stringify(e))}</div>`).join('');
+      const detailErrs = Array.isArray(p.detail) ? p.detail.map(e => `<div class="sched-msg-err">⛔ ${esc(e.msg || JSON.stringify(e))}</div>`).join('') : '';
+      const warns = (p.warnings || []).map(w => `<div class="sched-msg-warn">⚠️ ${esc(w)}</div>`).join('');
+      box.innerHTML = `${errs}${detailErrs}${warns}
+        <div><b>생성될 cron</b><pre class="sched-pre">${esc((p.cron_lines || []).join(SCH_NL) || '(없음)')}</pre></div>
+        <div><b>다음 실행 3회 (KST)</b>: ${p.next_runs_kst && p.next_runs_kst.length ? p.next_runs_kst.map(esc).join(' · ') : '없음'}</div>`;
+    }
+
+    async function schedSave(id, confirmMigration) {
+      const d = schedDraft(id);
+      if (!d) return;
+      const r = await schedReq('/api/platform/schedules/' + encodeURIComponent(id), { method: 'PUT', body: { enabled: !!d.enabled, times_kst: d.times_kst || [], days_mode: d.days_mode, weekdays: d.weekdays || [], confirm_migration: !!confirmMigration } });
+      const st = (r.data && r.data.status) || ('HTTP ' + r.status);
+      if (r.status === 200 && st === 'APPLIED') {
+        SCH.pendingMigration = null;
+        toast('✅ 실행 주기 저장 완료 (즉시 실행·발송 없음)');
+        await loadSchedules();
+        return;
+      }
+      if (st === 'MIGRATION_REQUIRED') {
+        SCH.pendingMigration = { taskId: id, diff: r.data.diff || [] };
+        renderScheduleBanner();
+        toast('📦 기존 크론 편입 승인이 필요합니다.');
+        return;
+      }
+      SCH.previews[id] = r.data;
+      renderSchedulePreview(id);
+      const msg = (r.data && (r.data.errors || []).join(' / ')) || (r.data && typeof r.data.detail === 'string' ? r.data.detail : '');
+      toast('⛔ 저장 실패 [' + st + '] ' + msg);
     }
 
     async function openBriefingModal(botId) {

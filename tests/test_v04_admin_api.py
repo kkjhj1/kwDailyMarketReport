@@ -583,5 +583,181 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn('id="schedulerTimer" style="display:none;"', html)
 
 
+class ScheduleApiTests(unittest.TestCase):
+    """⏰ /api/platform/schedules* with InMemoryCrontabDriver ([VERIFY-02], [PROD-LIVE])."""
+
+    APP_DIR = "/home/ubuntu/kwDailyMarketReport"
+
+    def setUp(self):
+        from market_brief.schedule_manager import InMemoryCrontabDriver
+
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmp_dir.name) / "test_sched_api.sqlite3"
+        env_path = Path(self.tmp_dir.name) / "empty.env"
+        self.live_crontab = "\n".join([
+            "SHELL=/bin/bash",
+            "0 4 * * * cp -p /home/ubuntu/kwDailyMarketReport/alerts.sqlite3 /home/ubuntu/backups/",
+            "# [1. 시황봇]",
+            f"33 6 * * 1-5 {self.APP_DIR}/run_cron.sh market_auto",
+            f"42 15 * * 1-5 {self.APP_DIR}/run_cron.sh market_auto",
+            f"7,22,37,52 9-15 * * 1-5 {self.APP_DIR}/run_cron.sh market_check_urgent",
+            "# [2. 여행봇]",
+            f"30 7,12,18 * * * {self.APP_DIR}/run_cron.sh travel_watches",
+            "",
+        ])
+        self.driver = InMemoryCrontabDriver(self.live_crontab, app_dir=self.APP_DIR)
+        self.app = create_admin_app(db_path=str(db_path), env_path=env_path, crontab_driver=self.driver)
+        self.client = TestClient(self.app)
+        self.body = {"enabled": True, "times_kst": ["08:00", "13:00", "19:00"], "days_mode": "DAILY", "weekdays": []}
+
+    def tearDown(self):
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_get_schedules_reports_migration_required(self):
+        res = self.client.get("/api/platform/schedules")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["migration_state"], "MIGRATION_REQUIRED")
+        self.assertTrue(data["db_backup_protected"])
+        tasks = {t["task_id"]: t for t in data["tasks"]}
+        self.assertEqual(data["tasks"][0]["task_id"], "travel_watches")
+        self.assertEqual(tasks["travel_watches"]["config"]["times_kst"], ["07:30", "12:30", "18:30"])
+        self.assertFalse(tasks["market_auto"]["editable"])
+        self.assertEqual(self.driver.writes, [])
+
+    def test_preview_endpoint(self):
+        self.client.get("/api/platform/schedules")
+        res = self.client.post("/api/platform/schedules/preview", json={"task_id": "travel_watches", **self.body})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["cron_lines"], [f"0 8,13,19 * * * {self.APP_DIR}/run_cron.sh travel_watches"])
+        self.assertEqual(len(data["next_runs_kst"]), 3)
+        self.assertTrue(data["diff_available"])
+
+        bad = self.client.post("/api/platform/schedules/preview", json={"task_id": "travel_watches", **self.body, "times_kst": ["02:00"]})
+        self.assertEqual(bad.status_code, 200)
+        self.assertEqual(bad.json()["status"], "VALIDATION_FAILED")
+
+        ro = self.client.post("/api/platform/schedules/preview", json={"task_id": "market_auto", **self.body})
+        self.assertEqual(ro.status_code, 400)
+        self.assertEqual(self.driver.writes, [])
+
+    def test_put_read_only_validation_and_injection(self):
+        self.assertEqual(self.client.put("/api/platform/schedules/market_auto", json=self.body).status_code, 400)
+        self.assertEqual(self.client.put("/api/platform/schedules/market_check_urgent", json=self.body).status_code, 400)
+        self.assertEqual(self.client.put("/api/platform/schedules/unknown_task", json=self.body).status_code, 404)
+        night = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "times_kst": ["23:30"]})
+        self.assertEqual(night.status_code, 422)
+        self.assertEqual(night.json()["status"], "VALIDATION_FAILED")
+        inj = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "times_kst": ["08:00; reboot"]})
+        self.assertEqual(inj.status_code, 422)
+        cmd = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "command": "rm -rf /"})
+        self.assertEqual(cmd.status_code, 422)
+        self.assertEqual(self.driver.writes, [])
+
+    def test_put_migration_confirm_flow(self):
+        res = self.client.put("/api/platform/schedules/travel_watches", json=self.body)
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["status"], "MIGRATION_REQUIRED")
+        self.assertTrue(res.json()["diff"])
+        self.assertEqual(self.driver.writes, [])
+
+        ok = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "confirm_migration": True})
+        self.assertEqual(ok.status_code, 200, ok.json())
+        self.assertEqual(ok.json()["status"], "APPLIED")
+        self.assertIn("0 4 * * * cp -p /home/ubuntu/kwDailyMarketReport/alerts.sqlite3 /home/ubuntu/backups/", self.driver.text.splitlines())
+        self.assertIn(f"0 8,13,19 * * * {self.APP_DIR}/run_cron.sh travel_watches", self.driver.text)
+        data = self.client.get("/api/platform/schedules").json()
+        self.assertEqual(data["migration_state"], "MANAGED")
+        self.assertEqual(data["sync_state"], "IN_SYNC")
+        # Legacy /api/settings contract untouched
+        settings = self.client.get("/api/settings").json()
+        self.assertEqual(set(settings.keys()), {"thresholds", "schedules"})
+
+    def test_conflict_and_unavailable_status_codes(self):
+        from market_brief.schedule_manager import MANAGED_START
+
+        self.driver.text = f"{MANAGED_START}\n"
+        res = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "confirm_migration": True})
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["status"], "MIGRATION_CONFLICT")
+
+        self.driver.text = ""
+        self.driver.fail_write = True
+        res = self.client.put("/api/platform/schedules/travel_watches", json=self.body)
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.json()["status"], "SYNC_FAILED")
+
+        default_app = create_admin_app(
+            db_path=str(Path(self.tmp_dir.name) / "default.sqlite3"), env_path=Path(self.tmp_dir.name) / "empty.env"
+        )
+        client = TestClient(default_app)
+        self.assertEqual(client.get("/api/platform/schedules").json()["crontab_status"], "UNAVAILABLE")
+        res = client.put("/api/platform/schedules/travel_watches", json=self.body)
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.json()["status"], "CRONTAB_UNAVAILABLE")
+
+    def test_schedule_token_guard(self):
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "secret_token_123"}):
+            self.assertEqual(self.client.get("/api/platform/schedules").status_code, 401)
+            self.assertEqual(
+                self.client.post("/api/platform/schedules/preview", json={"task_id": "travel_watches", **self.body}).status_code, 401
+            )
+            self.assertEqual(self.client.put("/api/platform/schedules/travel_watches", json=self.body).status_code, 401)
+            ok = self.client.get("/api/platform/schedules", headers={"X-Admin-Token": "secret_token_123"})
+            self.assertEqual(ok.status_code, 200)
+        with patch.dict(os.environ, {"SCHEDULE_REQUIRE_TOKEN": "true", "ADMIN_API_TOKEN": ""}):
+            res = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "confirm_migration": True})
+            self.assertEqual(res.status_code, 503)
+        self.assertEqual(self.driver.writes, [])
+
+    def test_prod_live_save_executes_nothing(self):
+        import market_brief.schedule_manager as sm
+
+        with patch.object(sm.subprocess, "run", side_effect=AssertionError("subprocess forbidden")) as run_mock, \
+             patch("subprocess.Popen", side_effect=AssertionError("Popen forbidden")) as popen_mock, \
+             patch("os.system", side_effect=AssertionError("os.system forbidden")) as system_mock, \
+             patch("admin_server.send_bot_test_message", side_effect=AssertionError("telegram forbidden")) as tg_mock, \
+             patch("admin_server.SafeTelegramDispatcher", side_effect=AssertionError("dispatch forbidden")) as disp_mock:
+            res = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "confirm_migration": True})
+            self.assertEqual(res.status_code, 200)
+            res2 = self.client.put("/api/platform/schedules/travel_watches", json={**self.body, "enabled": False})
+            self.assertEqual(res2.status_code, 200)
+        self.assertFalse(res.json()["executed_now"])
+        for m in (run_mock, popen_mock, system_mock, tg_mock, disp_mock):
+            m.assert_not_called()
+        self.assertIn(f"# [DISABLED] 0 8,13,19 * * * {self.APP_DIR}/run_cron.sh travel_watches", self.driver.text)
+
+    def test_schedule_manager_ui_present(self):
+        import re
+
+        html = self.client.get("/").text
+        self.assertIn('id="scheduleManagerCard"', html)
+        self.assertIn("⏰ 자동 실행 주기 관리", html)
+        self.assertIn("loadSchedules", html)
+        self.assertIn("loadSchedules();", html)
+        self.assertIn('id="schedStatusBanner"', html)
+        self.assertIn("🛡️ 04:00 DB 백업 보호됨", html)
+        self.assertIn("기존 크론 편입 후 저장", html)
+        self.assertIn("기본 3회 (07:30·12:30·18:30)", html)
+        self.assertIn("4시간 간격", html)
+        self.assertIn("2시간 간격 (7회)", html)
+        self.assertIn("'일', '월', '화', '수', '목', '금', '토'", html)
+        self.assertIn("READ_ONLY_DUAL_PATH", html)
+        self.assertIn("/api/platform/schedules/preview", html)
+        self.assertRegex(html, r"\.sched-touch \{ min-height: 44px; min-width: 44px; \}")
+        self.assertRegex(html, r"\.sched-chip \{ min-height: 44px;")
+        self.assertRegex(html, r"\.sched-switch \{ min-height: 44px;")
+        self.assertRegex(html, r"\.sched-grid \{[^}]*minmax\(0, 1fr\)")
+        # Card is placed inside #pane-bots, below #botDetailInspector
+        pane = html[html.index('id="pane-bots"'):html.index('id="pane-dashboard"')]
+        self.assertLess(pane.index('id="botDetailInspector"'), pane.index('id="scheduleManagerCard"'))
+        self.assertIsNone(re.search(r"sched[A-Za-z]*\([^)]*run_cron", html))
+
+
 if __name__ == "__main__":
     unittest.main()
