@@ -203,6 +203,39 @@ def test_main_returns_one_with_violations(tmp_path, capsys):
     assert "violations=1" in out
 
 
+def test_collect_files_dedupes_overlapping_targets_sorted(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    b = _write(tmp_path, "def test_b():\n    assert 1\n", name="test_b.py")
+    a = _write(tmp_path, "def test_a():\n    assert 1\n", name="test_a.py")
+    c = _write(sub, "def test_c():\n    assert 1\n", name="test_c.py")
+
+    targets = [
+        str(sub),                 # 하위 디렉터리 먼저
+        str(tmp_path),            # 상위 디렉터리 (sub 포함, 겹침)
+        str(b),                   # 이미 디렉터리로 수집된 파일
+        str(tmp_path),            # 동일 디렉터리 중복
+        str(sub / ".." / "test_a.py"),  # 다른 표기, 같은 실제 파일
+    ]
+    files = aq.collect_files(targets)
+
+    resolved = [f.resolve() for f in files]
+    assert len(resolved) == len(set(resolved)) == 3
+    assert resolved == sorted(resolved)
+    assert set(resolved) == {a.resolve(), b.resolve(), c.resolve()}
+    # 입력 순서를 바꿔도 동일한 결정적 결과
+    assert [f.resolve() for f in aq.collect_files(list(reversed(targets)))] == resolved
+
+
+def test_main_counts_overlapping_targets_once(tmp_path, capsys):
+    path = _write(tmp_path, "def test_bad():\n    pass\n")
+    rc = aq.main([str(tmp_path), str(path), str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert out.count("[PASS_ONLY]") == 1
+    assert "files=1 tests=1 violations=1" in out
+
+
 def test_main_returns_one_when_no_files(tmp_path, capsys):
     rc = aq.main([str(tmp_path / "missing")])
     assert rc == 1

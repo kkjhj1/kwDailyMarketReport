@@ -134,14 +134,26 @@ def audit_file(path: Path) -> list[Violation]:
 
 
 def collect_files(targets: list[str]) -> list[Path]:
-    files: list[Path] = []
+    """대상 경로에서 테스트 파일을 수집한다.
+
+    겹치는 대상(같은 디렉터리 중복 지정, 디렉터리 + 그 안의 파일, 상대/절대 경로 혼용 등)으로
+    동일 파일이 여러 번 수집되면 위반이 중복 보고되므로, 실제 경로(resolve) 기준으로 1회만 남기고
+    결정적(sorted) 순서로 반환한다.
+    """
+    seen: dict[Path, Path] = {}
     for target in targets:
         p = Path(target)
         if p.is_dir():
-            files.extend(sorted(p.rglob("test_*.py")))
+            candidates = p.rglob("test_*.py")
         elif p.is_file():
-            files.append(p)
-    return files
+            candidates = [p]
+        else:
+            continue
+        for c in candidates:
+            key = c.resolve()
+            if key not in seen:
+                seen[key] = c
+    return [seen[key] for key in sorted(seen)]
 
 
 def main(argv: list[str] | None = None) -> int:
