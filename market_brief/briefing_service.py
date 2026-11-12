@@ -225,13 +225,19 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             kind_kr = {"morning": "모닝 시황", "closing": "마감 시황", "urgent": "긴급 변동성"}.get(briefing.kind, briefing.kind.upper())
             title = f"[{kind_kr}] {briefing.headline} ({as_of_label})"
             GATE_REGISTRY.update_preset_url("bf_rep", report_url)
-            inline_keyboard = [[build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")]]
+            inline_keyboard = [
+                [build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")],
+                [{"text": "🔔 내 변동성 타겟 설정", "callback_data": "mbw:m"}],
+            ]
         except Exception as e:
             logger.error(f"Error generating brief_bot briefing: {e}", exc_info=True)
             title = f"📊 [시황] {now_str}"
             content_html = f"<b>📊 [시황]</b>\n<i>{now_str} KST</i>\n\n데이터 수집 중 오류: {html.escape(str(e))}"
             GATE_REGISTRY.update_preset_url("bf_rep", report_url)
-            inline_keyboard = [[build_gate_button("bf_rep", "📊 웹 리포트 보러가기")]]
+            inline_keyboard = [
+                [build_gate_button("bf_rep", "📊 웹 리포트 보러가기")],
+                [{"text": "🔔 내 변동성 타겟 설정", "callback_data": "mbw:m"}],
+            ]
 
     # =========================================================================
     # 2. TRAVEL BOT (여행 특가 & AI 추천) -> FlightEngine / BudgetCalculator

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime, time as dtime
 from http.server import HTTPServer
 from pathlib import Path
@@ -28,6 +29,7 @@ from market_brief.market_data import (
     QuoteStore,
 )
 from market_brief.market_data.naver_provider import NewsItem, fetch_naver_market_news
+from market_brief.market_watch import WATCH_TICK_INTERVAL_SEC, legacy_urgent_broadcast_enabled
 from market_brief.pipeline import MarketBriefingPipeline, DEFAULT_SYMBOLS
 from market_brief.report_server import create_report_handler
 
@@ -177,6 +179,111 @@ def check_oracle_server_sent(kind: str) -> bool:
         return False
 
 
+def _platform_db_has_watch_table(db_path: Path) -> bool:
+    """Read-only probe: only evaluate watches on an already-migrated platform DB (never create/mutate schema here)."""
+    import sqlite3
+
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_volatility_watches'"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def run_user_watch_tick(token: str, now: datetime, db_path: Path | None = None) -> None:
+    """Evaluates user-configured brief_bot target watches once (delivery ledger prevents duplicates)."""
+    from market_brief.market_watch import MarketWatchEvaluator, TelegramWatchSender
+    from market_brief.storage.db import MarketBriefDatabase
+
+    path = db_path or (ROOT / "alerts.sqlite3")
+    if not token or not _platform_db_has_watch_table(path):
+        print("ℹ️ [MarketWatch] 플랫폼 DB에 사용자 타겟 감시 테이블이 없어 사용자 타겟 평가를 건너뜁니다.")
+        return
+    db = MarketBriefDatabase(db_path=str(path))
+    if db.count_active_market_watches() == 0:
+        print("ℹ️ [MarketWatch] 활성 사용자 변동성 타겟이 없습니다.")
+        return
+    evaluator = MarketWatchEvaluator(db, sender=TelegramWatchSender(token))
+    res = evaluator.run_once(now)
+    print(
+        f"🔔 [MarketWatch] evaluated={res.evaluated} fired={res.fired} sent={res.sent} "
+        f"failed={res.failed} unknown={res.unknown} {res.skipped_reason}".rstrip()
+    )
+
+
+def run_watch_demo() -> int:
+    """[TG-06] Token-free watch simulation on a temp DB (no network, no production DB / reports writes)."""
+    import tempfile
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from market_brief.market_data.models import Quote
+    from market_brief.market_watch import MarketWatchEvaluator, MarketWatchService, iter_callback_samples
+    from market_brief.storage.db import MarketBriefDatabase
+
+    os.environ["TELEGRAM_BOT_TOKEN"] = ""
+    print("🧪 [DEMO] 사용자 변동성 타겟 감시 시뮬레이션 (토큰 없음 · 임시 DB · 네트워크 없음)")
+    with tempfile.TemporaryDirectory(prefix="mw_demo_") as tmp:
+        db = MarketBriefDatabase(db_path=str(Path(tmp) / "demo_platform.sqlite3"))
+        uid = "900000001"
+        with db._connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (telegram_user_id, full_name, tier, status) VALUES (?, 'Demo', 'WHITE', 'ACTIVE')", (uid,))
+            conn.execute("INSERT OR IGNORE INTO subscriptions (telegram_user_id, bot_id, status) VALUES (?, 'brief_bot', 'ACTIVE')", (uid,))
+        svc = MarketWatchService(db)
+        print("  • /watch →", svc.handle_callback(uid, uid, "mbw:m")["code"])
+        print("  • ±2% KOSPI 하락 →", svc.handle_callback(uid, uid, "mbw:d:KOSPI:200:D")["code"])
+        svc.handle_callback(uid, uid, "mbw:l:USDKRW")
+        svc.handle_level_text(uid, "1,400")
+        print("  • USDKRW 1400 이상 →", svc.handle_callback(uid, uid, "mbw:ld:USDKRW:U")["code"])
+        longest = max(len(c.encode("utf-8")) for c in iter_callback_samples())
+        print(f"  • 최장 callback_data = {longest} bytes (≤ 64)")
+
+        start = datetime(2026, 11, 12, 10, 0, tzinfo=KST)
+        kospi_path = [Decimal("-0.5"), Decimal("-2.3"), Decimal("-2.6"), Decimal("-2.8")]
+        fx_path = [Decimal("1390"), Decimal("1401"), Decimal("1403"), Decimal("1404")]
+
+        class _DemoProvider:
+            def __init__(self):
+                self.step = 0
+
+            def fetch(self, symbols):
+                now = start + timedelta(minutes=2 * self.step)
+                out = []
+                for s in symbols:
+                    if s == "KOSPI":
+                        prev = Decimal("2700")
+                        val = prev * (1 + kospi_path[self.step] / 100)
+                        out.append(Quote("KOSPI", "KR_EQUITY", "KR", "REGULAR", now.date(), now, val, prev, "INDEX", "NAVER:KOSPI"))
+                    elif s == "USDKRW":
+                        out.append(Quote("USDKRW", "ALTERNATIVE", "GLOBAL", "REFERENCE", now.date(), now, fx_path[self.step], Decimal("1385"), "FX", "NAVER:USDKRW"))
+                return out
+
+        sent: list[tuple[str, str]] = []
+
+        def _console_sender(chat_id: str, html_text: str):
+            sent.append((chat_id, html_text))
+            return "SENT", f"demo-{len(sent)}", None
+
+        provider = _DemoProvider()
+        evaluator = MarketWatchEvaluator(db, provider=provider, sender=_console_sender, runner_id="demo")
+        for step in range(4):
+            provider.step = step
+            res = evaluator.run_once(start + timedelta(minutes=2 * step))
+            print(f"  • tick {step}: evaluated={res.evaluated} fired={res.fired} sent={res.sent}")
+        for chat_id, text in sent:
+            print(f"--- [DRY-RUN → chat {chat_id}] ---\n{text}")
+        print(f"✅ [DEMO] 발송 시뮬레이션 {len(sent)}건 (중복 0건 기대) · 운영 DB/reports 미변경")
+    return 0
+
+
 def main() -> int:
     env_path = ROOT / ".env"
     load_dotenv_file(ROOT)
@@ -195,7 +302,11 @@ def main() -> int:
     parser.add_argument("--admin", action="store_true", help="Launch local FastAPI Admin Web Console (default port: 8002)")
     parser.add_argument("--port", type=int, default=8002, help="Port for built-in web server / admin console (default: 8002)")
     parser.add_argument("--report-url", default=resolve_default_report_url(), help="Base URL for detailed HTML reports (auto-detects GitHub Pages in Actions)")
+    parser.add_argument("--demo", action="store_true", help="Token-free user volatility watch simulation on a temp DB (no network, no sends)")
     args = parser.parse_args()
+
+    if args.demo:
+        return run_watch_demo()
 
     if args.setup:
         token, chat_id = interactive_setup(env_path)
@@ -305,14 +416,21 @@ def main() -> int:
             args.check_urgent = True
 
     if args.check_urgent:
-        print(f"🔍 [{now_kst.strftime('%Y-%m-%d %H:%M:%S')} KST] 장중 ±3% 급변동 감시 체크 실행...")
-        quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
-        triggered = pipeline.check_and_send_urgent_alerts(quotes, recipients, now=now_kst, news=news)
-        if triggered:
-            for q, _, r_path in triggered:
-                print(f"🚨 ±3% 급변동 알림 발송 완료: {q.symbol} -> {r_path}")
+        if legacy_urgent_broadcast_enabled():
+            print(f"🔍 [{now_kst.strftime('%Y-%m-%d %H:%M:%S')} KST] (레거시) 장중 ±3% 급변동 전체 방송 감시 체크 실행...")
+            quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
+            triggered = pipeline.check_and_send_urgent_alerts(quotes, recipients, now=now_kst, news=news)
+            if triggered:
+                for q, _, r_path in triggered:
+                    print(f"🚨 ±3% 급변동 알림 발송 완료: {q.symbol} -> {r_path}")
+            else:
+                print("✅ 현재 ±3% 돌파 자산이 없거나 금일 이미 발송 완료되었습니다.")
         else:
-            print("✅ 현재 ±3% 돌파 자산이 없거나 금일 이미 발송 완료되었습니다.")
+            print("ℹ️ 레거시 ±3% 전체 방송은 비활성화되어 있습니다 (LEGACY_URGENT_BROADCAST_ENABLED=false).")
+        try:
+            run_user_watch_tick(args.token, now_kst)
+        except Exception as exc:
+            print(f"⚠️ [MarketWatch] 사용자 타겟 평가 경고: {exc}")
         return 0
 
     if not args.send_now and not args.daemon:
@@ -354,6 +472,7 @@ def main() -> int:
         print("⏰ 24시간 시황 브리핑 & ±3% 급변동 감시 데몬 시작...")
         cal = MarketCalendar()
         sent_regular_today: set[str] = set()
+        last_watch_tick: datetime | None = None
         while True:
             now = datetime.now(KST)
             today_str = now.date().isoformat()
@@ -363,13 +482,20 @@ def main() -> int:
                     pipeline.run_regular_briefing(kind=kind, recipients=recipients, now=now, news=news)
                     sent_regular_today.add(run_key)
                     print(f"[{now.isoformat()}] 정기 브리핑({kind}) 발송 완료")
-            try:
-                quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
-                triggered = pipeline.check_and_send_urgent_alerts(quotes, recipients, now=now, news=news)
-                for q, _, r_path in triggered:
-                    print(f"[{now.isoformat()}] 🚨 ±3% 급변동 알림 발송 완료: {q.symbol} ({r_path})")
-            except Exception as exc:
-                print(f"[{now.isoformat()}] 시세 감시 주기 경고: {exc}")
+            if legacy_urgent_broadcast_enabled():
+                try:
+                    quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
+                    triggered = pipeline.check_and_send_urgent_alerts(quotes, recipients, now=now, news=news)
+                    for q, _, r_path in triggered:
+                        print(f"[{now.isoformat()}] 🚨 ±3% 급변동 알림 발송 완료: {q.symbol} ({r_path})")
+                except Exception as exc:
+                    print(f"[{now.isoformat()}] 시세 감시 주기 경고: {exc}")
+            if last_watch_tick is None or (now - last_watch_tick).total_seconds() >= WATCH_TICK_INTERVAL_SEC:
+                last_watch_tick = now
+                try:
+                    run_user_watch_tick(args.token, now)
+                except Exception as exc:
+                    print(f"[{now.isoformat()}] 사용자 타겟 감시 경고: {exc}")
             time.sleep(60)
 
     return 0

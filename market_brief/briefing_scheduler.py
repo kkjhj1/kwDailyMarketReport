@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from market_brief.alert_store import AlertStore
 from market_brief.calendar_manager import MarketCalendar
+from market_brief.market_watch import WATCH_TICK_INTERVAL_SEC, MarketWatchEvaluator, legacy_urgent_broadcast_enabled
 from market_brief.pipeline import DEFAULT_SYMBOLS, MarketBriefingPipeline
 from market_brief.storage.db import MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
@@ -148,6 +149,8 @@ class InternalBriefingScheduler:
         calendar: Optional[MarketCalendar] = None,
         deliverer: Optional[Any] = None,
         poll_interval: float = 20.0,
+        watch_evaluator: Optional[Any] = None,
+        watch_interval: float = WATCH_TICK_INTERVAL_SEC,
     ):
         self.db = db
         self.sub_engine = sub_engine
@@ -175,6 +178,13 @@ class InternalBriefingScheduler:
         self._retry_counts: Dict[str, int] = {}
         self._last_urgent_check: Optional[datetime] = None
 
+        # User-configured intraday volatility target watches (single dedicated loop, all sessions)
+        self.watch_evaluator = watch_evaluator
+        self.watch_interval = watch_interval
+        self._watch_task: Optional[asyncio.Task] = None
+        self._last_watch_tick_kst: Optional[str] = None
+        self._last_watch_result: Optional[str] = None
+
     def is_enabled(self) -> bool:
         env_val = os.environ.get("ENABLE_BRIEFING_SCHEDULER", "true").strip().lower()
         return env_val in ("1", "true", "yes", "on")
@@ -186,6 +196,7 @@ class InternalBriefingScheduler:
         self._has_crashed = False
         self._stop_event.clear()
         self._task = asyncio.create_task(self._main_loop(), name="oracle_briefing_scheduler")
+        self._watch_task = asyncio.create_task(self._watch_loop(), name="oracle_market_watch_loop")
         logger.info(f"⏰ [BriefingScheduler] Started internal daemon (runner_id={self.runner_id})")
 
     async def stop(self, timeout: float = 10.0) -> None:
@@ -194,12 +205,69 @@ class InternalBriefingScheduler:
         logger.info("🛑 [BriefingScheduler] Stopping internal daemon...")
         self._running = False
         self._stop_event.set()
-        if self._task:
-            try:
-                await asyncio.wait_for(self._task, timeout=timeout)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
+        for task in (self._task, self._watch_task):
+            if task:
+                try:
+                    await asyncio.wait_for(task, timeout=timeout)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    task.cancel()
         logger.info("✅ [BriefingScheduler] Daemon stopped.")
+
+    # ------------------------------------------------------------------
+    # User-configured intraday volatility target watches
+    # ------------------------------------------------------------------
+
+    async def _watch_loop(self) -> None:
+        """Single dedicated loop (every `watch_interval`s) evaluating KR/US/GLOBAL watches on weekdays.
+        One loop for all sessions so a reading is never counted twice by parallel per-market loops."""
+        while self._running:
+            try:
+                now_kst = datetime.now(KST)
+                if self.is_enabled():
+                    await self._check_market_watches(now_kst)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"⚠️ [MarketWatch] Error in watch tick: {exc}", exc_info=True)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.watch_interval)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+    async def _check_market_watches(self, now_kst: datetime) -> None:
+        sessions_open = any(self.calendar.get_session_info(m, now_kst).is_open for m in ("KR", "US", "GLOBAL"))
+        if not sessions_open:
+            return
+        await asyncio.to_thread(self._run_watch_tick_sync, now_kst)
+
+    def _run_watch_tick_sync(self, now_kst: datetime) -> Optional[Any]:
+        if self.db.count_active_market_watches() == 0:
+            return None
+        evaluator = self.watch_evaluator
+        if evaluator is None:
+            token = self.get_bot_token()
+            if not token:
+                logger.warning("[MarketWatch] brief_bot token missing; watch tick skipped")
+                return None
+            from market_brief.market_watch import TelegramWatchSender
+
+            evaluator = MarketWatchEvaluator(
+                self.db,
+                calendar=self.calendar,
+                sender=TelegramWatchSender(token),
+                runner_id=f"{self.runner_id}_mw",
+            )
+        result = evaluator.run_once(now_kst)
+        with self._lock:
+            self._last_watch_tick_kst = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+            self._last_watch_result = (
+                f"evaluated={result.evaluated} fired={result.fired} sent={result.sent} "
+                f"failed={result.failed} unknown={result.unknown} {result.skipped_reason}".strip()
+            )
+        if result.fired:
+            logger.info(f"🔔 [MarketWatch] {self._last_watch_result}")
+        return result
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
@@ -218,6 +286,12 @@ class InternalBriefingScheduler:
                 } if self._last_run_kind else None,
                 "last_error": self._last_error,
                 "next_scheduled_kst": next_dt.strftime("%Y-%m-%d %H:%M:%S KST") if next_dt else None,
+                "legacy_urgent_broadcast_enabled": legacy_urgent_broadcast_enabled(),
+                "market_watch": {
+                    "interval_sec": self.watch_interval,
+                    "last_tick_kst": self._last_watch_tick_kst,
+                    "last_result": self._last_watch_result,
+                },
             }
 
     def calculate_next_trigger_kst(self, from_kst: Optional[datetime] = None) -> Optional[datetime]:
@@ -303,7 +377,9 @@ class InternalBriefingScheduler:
             pass
 
     async def _check_urgent_volatility(self, now_kst: datetime) -> None:
-        """In-process check for ±3.0% market sudden breaches during KR regular session (09:00~15:30 KST)."""
+        """Legacy global ±3.0% FINANCE broadcast (KR regular session). OFF unless LEGACY_URGENT_BROADCAST_ENABLED."""
+        if not legacy_urgent_broadcast_enabled():
+            return
         today = now_kst.date()
         if not self.calendar.is_trading_day("KR", today):
             return
@@ -326,18 +402,41 @@ class InternalBriefingScheduler:
         except Exception as e:
             logger.error(f"Error during in-process urgent volatility check: {e}", exc_info=True)
 
+    def _build_legacy_urgent_pipeline(self, token: str) -> MarketBriefingPipeline:
+        from market_brief.channels.telegram import TelegramChannel
+        from market_brief.gateway import DeliveryGateway
+        from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider, QuoteStore
+
+        provider = CompositeMarketDataProvider(
+            NaverFinanceProvider(), FixtureProvider(str(self.root_dir / "fixtures/market_snapshot.json"))
+        )
+        tg = TelegramChannel(token, include_inline_button=True, use_html=True)
+        gateway = DeliveryGateway(
+            tg,
+            primary_name="telegram",
+            fallback_channel=None,
+            alert_store=self.alert_store,
+            max_retries=2,
+            backoff_seconds=0.5,
+        )
+        return MarketBriefingPipeline(
+            provider=provider,
+            gateway=gateway,
+            quote_store=QuoteStore(str(self.root_dir / "quotes.sqlite3")),
+            alert_store=self.alert_store,
+            calendar=self.calendar,
+            report_dir=self.root_dir / "reports",
+            base_report_url=self.get_report_base_url(),
+        )
+
     def _run_urgent_check_sync(self, now_kst: datetime) -> None:
+        if not legacy_urgent_broadcast_enabled():
+            return
         token = self.get_bot_token()
         if not token:
             return
 
-        pipeline = MarketBriefingPipeline(
-            token=token,
-            channel="telegram",
-            calendar=self.calendar,
-            alert_db_path=self.root_dir / "alerts.sqlite3",
-            report_base_url=self.get_report_base_url(),
-        )
+        pipeline = self._build_legacy_urgent_pipeline(token)
 
         quotes = pipeline.provider.fetch(DEFAULT_SYMBOLS)
         recipients = [r.chat_id for r in self.db.get_active_recipients(topic="FINANCE")]

@@ -42,6 +42,10 @@ DEFAULT_THRESHOLDS = {
 }
 
 
+# Active intraday volatility target-watch caps per tier (separate from `tier_policies.max_bots`).
+MARKET_WATCH_TIER_LIMITS: dict[str, int] = {"WHITE": 3, "GREEN": 5, "RED": 10, "BLACK": 20}
+
+
 class MarketBriefDatabase:
     """Thread-safe SQLite database manager supporting ACID transactions and atomic lease locks."""
 
@@ -293,6 +297,103 @@ class MarketBriefDatabase:
                 db.execute("ALTER TABLE users ADD COLUMN name_source TEXT DEFAULT 'TELEGRAM'")
             if "name_synced_at" not in existing_user_cols:
                 db.execute("ALTER TABLE users ADD COLUMN name_synced_at TEXT")
+
+            # 9. User-configured intraday volatility target watches (brief_bot, additive migration).
+            #    All numeric thresholds/observations are normalized Decimal strings (TEXT), never REAL.
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS market_volatility_watches (
+                    watch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    bot_id TEXT NOT NULL DEFAULT 'brief_bot',
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    quote_unit TEXT NOT NULL,
+                    condition_type TEXT NOT NULL,
+                    direction TEXT NOT NULL DEFAULT 'BOTH',
+                    threshold_value TEXT NOT NULL,
+                    threshold_unit TEXT NOT NULL,
+                    condition_version INTEGER NOT NULL DEFAULT 1,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    is_armed INTEGER NOT NULL DEFAULT 0,
+                    armed_side TEXT NOT NULL DEFAULT 'BOTH',
+                    confirm_streak INTEGER NOT NULL DEFAULT 0,
+                    confirm_side TEXT NOT NULL DEFAULT '',
+                    last_observed_value TEXT,
+                    last_observed_change TEXT,
+                    last_observed_as_of TEXT,
+                    last_observed_trade_date TEXT,
+                    last_triggered_at TEXT,
+                    cooldown_until TEXT,
+                    deactivated_reason TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            existing_watch_cols = {
+                row["name"] for row in db.execute("PRAGMA table_info(market_volatility_watches)").fetchall()
+            }
+            for col_name, col_ddl in (
+                ("armed_side", "TEXT NOT NULL DEFAULT 'BOTH'"),
+                ("confirm_streak", "INTEGER NOT NULL DEFAULT 0"),
+                ("confirm_side", "TEXT NOT NULL DEFAULT ''"),
+                ("deactivated_reason", "TEXT"),
+            ):
+                if col_name not in existing_watch_cols:
+                    db.execute(f"ALTER TABLE market_volatility_watches ADD COLUMN {col_name} {col_ddl}")
+            db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS ux_market_watch_active_dup
+                   ON market_volatility_watches
+                   (telegram_user_id, symbol, condition_type, direction, threshold_unit, threshold_value)
+                   WHERE is_active = 1"""
+            )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_market_watch_active
+                   ON market_volatility_watches (is_active, symbol)"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS market_watch_deliveries (
+                    delivery_key TEXT PRIMARY KEY,
+                    watch_id INTEGER NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    trigger_side TEXT NOT NULL,
+                    observed_value TEXT,
+                    observed_change TEXT,
+                    quote_as_of TEXT,
+                    status TEXT NOT NULL,
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    lease_expires_at TEXT,
+                    attempt_no INTEGER NOT NULL DEFAULT 1,
+                    provider_msg_id TEXT,
+                    error_detail TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_market_watch_deliveries_watch
+                   ON market_watch_deliveries (watch_id, status)"""
+            )
+
+    @contextmanager
+    def _immediate_tx(self):
+        """`BEGIN IMMEDIATE` write transaction (cross-process safe write lock for check-then-write sequences)."""
+        conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
     def _seed_initial_data(self) -> None:
         with self._connect() as db:
@@ -972,3 +1073,311 @@ class MarketBriefDatabase:
                 (key, kind),
             )
             return cursor.rowcount == 1
+
+    # =========================================================================
+    # Market Volatility Target Watches (brief_bot) & Delivery Ledger
+    # =========================================================================
+
+    @staticmethod
+    def _utc_now_str() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def get_market_watch_tier_limit(self, tier_code: str | None) -> int:
+        return MARKET_WATCH_TIER_LIMITS.get((tier_code or "WHITE").upper(), MARKET_WATCH_TIER_LIMITS["WHITE"])
+
+    def create_market_watch(
+        self,
+        telegram_user_id: str,
+        chat_id: str,
+        *,
+        symbol: str,
+        market: str,
+        quote_unit: str,
+        condition_type: str,
+        direction: str,
+        threshold_value: str,
+        threshold_unit: str,
+        bot_id: str = "brief_bot",
+    ) -> dict[str, Any]:
+        """Creates an active watch inside one `BEGIN IMMEDIATE` (tier cap + active duplicate guard).
+
+        Returns {"success", "code", "watch_id", "active_count", "limit"}. A new watch starts DISARMED with no
+        baseline: the first valid observation only records the baseline (never triggers retroactively).
+        """
+        uid = str(telegram_user_id).strip()
+        with self._immediate_tx() as db:
+            user = db.execute("SELECT tier, status FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
+            tier = (user["tier"] if user else "WHITE") or "WHITE"
+            limit = self.get_market_watch_tier_limit(tier)
+            if user and user["status"] == "BLOCKED":
+                return {"success": False, "code": "USER_BLOCKED", "watch_id": None, "active_count": 0, "limit": limit}
+            active_count = db.execute(
+                "SELECT COUNT(*) FROM market_volatility_watches WHERE telegram_user_id = ? AND is_active = 1",
+                (uid,),
+            ).fetchone()[0]
+            dup = db.execute(
+                """SELECT watch_id FROM market_volatility_watches
+                   WHERE telegram_user_id = ? AND symbol = ? AND condition_type = ? AND direction = ?
+                     AND threshold_unit = ? AND threshold_value = ? AND is_active = 1""",
+                (uid, symbol, condition_type, direction, threshold_unit, threshold_value),
+            ).fetchone()
+            if dup:
+                return {
+                    "success": False,
+                    "code": "DUPLICATE",
+                    "watch_id": int(dup["watch_id"]),
+                    "active_count": int(active_count),
+                    "limit": limit,
+                }
+            if active_count >= limit:
+                return {"success": False, "code": "LIMIT_EXCEEDED", "watch_id": None, "active_count": int(active_count), "limit": limit}
+            now_str = self._utc_now_str()
+            try:
+                cur = db.execute(
+                    """INSERT INTO market_volatility_watches
+                       (telegram_user_id, chat_id, bot_id, symbol, market, quote_unit, condition_type, direction,
+                        threshold_value, threshold_unit, condition_version, is_active, is_armed, armed_side,
+                        confirm_streak, confirm_side, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 0, ?, 0, '', ?, ?)""",
+                    (
+                        uid,
+                        str(chat_id).strip(),
+                        bot_id,
+                        symbol,
+                        market,
+                        quote_unit,
+                        condition_type,
+                        direction,
+                        threshold_value,
+                        threshold_unit,
+                        direction,
+                        now_str,
+                        now_str,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return {"success": False, "code": "DUPLICATE", "watch_id": None, "active_count": int(active_count), "limit": limit}
+            return {
+                "success": True,
+                "code": "CREATED",
+                "watch_id": int(cur.lastrowid),
+                "active_count": int(active_count) + 1,
+                "limit": limit,
+            }
+
+    def get_market_watch(self, watch_id: int) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM market_volatility_watches WHERE watch_id = ?", (int(watch_id),)).fetchone()
+            return dict(row) if row else None
+
+    def list_market_watches(self, telegram_user_id: str, active_only: bool = True) -> list[dict[str, Any]]:
+        uid = str(telegram_user_id).strip()
+        sql = "SELECT * FROM market_volatility_watches WHERE telegram_user_id = ?"
+        if active_only:
+            sql += " AND is_active = 1"
+        sql += " ORDER BY created_at ASC, watch_id ASC"
+        with self._connect() as db:
+            return [dict(r) for r in db.execute(sql, (uid,)).fetchall()]
+
+    def deactivate_market_watch(self, telegram_user_id: str, watch_id: int, reason: str = "USER_DELETE") -> bool:
+        """Owner-guarded single watch deactivation (`telegram_user_id` must own `watch_id`)."""
+        with self._immediate_tx() as db:
+            cur = db.execute(
+                """UPDATE market_volatility_watches
+                   SET is_active = 0, is_armed = 0, confirm_streak = 0, confirm_side = '',
+                       deactivated_reason = ?, updated_at = ?
+                   WHERE watch_id = ? AND telegram_user_id = ? AND is_active = 1""",
+                (reason, self._utc_now_str(), int(watch_id), str(telegram_user_id).strip()),
+            )
+            return cur.rowcount == 1
+
+    def deactivate_all_market_watches(self, telegram_user_id: str, reason: str = "BRIEF_UNSUBSCRIBED") -> int:
+        """Deactivates every active watch of the user (`/stop`, menu unsubscribe, bot swap-out).
+        `/start` never revives them: re-subscription leaves rows inactive."""
+        with self._immediate_tx() as db:
+            cur = db.execute(
+                """UPDATE market_volatility_watches
+                   SET is_active = 0, is_armed = 0, confirm_streak = 0, confirm_side = '',
+                       deactivated_reason = ?, updated_at = ?
+                   WHERE telegram_user_id = ? AND is_active = 1""",
+                (reason, self._utc_now_str(), str(telegram_user_id).strip()),
+            )
+            return int(cur.rowcount)
+
+    def count_active_market_watches(self) -> int:
+        with self._connect() as db:
+            return int(db.execute("SELECT COUNT(*) FROM market_volatility_watches WHERE is_active = 1").fetchone()[0])
+
+    def list_evaluable_market_watches(self) -> list[dict[str, Any]]:
+        """Active watches of ACTIVE `brief_bot` subscribers (non-blocked), capped per current tier oldest-first."""
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT w.*, COALESCE(u.tier, 'WHITE') AS user_tier
+                   FROM market_volatility_watches w
+                   JOIN subscriptions s
+                     ON s.telegram_user_id = w.telegram_user_id AND s.bot_id = 'brief_bot' AND s.status = 'ACTIVE'
+                   LEFT JOIN users u ON u.telegram_user_id = w.telegram_user_id
+                   WHERE w.is_active = 1 AND w.bot_id = 'brief_bot'
+                     AND COALESCE(u.status, 'ACTIVE') != 'BLOCKED'
+                   ORDER BY w.telegram_user_id ASC, w.created_at ASC, w.watch_id ASC"""
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        per_user: dict[str, int] = {}
+        for r in rows:
+            d = dict(r)
+            uid = d["telegram_user_id"]
+            used = per_user.get(uid, 0)
+            if used >= self.get_market_watch_tier_limit(d.get("user_tier")):
+                continue
+            per_user[uid] = used + 1
+            result.append(d)
+        return result
+
+    def update_market_watch_state(
+        self,
+        watch_id: int,
+        condition_version: int,
+        *,
+        is_armed: bool,
+        armed_side: str,
+        confirm_streak: int,
+        confirm_side: str,
+        last_observed_value: str | None,
+        last_observed_change: str | None,
+        last_observed_as_of: str | None,
+        last_observed_trade_date: str | None,
+        last_triggered_at: str | None = None,
+    ) -> bool:
+        """Persists evaluator state (restart-safe hysteresis/confirmation). Guarded by `condition_version`."""
+        with self._connect() as db:
+            cur = db.execute(
+                """UPDATE market_volatility_watches
+                   SET is_armed = ?, armed_side = ?, confirm_streak = ?, confirm_side = ?,
+                       last_observed_value = ?, last_observed_change = ?, last_observed_as_of = ?,
+                       last_observed_trade_date = ?,
+                       last_triggered_at = COALESCE(?, last_triggered_at),
+                       updated_at = ?
+                   WHERE watch_id = ? AND condition_version = ? AND is_active = 1""",
+                (
+                    1 if is_armed else 0,
+                    armed_side,
+                    int(confirm_streak),
+                    confirm_side,
+                    last_observed_value,
+                    last_observed_change,
+                    last_observed_as_of,
+                    last_observed_trade_date,
+                    last_triggered_at,
+                    self._utc_now_str(),
+                    int(watch_id),
+                    int(condition_version),
+                ),
+            )
+            return cur.rowcount == 1
+
+    def claim_market_watch_delivery(
+        self,
+        *,
+        delivery_key: str,
+        watch_id: int,
+        chat_id: str,
+        symbol: str,
+        market: str,
+        session_id: str,
+        trade_date: str,
+        trigger_side: str,
+        observed_value: str | None,
+        observed_change: str | None,
+        quote_as_of: str | None,
+        lease_owner: str,
+        lease_seconds: int = 120,
+        max_attempts: int = 3,
+    ) -> tuple[bool, str, str | None]:
+        """Atomic lease claim inside one `BEGIN IMMEDIATE`.
+
+        - Expired `IN_FLIGHT` leases are quarantined to `UNKNOWN` first (never auto-resent).
+        - `SENT` / `UNKNOWN` / `IN_FLIGHT` for the key -> rejected.
+        - Only an explicit `FAILED` row may be re-claimed (bounded by `max_attempts`).
+        Returns (claimed, reason, lease_token).
+        """
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        expires = (now + timedelta(seconds=lease_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        token = uuid.uuid4().hex
+        with self._immediate_tx() as db:
+            db.execute(
+                """UPDATE market_watch_deliveries
+                   SET status = 'UNKNOWN', error_detail = COALESCE(error_detail, 'LEASE_EXPIRED_QUARANTINE'),
+                       updated_at = ?
+                   WHERE status = 'IN_FLIGHT' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?""",
+                (now_str, now_str),
+            )
+            row = db.execute(
+                "SELECT status, attempt_no FROM market_watch_deliveries WHERE delivery_key = ?",
+                (delivery_key,),
+            ).fetchone()
+            if row:
+                status = row["status"]
+                if status != "FAILED":
+                    return False, f"ALREADY_{status}", None
+                if int(row["attempt_no"]) >= max_attempts:
+                    return False, "MAX_ATTEMPTS_EXCEEDED", None
+                db.execute(
+                    """UPDATE market_watch_deliveries
+                       SET status = 'IN_FLIGHT', lease_owner = ?, lease_token = ?, lease_expires_at = ?,
+                           attempt_no = attempt_no + 1, trigger_side = ?, observed_value = ?, observed_change = ?,
+                           quote_as_of = ?, error_detail = NULL, updated_at = ?
+                       WHERE delivery_key = ? AND status = 'FAILED'""",
+                    (lease_owner, token, expires, trigger_side, observed_value, observed_change, quote_as_of, now_str, delivery_key),
+                )
+                return True, "RECLAIMED_FAILED", token
+            db.execute(
+                """INSERT INTO market_watch_deliveries
+                   (delivery_key, watch_id, chat_id, symbol, market, session_id, trade_date, trigger_side,
+                    observed_value, observed_change, quote_as_of, status, lease_owner, lease_token,
+                    lease_expires_at, attempt_no, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN_FLIGHT', ?, ?, ?, 1, ?, ?)""",
+                (
+                    delivery_key,
+                    int(watch_id),
+                    str(chat_id),
+                    symbol,
+                    market,
+                    session_id,
+                    trade_date,
+                    trigger_side,
+                    observed_value,
+                    observed_change,
+                    quote_as_of,
+                    lease_owner,
+                    token,
+                    expires,
+                    now_str,
+                    now_str,
+                ),
+            )
+            return True, "CLAIMED", token
+
+    def finalize_market_watch_delivery(
+        self,
+        delivery_key: str,
+        lease_token: str,
+        status: str,
+        provider_msg_id: str | None = None,
+        error_detail: str | None = None,
+    ) -> bool:
+        """Moves an owned `IN_FLIGHT` lease to SENT / FAILED / UNKNOWN (token-guarded)."""
+        final = status if status in {"SENT", "FAILED", "UNKNOWN"} else "UNKNOWN"
+        with self._connect() as db:
+            cur = db.execute(
+                """UPDATE market_watch_deliveries
+                   SET status = ?, provider_msg_id = ?, error_detail = ?, lease_expires_at = NULL, updated_at = ?
+                   WHERE delivery_key = ? AND lease_token = ? AND status = 'IN_FLIGHT'""",
+                (final, provider_msg_id, error_detail, self._utc_now_str(), delivery_key, lease_token),
+            )
+            return cur.rowcount == 1
+
+    def get_market_watch_delivery(self, delivery_key: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM market_watch_deliveries WHERE delivery_key = ?", (delivery_key,)).fetchone()
+            return dict(row) if row else None

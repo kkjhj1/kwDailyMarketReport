@@ -193,6 +193,8 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "start", "description": "🏠 시황 브리핑 홈"},
         {"command": "briefing", "description": "📈 모닝/마감 시황 요약"},
         {"command": "market", "description": "📊 글로벌 증시 현황"},
+        {"command": "watch", "description": "🔔 내 변동성 타겟 설정"},
+        {"command": "alert", "description": "⚡ 장중 알림 조건 관리"},
         {"command": "help", "description": "❓ 이용 안내"},
     ],
     "travel_bot": [
@@ -323,6 +325,17 @@ TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
 # Menu-bot callbacks that cancel the travel subscription -> travel price watches are switched off too.
 TRAVEL_MENU_UNSUB_CALLBACKS = ("menu:unsub:travel_bot", "info:unsub:travel_bot", "sub:do_unsub:travel_bot")
 
+# Menu-bot callbacks that cancel brief_bot -> intraday market target watches are switched off too.
+BRIEF_MENU_UNSUB_CALLBACKS = ("menu:unsub:brief_bot", "info:unsub:brief_bot", "sub:do_unsub:brief_bot")
+# Menu-bot swap-outs of brief_bot: watches are switched off only if the swap actually cancelled brief_bot.
+BRIEF_MENU_SWAP_CALLBACKS = ("menu:swap:brief_bot:", "sub:swap:brief_bot:")
+
+WATCH_COMMANDS = {"/watch", "/alert", "/알림", "/타겟"}
+BRIEF_WATCH_CTA_ROW: list[dict[str, Any]] = [
+    {"text": "🔔 내 변동성 타겟 설정", "callback_data": "mbw:m"},
+    {"text": "⚡ ±3% 기본 알림", "callback_data": "mbw:q3"},
+]
+
 
 def parse_travel_text_chat(item: dict[str, Any]) -> str:
     msg = item.get("message") or {}
@@ -338,6 +351,64 @@ class MultiBotInteractionRouter:
         self._delivered_initial_briefing: set[tuple[str, str]] = set()
         self._user_targets: dict[tuple[str, str], str] = {}
         self._briefing_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+        self._market_watch_service = None
+
+    # -------------------------------------------------------------------------
+    # brief_bot intraday volatility target watches
+    # -------------------------------------------------------------------------
+
+    @property
+    def market_watch(self):
+        from market_brief.market_watch import MarketWatchService
+
+        db = getattr(self.engine, "db", None)
+        svc = self._market_watch_service
+        if svc is None or svc.db is not db:
+            svc = self._market_watch_service = MarketWatchService(db)
+        return svc
+
+    def deactivate_brief_watches(self, uid: str, reason: str) -> int:
+        try:
+            n = self.market_watch.deactivate_all(uid, reason=reason)
+            if n:
+                logger.info("[brief_bot] deactivated %d market watch(es) for %s (%s)", n, uid, reason)
+            return n
+        except Exception as exc:
+            logger.warning("[brief_bot] market watch deactivation failed for %s: %s", uid, exc)
+            return 0
+
+    def _is_brief_subscriber(self, uid: str) -> bool:
+        profile = self.engine.get_user_profile(uid) or {}
+        return any(s.get("bot_id") == "brief_bot" for s in profile.get("active_subscriptions", []))
+
+    def handle_market_watch(self, uid: str, chat_id: str, callback_data: str | None = None, text: str | None = None) -> dict[str, Any]:
+        """`/watch`, `/alert`, `mbw:*` and pending manual-level input. `uid` MUST be the caller's `from.id`."""
+        uid = str(uid).strip()
+        user = self.engine.get_user_profile(uid)
+        if not self._is_brief_subscriber(uid):
+            return {
+                "bot_id": "brief_bot",
+                "reply_html": "🔔 <b>장중 변동성 타겟</b>은 시황 브리핑 구독자 전용 기능입니다.\n먼저 /start 로 구독해 주세요.",
+                "inline_keyboard": [[{"text": "📈 시황 브리핑 구독하기", "callback_data": "info:sub:brief_bot"}]],
+                "callback_toast": "구독 후 이용할 수 있습니다.",
+                "result_code": "WATCH_REQUIRES_SUBSCRIPTION",
+                "user_profile": user,
+            }
+        svc = self.market_watch
+        if callback_data:
+            res = svc.handle_callback(uid, chat_id, callback_data)
+        elif text is not None and svc.has_pending_input(uid) and not text.strip().startswith("/"):
+            res = svc.handle_level_text(uid, text)
+        else:
+            res = svc.render_home(uid)
+        return {
+            "bot_id": "brief_bot",
+            "reply_html": self._enforce_tg01_limits(res["html"]),
+            "inline_keyboard": res["inline_keyboard"],
+            "callback_toast": res.get("toast") or None,
+            "result_code": res["code"],
+            "user_profile": user,
+        }
 
     @staticmethod
     def is_common_briefing_bot(bot_id: str) -> bool:
@@ -348,6 +419,8 @@ class MultiBotInteractionRouter:
     def get_quick_callback_toast(callback_data: str | None) -> str:
         """Computes immediate <0.1s callback acknowledgement text ([TG-04]) before DB/Briefing work."""
         cb = (callback_data or "").strip()
+        if cb.startswith("mbw:"):
+            return "🔔 변동성 타겟 설정을 불러옵니다..."
         if cb.startswith("info:target:"):
             return "🎯 맞춤 대상이 선택되었습니다. [정보보기] 버튼을 눌러주세요!"
         if cb.startswith("info:preview:"):
@@ -438,6 +511,8 @@ class MultiBotInteractionRouter:
         elif cb.startswith("menu:unsub:"):
             target_bot_id = cb.split(":", 2)[2]
             res = self.engine.unsubscribe_bot(uid, target_bot_id, actor="USER", reason="MENU_BOT_UNSUB")
+            if target_bot_id == "brief_bot":
+                self.deactivate_brief_watches(uid, "MENU_BOT_UNSUB")
             toast = res["message"]
             banner_notice = f"{res['message']}\n\n"
 
@@ -447,6 +522,8 @@ class MultiBotInteractionRouter:
                 old_id, new_id = parts[2], parts[3]
                 try:
                     res = self.engine.atomic_swap_subscription(uid, old_id, new_id, actor="USER")
+                    if res.get("success") and old_id == "brief_bot":
+                        self.deactivate_brief_watches(uid, "BRIEF_SWAPPED_OUT")
                     toast = "✅ 봇 교체 완료!" if res["success"] else res["message"]
                     banner_notice = f"{res['message']}\n\n"
                 except ValueError as err:
@@ -1154,6 +1231,8 @@ class MultiBotInteractionRouter:
         # 1. Explicit Unsubscribe via command or inline button
         if clean_text in {"/stop", "/탈퇴", "/해지", "/구독취소", "/unsubscribe", "탈퇴", "구독취소"} or cb == f"info:unsub:{bot.bot_id}":
             res = self.engine.unsubscribe_bot(uid, bot.bot_id, actor="USER", reason="INFO_BOT_STOP")
+            if bot.bot_id == "brief_bot":
+                self.deactivate_brief_watches(uid, "BRIEF_STOP")
             self._delivered_initial_briefing.discard((uid, bot.bot_id))
             user = self.engine.get_user_profile(uid)
             slot_str = format_slot_usage(
@@ -1183,6 +1262,16 @@ class MultiBotInteractionRouter:
                 "result_code": res["code"],
                 "user_profile": user,
             }
+
+        # 1-1. brief_bot intraday volatility target watches (`/watch`, `/alert`, `mbw:*`, pending level input)
+        if bot.bot_id == "brief_bot":
+            cmd = clean_text.split()[0].split("@")[0] if clean_text else ""
+            if cb.startswith("mbw:"):
+                return self.handle_market_watch(uid, uid, callback_data=cb)
+            if cmd in WATCH_COMMANDS:
+                return self.handle_market_watch(uid, uid)
+            if text and not cb and not clean_text.startswith("/") and self.market_watch.has_pending_input(uid):
+                return self.handle_market_watch(uid, uid, text=text)
 
         # 2. Target Selection Callback (`info:target:<bot_id>:<target_code>`) for Target-Selection Bots (Type B)
         if cb.startswith("info:target:"):
@@ -1256,6 +1345,8 @@ class MultiBotInteractionRouter:
                     res = {"success": False, "code": "STILL_OVER_QUOTA", "message": str(err)}
                 user = self.engine.get_user_profile(uid)
                 if res["success"]:
+                    if old_id == "brief_bot":
+                        self.deactivate_brief_watches(uid, "BRIEF_SWAPPED_OUT")
                     self._delivered_initial_briefing.discard((uid, old_id))
                     slot_str = format_slot_usage(
                         res["used_slots"], res["max_slots"], res["tier"]["is_unlimited"]
@@ -1276,8 +1367,10 @@ class MultiBotInteractionRouter:
                         self._delivered_initial_briefing.add((uid, bot.bot_id))
                         kb = [
                             [{"text": "📊 직전 발송 최신 시황 브리핑 보기", "callback_data": f"info:preview:{bot.bot_id}"}],
-                            [{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}],
                         ]
+                        if bot.bot_id == "brief_bot":
+                            kb.append(list(BRIEF_WATCH_CTA_ROW))
+                        kb.append([{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}])
                         if menu_uname:
                             kb.append([{"text": "🧭 메뉴봇(전체 봇 목록) 열기", "url": f"https://t.me/{menu_uname}"}])
                     else:
@@ -1366,8 +1459,12 @@ class MultiBotInteractionRouter:
 
             kb = [
                 [{"text": "📊 직전 발송 최신 시황 브리핑 보기", "callback_data": f"info:preview:{bot.bot_id}"}],
-                [{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}],
             ]
+            if bot.bot_id == "brief_bot":
+                # Opt-in only: existing users are never auto-enrolled into intraday watches.
+                lines.append("🔔 <i>장중 급등락 알림은 <code>/watch</code>로 원하는 자산·조건을 직접 설정할 때만 발송됩니다.</i>")
+                kb.append(list(BRIEF_WATCH_CTA_ROW))
+            kb.append([{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}])
             if menu_uname:
                 kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
         else:
@@ -1648,6 +1745,41 @@ class DynamicBotManager:
             if stop_chat:
                 self._deactivate_travel_for_stop(stop_chat, recipient=True)
         return handled, reason
+
+    def _brief_subscription_active(self, uid: str) -> bool:
+        try:
+            with self.engine.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT status FROM subscriptions WHERE telegram_user_id = ? AND bot_id = 'brief_bot'",
+                    (str(uid),),
+                ).fetchone()
+            return bool(row and row["status"] == "ACTIVE")
+        except Exception:
+            return True  # unknown -> keep watches (evaluator still requires an ACTIVE subscription to send)
+
+    def _dispatch_brief_watch_callback(self, transport: "TelegramBotTransport", cq: dict[str, Any]) -> str:
+        """`mbw:*` on brief_bot: answerCallbackQuery FIRST, private chat only, caller `from.id` owns the chat."""
+        cq_id = str(cq.get("id", ""))
+        cb_data = str(cq.get("data") or "")
+        if cq_id:
+            transport.answer_callback(cq_id, text=self.router.get_quick_callback_toast(cb_data))
+        sender = cq.get("from", {}) or {}
+        msg = cq.get("message", {}) or {}
+        chat = msg.get("chat", {}) or {}
+        from_id = str(sender.get("id") or "")
+        chat_id = str(chat.get("id") or "")
+        if not from_id or chat.get("type", "private") != "private" or chat_id != from_id:
+            logger.info("[brief_bot] rejected mbw callback outside caller's private chat (from=%s chat=%s)", from_id, chat_id)
+            return "WATCH_REJECTED_NON_PRIVATE"
+        if len(cb_data.encode("utf-8")) > 64 or not cb_data.isascii():
+            return "WATCH_REJECTED_BAD_CALLBACK"
+        out = self.router.handle_market_watch(from_id, chat_id, callback_data=cb_data)
+        msg_id = msg.get("message_id")
+        if msg_id:
+            transport.edit_message_text(chat_id, int(msg_id), out["reply_html"], out.get("inline_keyboard"))
+        else:
+            transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+        return out["result_code"]
 
     def _travel_subscribe_hook(self, chat_id: str, sender_name: str = "") -> None:
         """Direct /start (or first use) on travel_bot re-activates `subscriptions` + TRAVEL recipient via the
@@ -1930,10 +2062,25 @@ class DynamicBotManager:
                     menu_chat = (cq_menu.get("message", {}) or {}).get("chat", {}) or cq_menu.get("from", {}) or {}
                     if menu_chat.get("id"):
                         self._deactivate_travel_for_stop(str(menu_chat["id"]), recipient=False)
+                menu_cb = str(cq_menu.get("data") or "")
+                menu_uid = str((cq_menu.get("from", {}) or {}).get("id") or "")
+                if menu_uid and menu_cb.startswith(BRIEF_MENU_UNSUB_CALLBACKS):
+                    self.router.deactivate_brief_watches(menu_uid, "MENU_BOT_UNSUB")
                 handled, reason = self._dispatch_portal_menu_update(bot.token, item)
+                if menu_uid and menu_cb.startswith(BRIEF_MENU_SWAP_CALLBACKS) and not self._brief_subscription_active(menu_uid):
+                    self.router.deactivate_brief_watches(menu_uid, "BRIEF_SWAPPED_OUT")
                 if handled:
                     processed += 1
                     events.append({"user_id": "portal", "type": "portal_integrated", "code": reason})
+                    continue
+
+            if bot.bot_id == "brief_bot" and "callback_query" in item:
+                cq_w = item["callback_query"]
+                cb_w = str(cq_w.get("data") or "")
+                if cb_w.startswith("mbw:"):
+                    self._dispatch_brief_watch_callback(transport, cq_w)
+                    processed += 1
+                    events.append({"user_id": str((cq_w.get("from") or {}).get("id") or ""), "type": "watch_callback", "code": cb_w[:16]})
                     continue
 
             if bot.bot_id == "travel_bot":
