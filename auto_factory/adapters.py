@@ -155,7 +155,85 @@ class HandoffContract:
         return path
 
 
+QA_SCHEMA_VERSION = 1
+QA_RESULT_KEYS = frozenset({"schema_version", "qa_id", "answer", "refs"})
+QA_MAX_REFS = 5
+QA_MAX_ANSWER_CHARS = 6000
+
+
+@dataclass
+class QAContract:
+    """Read-only Q&A request handed to a provider (written as `__af_qa_request__.json`)."""
+
+    qa_id: str
+    question: str
+    preset_alias: str | None = None
+    allowed_paths: list[str] = field(default_factory=list)
+    base_sha: str = ""
+    schema_version: int = QA_SCHEMA_VERSION
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"schema_version": self.schema_version, "qa_id": self.qa_id, "preset_alias": self.preset_alias,
+             "allowed_paths": list(self.allowed_paths), "question": self.question},
+            ensure_ascii=False,
+        )
+
+
+class QAParseError(ValueError):
+    pass
+
+
+def parse_qa_result(stdout: str, expected_qa_id: str) -> dict[str, Any]:
+    """Strictly parse the provider's single Q&A JSON object; any deviation raises QAParseError."""
+    from .guardrails import is_qa_secret_path, normalize_rel_segments
+
+    objs = [o for o in _json_objects(stdout or "") if isinstance(o, dict)]
+    if len(objs) != 1:
+        raise QAParseError(f"expected exactly one JSON object, found {len(objs)}")
+    data = objs[0]
+    if set(data) != QA_RESULT_KEYS:
+        raise QAParseError("qa keys mismatch")
+    if type(data["schema_version"]) is not int or data["schema_version"] != QA_SCHEMA_VERSION:
+        raise QAParseError("schema_version must be the integer 1")
+    if data["qa_id"] != expected_qa_id:
+        raise QAParseError("qa_id mismatch")
+    answer = data["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        raise QAParseError("answer must be a non-empty string")
+    refs = data["refs"]
+    if not isinstance(refs, list) or len(refs) > QA_MAX_REFS or not all(isinstance(r, str) for r in refs):
+        raise QAParseError(f"refs must be a list of <= {QA_MAX_REFS} strings")
+    clean: list[str] = []
+    for ref in refs:
+        if not ref or "\x00" in ref or ":" in ref or ref.startswith(("/", "\\")):
+            raise QAParseError("ref must be a relative repository path")
+        try:
+            parts = normalize_rel_segments(ref)
+        except ValueError as exc:
+            raise QAParseError(f"invalid ref: {exc}") from None
+        if is_qa_secret_path(ref):
+            raise QAParseError("ref points at a forbidden path")
+        clean.append("/".join(parts))
+    return {"schema_version": 1, "qa_id": data["qa_id"], "answer": answer.strip()[:QA_MAX_ANSWER_CHARS],
+            "refs": clean}
+
+
 def render_prompt(role: str, contract_path: str) -> str:
+    if role == "qa":
+        # Pure US-ASCII prose without cmd.exe metacharacters (checked again in `invoke`).
+        return (
+            "You are a read-only question answering assistant for this repository snapshot. "
+            f"Read the JSON request file at {contract_path} and answer its question field in Korean, "
+            "focusing on allowed_paths when that list is not empty. "
+            "Only read and search files. Never modify, create or delete any file and never run any command "
+            "that writes. Never open env files, database files or anything under the scratch directory. "
+            "Reply on stdout with exactly one JSON object and nothing else. "
+            "The object must have exactly four keys: schema_version set to the integer 1, "
+            "qa_id copied from the request file, answer as a non-empty string, "
+            "and refs as a list of at most five relative file paths you relied on. "
+            "Do not add any other key."
+        )
     if role == "auditor":
         # Plain prose only: no cmd.exe metacharacters, so it passes `_SAFE_SHIM_ARG_RE` for .cmd shims.
         return (
@@ -309,6 +387,8 @@ class ProviderAdapter:
         if exe is None:
             return AdapterResult(self.provider, role, FailureCode.UNAVAILABLE, stderr="executable not found")
         prompt = render_prompt(role, contract_path)
+        if role == "qa" and not (_SAFE_SHIM_ARG_RE.match(prompt) and prompt.isascii()):
+            return AdapterResult(self.provider, role, FailureCode.INTERNAL, stderr="unsafe qa prompt")
         if exe.lower().endswith((".cmd", ".bat")) and not _SAFE_SHIM_ARG_RE.match(prompt):
             return AdapterResult(self.provider, role, FailureCode.INTERNAL, stderr="unsafe prompt for shim")
         cmd = self.build_command(role, prompt)
@@ -407,11 +487,12 @@ class GeminiAdapter(ProviderAdapter):
     def build_command(self, role: str, prompt: str) -> list[str]:
         # `--mode auto` is unavailable on this account; "plan" is read-only and non-interactive.
         mode = "accept-edits" if role == "writer" else "plan"
-        # Allow local verification (pytest etc.) but deny git history/remote mutation.
-        settings = json.dumps(
-            {"permissions": {"allow": self._ALLOW_COMMANDS, "deny": self._DENY_COMMANDS}},
-            separators=(",", ":"),
-        )
+        if role == "qa":  # read-only Q&A: no shell command at all
+            permissions = {"allow": [], "deny": ["command(regex:.*)"]}
+        else:
+            # Allow local verification (pytest etc.) but deny git history/remote mutation.
+            permissions = {"allow": self._ALLOW_COMMANDS, "deny": self._DENY_COMMANDS}
+        settings = json.dumps({"permissions": permissions}, separators=(",", ":"))
         cmd = [self.executable, "-p", prompt, "--mode", mode, "--settings", settings]
         if self.model:
             cmd += ["--model", self.model]
@@ -448,13 +529,20 @@ class MockAdapter(ProviderAdapter):
         return {"schema_version": 1, "task_id": contract.task_id, "verdict": verdict, "summary": "mock audit",
                 "base_sha": contract.base_sha, "allowed_paths": list(contract.allowed_paths)}
 
+    @staticmethod
+    def default_qa(contract, answer: str = "mock qa answer", refs: Sequence[str] = ("calc.py",)) -> dict[str, Any]:
+        return {"schema_version": 1, "qa_id": contract.qa_id, "answer": answer, "refs": list(refs)}
+
     def invoke(self, contract, wt_path, role, contract_path, stop_check=None) -> AdapterResult:
-        self.calls.append((role, contract.task_id))
+        self.calls.append((role, getattr(contract, "qa_id", None) or getattr(contract, "task_id", "")))
         step = self.script.pop(0) if self.script else None
         if step is None:
             if role == "auditor":  # exhausted script: a valid approving audit
                 return AdapterResult(self.provider, role, FailureCode.OK,
                                      stdout=json.dumps(self.default_audit(contract)))
+            if role == "qa":  # exhausted script: a valid answer
+                return AdapterResult(self.provider, role, FailureCode.OK,
+                                     stdout=json.dumps(self.default_qa(contract), ensure_ascii=False))
             verdict = "approve" if role == "reviewer" else None
             return AdapterResult(self.provider, role, FailureCode.OK, verdict=verdict)
         if isinstance(step, (FailureCode, str)) and not callable(step):
@@ -464,8 +552,10 @@ class MockAdapter(ProviderAdapter):
         out = step(wt_path, contract, role)
         if isinstance(out, AdapterResult):
             return out
-        if role == "auditor":  # callable returns raw stdout (str) or a dict serialized as JSON
-            stdout = json.dumps(out) if isinstance(out, dict) else ("" if out is None else str(out))
+        if role in ("auditor", "qa"):  # callable returns raw stdout (str) or a dict serialized as JSON
+            if out is None and role == "qa":
+                out = self.default_qa(contract)
+            stdout = json.dumps(out, ensure_ascii=False) if isinstance(out, dict) else ("" if out is None else str(out))
             return AdapterResult(self.provider, role, FailureCode.OK, stdout=stdout)
         verdict = out if out in ("approve", "reject") else ("approve" if role == "reviewer" else None)
         return AdapterResult(self.provider, role, FailureCode.OK, verdict=verdict)

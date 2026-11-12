@@ -13,7 +13,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Any, Iterable
 
 from .win_job import JobRunner, build_sandbox_env
 from .worktree import ChangedFile, WorktreeManager
@@ -246,6 +246,83 @@ def compare_sources(baseline: dict[str, str], candidate: dict[str, str | None]) 
 
 def scan_secrets(text: str) -> list[str]:
     return [p.pattern for p in SECRET_PATTERNS if p.search(text)]
+
+
+# ------------------------------------------------------- Q&A snapshot policy
+# Segment patterns (matched case-insensitively against EVERY path segment) that a read-only
+# Q&A snapshot must never contain: secrets, databases, scratch notes, VCS and control files.
+QA_SNAPSHOT_SEGMENT_PATTERNS = (
+    ".env", ".env.*", "*.sqlite", "*.sqlite3", "*.sqlite-wal", "*.sqlite-shm", "*.sqlite3-wal",
+    "*.sqlite3-shm", "*.sqlite*-journal", "*.db", "*.db-wal", "*.db-shm", "*.db-journal", "scratch",
+    ".git", ".auto_factory", "STOP.flag",
+)
+QA_ALLOWED_ENV_TEMPLATES = frozenset({".env.example", ".env.template"})
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def normalize_rel_segments(rel_path: str) -> tuple[str, ...]:
+    """Split a relative path on BOTH `/` and `\\`; reject anything absolute, traversing or odd."""
+    if not isinstance(rel_path, str) or not rel_path:
+        raise ValueError("empty path")
+    if "\x00" in rel_path:
+        raise ValueError("NUL byte in path")
+    if rel_path[0] in ("/", "\\"):
+        raise ValueError("absolute/UNC path")
+    if _DRIVE_RE.match(rel_path):
+        raise ValueError("drive-letter path")
+    parts = tuple(re.split(r"[\\/]", rel_path))
+    if parts and parts[-1] == "":  # one trailing separator (directory) is tolerated
+        parts = parts[:-1]
+    if not parts:
+        raise ValueError("empty path")
+    for seg in parts:
+        if seg in ("", ".", ".."):
+            raise ValueError("empty, '.' or '..' path segment")
+        if ":" in seg:
+            raise ValueError("':' in path segment (drive/stream)")
+    return parts
+
+
+def _segment_matches(seg: str) -> bool:
+    low = seg.lower()
+    return any(low == pat.lower() or fnmatch.fnmatchcase(low, pat.lower()) for pat in QA_SNAPSHOT_SEGMENT_PATTERNS)
+
+
+def is_qa_secret_path(rel_path: str, *, is_dir: bool = False) -> bool:
+    """True if `rel_path` must be excluded from a Q&A snapshot (invalid paths are forbidden too)."""
+    try:
+        parts = normalize_rel_segments(rel_path)
+    except ValueError:
+        return True
+    if any(_segment_matches(seg) for seg in parts[:-1]):
+        return True
+    last = parts[-1]
+    if not is_dir and last.lower() in QA_ALLOWED_ENV_TEMPLATES:
+        return False
+    return _segment_matches(last)
+
+
+_REDACT = "[REDACTED]"
+_REDACT_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----)?", re.S),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),
+)
+_AUTH_HEADER_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}")
+_SECRET_KV_RE = re.compile(  # key + separator (with original spacing) | quote | value | quote
+    r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|CREDENTIAL|DATABASE_URL)\s*[=:]\s*)(['\"]?)([^\s'\"]{6,})\2"
+)
+
+
+def redact_secrets(text: Any) -> str:
+    """Mask credentials in free text (answers, errors) before they are stored or sent."""
+    s = "" if text is None else str(text)
+    s = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACT}{m.group(2)}", s)
+    s = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)} {_REDACT}", s)
+    for rx in _REDACT_PATTERNS:
+        s = rx.sub(_REDACT, s)
+    for rx in SECRET_PATTERNS:
+        s = rx.sub(_REDACT, s)
+    return s
 
 
 class GuardrailChecker:

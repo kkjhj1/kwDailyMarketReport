@@ -101,6 +101,12 @@ ACTION_OPS_BY_STATE: dict[str, frozenset[str]] = {
     "GUARDRAIL_BLOCKED": frozenset("dxX"),
 }
 ACTION_TTL = 3600.0
+# Delivery tables sharing the outbox SQL helpers (strict allowlist: table names are interpolated).
+_OUTBOX_TABLES = frozenset({"tg_outbox", "qa_outbox"})
+QA_STATUSES = ("PENDING", "RUNNING", "ANSWERED", "FAILED", "EXPIRED")
+QA_ACTIVE_STATUSES = ("PENDING", "RUNNING")
+QA_TTL = 1800.0
+_QA_CLEAR_LEASE = "lease_owner=NULL, pid=NULL, proc_start_time=NULL, lease_expires_at=NULL"
 MERGE_INTENT_STATUSES = ("PREPARING", "GIT_MERGED", "COMPLETED", "ABORTED", "BLOCKED", "ORPHAN_CLEANUP")
 OPEN_MERGE_INTENT = ("PREPARING", "GIT_MERGED")
 
@@ -249,6 +255,51 @@ CREATE TABLE IF NOT EXISTS merge_intents (
     created_at REAL,
     updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS qa_requests (
+    id TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    preset_alias TEXT,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING','RUNNING','ANSWERED','FAILED','EXPIRED')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    provider TEXT,
+    base_sha TEXT,
+    answer TEXT,
+    refs_json TEXT,
+    error TEXT,
+    lease_owner TEXT,
+    pid INTEGER,
+    proc_start_time REAL,
+    lease_expires_at REAL,
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS qa_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    chat_id INTEGER NOT NULL,
+    qa_id TEXT NOT NULL REFERENCES qa_requests(id),
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING','SENT','UNKNOWN','FAILED','EXPIRED')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at REAL NOT NULL,
+    last_error TEXT,
+    lease_owner TEXT,
+    lease_until REAL,
+    boot_id TEXT,
+    sent_at REAL,
+    unknown_at REAL,
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_qa_requests_due ON qa_requests(status, lease_expires_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_qa_requests_hash ON qa_requests(request_hash, status);
+CREATE INDEX IF NOT EXISTS idx_qa_outbox_due ON qa_outbox(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
 CREATE INDEX IF NOT EXISTS idx_tg_outbox_due ON tg_outbox(status, next_retry_at);
@@ -499,36 +550,53 @@ class CoordinatorDB:
     ) -> tuple[str, bool]:
         if risk_level not in RISK_LEVELS:
             raise ValueError(f"unknown risk level: {risk_level}")
+        with self._tx() as c:
+            return self._create_task_in_tx(
+                c, request, risk_level, allowed_paths, acceptance_spec, idempotency_key, task_id
+            )
+
+    def _create_task_in_tx(
+        self,
+        c: sqlite3.Connection,
+        request: str,
+        risk_level: str,
+        allowed_paths: list[str],
+        acceptance_spec: dict[str, Any],
+        idempotency_key: str | None = None,
+        task_id: str | None = None,
+    ) -> tuple[str, bool]:
+        """Insert a RECEIVED task inside the caller's tx; same `request_hash` -> existing id."""
+        if risk_level not in RISK_LEVELS:
+            raise ValueError(f"unknown risk level: {risk_level}")
         canonical = json.dumps(
             [request, risk_level, sorted(allowed_paths), acceptance_spec], sort_keys=True
         )
         request_hash = sha256_text(idempotency_key or canonical)
         tid = task_id or f"t{request_hash[:12]}"
         now = self.clock()
-        with self._tx() as c:
-            row = c.execute("SELECT id FROM tasks WHERE request_hash=?", (request_hash,)).fetchone()
-            if row:
-                return row["id"], False
-            c.execute(
-                "INSERT INTO tasks (id, request_hash, request, risk_level, state, state_version,"
-                " allowed_paths, acceptance_spec, created_at, updated_at)"
-                " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?)",
-                (
-                    tid,
-                    request_hash,
-                    request,
-                    risk_level,
-                    json.dumps(allowed_paths),
-                    json.dumps(acceptance_spec),
-                    now,
-                    now,
-                ),
-            )
-            c.execute(
-                "INSERT INTO events (task_id, from_state, to_state, actor, reason, created_at)"
-                " VALUES (?, NULL, 'RECEIVED', 'intake', 'task created', ?)",
-                (tid, now),
-            )
+        row = c.execute("SELECT id FROM tasks WHERE request_hash=?", (request_hash,)).fetchone()
+        if row:
+            return row["id"], False
+        c.execute(
+            "INSERT INTO tasks (id, request_hash, request, risk_level, state, state_version,"
+            " allowed_paths, acceptance_spec, created_at, updated_at)"
+            " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?)",
+            (
+                tid,
+                request_hash,
+                request,
+                risk_level,
+                json.dumps(allowed_paths),
+                json.dumps(acceptance_spec),
+                now,
+                now,
+            ),
+        )
+        c.execute(
+            "INSERT INTO events (task_id, from_state, to_state, actor, reason, created_at)"
+            " VALUES (?, NULL, 'RECEIVED', 'intake', 'task created', ?)",
+            (tid, now),
+        )
         return tid, True
 
     @staticmethod
@@ -1070,6 +1138,370 @@ class CoordinatorDB:
                 )
             return cur.rowcount == 1
 
+    def delete_kv(self, key: str) -> bool:
+        with self._tx() as c:
+            return c.execute("DELETE FROM bot_kv WHERE k=?", (key,)).rowcount == 1
+
+    def cas_delete_kv(self, key: str, expected: str) -> bool:
+        """Delete `key` only if its current value equals `expected`."""
+        with self._tx() as c:
+            return c.execute("DELETE FROM bot_kv WHERE k=? AND v=?", (key, expected)).rowcount == 1
+
+    @staticmethod
+    def _upsert_kv(c: sqlite3.Connection, key: str, value: str, now: float) -> None:
+        c.execute(
+            "INSERT INTO bot_kv (k, v, updated_at) VALUES (?,?,?)"
+            " ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at",
+            (key, value, now),
+        )
+
+    def set_focus_and_clear_draft(self, chat_id: int, focus_json: str) -> None:
+        """Focus a chat on a preset and drop any pending ambiguous draft (one tx)."""
+        with self._tx() as c:
+            self._upsert_kv(c, f"focus:{int(chat_id)}", str(focus_json), self.clock())
+            c.execute("DELETE FROM bot_kv WHERE k=?", (f"draft:{int(chat_id)}",))
+
+    def clear_chat_focus(self, chat_id: int) -> bool:
+        """Delete `focus:<chat>` and `draft:<chat>` together; True if anything existed."""
+        with self._tx() as c:
+            n = c.execute(
+                "DELETE FROM bot_kv WHERE k IN (?, ?)", (f"focus:{int(chat_id)}", f"draft:{int(chat_id)}")
+            ).rowcount
+            return n > 0
+
+    def refresh_focus_cas(self, chat_id: int, expected_raw: str, new_json: str) -> bool:
+        return self.cas_kv(f"focus:{int(chat_id)}", expected_raw, new_json)
+
+    # ------------------------------------------------------------ chat drafts
+    def _validate_draft_in_tx(
+        self,
+        c: sqlite3.Connection,
+        chat_id: int,
+        expected_draft_raw: str,
+        expected_token: str,
+        unlocked_presets: Iterable[str] | None,
+        now: float,
+        require_focus: bool = True,
+    ) -> dict[str, Any]:
+        """Validate the live draft (+ focus) of `chat_id`; raises ActionRejected, mutates nothing."""
+        row = c.execute("SELECT v FROM bot_kv WHERE k=?", (f"draft:{int(chat_id)}",)).fetchone()
+        if row is None:
+            raise ActionRejected("DRAFT_MISSING", "draft already used or cleared")
+        if row["v"] != expected_draft_raw:
+            raise ActionRejected("DRAFT_STALE", "draft was replaced")
+        try:
+            draft = json.loads(row["v"])
+        except ValueError:
+            raise ActionRejected("DRAFT_INVALID") from None
+        if not isinstance(draft, dict) or not expected_token or draft.get("token") != expected_token:
+            raise ActionRejected("TOKEN_MISMATCH")
+        if not require_focus:
+            return draft
+        if not isinstance(draft.get("expires_at"), (int, float)) or draft["expires_at"] <= now:
+            raise ActionRejected("DRAFT_EXPIRED")
+        frow = c.execute("SELECT v FROM bot_kv WHERE k=?", (f"focus:{int(chat_id)}",)).fetchone()
+        if frow is None:
+            raise ActionRejected("FOCUS_MISSING", "pick a bot again via /bots")
+        try:
+            focus = json.loads(frow["v"])
+        except ValueError:
+            raise ActionRejected("FOCUS_INVALID") from None
+        if not isinstance(focus, dict) or not isinstance(focus.get("expires_at"), (int, float)) \
+                or focus["expires_at"] <= now:
+            raise ActionRejected("FOCUS_EXPIRED", "pick a bot again via /bots")
+        if focus.get("alias") != draft.get("alias") or focus.get("ver") != draft.get("focus_ver"):
+            raise ActionRejected("FOCUS_CHANGED", "the focused bot changed after this draft")
+        if unlocked_presets is not None and draft.get("alias") not in frozenset(unlocked_presets):
+            raise ActionRejected("PRESET_LOCKED")
+        if not isinstance(draft.get("text"), str) or not draft["text"].strip():
+            raise ActionRejected("DRAFT_INVALID")
+        return draft
+
+    def consume_draft_for_qa(
+        self,
+        chat_id: int,
+        expected_draft_raw: str,
+        expected_token: str,
+        unlocked_presets: Iterable[str],
+        normalized_question: str,
+        request_hash: str,
+        *,
+        ttl: float = QA_TTL,
+        max_attempts: int = 3,
+    ) -> tuple[str, str, bool]:
+        """Draft -> Q&A request atomically (validate + delete draft + insert/dedupe in ONE tx)."""
+        now = self.clock()
+        with self._tx() as c:
+            draft = self._validate_draft_in_tx(c, chat_id, expected_draft_raw, expected_token,
+                                               unlocked_presets, now)
+            c.execute("DELETE FROM bot_kv WHERE k=? AND v=?", (f"draft:{int(chat_id)}", expected_draft_raw))
+            qa_id, created = self._create_qa_in_tx(
+                c, chat_id, draft["alias"], normalized_question, request_hash, ttl, max_attempts, now
+            )
+            return qa_id, draft["alias"], created
+
+    def consume_draft_for_task(
+        self,
+        chat_id: int,
+        expected_draft_raw: str,
+        expected_token: str,
+        unlocked_presets: Iterable[str],
+        preset_policy_fn: Callable[[str, str], tuple[str, str, list[str], dict[str, Any]]],
+    ) -> tuple[str, str, bool]:
+        """Draft -> preset task atomically; duplicate semantics identical to `create_task`."""
+        now = self.clock()
+        with self._tx() as c:
+            draft = self._validate_draft_in_tx(c, chat_id, expected_draft_raw, expected_token,
+                                               unlocked_presets, now)
+            request, risk, paths, spec = preset_policy_fn(draft["alias"], draft["text"])
+            c.execute("DELETE FROM bot_kv WHERE k=? AND v=?", (f"draft:{int(chat_id)}", expected_draft_raw))
+            tid, created = self._create_task_in_tx(c, request, risk, list(paths), spec)
+            return tid, draft["alias"], created
+
+    def consume_draft_cancel(self, chat_id: int, expected_draft_raw: str, expected_token: str) -> bool:
+        with self._tx() as c:
+            self._validate_draft_in_tx(c, chat_id, expected_draft_raw, expected_token, None, self.clock(),
+                                       require_focus=False)
+            cur = c.execute("DELETE FROM bot_kv WHERE k=? AND v=?", (f"draft:{int(chat_id)}", expected_draft_raw))
+            return cur.rowcount == 1
+
+    # ------------------------------------------------------------ Q&A requests
+    def _create_qa_in_tx(
+        self, c: sqlite3.Connection, chat_id: int, preset_alias: str | None, question: str,
+        request_hash: str, ttl: float, max_attempts: int, now: float,
+    ) -> tuple[str, bool]:
+        row = c.execute(
+            "SELECT id FROM qa_requests WHERE request_hash=? AND status IN ('PENDING','RUNNING')"
+            " AND expires_at>? ORDER BY created_at, id LIMIT 1",
+            (request_hash, now),
+        ).fetchone()
+        if row:
+            return row["id"], False
+        for _ in range(5):
+            qa_id = "q" + secrets.token_hex(6)
+            try:
+                c.execute(
+                    "INSERT INTO qa_requests (id, request_hash, chat_id, preset_alias, question, status,"
+                    " attempt_count, max_attempts, expires_at, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?, 'PENDING', 0, ?,?,?,?)",
+                    (qa_id, request_hash, int(chat_id), preset_alias, question, int(max_attempts),
+                     now + ttl, now, now),
+                )
+                return qa_id, True
+            except sqlite3.IntegrityError:
+                continue
+        raise CoordinatorError("could not allocate a unique qa id")
+
+    def create_qa_request(
+        self, chat_id: int, preset_alias: str | None, question: str, request_hash: str,
+        ttl: float = QA_TTL, max_attempts: int = 3,
+    ) -> tuple[str, bool]:
+        """Enqueue a read-only question; an active unexpired twin (same hash) is reused."""
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("empty question")
+        now = self.clock()
+        with self._tx() as c:
+            return self._create_qa_in_tx(c, chat_id, preset_alias, question, request_hash, ttl, max_attempts, now)
+
+    @staticmethod
+    def _qa_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        try:
+            d["refs"] = json.loads(d["refs_json"]) if d.get("refs_json") else []
+        except ValueError:
+            d["refs"] = []
+        return d
+
+    def get_qa_request(self, qa_id: str) -> dict[str, Any]:
+        rows = self._query("SELECT * FROM qa_requests WHERE id=?", (qa_id,))
+        if not rows:
+            raise KeyError(qa_id)
+        return self._qa_dict(rows[0])
+
+    def list_qa_requests(self, statuses: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        if statuses is None:
+            rows = self._query("SELECT * FROM qa_requests ORDER BY created_at, id")
+        else:
+            statuses = list(statuses)
+            marks = ",".join("?" * len(statuses))
+            rows = self._query(
+                f"SELECT * FROM qa_requests WHERE status IN ({marks}) ORDER BY created_at, id", statuses
+            )
+        return [self._qa_dict(r) for r in rows]
+
+    def has_due_qa(self) -> bool:
+        """Cheap probe: is there anything a Q&A cycle could claim or reap right now?"""
+        now = self.clock()
+        return bool(self._query(
+            "SELECT 1 FROM qa_requests WHERE status='PENDING'"
+            " OR (status='RUNNING' AND lease_expires_at<=?) LIMIT 1", (now,)))
+
+    def _enqueue_qa_outbox(
+        self, c: sqlite3.Connection, row: sqlite3.Row, kind: str, payload: dict[str, Any], now: float
+    ) -> None:
+        body = {"qa_id": row["id"], "kind": kind, "preset_alias": row["preset_alias"],
+                "question": (row["question"] or "")[:300]}
+        body.update(payload)
+        c.execute(
+            "INSERT OR IGNORE INTO qa_outbox (idempotency_key, chat_id, qa_id, kind, payload_json, status,"
+            " attempts, next_retry_at, expires_at, created_at, updated_at)"
+            " VALUES (?,?,?,?,?, 'PENDING', 0, ?,?,?,?)",
+            (f"qa:{kind}:{row['id']}", int(row["chat_id"]), row["id"], kind,
+             json.dumps(body, ensure_ascii=False, sort_keys=True), now, now + OUTBOX_TTL, now, now),
+        )
+
+    def _reap_qa_row_in_tx(self, c: sqlite3.Connection, row: sqlite3.Row, now: float,
+                           reason: str) -> str:
+        """RUNNING row whose owner is gone: EXPIRED / FAILED(+notice) / back to PENDING."""
+        from .guardrails import redact_secrets
+
+        if row["expires_at"] <= now:
+            c.execute(f"UPDATE qa_requests SET status='EXPIRED', {_QA_CLEAR_LEASE}, error=?, updated_at=?"
+                      " WHERE id=? AND status='RUNNING'", (redact_secrets(reason)[:500], now, row["id"]))
+            return "expired"
+        if row["attempt_count"] >= row["max_attempts"]:
+            c.execute(f"UPDATE qa_requests SET status='FAILED', {_QA_CLEAR_LEASE}, error=?, updated_at=?"
+                      " WHERE id=? AND status='RUNNING'", (redact_secrets(reason)[:500], now, row["id"]))
+            self._enqueue_qa_outbox(c, row, "fail", {"text": "답변 생성이 중단되었습니다 (재시도 한도 초과)."}, now)
+            return "failed"
+        c.execute(f"UPDATE qa_requests SET status='PENDING', {_QA_CLEAR_LEASE}, error=?, updated_at=?"
+                  " WHERE id=? AND status='RUNNING'", (redact_secrets(reason)[:500], now, row["id"]))
+        return "requeued"
+
+    def claim_next_qa_request(
+        self, owner: str, pid: int | None, proc_start_time: float | None, lease_ttl: float = 300.0
+    ) -> dict[str, Any] | None:
+        """Expire overdue rows, reap lapsed leases, then lease the oldest eligible PENDING row."""
+        now = self.clock()
+        with self._tx() as c:
+            c.execute(
+                f"UPDATE qa_requests SET status='EXPIRED', {_QA_CLEAR_LEASE}, updated_at=?"
+                " WHERE status='PENDING' AND expires_at<=?",
+                (now, now),
+            )
+            for row in c.execute(
+                "SELECT * FROM qa_requests WHERE status='RUNNING' AND lease_expires_at<=?", (now,)
+            ).fetchall():
+                self._reap_qa_row_in_tx(c, row, now, "lease lapsed")
+            row = c.execute(
+                "SELECT id FROM qa_requests WHERE status='PENDING' AND attempt_count<max_attempts"
+                " AND expires_at>? ORDER BY created_at, id LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+            cur = c.execute(
+                "UPDATE qa_requests SET status='RUNNING', attempt_count=attempt_count+1, lease_owner=?, pid=?,"
+                " proc_start_time=?, lease_expires_at=?, updated_at=? WHERE id=? AND status='PENDING'",
+                (owner, pid, proc_start_time, now + lease_ttl, now, row["id"]),
+            )
+            if cur.rowcount != 1:
+                return None
+            return self._qa_dict(c.execute("SELECT * FROM qa_requests WHERE id=?", (row["id"],)).fetchone())
+
+    _QA_FENCE = (" WHERE id=? AND status='RUNNING' AND lease_owner=? AND attempt_count=?"
+                 " AND lease_expires_at>? AND expires_at>?")
+
+    def heartbeat_qa_request(self, qa_id: str, owner: str, expected_attempt: int, lease_ttl: float = 300.0) -> bool:
+        now = self.clock()
+        with self._tx() as c:
+            cur = c.execute(
+                "UPDATE qa_requests SET lease_expires_at=?, updated_at=?" + self._QA_FENCE,
+                (now + lease_ttl, now, qa_id, owner, int(expected_attempt), now, now),
+            )
+            return cur.rowcount == 1
+
+    def _expire_if_overdue_in_tx(self, c: sqlite3.Connection, qa_id: str, owner: str,
+                                 expected_attempt: int, now: float) -> bool:
+        """The owner still holds a live lease but the request TTL passed: EXPIRED (no outbox)."""
+        row = c.execute("SELECT * FROM qa_requests WHERE id=?", (qa_id,)).fetchone()
+        if (row is not None and row["status"] == "RUNNING"
+                and (row["lease_owner"], row["attempt_count"]) == (owner, int(expected_attempt))
+                and (row["lease_expires_at"] or 0) > now and row["expires_at"] <= now):
+            c.execute(f"UPDATE qa_requests SET status='EXPIRED', {_QA_CLEAR_LEASE}, updated_at=? WHERE id=?",
+                      (now, qa_id))
+            return True
+        return False
+
+    def complete_qa_answer(
+        self, qa_id: str, owner: str, expected_attempt: int, provider: str, base_sha: str,
+        answer: str, refs: Iterable[str],
+    ) -> bool:
+        """Fenced RUNNING -> ANSWERED + `qa_outbox` answer row in the SAME tx (secrets redacted)."""
+        from .guardrails import redact_secrets
+
+        clean_answer = redact_secrets(answer)
+        clean_refs = [redact_secrets(r) for r in (refs or [])]
+        now = self.clock()
+        with self._tx() as c:
+            if self._expire_if_overdue_in_tx(c, qa_id, owner, expected_attempt, now):
+                return False
+            cur = c.execute(
+                f"UPDATE qa_requests SET status='ANSWERED', {_QA_CLEAR_LEASE}, provider=?, base_sha=?, answer=?,"
+                " refs_json=?, error=NULL, updated_at=?" + self._QA_FENCE,
+                (provider, base_sha, clean_answer, json.dumps(clean_refs, ensure_ascii=False), now,
+                 qa_id, owner, int(expected_attempt), now, now),
+            )
+            if cur.rowcount != 1:
+                return False
+            row = c.execute("SELECT * FROM qa_requests WHERE id=?", (qa_id,)).fetchone()
+            self._enqueue_qa_outbox(c, row, "answer", {
+                "answer": clean_answer, "refs": clean_refs, "provider": provider, "base_sha": base_sha,
+            }, now)
+            return True
+
+    def fail_qa_request(
+        self, qa_id: str, owner: str, expected_attempt: int, error: str, notify_text: str | None = None,
+        provider: str | None = None, retryable: bool = False,
+    ) -> bool:
+        """Fenced RUNNING -> PENDING (retryable, attempts left) or FAILED (+ optional notice)."""
+        from .guardrails import redact_secrets
+
+        clean_error = redact_secrets(error)[:500]
+        clean_notify = redact_secrets(notify_text)[:500] if notify_text else None
+        now = self.clock()
+        with self._tx() as c:
+            if self._expire_if_overdue_in_tx(c, qa_id, owner, expected_attempt, now):
+                return False
+            row = c.execute("SELECT * FROM qa_requests WHERE id=?" + self._QA_FENCE[len(" WHERE id=?"):],
+                            (qa_id, owner, int(expected_attempt), now, now)).fetchone()
+            if row is None:
+                return False
+            if retryable and row["attempt_count"] < row["max_attempts"]:
+                cur = c.execute(
+                    f"UPDATE qa_requests SET status='PENDING', {_QA_CLEAR_LEASE}, error=?,"
+                    " provider=COALESCE(?, provider), updated_at=?" + self._QA_FENCE,
+                    (clean_error, provider, now, qa_id, owner, int(expected_attempt), now, now),
+                )
+                return cur.rowcount == 1
+            cur = c.execute(
+                f"UPDATE qa_requests SET status='FAILED', {_QA_CLEAR_LEASE}, error=?,"
+                " provider=COALESCE(?, provider), updated_at=?" + self._QA_FENCE,
+                (clean_error, provider, now, qa_id, owner, int(expected_attempt), now, now),
+            )
+            if cur.rowcount != 1:
+                return False
+            if clean_notify:
+                self._enqueue_qa_outbox(c, row, "fail", {"text": clean_notify}, now)
+            return True
+
+    def recover_stale_qa_requests(
+        self, current_nonce: str | None = None, is_live_fn: Callable[[Any, Any], bool] | None = None
+    ) -> dict[str, list[str]]:
+        """Boot recovery: RUNNING rows of dead owners -> EXPIRED / FAILED(+notice) / PENDING."""
+        if is_live_fn is None:
+            from .win_job import is_same_process as is_live_fn
+        out: dict[str, list[str]] = {"expired": [], "failed": [], "requeued": [], "skipped": []}
+        now = self.clock()
+        with self._tx() as c:
+            for row in c.execute("SELECT * FROM qa_requests WHERE status='RUNNING' ORDER BY created_at, id").fetchall():
+                if (row["lease_owner"] != current_nonce and (row["lease_expires_at"] or 0) > now
+                        and is_live_fn(row["pid"], row["proc_start_time"])):
+                    out["skipped"].append(row["id"])
+                    continue
+                out[self._reap_qa_row_in_tx(c, row, now, "boot recovery")].append(row["id"])
+        return out
+
     def acquire_poller_lease(self, owner: str, ttl: float = 60.0) -> bool:
         """Single-poller lease (prevents two getUpdates loops from splitting the update stream)."""
         now = self.clock()
@@ -1107,72 +1539,77 @@ class CoordinatorDB:
         return self.cas_kv("update_offset", str(expected), new)
 
     # --------------------------------------------------------------- outbox
-    def outbox(self, task_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
-        sql, params = "SELECT * FROM tg_outbox WHERE 1=1", []
-        if task_id is not None:
-            sql += " AND task_id=?"
-            params.append(task_id)
+    @staticmethod
+    def _outbox_table(table: str) -> str:
+        if table not in _OUTBOX_TABLES:
+            raise ValueError(f"not an outbox table: {table!r}")
+        return table
+
+    def _list_outbox_table(self, table: str, ref_col: str, ref: str | None, status: str | None) -> list[dict[str, Any]]:
+        table = self._outbox_table(table)
+        if ref_col not in ("task_id", "qa_id"):
+            raise ValueError(ref_col)
+        sql, params = f"SELECT * FROM {table} WHERE 1=1", []
+        if ref is not None:
+            sql += f" AND {ref_col}=?"
+            params.append(ref)
         if status is not None:
             sql += " AND status=?"
             params.append(status)
         return [dict(r) for r in self._query(sql + " ORDER BY id", params)]
 
-    def outbox_counts(self) -> dict[str, int]:
+    def _outbox_counts_table(self, table: str) -> dict[str, int]:
+        table = self._outbox_table(table)
         counts = {s: 0 for s in OUTBOX_STATUSES}
-        for r in self._query("SELECT status, COUNT(*) AS n FROM tg_outbox GROUP BY status"):
+        for r in self._query(f"SELECT status, COUNT(*) AS n FROM {table} GROUP BY status"):
             counts[r["status"]] = r["n"]
         return counts
 
-    def expire_stale_outbox_on_boot(self, current_boot_id: str, boot_time: float | None = None) -> dict[str, int]:
-        """Prevent restart notification storms (no compensatory redelivery).
-
-        PENDING rows claimed by a previous dispatcher boot, or enqueued before this boot,
-        become EXPIRED (never attempted) or UNKNOWN (may already have been delivered).
-        `/status` is the canonical way to recover the current picture.
-        """
+    def _expire_stale_outbox_table(self, table: str, current_boot_id: str, boot_time: float | None) -> dict[str, int]:
+        table = self._outbox_table(table)
         boot_time = self.clock() if boot_time is None else boot_time
         now = self.clock()
         stale = "status='PENDING' AND ((boot_id IS NOT NULL AND boot_id<>?) OR (boot_id IS NULL AND created_at<?))"
         with self._tx() as c:
             unknown = c.execute(
-                f"UPDATE tg_outbox SET status='UNKNOWN', unknown_at=?, updated_at=?, lease_owner=NULL,"
+                f"UPDATE {table} SET status='UNKNOWN', unknown_at=?, updated_at=?, lease_owner=NULL,"
                 f" lease_until=NULL, last_error='stale on boot' WHERE {stale} AND attempts>0",
                 (now, now, current_boot_id, boot_time),
             ).rowcount
             expired = c.execute(
-                f"UPDATE tg_outbox SET status='EXPIRED', updated_at=?, lease_owner=NULL, lease_until=NULL,"
+                f"UPDATE {table} SET status='EXPIRED', updated_at=?, lease_owner=NULL, lease_until=NULL,"
                 f" last_error='stale on boot' WHERE {stale} AND attempts=0",
                 (now, current_boot_id, boot_time),
             ).rowcount
         return {"expired": expired, "unknown": unknown}
 
-    def claim_outbox(
-        self, owner: str, boot_id: str, limit: int = 10, lease_ttl: float = 60.0
+    def _claim_outbox_table(
+        self, table: str, owner: str, boot_id: str, limit: int, lease_ttl: float
     ) -> list[dict[str, Any]]:
-        """Lease due PENDING rows to `owner`; `attempts` is bumped *before* any network call."""
+        table = self._outbox_table(table)
         now = self.clock()
         with self._tx() as c:
             c.execute(
-                "UPDATE tg_outbox SET status='EXPIRED', updated_at=?, last_error='ttl expired'"
+                f"UPDATE {table} SET status='EXPIRED', updated_at=?, last_error='ttl expired'"
                 " WHERE status='PENDING' AND expires_at<=?",
                 (now, now),
             )
             # A lease that lapsed mid-send may have been delivered: quarantine, never resend.
             c.execute(
-                "UPDATE tg_outbox SET status='UNKNOWN', unknown_at=?, updated_at=?, lease_owner=NULL,"
+                f"UPDATE {table} SET status='UNKNOWN', unknown_at=?, updated_at=?, lease_owner=NULL,"
                 " last_error='lease lapsed during send' WHERE status='PENDING' AND lease_owner IS NOT NULL"
                 " AND lease_until<=?",
                 (now, now, now),
             )
             rows = c.execute(
-                "SELECT id FROM tg_outbox WHERE status='PENDING' AND lease_owner IS NULL"
+                f"SELECT id FROM {table} WHERE status='PENDING' AND lease_owner IS NULL"
                 " AND next_retry_at<=? ORDER BY id LIMIT ?",
                 (now, limit),
             ).fetchall()
             ids = [r["id"] for r in rows]
             for i in ids:
                 c.execute(
-                    "UPDATE tg_outbox SET lease_owner=?, lease_until=?, boot_id=?, attempts=attempts+1,"
+                    f"UPDATE {table} SET lease_owner=?, lease_until=?, boot_id=?, attempts=attempts+1,"
                     " updated_at=? WHERE id=? AND status='PENDING' AND lease_owner IS NULL",
                     (owner, now + lease_ttl, boot_id, now, i),
                 )
@@ -1182,42 +1619,111 @@ class CoordinatorDB:
             return [
                 dict(r)
                 for r in c.execute(
-                    f"SELECT * FROM tg_outbox WHERE id IN ({marks}) AND lease_owner=? ORDER BY id",
+                    f"SELECT * FROM {table} WHERE id IN ({marks}) AND lease_owner=? ORDER BY id",
                     ids + [owner],
                 ).fetchall()
             ]
 
-    def _settle_outbox(self, row_id: int, owner: str, sets: str, params: list[Any]) -> bool:
+    def _settle_outbox_table(self, table: str, row_id: int, owner: str, sets: str, params: list[Any]) -> bool:
+        table = self._outbox_table(table)
         now = self.clock()
         with self._tx() as c:
             cur = c.execute(
-                f"UPDATE tg_outbox SET {sets}, lease_owner=NULL, lease_until=NULL, updated_at=?"
+                f"UPDATE {table} SET {sets}, lease_owner=NULL, lease_until=NULL, updated_at=?"
                 " WHERE id=? AND status='PENDING' AND lease_owner=?",
                 params + [now, row_id, owner],
             )
             return cur.rowcount == 1
 
+    def _mark_outbox(self, table: str, row_id: int, owner: str, outcome: str, error: str = "",
+                     retry_after: float | None = None) -> bool:
+        err = (error or "")[:300]
+        if outcome == "sent":
+            return self._settle_outbox_table(table, row_id, owner, "status='SENT', sent_at=?", [self.clock()])
+        if outcome == "retry":
+            delay = max(1.0, float(retry_after or 1.0))
+            return self._settle_outbox_table(table, row_id, owner, "next_retry_at=?, last_error=?",
+                                             [self.clock() + delay, err])
+        if outcome == "unknown":
+            return self._settle_outbox_table(table, row_id, owner, "status='UNKNOWN', unknown_at=?, last_error=?",
+                                             [self.clock(), err])
+        if outcome == "failed":
+            return self._settle_outbox_table(table, row_id, owner, "status='FAILED', last_error=?", [err])
+        if outcome == "expired":
+            return self._settle_outbox_table(table, row_id, owner, "status='EXPIRED', last_error=?", [err])
+        raise ValueError(outcome)
+
+    # tg_outbox (task notifications) -- public API unchanged
+    def outbox(self, task_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        return self._list_outbox_table("tg_outbox", "task_id", task_id, status)
+
+    def outbox_counts(self) -> dict[str, int]:
+        return self._outbox_counts_table("tg_outbox")
+
+    def expire_stale_outbox_on_boot(self, current_boot_id: str, boot_time: float | None = None) -> dict[str, int]:
+        """Prevent restart notification storms (no compensatory redelivery).
+
+        PENDING rows claimed by a previous dispatcher boot, or enqueued before this boot,
+        become EXPIRED (never attempted) or UNKNOWN (may already have been delivered).
+        `/status` is the canonical way to recover the current picture.
+        """
+        return self._expire_stale_outbox_table("tg_outbox", current_boot_id, boot_time)
+
+    def claim_outbox(
+        self, owner: str, boot_id: str, limit: int = 10, lease_ttl: float = 60.0
+    ) -> list[dict[str, Any]]:
+        """Lease due PENDING rows to `owner`; `attempts` is bumped *before* any network call."""
+        return self._claim_outbox_table("tg_outbox", owner, boot_id, limit, lease_ttl)
+
+    def _settle_outbox(self, row_id: int, owner: str, sets: str, params: list[Any]) -> bool:
+        return self._settle_outbox_table("tg_outbox", row_id, owner, sets, params)
+
     def mark_outbox_sent(self, row_id: int, owner: str) -> bool:
-        return self._settle_outbox(row_id, owner, "status='SENT', sent_at=?", [self.clock()])
+        return self._mark_outbox("tg_outbox", row_id, owner, "sent")
 
     def mark_outbox_retry(self, row_id: int, owner: str, retry_after: float, error: str = "429") -> bool:
         """HTTP 429 only: stays PENDING with `next_retry_at` pushed out by Retry-After."""
-        delay = max(1.0, float(retry_after or 1.0))
-        return self._settle_outbox(
-            row_id, owner, "next_retry_at=?, last_error=?", [self.clock() + delay, error[:300]]
-        )
+        return self._mark_outbox("tg_outbox", row_id, owner, "retry", error, retry_after)
 
     def mark_outbox_unknown(self, row_id: int, owner: str, error: str) -> bool:
         """Timeout / connection reset / 5xx: delivery state unknown; never retried automatically."""
-        return self._settle_outbox(
-            row_id, owner, "status='UNKNOWN', unknown_at=?, last_error=?", [self.clock(), error[:300]]
-        )
+        return self._mark_outbox("tg_outbox", row_id, owner, "unknown", error)
 
     def mark_outbox_failed(self, row_id: int, owner: str, error: str) -> bool:
-        return self._settle_outbox(row_id, owner, "status='FAILED', last_error=?", [error[:300]])
+        return self._mark_outbox("tg_outbox", row_id, owner, "failed", error)
 
     def mark_outbox_expired(self, row_id: int, owner: str, error: str) -> bool:
-        return self._settle_outbox(row_id, owner, "status='EXPIRED', last_error=?", [error[:300]])
+        return self._mark_outbox("tg_outbox", row_id, owner, "expired", error)
+
+    # qa_outbox (Q&A answers) -- same delivery semantics, bound to qa_requests
+    def qa_outbox(self, qa_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        return self._list_outbox_table("qa_outbox", "qa_id", qa_id, status)
+
+    def qa_outbox_counts(self) -> dict[str, int]:
+        return self._outbox_counts_table("qa_outbox")
+
+    def expire_stale_qa_outbox_on_boot(self, current_boot_id: str, boot_time: float | None = None) -> dict[str, int]:
+        return self._expire_stale_outbox_table("qa_outbox", current_boot_id, boot_time)
+
+    def claim_qa_outbox(
+        self, owner: str, boot_id: str, limit: int = 10, lease_ttl: float = 60.0
+    ) -> list[dict[str, Any]]:
+        return self._claim_outbox_table("qa_outbox", owner, boot_id, limit, lease_ttl)
+
+    def mark_qa_outbox_sent(self, row_id: int, owner: str) -> bool:
+        return self._mark_outbox("qa_outbox", row_id, owner, "sent")
+
+    def mark_qa_outbox_retry(self, row_id: int, owner: str, retry_after: float, error: str = "429") -> bool:
+        return self._mark_outbox("qa_outbox", row_id, owner, "retry", error, retry_after)
+
+    def mark_qa_outbox_unknown(self, row_id: int, owner: str, error: str) -> bool:
+        return self._mark_outbox("qa_outbox", row_id, owner, "unknown", error)
+
+    def mark_qa_outbox_failed(self, row_id: int, owner: str, error: str) -> bool:
+        return self._mark_outbox("qa_outbox", row_id, owner, "failed", error)
+
+    def mark_qa_outbox_expired(self, row_id: int, owner: str, error: str) -> bool:
+        return self._mark_outbox("qa_outbox", row_id, owner, "expired", error)
 
     # -------------------------------------------------------------- actions
     def issue_action_token(

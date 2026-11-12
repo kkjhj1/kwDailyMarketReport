@@ -35,6 +35,7 @@ import html
 import json
 import os
 import re
+import secrets
 import socket
 import sys
 import tempfile
@@ -84,7 +85,7 @@ CHAT_ENV = "AUTO_FACTORY_ADMIN_CHAT_ID"
 UNLOCKED_PRESETS_ENV = "AUTO_FACTORY_UNLOCKED_PRESETS"
 BOT_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 CALLBACK_PREFIX = "af2"
-CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxXp])\|([A-Za-z0-9_-]{22})$")
+CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxXpqez])\|([A-Za-z0-9_-]{22})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_CALLBACK_BYTES = 64
 MAX_VISIBLE = 1800
@@ -92,6 +93,10 @@ MAX_HTML = 3500
 MAX_REQUEST_BYTES = 2048
 MAX_PATHS = 20
 CIRCUIT = "global"  # mirrors worker.CIRCUIT (kept local so the bot does not import the worker)
+QA_CIRCUIT = "qa_provider"  # mirrors worker.QA_CIRCUIT
+FOCUS_TTL = 900.0  # a /bots pick keeps the chat focused on that preset for 15 minutes (refreshed on use)
+DRAFT_TTL = 600.0  # ambiguous message -> 질문/수정 choice buttons stay valid for 10 minutes
+QA_REQUEST_TTL = 1800.0
 STOP_FLAG_NAME = "STOP.flag"
 START_APPROVAL_TTL = 24 * 3600.0
 REVIEW_APPROVAL_TTL = 24 * 3600.0
@@ -416,6 +421,52 @@ def parse_do_command(
     return preset, request
 
 
+# ======================================================= conversational text
+_FLAG_INJECTION_RE = re.compile(r"(?:^|\s)--(?=\s|$|[A-Za-z])")
+_ASK_CUES_KO = ("뭐", "무엇", "무슨", "왜", "어떻게", "어디", "언제", "누가", "어느", "몇", "알려", "설명", "궁금",
+                "인가", "인지", "나요", "까요", "니까", "는지", "을까", "ㄴ가", "있어?", "있나", "되나", "맞아", "맞나")
+_EDIT_CUES_KO = ("수정", "고쳐", "고치", "바꿔", "바꾸", "변경", "추가", "삭제", "제거", "만들어", "구현", "개선",
+                 "리팩", "적용", "넣어", "빼줘", "빼 줘", "다듬", "업데이트", "교체", "정리해")
+_ASK_CUES_EN = re.compile(r"\b(what|why|how|where|when|which|who|explain|does|is there)\b", re.I)
+_EDIT_CUES_EN = re.compile(r"\b(fix|change|add|remove|delete|implement|update|refactor|rename|replace)\b", re.I)
+
+
+def validate_conversational_text(text: str) -> str:
+    """Normalize a plain chat message; reject control chars, oversize text and CLI-flag smuggling.
+
+    Natural punctuation (`?`, `,`, `/`, `()`) is fine: this text is data, never a command line.
+    """
+    if not isinstance(text, str):
+        raise ValueError("text required")
+    if "\x00" in text:
+        raise ValueError("NUL byte")
+    s = text.replace("\r\n", "\n").replace("\r", "\n")
+    if any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in s):
+        raise ValueError("control character in message")
+    s = s.strip()
+    if not s:
+        raise ValueError("empty message")
+    if len(s.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ValueError(f"message exceeds {MAX_REQUEST_BYTES} UTF-8 bytes")
+    if "--tests=" in s.lower():
+        raise ValueError("--tests= is not allowed (scope comes from the preset)")
+    if _FLAG_INJECTION_RE.search(s):
+        raise ValueError("'--' flags are not allowed in chat messages")
+    return s
+
+
+def classify_intent(text: str) -> str:
+    """Deterministic routing: `ask` (read-only Q&A), `edit` (L2 preset task) or `ambiguous`."""
+    s = (text or "").strip()
+    ask = s.endswith(("?", "？")) or any(c in s for c in _ASK_CUES_KO) or bool(_ASK_CUES_EN.search(s))
+    edit = any(c in s for c in _EDIT_CUES_KO) or bool(_EDIT_CUES_EN.search(s))
+    if edit and not ask:
+        return "edit"
+    if ask and not edit:
+        return "ask"
+    return "ambiguous"
+
+
 # ================================================================ formatting
 class MessageTooLong(ValueError):
     pass
@@ -451,6 +502,41 @@ class SafeHtmlFormatter:
         if limit is not None and len(s) > limit:
             s = s[: max(0, limit - 1)] + "…"
         return html.escape(s, quote=True)
+
+    @staticmethod
+    def normalize_plain(value: Any) -> str:
+        """Unify newlines and drop C0/DEL control characters (keeps `\\n` and `\\t`)."""
+        s = "" if value is None else str(value)
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        return "".join(ch for ch in s if ch in "\n\t" or not (ord(ch) < 32 or ord(ch) == 127))
+
+    @classmethod
+    def esc_html_budget(cls, value: Any, max_visible: int, max_html: int) -> str:
+        """Longest escaped prefix (+ "…" when cut) within BOTH the visible and the HTML budget.
+
+        The plain text is cut before escaping, so an entity like `&lt;` is never split.
+        """
+        s = cls.normalize_plain(value)
+
+        def candidate(k: int) -> str:
+            return s[:k] + ("…" if k < len(s) else "")
+
+        def fits(k: int) -> bool:
+            cand = candidate(k)
+            return len(cand) <= max_visible and len(html.escape(cand, quote=True)) <= max_html
+
+        if fits(len(s)):
+            return html.escape(s, quote=True)
+        if not fits(0):
+            return ""
+        lo, hi = 0, len(s) - 1
+        while lo < hi:  # escaped length is monotonic in k
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        return html.escape(candidate(lo), quote=True)
 
     def b(self, v: Any, limit: int = 200) -> str:
         return f"<b>{self.esc(v, limit)}</b>"
@@ -597,12 +683,16 @@ class HttpTransport:
             raise TgRejected(str(body.get("description", "not ok"))[:200])
         return body.get("result")
 
-    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None) -> int:
+    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None,
+                     reply_to_message_id: int | None = None) -> int:
         payload: dict[str, Any] = {
             "chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        if reply_to_message_id is not None:
+            payload["reply_parameters"] = {"message_id": int(reply_to_message_id),
+                                           "allow_sending_without_reply": True}
         return int((self._call("sendMessage", payload) or {}).get("message_id", 0))
 
     def edit_message_text(self, chat_id: int, message_id: int, text: str, reply_markup: dict | None = None) -> None:
@@ -649,11 +739,12 @@ class FakeTransport:
             raise step
         return step
 
-    def send_message(self, chat_id, text, reply_markup=None) -> int:
+    def send_message(self, chat_id, text, reply_markup=None, reply_to_message_id: int | None = None) -> int:
         self.send_attempts += 1
         self._step(self.send_script)
         self._mid += 1
-        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup, "message_id": self._mid})
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup, "message_id": self._mid,
+                          "reply_to_message_id": reply_to_message_id})
         return self._mid
 
     def edit_message_text(self, chat_id, message_id, text, reply_markup=None) -> None:
@@ -830,55 +921,124 @@ class OutboxDispatcher:
         self.owner = owner or f"dispatch:{uuid.uuid4().hex[:12]}"
 
     def boot(self) -> dict[str, int]:
-        return self.db.expire_stale_outbox_on_boot(self.boot_id)
+        tg = self.db.expire_stale_outbox_on_boot(self.boot_id)
+        qa = self.db.expire_stale_qa_outbox_on_boot(self.boot_id)
+        return {k: tg.get(k, 0) + qa.get(k, 0) for k in set(tg) | set(qa)}
+
+    def _marks(self, qa: bool) -> dict[str, Callable[..., bool]]:
+        d = self.db
+        if qa:
+            return {"sent": d.mark_qa_outbox_sent, "retry": d.mark_qa_outbox_retry, "unknown": d.mark_qa_outbox_unknown,
+                    "failed": d.mark_qa_outbox_failed, "expired": d.mark_qa_outbox_expired}
+        return {"sent": d.mark_outbox_sent, "retry": d.mark_outbox_retry, "unknown": d.mark_outbox_unknown,
+                "failed": d.mark_outbox_failed, "expired": d.mark_outbox_expired}
 
     def dispatch_once(self, limit: int = 10) -> dict[str, int]:
         stats = {"sent": 0, "retry": 0, "unknown": 0, "failed": 0, "expired": 0}
         for row in self.db.claim_outbox(self.owner, self.boot_id, limit):
-            rid = row["id"]
-            if row["chat_id"] != self.admin_chat_id:
-                self.db.mark_outbox_failed(rid, self.owner, "chat is not the admin chat")
-                stats["failed"] += 1
-                continue
-            try:
-                payload = json.loads(row["payload_json"])
-                task = self.db.get_task(row["task_id"])
-                if task["state_version"] != payload.get("state_version"):
-                    self.db.mark_outbox_expired(rid, self.owner, "superseded by a newer state")
-                    stats["expired"] += 1
-                    continue
-                text, markup = self.renderer.task_card(task, payload.get("reason", ""))
-            except Exception as exc:  # render failure: nothing was sent
-                self.db.mark_outbox_failed(rid, self.owner, f"render: {type(exc).__name__}: {exc}")
-                stats["failed"] += 1
-                continue
-            self.limiter.wait(row["chat_id"])
-            try:
-                self.transport.send_message(row["chat_id"], text, markup)
-            except TgRetryAfter as exc:
-                self.db.mark_outbox_retry(rid, self.owner, exc.retry_after, str(exc))
-                stats["retry"] += 1
-            except TgRejected as exc:
-                self.db.mark_outbox_failed(rid, self.owner, str(exc))
-                stats["failed"] += 1
-            except Exception as exc:  # timeout / reset / 5xx / anything else: may have been sent
-                self.db.mark_outbox_unknown(rid, self.owner, f"{type(exc).__name__}: {exc}")
-                stats["unknown"] += 1
-            else:
-                self.db.mark_outbox_sent(rid, self.owner)
-                stats["sent"] += 1
+            self._dispatch_tg_row(row, stats)
+        for row in self.db.claim_qa_outbox(self.owner, self.boot_id, limit):
+            self._dispatch_qa_row(row, stats)
         return stats
+
+    def _dispatch_tg_row(self, row: dict[str, Any], stats: dict[str, int]) -> None:
+        marks = self._marks(qa=False)
+        rid = row["id"]
+        if row["chat_id"] != self.admin_chat_id:
+            marks["failed"](rid, self.owner, "chat is not the admin chat")
+            stats["failed"] += 1
+            return
+        try:
+            payload = json.loads(row["payload_json"])
+            task = self.db.get_task(row["task_id"])
+            if task["state_version"] != payload.get("state_version"):
+                marks["expired"](rid, self.owner, "superseded by a newer state")
+                stats["expired"] += 1
+                return
+            text, markup = self.renderer.task_card(task, payload.get("reason", ""))
+        except Exception as exc:  # render failure: nothing was sent
+            marks["failed"](rid, self.owner, f"render: {type(exc).__name__}: {exc}")
+            stats["failed"] += 1
+            return
+        self._deliver(row, text, markup, marks, stats)
+
+    def _dispatch_qa_row(self, row: dict[str, Any], stats: dict[str, int]) -> None:
+        """Q&A answers/notices: rendered from the payload alone (never touches `tasks`)."""
+        marks = self._marks(qa=True)
+        rid = row["id"]
+        if row["chat_id"] != self.admin_chat_id:
+            marks["failed"](rid, self.owner, "chat is not the admin chat")
+            stats["failed"] += 1
+            return
+        try:
+            text = self._format_qa_message(row["payload_json"])
+        except Exception as exc:  # render failure: nothing was sent
+            marks["failed"](rid, self.owner, f"render: {type(exc).__name__}")
+            stats["failed"] += 1
+            return
+        self._deliver(row, text, None, marks, stats)
+
+    def _deliver(self, row: dict[str, Any], text: str, markup: dict | None,
+                 marks: dict[str, Callable[..., bool]], stats: dict[str, int]) -> None:
+        rid = row["id"]
+        self.limiter.wait(row["chat_id"])
+        try:
+            self.transport.send_message(row["chat_id"], text, markup)
+        except TgRetryAfter as exc:
+            marks["retry"](rid, self.owner, exc.retry_after, str(exc))
+            stats["retry"] += 1
+        except TgRejected as exc:
+            marks["failed"](rid, self.owner, str(exc))
+            stats["failed"] += 1
+        except Exception as exc:  # timeout / reset / 5xx / anything else: may have been sent
+            marks["unknown"](rid, self.owner, f"{type(exc).__name__}: {exc}")
+            stats["unknown"] += 1
+        else:
+            marks["sent"](rid, self.owner)
+            stats["sent"] += 1
+
+    def _format_qa_message(self, payload_json: str) -> str:
+        from .guardrails import redact_secrets
+
+        f = self.renderer.fmt
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        qa_id = str(payload.get("qa_id") or "?")
+        alias = payload.get("preset_alias")
+        scope = PRESETS[alias].label if isinstance(alias, str) and alias in PRESETS else "저장소 전체"
+        question = redact_secrets(payload.get("question") or "")
+        if payload.get("kind") == "fail":
+            lines = [f"<b>⚠️ 질문 처리 실패</b> · {f.code(qa_id, 24)} · {f.esc(scope, 40)}",
+                     f"Q: {f.esc(f.normalize_plain(question), 200)}",
+                     f.esc(f.normalize_plain(redact_secrets(payload.get("text") or "")), 500)]
+            return f.finalize("\n".join(lines))
+        refs = [redact_secrets(r) for r in (payload.get("refs") or []) if isinstance(r, str)][:5]
+        header = "\n".join([
+            f"<b>\U0001f4ac 답변</b> · {f.code(qa_id, 24)} · {f.esc(scope, 40)}",
+            f"Q: {f.esc(f.normalize_plain(question), 200)}",
+            "",
+        ])
+        footer = ("\n\n참고: " + ", ".join(f.code(r, 80) for r in refs)) if refs else ""
+        frame = header + footer
+        budget_visible = f.max_visible - f.visible_len(frame)
+        budget_html = f.max_html - len(frame)
+        body = f.esc_html_budget(redact_secrets(payload.get("answer") or ""), max(0, budget_visible),
+                                 max(0, budget_html))
+        return f.finalize(header + body + footer)
 
 
 # ===================================================================== bot
 HELP_TEXT = (
     "<b>auto_factory dev bot</b>\n"
-    "/bots — product bot presets (✅ unlocked / 🔒 locked)\n"
-    "/do &lt;preset&gt; &lt;request&gt; — L2 task scoped by the preset (no paths needed)\n"
+    "/bots — 봇 프리셋 선택 (✅ unlocked / 🔒 locked)\n"
+    "봇 선택 후 자연어로 질문·수정 요청 (질문=읽기 전용 답변, 수정=L2 작업)\n"
+    "/ask [preset] &lt;질문&gt; — 읽기 전용 질문\n"
+    "/clear — 선택한 봇 해제\n"
+    "/do &lt;preset&gt; &lt;request&gt; — L2 task scoped by the preset\n"
     "/task &lt;L0|L1|L2|L3&gt; &lt;path&gt;[,&lt;path&gt;] [--tests=a,b] -- &lt;request&gt;\n"
-    "/status [task_id] — overview, or a task card with fresh buttons\n"
-    "/kill — write STOP.flag (worker halts)\n"
-    "/resume [clear-circuit] — remove STOP.flag (optionally reset the circuit breaker)\n"
+    "/status [task_id] — overview or task card\n"
+    "/kill — write STOP.flag · /resume [clear-circuit]\n"
     "Merges are 2-step and bound to task + target_sha + diff_sha256."
 )
 
@@ -1011,11 +1171,14 @@ class DevBot:
             self.log(f"handler error: {type(exc).__name__}: {exc}")
             return f"error:{type(exc).__name__}"
 
-    def _send(self, chat_id: int, text: str, markup: dict | None = None) -> bool:
+    def _send(self, chat_id: int, text: str, markup: dict | None = None, reply_to: int | None = None) -> bool:
         """Interactive reply: one attempt, never retried (UNKNOWN semantics)."""
         self.limiter.wait(chat_id)
         try:
-            self.transport.send_message(chat_id, self.fmt.finalize(text), markup)
+            if isinstance(reply_to, int) and not isinstance(reply_to, bool):
+                self.transport.send_message(chat_id, self.fmt.finalize(text), markup, reply_to_message_id=reply_to)
+            else:
+                self.transport.send_message(chat_id, self.fmt.finalize(text), markup)
             return True
         except Exception as exc:
             self.log(f"reply failed: {type(exc).__name__}")
@@ -1040,7 +1203,11 @@ class DevBot:
             return "ignored:unauthorized"
         text = msg.get("text") or ""
         if not text.startswith("/"):
-            return "ignored:text"
+            if text.lstrip().startswith("/"):
+                return "ignored:leading_space_command"  # " /do ..." is never re-parsed as a command
+            if not text.strip():
+                return "ignored:text"
+            return self._on_plain_text(chat_id, text, msg.get("message_id"))
         parts = re.split(r"\s+", text, maxsplit=1)
         head, rest = parts[0], (parts[1] if len(parts) > 1 else "")
         cmd = head.split("@", 1)[0].lower()
@@ -1054,6 +1221,12 @@ class DevBot:
             return self._cmd_do(chat_id, text)
         if cmd == "/bots":
             return self._cmd_bots(chat_id)
+        if cmd == "/ask":
+            return self._cmd_ask(chat_id, arg)
+        if cmd == "/clear":
+            self.db.clear_chat_focus(chat_id)
+            self._send(chat_id, "\U0001f9f9 선택한 봇을 해제했습니다. /bots 로 다시 선택하세요.")
+            return "cmd:clear"
         if cmd == "/status":
             return self._cmd_status(chat_id, arg)
         if cmd == "/kill":
@@ -1077,6 +1250,7 @@ class DevBot:
                 return "cmd:resume:failed"
             if arg == "clear-circuit":
                 self.db.circuit_reset(CIRCUIT)
+                self.db.circuit_reset(QA_CIRCUIT)
             self._send(chat_id, "▶️ STOP.flag removed" + (" and circuit reset." if arg else "."))
             self._fire_wake()
             return "cmd:resume"
@@ -1161,6 +1335,146 @@ class DevBot:
         self._send(chat_id, "\n".join(lines), f.markup(rows))
         return f"cmd:bots:{len(unlocked)}"
 
+    # --------------------------------------------------- conversational mode
+    def _live_focus(self, chat_id: int) -> tuple[str, dict[str, Any]] | None:
+        """(raw, focus) of a live, unlocked, registered focus for `chat_id`, else None."""
+        raw = self.db.get_kv(f"focus:{int(chat_id)}")
+        if raw is None:
+            return None
+        try:
+            focus = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(focus, dict) or not isinstance(focus.get("expires_at"), (int, float)):
+            return None
+        alias = focus.get("alias")
+        if focus["expires_at"] <= self.db.clock() or alias not in PRESETS or alias not in self.unlocked_presets:
+            return None
+        return raw, focus
+
+    def _prompt_pick_bot(self, chat_id: int) -> None:
+        f = self.fmt
+        unlocked = [p for p in PRESETS.values() if p.alias in self.unlocked_presets]
+        if not unlocked:
+            self._send(chat_id, "먼저 대화할 봇을 선택해야 하지만 사용 가능한 프리셋이 없습니다. "
+                                f"잠금 해제: {f.code(UNLOCKED_PRESETS_ENV, 40)} (.env)")
+            return
+        buttons = [f.button(p.label, "p", encode_preset_token(p.alias)) for p in unlocked]
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        self._send(chat_id, "\U0001f916 먼저 대화할 봇을 선택하세요 (또는 /ask &lt;질문&gt;).", f.markup(rows))
+
+    @staticmethod
+    def _qa_hash(chat_id: int, alias: str | None, question: str) -> str:
+        return hashlib.sha256(json.dumps([int(chat_id), alias, question], ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _reply_qa_queued(self, chat_id: int, qa_id: str, alias: str | None, created: bool,
+                         reply_to: int | None = None) -> None:
+        f = self.fmt
+        scope = PRESETS[alias].label if alias in PRESETS else "저장소 전체"
+        if created:
+            self._send(chat_id, f"\U0001f4ac 질문 접수 {f.code(qa_id, 24)} · {f.esc(scope, 40)}\n"
+                                "읽기 전용으로 답변을 준비해 보내드립니다.", reply_to=reply_to)
+        else:
+            self._send(chat_id, f"♻️ 같은 질문이 이미 처리 중입니다 {f.code(qa_id, 24)}", reply_to=reply_to)
+
+    def _enqueue_qa(self, chat_id: int, alias: str | None, question: str) -> tuple[str, bool]:
+        qa_id, created = self.db.create_qa_request(chat_id, alias, question, self._qa_hash(chat_id, alias, question),
+                                                   ttl=QA_REQUEST_TTL)
+        if created:
+            self._fire_wake()  # after commit
+        return qa_id, created
+
+    def _cmd_ask(self, chat_id: int, arg: str) -> str:
+        f = self.fmt
+        alias: str | None = None
+        question = arg
+        head = arg.split(None, 1)
+        if head and head[0] in PRESETS:
+            if head[0] not in self.unlocked_presets:
+                self._send(chat_id, f"⚠️ /ask rejected: preset {f.code(head[0], 22)} is locked")
+                return "cmd:ask:rejected"
+            alias, question = head[0], (head[1] if len(head) > 1 else "")
+        else:
+            live = self._live_focus(chat_id)
+            alias = live[1]["alias"] if live else None
+        try:
+            question = validate_conversational_text(question)
+        except ValueError as exc:
+            self._send(chat_id, f"⚠️ /ask rejected: {f.esc(exc, 200)}\nusage: /ask [preset] &lt;질문&gt;")
+            return "cmd:ask:rejected"
+        qa_id, created = self._enqueue_qa(chat_id, alias, question)
+        self._reply_qa_queued(chat_id, qa_id, alias, created)
+        return f"cmd:ask:{'queued' if created else 'duplicate'}:{qa_id}"
+
+    def _preset_task_fields(self, alias: str, text: str) -> tuple[str, str, list[str], dict[str, Any]]:
+        """Same scope policy as `/do`: paths/tests/risk come ONLY from the code registry."""
+        if alias not in PRESETS or alias not in self.unlocked_presets:
+            raise TaskParseError(f"preset {alias} is locked (add it to {UNLOCKED_PRESETS_ENV})")
+        _check_no_smuggling(text)
+        preset = PRESETS[alias]
+        _verify_preset_paths(preset, self.wtm.repo_root)
+        spec = {"pytest": list(preset.tests), "preset": preset.alias, "preset_policy": PRESET_POLICY_VERSION}
+        return text, preset.min_risk, list(preset.allowed_paths), spec
+
+    def _reply_preset_task(self, chat_id: int, alias: str, tid: str, created: bool) -> None:
+        f = self.fmt
+        if not created:
+            self._reply_duplicate(chat_id, tid)
+            return
+        preset = PRESETS[alias]
+        self._send(
+            chat_id,
+            f"\U0001f195 {f.esc(preset.label, 40)} 작업 생성 {f.code(tid, 64)} ({f.esc(preset.min_risk, 4)} · "
+            f"파일 {len(preset.allowed_paths)}개 · 테스트 {len(preset.tests)}개).\n"
+            "감사(audit) 후 AWAITING_START_AUTH 에서 ▶️ Start 버튼이 도착합니다.",
+        )
+
+    def _on_plain_text(self, chat_id: int, text: str, message_id: Any) -> str:
+        f = self.fmt
+        reply_to = message_id if isinstance(message_id, int) and not isinstance(message_id, bool) else None
+        try:
+            clean = validate_conversational_text(text)
+        except ValueError as exc:
+            self._send(chat_id, f"⚠️ 메시지를 처리할 수 없습니다: {f.esc(exc, 200)}", reply_to=reply_to)
+            return "text:invalid"
+        live = self._live_focus(chat_id)
+        if live is None:
+            self._prompt_pick_bot(chat_id)
+            return "text:no_focus"
+        raw, focus = live
+        refreshed = dict(focus, expires_at=self.db.clock() + FOCUS_TTL)
+        if not self.db.refresh_focus_cas(chat_id, raw, json.dumps(refreshed, sort_keys=True)):
+            self._prompt_pick_bot(chat_id)  # focus changed underneath us: fail closed
+            return "text:no_focus"
+        alias = focus["alias"]
+        intent = classify_intent(clean)
+        if intent == "ask":
+            qa_id, created = self._enqueue_qa(chat_id, alias, clean)
+            self._reply_qa_queued(chat_id, qa_id, alias, created, reply_to=reply_to)
+            return f"text:ask:{'queued' if created else 'duplicate'}:{qa_id}"
+        if intent == "edit":
+            try:
+                request, risk, paths, spec = self._preset_task_fields(alias, clean)
+            except TaskParseError as exc:
+                self._send(chat_id, f"⚠️ 수정 요청 거부: {f.esc(exc, 200)}", reply_to=reply_to)
+                return "text:edit:rejected"
+            tid, created = self.db.create_task(request, risk, paths, spec)
+            if created:
+                self._fire_wake()  # after commit
+            self._reply_preset_task(chat_id, alias, tid, created)
+            return f"text:edit:{'created' if created else 'duplicate'}:{tid}"
+        token = secrets.token_urlsafe(16)
+        draft = {"token": token, "alias": alias, "focus_ver": focus.get("ver"), "text": clean,
+                 "expires_at": self.db.clock() + DRAFT_TTL}
+        self.db.set_kv(f"draft:{int(chat_id)}", json.dumps(draft, ensure_ascii=False, sort_keys=True))
+        markup = f.markup([
+            [f.button("\U0001f4ac 질문 답변", "q", token), f.button("\U0001f6e0 수정 작업", "e", token)],
+            [f.button("❌ 취소", "z", token)],
+        ])
+        self._send(chat_id, f"\U0001f914 {f.esc(PRESETS[alias].label, 40)}: 질문인가요, 수정 요청인가요?\n"
+                            f"{f.i(clean, 300)}", markup, reply_to=reply_to)
+        return "text:ambiguous"
+
     def _cmd_status(self, chat_id: int, arg: str) -> str:
         f = self.fmt
         if arg:
@@ -1184,6 +1498,8 @@ class DevBot:
             f"outbox pending {counts['PENDING']} · unknown {counts['UNKNOWN']}",
             f"open tasks: {len(tasks)}",
         ]
+        if self.db.circuit_is_open(QA_CIRCUIT):
+            lines.insert(2, f"qa_circuit: {f.b('OPEN', 8)}")
         for t in tasks[:15]:
             lines.append(f"{f.code(t['id'], 64)} {f.esc(t['state'], 40)} {f.esc(t['risk_level'], 4)}")
         self._send(chat_id, "\n".join(lines))
@@ -1208,8 +1524,15 @@ class DevBot:
         if not m:
             return "callback:malformed"
         op, token = m.groups()
-        if op == "p":  # stateless, read-only: never touches tg_actions
+        if op == "p":  # never touches tg_actions / tasks (only the chat focus in bot_kv)
             return self._cb_preset(token, chat_id)
+        if op in ("q", "e", "z"):  # ambiguous-message draft: single-tx CAS consume in the DB
+            try:
+                return self._cb_draft(op, token, chat_id, msg.get("message_id"))
+            except ActionRejected as exc:
+                self._send(chat_id, f"⚠️ 선택이 만료되었거나 이미 처리되었습니다 ({self.fmt.code(exc.code, 40)}). "
+                                    "메시지를 다시 보내주세요.")
+                return f"callback:rejected:{exc.code}"
         handler = {
             "s": self._cb_start, "c": self._cb_cancel, "d": self._cb_diff,
             "r": self._cb_prompt, "m": self._cb_prompt, "x": self._cb_prompt,
@@ -1225,8 +1548,47 @@ class DevBot:
     def _actor(user_id: int) -> str:
         return f"human:tg:{user_id}"
 
+    def _cb_draft(self, op: str, token: str, chat_id: int, message_id: Any) -> str:
+        f = self.fmt
+        raw = self.db.get_kv(f"draft:{int(chat_id)}")
+        if raw is None:
+            raise ActionRejected("DRAFT_MISSING", "draft already used or cleared")
+        if op == "z":
+            self.db.consume_draft_cancel(chat_id, raw, token)
+            self._edit(chat_id, message_id, "❌ 취소했습니다.")
+            return "callback:draft:cancel"
+        try:
+            draft = json.loads(raw)
+        except ValueError:
+            raise ActionRejected("DRAFT_INVALID") from None
+        if not isinstance(draft, dict):
+            raise ActionRejected("DRAFT_INVALID")
+        if op == "q":
+            alias, question = draft.get("alias"), str(draft.get("text") or "")
+            qa_id, alias, created = self.db.consume_draft_for_qa(
+                chat_id, raw, token, self.unlocked_presets, question, self._qa_hash(chat_id, alias, question),
+                ttl=QA_REQUEST_TTL,
+            )
+            if created:
+                self._fire_wake()  # after commit
+            label = "질문 접수" if created else "같은 질문이 이미 처리 중"
+            self._edit(chat_id, message_id, f"\U0001f4ac {label} {f.code(qa_id, 24)} · {f.esc(PRESETS[alias].label, 40)}")
+            return f"callback:draft:ask:{qa_id}"
+        try:
+            tid, alias, created = self.db.consume_draft_for_task(
+                chat_id, raw, token, self.unlocked_presets, self._preset_task_fields
+            )
+        except TaskParseError as exc:  # rolled back: the draft is untouched
+            self._edit(chat_id, message_id, f"⚠️ 수정 요청 거부: {f.esc(exc, 200)}")
+            return "callback:draft:rejected"
+        if created:
+            self._fire_wake()  # after commit
+        self._edit(chat_id, message_id, f"\U0001f6e0 수정 작업 {'생성' if created else '중복'} {f.code(tid, 64)}")
+        self._reply_preset_task(chat_id, alias, tid, created)
+        return f"callback:draft:edit:{tid}"
+
     def _cb_preset(self, token: str, chat_id: int) -> str:
-        """Stateless preset info card: no DB token is issued or consumed, nothing is mutated."""
+        """Preset info card + chat focus: no action token is issued/consumed and no task is created."""
         f = self.fmt
         try:
             alias = decode_preset_token(token)
@@ -1242,9 +1604,14 @@ class DevBot:
             f"파일 {len(p.allowed_paths)}개 · 테스트 스위트:",
         ]
         lines += [f"• {f.code(t, 80)}" for t in p.tests]
-        lines.append("아래 문장을 복사해 내용을 바꿔 보내세요:")
+        lines.append("이제 이 채팅에 질문이나 수정 요청을 그대로 입력하세요 (15분 유지 · /clear 해제).")
+        lines.append("또는 아래 문장을 복사해 내용을 바꿔 보내세요:")
         lines.append(f.code(f"/do {p.alias} 원하는 작업 내용", 120))
-        self._send(chat_id, "\n".join(lines))
+        focus = {"alias": alias, "ver": secrets.token_urlsafe(8), "expires_at": self.db.clock() + FOCUS_TTL}
+        self.db.set_focus_and_clear_draft(chat_id, json.dumps(focus, sort_keys=True))
+        markup = {"force_reply": True, "selective": False,
+                  "input_field_placeholder": f"{p.label} · 질문 또는 수정 요청 입력"[:64]}
+        self._send(chat_id, "\n".join(lines), markup)
         return f"callback:preset:{alias}"
 
     def _merge_summary(self, task: dict[str, Any], head: str | None) -> list[str]:

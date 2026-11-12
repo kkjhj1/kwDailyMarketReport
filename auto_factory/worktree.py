@@ -7,6 +7,7 @@ disposable audit clones with main-repo mutation snapshots.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -735,6 +737,55 @@ class WorktreeManager:
         if dest.exists():
             raise WorktreeError(f"disposable clone still present: {dest}")
 
+    def export_clean_snapshot(self, base_sha: str, tmp_dir: str | os.PathLike) -> Path:
+        """Materialize `base_sha` as a plain file tree WITHOUT `.git`, secrets, DBs or scratch notes.
+
+        Built from `git archive` (committed content only), so dirty workspace files never leak.
+        Any symlink / special file / Windows reparse entry in the archive fails closed.
+        """
+        from .guardrails import is_qa_secret_path, normalize_rel_segments
+
+        if not _FULL_SHA_RE.match(base_sha or ""):
+            raise WorktreeError("clean snapshot needs a full 40-hex base_sha")
+        dest = Path(tmp_dir)
+        if _is_within(dest, self.repo_root) or _is_within(self.repo_root, dest):
+            raise WorktreeError("clean snapshot must live outside the repository")
+        if dest.exists() and any(dest.iterdir()):
+            raise WorktreeError(f"clean snapshot dir is not empty: {dest}")
+        _assert_no_link_or_reparse_ancestors(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        root = _assert_no_link_or_reparse_ancestors(dest)
+        proc = subprocess.run(
+            ["git", "archive", "--format=zip", base_sha], cwd=str(self.repo_root), env=build_sandbox_env(),
+            stdin=subprocess.DEVNULL, capture_output=True, check=True,
+        )
+        with zipfile.ZipFile(io.BytesIO(proc.stdout)) as zf:
+            for zi in zf.infolist():
+                _reject_unsafe_zip_entry(zi)
+                raw = zi.filename
+                is_dir = zi.is_dir() or raw.endswith(("/", "\\"))
+                try:
+                    parts = normalize_rel_segments(raw)
+                except ValueError as exc:
+                    raise UnsafePathError(f"unsafe archive entry {raw!r}: {exc}") from None
+                rel = "/".join(parts)
+                if is_qa_secret_path(rel, is_dir=is_dir):
+                    continue
+                if is_dir:
+                    _mkdirs_plain(root, parts)
+                    continue
+                parent = _mkdirs_plain(root, parts[:-1])
+                _write_new_plain_file(parent / parts[-1], zf.read(zi))
+        for cur, dirs, files in os.walk(root, topdown=True, followlinks=False):
+            for name in dirs + files:
+                p = Path(cur) / name
+                rel = p.relative_to(root).as_posix()
+                if _is_link_or_reparse(p):
+                    raise UnsafePathError(f"link/reparse point in clean snapshot: {rel}")
+                if is_qa_secret_path(rel, is_dir=name in dirs):
+                    raise UnsafePathError(f"forbidden path in clean snapshot: {rel}")
+        return root.resolve()
+
     def clone_snapshot(self, clone: str | os.PathLike) -> dict[str, str]:
         return {
             "head": self.head_sha(cwd=clone),
@@ -775,6 +826,71 @@ class WorktreeManager:
             "status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest(),
             "control": control,
         }
+
+
+_WIN_ZIP_SYSTEMS = (0, 10, 14)  # MS-DOS/FAT, NTFS, VFAT
+_SPECIAL_FILE_TYPES = frozenset({stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFSOCK})
+
+
+def _reject_unsafe_zip_entry(zi: zipfile.ZipInfo) -> None:
+    """Symlinks, special files and DOS reparse-point entries are never extracted."""
+    mode = (zi.external_attr >> 16) & 0xFFFF
+    ftype = stat.S_IFMT(mode)
+    if ftype == stat.S_IFLNK or stat.S_ISLNK(mode):
+        raise UnsafePathError(f"symlink entry in archive: {zi.filename!r}")
+    if ftype and (ftype in _SPECIAL_FILE_TYPES or ftype not in (stat.S_IFREG, stat.S_IFDIR)):
+        raise UnsafePathError(f"special file entry in archive: {zi.filename!r}")
+    if zi.create_system in _WIN_ZIP_SYSTEMS and (zi.external_attr & 0xFFFF) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise UnsafePathError(f"reparse-point entry in archive: {zi.filename!r}")
+
+
+def _mkdirs_plain(root: Path, parts: tuple[str, ...] | list[str]) -> Path:
+    """Create `root/<parts>` one level at a time; every level must be a real directory."""
+    cur = root
+    for seg in parts:
+        cur = cur / seg
+        if not os.path.lexists(cur):
+            os.mkdir(cur)
+        if _is_link_or_reparse(cur) or not cur.is_dir():
+            raise UnsafePathError(f"not a plain directory: {cur}")
+    return cur
+
+
+def _write_new_plain_file(path: Path, data: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), flags, 0o644)
+    except FileExistsError:
+        raise UnsafePathError(f"duplicate/colliding archive entry: {path}") from None
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    if _is_link_or_reparse(path) or not path.is_file():
+        raise UnsafePathError(f"written entry is not a plain file: {path}")
+
+
+def snapshot_tree(root: str | os.PathLike) -> dict[str, tuple[int, str]]:
+    """Deterministic `{rel_posix: (size, sha256)}` of a plain tree (dirs as `(-1, "")`).
+
+    Fails closed (UnsafePathError) on any symlink / reparse point, including the root itself.
+    """
+    base = Path(root)
+    if _is_link_or_reparse(base):
+        raise UnsafePathError(f"snapshot root is a link/reparse point: {base}")
+    out: dict[str, tuple[int, str]] = {}
+    for cur, dirs, files in os.walk(base, topdown=True, followlinks=False):
+        dirs.sort()
+        for name in dirs:
+            p = Path(cur) / name
+            if _is_link_or_reparse(p):
+                raise UnsafePathError(f"link/reparse point in tree: {p}")
+            out[p.relative_to(base).as_posix()] = (-1, "")
+        for name in sorted(files):
+            p = Path(cur) / name
+            if _is_link_or_reparse(p):
+                raise UnsafePathError(f"link/reparse point in tree: {p}")
+            data = p.read_bytes()
+            out[p.relative_to(base).as_posix()] = (len(data), hashlib.sha256(data).hexdigest())
+    return dict(sorted(out.items()))
 
 
 def _hash_file(p: Path) -> str:

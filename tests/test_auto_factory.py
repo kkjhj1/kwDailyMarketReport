@@ -3275,6 +3275,12 @@ class TestBotsAndPresetCallback:
         assert "/do kids 원하는 작업 내용" in text and "tests/test_kids_compass.py" in text and "파일 5개" in text
         assert bot.handle_update(upd_cb("p", tok)) == "callback:preset:kids"  # reusable: nothing consumed
         assert _tg_action_count(db) == before and db.list_tasks() == [] and len(tr.answers) == 2
+        focus = _json.loads(db.get_kv(f"focus:{ADMIN}"))  # only the chat focus is written
+        assert focus["alias"] == "kids" and focus["expires_at"] > time.time() and focus["ver"]
+        markup = tr.sent[-1]["reply_markup"]
+        assert markup["force_reply"] is True and markup["selective"] is False
+        assert len(markup["input_field_placeholder"]) <= 64 and "inline_keyboard" not in markup
+        assert db.list_qa_requests() == []
 
     def test_preset_callback_rejects_unauthorized_locked_and_forged(self, tmp_path, repo, db):
         bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
@@ -3381,3 +3387,763 @@ class TestPresetEndToEnd:
         bad.write_bytes(b'[{"gate": "pytest", "ok": false}]')  # tampered after hashing
         assert bot._merge_summary(db.get_task(tid), None) == ["Files: (no changes)",
                                                               "Tests: (gate report unreadable)"]
+
+
+# ######################################################################## Method 1: conversational Q&A
+import io as _io
+import stat as _stat
+import zipfile as _zipfile
+
+from auto_factory.adapters import QAContract, QAParseError, parse_qa_result, render_prompt
+from auto_factory.db import CoordinatorError
+from auto_factory.dev_bot import classify_intent, validate_conversational_text
+from auto_factory.guardrails import is_qa_secret_path, normalize_rel_segments, redact_secrets
+from auto_factory.worker import QA_CIRCUIT, QA_REQUEST_FILENAME
+from auto_factory.worktree import UnsafePathError, snapshot_tree
+
+TG_SECRET = "123456789:" + "B" * 35
+QA_HASH = "h" * 64
+
+
+def _qa_db(tmp_path, t=1_000_000.0):
+    clk = Clock(t)
+    return CoordinatorDB(tmp_path / "qa.db", clock=clk), clk
+
+
+def _claim(d, owner="w1", ttl=300.0):
+    return d.claim_next_qa_request(owner, os.getpid(), 1.0, ttl)
+
+
+def _focused_bot(tmp_path, repo, db, alias="kids", **kw):
+    bot, tr = make_bot(tmp_path, repo, db, unlocked_presets=kw.pop("unlocked", {alias}), **kw)
+    assert bot.handle_update(upd_cb("p", encode_preset_token(alias))) == f"callback:preset:{alias}"
+    return bot, tr
+
+
+class TestQASnapshotPolicy:
+    def test_is_qa_secret_path_matrix(self):
+        for p in (".env", ".ENV", ".env.local", "sub/.env", ".env/secret", "cache.db/token", "x.db", "x.db-wal",
+                  "x.db-shm", "x.db-journal", "a.sqlite3", "a.SQLITE", "a.sqlite3-wal", "a.sqlite-journal",
+                  "scratch/n.md", "Scratch/n.md", ".git/config", ".auto_factory/h.json", "STOP.flag",
+                  "a\\.env", "a\\..\\x.py", "../x.py", "/abs.py", "\\\\srv\\share\\x", "C:/x.py", "C:x.py",
+                  "a/./b.py", "", "a\x00b.py", "a/b:stream"):
+            assert is_qa_secret_path(p), p
+        assert is_qa_secret_path(".env.example", is_dir=True)  # a DIRECTORY named like a template is forbidden
+        assert is_qa_secret_path(".env.example/inner.txt")
+        for p in (".env.example", ".env.template", "calc.py", "tests/test_calc.py", "docs\\guide.md", "dbx/a.py"):
+            assert not is_qa_secret_path(p), p
+        assert normalize_rel_segments("a\\b/c.py") == ("a", "b", "c.py")
+        for bad in ("", "/a", "\\a", "C:/a", "a/../b", "a//b", "a\x00"):
+            with pytest.raises(ValueError):
+                normalize_rel_segments(bad)
+
+    def test_export_clean_snapshot_strips_secrets_dbs_and_git(self, tmp_path, repo):
+        files = {".env": "TOKEN=x", ".env.example": "TOKEN=", "cache.db/token": "t", "a.db-wal": "w",
+                 "a.db-shm": "s", "p.sqlite3": "d", "scratch/notes.md": "n", "sub/.ENV.local": "e",
+                 ".env.template/inner.txt": "i", "docs/ok.md": "ok"}
+        for rel, body in files.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(body, encoding="utf-8")
+        _git_main(repo, "add", "-A", "-f")
+        _git_main(repo, "commit", "-q", "-m", "secrets fixture")
+        (repo / "dirty_untracked.py").write_text("leak", encoding="utf-8")  # never committed
+        wtm = WorktreeManager(repo, tmp_path / "wts")
+        snap = wtm.export_clean_snapshot(wtm.head_sha(), tmp_path / "snap")
+        got = sorted(p.relative_to(snap).as_posix() for p in snap.rglob("*") if p.is_file())
+        assert got == [".env.example", ".gitignore", "calc.py", "docs/ok.md", "tests/test_calc.py"]
+        assert not (snap / ".git").exists() and not (snap / "scratch").exists()
+        assert (snap / "calc.py").read_text(encoding="utf-8") == (repo / "calc.py").read_text(encoding="utf-8")
+        tree = snapshot_tree(snap)
+        assert tree == snapshot_tree(snap) and tree["calc.py"][0] == (snap / "calc.py").stat().st_size
+        (snap / "calc.py").write_text("changed", encoding="utf-8")
+        assert snapshot_tree(snap) != tree
+        with pytest.raises(wt_mod.WorktreeError):
+            wtm.export_clean_snapshot(wtm.head_sha(), snap)  # not empty
+        with pytest.raises(wt_mod.WorktreeError):
+            wtm.export_clean_snapshot("HEAD", tmp_path / "snap2")  # full SHA only
+        with pytest.raises(wt_mod.WorktreeError):
+            wtm.export_clean_snapshot(wtm.head_sha(), repo / "inside")  # never inside the repo
+
+    @staticmethod
+    def _zip(entries):
+        buf = _io.BytesIO()
+        with _zipfile.ZipFile(buf, "w") as zf:
+            for name, mode, system, dos in entries:
+                zi = _zipfile.ZipInfo(name)
+                zi.create_system = system
+                zi.external_attr = (mode << 16) | dos
+                zf.writestr(zi, b"x")
+        return buf.getvalue()
+
+    @pytest.mark.parametrize("entry", [
+        ("link.py", _stat.S_IFLNK | 0o777, 3, 0),
+        ("fifo", _stat.S_IFIFO | 0o644, 3, 0),
+        ("chr", _stat.S_IFCHR | 0o644, 3, 0),
+        ("sock", _stat.S_IFSOCK | 0o644, 3, 0),
+        ("junction", 0, 0, 0x400),
+        ("ntfs_reparse", 0, 10, 0x400 | 0x20),
+        ("../evil.py", _stat.S_IFREG | 0o644, 3, 0),
+        ("a\\..\\..\\evil.py", _stat.S_IFREG | 0o644, 3, 0),
+        ("C:/evil.py", _stat.S_IFREG | 0o644, 3, 0),
+        ("/abs.py", _stat.S_IFREG | 0o644, 3, 0),
+    ])
+    def test_export_rejects_unsafe_archive_entries(self, tmp_path, repo, monkeypatch, entry):
+        data = self._zip([("ok.py", _stat.S_IFREG | 0o644, 3, 0), entry])
+        fake = _types.SimpleNamespace(
+            DEVNULL=subprocess.DEVNULL, run=lambda *a, **k: _types.SimpleNamespace(stdout=data, returncode=0))
+        monkeypatch.setattr(wt_mod, "subprocess", fake)
+        wtm = WorktreeManager(repo, tmp_path / "wts")
+        with pytest.raises(UnsafePathError):
+            wtm.export_clean_snapshot("a" * 40, tmp_path / "snap")
+        assert not (tmp_path / "evil.py").exists() and not (tmp_path.parent / "evil.py").exists()
+
+    def test_export_skips_forbidden_archive_dirs(self, tmp_path, repo, monkeypatch):
+        data = self._zip([("ok.py", _stat.S_IFREG | 0o644, 3, 0), (".env.example/", _stat.S_IFDIR | 0o755, 3, 0x10),
+                          (".env.example/in.txt", _stat.S_IFREG | 0o644, 3, 0),
+                          (".env.example", 0, 0, 0x20)])
+        fake = _types.SimpleNamespace(
+            DEVNULL=subprocess.DEVNULL, run=lambda *a, **k: _types.SimpleNamespace(stdout=data, returncode=0))
+        monkeypatch.setattr(wt_mod, "subprocess", fake)
+        snap = WorktreeManager(repo, tmp_path / "wts").export_clean_snapshot("a" * 40, tmp_path / "snap")
+        assert sorted(p.name for p in snap.iterdir()) == [".env.example", "ok.py"]
+        assert (snap / ".env.example").is_file()
+
+    def test_snapshot_tree_rejects_links_and_reparse_points(self, tmp_path, monkeypatch):
+        root = tmp_path / "t"
+        (root / "d").mkdir(parents=True)
+        (root / "d" / "f.txt").write_text("x", encoding="utf-8")
+        assert snapshot_tree(root) == {"d": (-1, ""), "d/f.txt": (1, _hashlib.sha256(b"x").hexdigest())}
+        real = wt_mod._is_link_or_reparse
+        for target in (root, root / "d", root / "d" / "f.txt"):  # root, dir and file are all checked
+            monkeypatch.setattr(wt_mod, "_is_link_or_reparse", lambda p, _t=target: Path(p) == _t or real(p))
+            with pytest.raises(UnsafePathError):
+                snapshot_tree(root)
+
+
+class TestRedaction:
+    def test_redact_secrets_patterns(self):
+        raw = (f"tg {TG_SECRET} key sk-ant-{'a' * 24} openai sk-{'b' * 24} aws AKIA{'C' * 16} "
+               f"auth: Bearer {'d' * 24} API_KEY = 'hunter2secret' DATABASE_URL=postgres://u:p@h/db "
+               "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY----- safe text")
+        out = redact_secrets(raw)
+        for leaked in (TG_SECRET, "sk-ant-", "b" * 24, "AKIA", "d" * 24, "hunter2secret", "postgres://", "MIIabc"):
+            assert leaked not in out, leaked
+        assert "API_KEY = '[REDACTED]'" in out and "DATABASE_URL=[REDACTED]" in out and "safe text" in out
+        assert redact_secrets("db_password: 'abcdefg'") == "db_password: '[REDACTED]'"
+        assert redact_secrets("MY_TOKEN=short") == "MY_TOKEN=short"  # < 6 chars is not treated as a secret
+        assert redact_secrets(None) == "" and redact_secrets("plain 안녕") == "plain 안녕"
+
+
+class TestQAAdapters:
+    def test_qa_prompt_is_ascii_and_shim_safe(self):
+        p = render_prompt("qa", QA_REQUEST_FILENAME)
+        assert p.isascii() and adapters_mod._SAFE_SHIM_ARG_RE.match(p) and QA_REQUEST_FILENAME in p
+        assert "schema_version" in p and "refs" in p
+
+    def test_invoke_qa_enforces_ascii_and_metachar_free_prompt(self, monkeypatch):
+        runner = _RecordingRunner()
+        a = adapters_mod.CodexAdapter(runner, executable=sys.executable)
+        res = a.invoke(QAContract("q1", "x"), ".", "qa", QA_REQUEST_FILENAME)
+        assert res.ok and runner.cmds and "read-only" in runner.cmds[-1]
+        for bad in ("질문 prompt", "a & b", "a | b"):
+            monkeypatch.setattr(adapters_mod, "render_prompt", lambda role, path, _b=bad: _b)
+            n = len(runner.cmds)
+            res = a.invoke(QAContract("q1", "x"), ".", "qa", QA_REQUEST_FILENAME)
+            assert res.code == FailureCode.INTERNAL and len(runner.cmds) == n
+
+    def test_gemini_qa_denies_all_commands_and_writer_unchanged(self):
+        g = adapters_mod.GeminiAdapter(model=None)
+        qa = g.build_command("qa", "p")
+        settings = _json.loads(qa[qa.index("--settings") + 1])
+        assert settings == {"permissions": {"allow": [], "deny": ["command(regex:.*)"]}}
+        assert qa[qa.index("--mode") + 1] == "plan"
+        w = g.build_command("writer", "p")
+        assert w[w.index("--mode") + 1] == "accept-edits"
+        assert _json.loads(w[w.index("--settings") + 1])["permissions"]["allow"] == ["command(regex:.*)"]
+        r = g.build_command("reviewer", "p")
+        assert _json.loads(r[r.index("--settings") + 1])["permissions"]["allow"] == ["command(regex:.*)"]
+
+    def test_parse_qa_result_strict(self):
+        good = {"schema_version": 1, "qa_id": "q1", "answer": " 답 ", "refs": ["a/b.py", "c\\d.py"]}
+        assert parse_qa_result("noise " + _json.dumps(good, ensure_ascii=False), "q1") == {
+            "schema_version": 1, "qa_id": "q1", "answer": "답", "refs": ["a/b.py", "c/d.py"]}
+        bads = [dict(good, qa_id="q2"), dict(good, schema_version=True), dict(good, schema_version="1"),
+                dict(good, answer=" "), dict(good, refs=["a"] * 6), dict(good, refs=["../x.py"]),
+                dict(good, refs=["/etc/passwd"]), dict(good, refs=["C:/x"]), dict(good, refs=[".env"]),
+                dict(good, refs=["db/app.sqlite3"]), dict(good, refs=[1]), dict(good, extra=1)]
+        for bad in bads:
+            with pytest.raises(QAParseError):
+                parse_qa_result(_json.dumps(bad), "q1")
+        with pytest.raises(QAParseError):
+            parse_qa_result(_json.dumps(good) + _json.dumps(good), "q1")
+        with pytest.raises(QAParseError):
+            parse_qa_result("no json", "q1")
+
+    def test_mock_adapter_qa_calls(self):
+        m = MockAdapter("codex")
+        res = m.invoke(QAContract("q9", "x"), ".", "qa", QA_REQUEST_FILENAME)
+        assert m.calls == [("qa", "q9")] and parse_qa_result(res.stdout, "q9")["answer"] == "mock qa answer"
+
+
+class TestQADatabase:
+    def test_create_dedupe_claim_and_complete(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            qid, created = d.create_qa_request(ADMIN, "kids", "질문?", QA_HASH)
+            assert created and qid.startswith("q") and d.create_qa_request(ADMIN, "kids", "질문?", QA_HASH) == (qid, False)
+            row = _claim(d)
+            assert row["id"] == qid and row["status"] == "RUNNING" and row["attempt_count"] == 1
+            assert d.create_qa_request(ADMIN, "kids", "질문?", QA_HASH) == (qid, False)  # RUNNING still dedupes
+            assert _claim(d, "w2") is None
+            assert d.heartbeat_qa_request(qid, "w1", 1) and not d.heartbeat_qa_request(qid, "w2", 1)
+            assert not d.complete_qa_answer(qid, "w2", 1, "codex", "a" * 40, "x", [])  # stale worker
+            assert not d.complete_qa_answer(qid, "w1", 2, "codex", "a" * 40, "x", [])  # stale attempt
+            assert d.complete_qa_answer(qid, "w1", 1, "codex", "a" * 40, f"답 {TG_SECRET}", [f"x {TG_SECRET}"])
+            r = d.get_qa_request(qid)
+            assert r["status"] == "ANSWERED" and r["lease_owner"] is None and TG_SECRET not in r["answer"]
+            assert r["refs"] == ["x [REDACTED]"]
+            out = d.qa_outbox(qid)
+            assert len(out) == 1 and out[0]["idempotency_key"] == f"qa:answer:{qid}" and TG_SECRET not in out[0]["payload_json"]
+            assert not d.complete_qa_answer(qid, "w1", 1, "codex", "a" * 40, "again", [])
+            assert len(d.qa_outbox(qid)) == 1 and d.qa_outbox_counts()["PENDING"] == 1
+            qid2, created2 = d.create_qa_request(ADMIN, "kids", "질문?", QA_HASH)  # answered -> new request
+            assert created2 and qid2 != qid
+            with pytest.raises(KeyError):
+                d.get_qa_request("qnope")
+        finally:
+            d.close()
+
+    def test_dual_expiration_fencing(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            qid, _ = d.create_qa_request(ADMIN, None, "q", QA_HASH, ttl=100)
+            _claim(d, ttl=300)
+            clk.t += 150  # request TTL passed, lease still live
+            assert d.complete_qa_answer(qid, "w1", 1, "codex", "a" * 40, "late", []) is False
+            r = d.get_qa_request(qid)
+            assert r["status"] == "EXPIRED" and r["lease_owner"] is None and d.qa_outbox() == []
+            qid2, _ = d.create_qa_request(ADMIN, None, "q2", "g" * 64, ttl=1000)
+            _claim(d, ttl=10)
+            clk.t += 20  # lease lapsed, request still valid
+            assert d.complete_qa_answer(qid2, "w1", 1, "codex", "a" * 40, "x", []) is False
+            assert d.fail_qa_request(qid2, "w1", 1, "e", notify_text="n") is False
+            assert d.get_qa_request(qid2)["status"] == "RUNNING" and d.qa_outbox() == []
+            row = _claim(d, "w2")  # lapsed lease is reaped and re-claimed
+            assert row["id"] == qid2 and row["attempt_count"] == 2 and row["lease_owner"] == "w2"
+            assert d.fail_qa_request(qid2, "w1", 1, "stale", retryable=True) is False
+            clk.t += 2000  # both expired
+            assert d.fail_qa_request(qid2, "w2", 2, "x", notify_text="n") is False
+            assert d.get_qa_request(qid2)["status"] == "RUNNING"
+            assert _claim(d, "w3") is None and d.get_qa_request(qid2)["status"] == "EXPIRED"
+        finally:
+            d.close()
+
+    def test_fail_retryable_then_terminal_with_redacted_notice(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            qid, _ = d.create_qa_request(ADMIN, "kids", "q", QA_HASH, max_attempts=2)
+            _claim(d)
+            assert d.fail_qa_request(qid, "w1", 1, f"boom {TG_SECRET}", notify_text="n", retryable=True)
+            r = d.get_qa_request(qid)
+            assert r["status"] == "PENDING" and r["lease_owner"] is None and r["pid"] is None
+            assert r["lease_expires_at"] is None and TG_SECRET not in r["error"] and d.qa_outbox() == []
+            _claim(d)
+            assert d.fail_qa_request(qid, "w1", 2, "boom", notify_text=f"실패 {TG_SECRET}", retryable=True)
+            r = d.get_qa_request(qid)
+            assert r["status"] == "FAILED" and r["lease_owner"] is None
+            out = d.qa_outbox(qid)
+            assert [o["idempotency_key"] for o in out] == [f"qa:fail:{qid}"] and TG_SECRET not in out[0]["payload_json"]
+            assert _claim(d) is None
+            qid2, _ = d.create_qa_request(ADMIN, None, "q2", "f" * 64)
+            _claim(d)
+            assert d.fail_qa_request(qid2, "w1", 1, "fatal", retryable=False)  # no notify_text: no outbox
+            assert d.get_qa_request(qid2)["status"] == "FAILED" and d.qa_outbox(qid2) == []
+        finally:
+            d.close()
+
+    def test_claim_expires_due_pending_and_lists(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            old, _ = d.create_qa_request(ADMIN, None, "old", "a" * 64, ttl=10)
+            new, _ = d.create_qa_request(ADMIN, None, "new", "b" * 64, ttl=1000)
+            clk.t += 20
+            assert d.has_due_qa()
+            assert _claim(d)["id"] == new and d.get_qa_request(old)["status"] == "EXPIRED"
+            assert [r["id"] for r in d.list_qa_requests(["EXPIRED"])] == [old]
+            assert len(d.list_qa_requests()) == 2 and not d.has_due_qa()
+        finally:
+            d.close()
+
+    def test_boot_recovery_outcomes(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            ids = []
+            for i, (q, maxa) in enumerate((("live", 3), ("dead", 3), ("exhausted", 1), ("expired", 3))):
+                clk.t += 1  # distinct created_at -> deterministic FIFO claim order
+                ids.append(d.create_qa_request(ADMIN, None, q, f"{i}" * 64, ttl=1000, max_attempts=maxa)[0])
+            a, b, c, e = ids
+            for pid in (111, 222, 333, 444):
+                assert d.claim_next_qa_request(f"owner-{pid}", pid, 1.0)["pid"] == pid
+            d._conn.execute("UPDATE qa_requests SET expires_at=? WHERE id=?", (clk.t - 1, e))
+            res = d.recover_stale_qa_requests("me", lambda pid, st: pid == 111)
+            assert res == {"expired": [e], "failed": [c], "requeued": [b], "skipped": [a]}
+            assert d.get_qa_request(a)["status"] == "RUNNING"
+            assert d.get_qa_request(b)["status"] == "PENDING" and d.get_qa_request(b)["lease_owner"] is None
+            assert d.get_qa_request(c)["status"] == "FAILED" and d.qa_outbox(c)[0]["kind"] == "fail"
+            assert d.get_qa_request(e)["status"] == "EXPIRED" and d.qa_outbox(e) == []
+            res2 = d.recover_stale_qa_requests("owner-111", lambda pid, st: True)  # own nonce: never "live"
+            assert res2["requeued"] == [a]
+        finally:
+            d.close()
+
+    def test_outbox_helpers_are_table_allowlisted(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            with pytest.raises(ValueError):
+                d._claim_outbox_table("tasks; DROP TABLE tasks", "o", "b", 1, 1.0)
+            with pytest.raises(ValueError):
+                d._outbox_counts_table("events")
+            assert d.outbox_counts() == d.qa_outbox_counts() == {s: 0 for s in db_mod.OUTBOX_STATUSES}
+        finally:
+            d.close()
+
+    def test_kv_focus_helpers(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            d.set_kv(f"draft:{ADMIN}", "{}")
+            d.set_focus_and_clear_draft(ADMIN, '{"alias": "kids"}')
+            assert d.get_kv(f"draft:{ADMIN}") is None and d.get_kv(f"focus:{ADMIN}") == '{"alias": "kids"}'
+            assert not d.refresh_focus_cas(ADMIN, "wrong", "{}") and d.refresh_focus_cas(ADMIN, '{"alias": "kids"}', "{}")
+            assert not d.cas_delete_kv(f"focus:{ADMIN}", "nope") and d.get_kv(f"focus:{ADMIN}") == "{}"
+            d.set_kv(f"draft:{ADMIN}", "x")
+            assert d.clear_chat_focus(ADMIN) and not d.clear_chat_focus(ADMIN)
+            assert d.get_kv(f"focus:{ADMIN}") is None and d.get_kv(f"draft:{ADMIN}") is None
+            d.set_kv("k", "v")
+            assert d.cas_delete_kv("k", "v") and not d.delete_kv("k")
+        finally:
+            d.close()
+
+
+class TestQAWorker:
+    def _qa(self, db, question="calc 는 무엇을 하나요?", alias=None):
+        qid, _ = db.create_qa_request(ADMIN, alias, question, _hashlib.sha256(question.encode()).hexdigest())
+        return qid
+
+    def test_answer_from_clean_snapshot_and_cleanup(self, tmp_path, repo, db):
+        seen = {}
+
+        def look(wt, contract, role):
+            root = Path(wt)
+            seen["git"] = (root / ".git").exists()
+            seen["files"] = sorted(p.name for p in root.iterdir())
+            seen["request"] = _json.loads((root / QA_REQUEST_FILENAME).read_text(encoding="utf-8"))
+            return {"schema_version": 1, "qa_id": contract.qa_id, "answer": "calc.add 는 덧셈입니다", "refs": ["calc.py"]}
+
+        w = make_worker(tmp_path, repo, db, codex=[look], audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db, alias="kids")
+        s = w.run_cycle()
+        assert s["qa_processed"] == [(qid, "ANSWERED")] and s["processed"] == []
+        r = db.get_qa_request(qid)
+        assert r["status"] == "ANSWERED" and r["provider"] == "codex" and r["base_sha"] == w.wtm.head_sha()
+        assert r["refs"] == ["calc.py"] and r["attempt_count"] == 1
+        assert seen["git"] is False and QA_REQUEST_FILENAME in seen["files"] and "calc.py" in seen["files"]
+        assert seen["request"]["qa_id"] == qid and seen["request"]["preset_alias"] == "kids"
+        assert seen["request"]["allowed_paths"] == list(PRESETS["kids"].allowed_paths)
+        assert w.adapters["codex"].calls == [("qa", qid)] and w.adapters["claude"].calls == []
+        assert db.qa_outbox(qid)[0]["status"] == "PENDING"
+        assert list((tmp_path / "clones").iterdir()) == [] and w.qa_cleanup_errors == []
+        assert w.wtm.main_is_clean()
+
+    def test_merge_lock_contention_defers_without_consuming_attempt(self, tmp_path, repo, db, no_leaked_locks):
+        w = make_worker(tmp_path, repo, db, audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db)
+        lock = _FileLock(w.wtm.merge_lock_path, role="merge")
+        lock.acquire()
+        try:
+            s = w.run_cycle()
+        finally:
+            lock.release()
+        assert s["qa_processed"] == []
+        r = db.get_qa_request(qid)
+        assert r["status"] == "PENDING" and r["attempt_count"] == 0 and w.adapters["codex"].calls == []
+        assert w.run_cycle()["qa_processed"] == [(qid, "ANSWERED")]
+
+    def test_tamper_detected_even_when_provider_raises(self, tmp_path, repo, db):
+        def vandal(wt, contract, role):
+            Path(wt, "calc.py").write_text("pwned", encoding="utf-8")
+            raise RuntimeError(f"crash {TG_SECRET}")
+
+        w = make_worker(tmp_path, repo, db, codex=[vandal], audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db)
+        s = w.run_cycle()
+        assert s["qa_processed"] and s["qa_processed"][0][0] == qid
+        r = db.get_qa_request(qid)
+        assert r["status"] == "FAILED" and r["error"].startswith("TAMPER_DETECTED") and r["answer"] is None
+        out = db.qa_outbox(qid)
+        assert [o["kind"] for o in out] == ["fail"] and "TAMPER_DETECTED" in out[0]["payload_json"]
+        assert w.adapters["claude"].calls == []  # no failover after tampering
+        assert list((tmp_path / "clones").iterdir()) == []
+
+    def test_tamper_with_valid_answer_discards_stdout(self, tmp_path, repo, db):
+        def sneaky(wt, contract, role):
+            Path(wt, "new.py").write_text("x", encoding="utf-8")
+            return {"schema_version": 1, "qa_id": contract.qa_id, "answer": "looks fine", "refs": []}
+
+        def main_writer(wt, contract, role):
+            (repo / "planted.txt").write_text("x", encoding="utf-8")
+            return None
+
+        w = make_worker(tmp_path, repo, db, codex=[sneaky, main_writer], audit_tmp_dir=tmp_path / "clones")
+        q1 = self._qa(db, "첫 질문?")
+        assert w.run_cycle()["qa_processed"] == [(q1, "TAMPER_DETECTED")]
+        assert db.get_qa_request(q1)["answer"] is None and db.get_qa_request(q1)["status"] == "FAILED"
+        q2 = self._qa(db, "두번째 질문?")
+        assert w.run_cycle()["qa_processed"] == [(q2, "TAMPER_DETECTED")]  # main repo mutation too
+
+    def test_failover_on_format_error_and_unavailable(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db, codex=["RATE_LIMIT"], claude=[lambda wt, c, r: "not json"],
+                        audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db)
+        assert w.run_cycle()["qa_processed"] == [(qid, "ANSWERED")]
+        assert db.get_qa_request(qid)["provider"] == "gemini"
+        assert db.provider_status("codex")["health"] == "rate_limit"
+
+    def test_exhausted_providers_retry_then_fail_and_open_qa_circuit(self, tmp_path, repo, db):
+        fails = ["INTERNAL"] * 3
+        w = make_worker(tmp_path, repo, db, codex=fails, claude=list(fails), gemini=list(fails),
+                        audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db)
+        s = w.run_cycle()
+        assert [o for _, o in s["qa_processed"]] == ["RETRY", "RETRY", "FAILED"]
+        r = db.get_qa_request(qid)
+        assert r["status"] == "FAILED" and r["attempt_count"] == 3 and r["error"].startswith("QA_UNAVAILABLE")
+        assert [o["kind"] for o in db.qa_outbox(qid)] == ["fail"]
+        assert db.circuit_is_open(QA_CIRCUIT) and not db.circuit_is_open(CIRCUIT)
+        q2 = self._qa(db, "다음 질문?")
+        assert w.run_cycle()["qa_processed"] == [] and db.get_qa_request(q2)["status"] == "PENDING"
+
+    def test_coding_circuit_open_does_not_stall_qa(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db, circuit_cooldown=300, audit_tmp_dir=tmp_path / "clones")
+        for _ in range(3):
+            db.circuit_record(CIRCUIT, False)
+        assert db.circuit_is_open(CIRCUIT)
+        qid = self._qa(db)
+        s = w.run_cycle()
+        assert s["circuit_open"] is True and s["qa_processed"] == [(qid, "ANSWERED")] and w.sleeps == []
+        s = w.run_cycle()
+        assert s["qa_processed"] == [] and w.sleeps == [300]
+        q2 = self._qa(db, "또 질문?")
+        cycles = w.run_forever(max_cycles=1, idle_sleep=77)
+        assert cycles == 1 and 77 not in w.sleeps and db.get_qa_request(q2)["status"] == "ANSWERED"
+
+    def test_stop_requested_releases_claimed_row(self, tmp_path, repo, db):
+        def stopper(wt, contract, role):
+            (tmp_path / "STOP.flag").write_text("stop", encoding="utf-8")
+            return None
+
+        w = make_worker(tmp_path, repo, db, codex=[stopper], audit_tmp_dir=tmp_path / "clones")
+        qid = self._qa(db)
+        assert w.run_cycle()["stopped"] is True
+        r = db.get_qa_request(qid)
+        assert r["status"] == "PENDING" and r["lease_owner"] is None and r["attempt_count"] == 1
+        assert list((tmp_path / "clones").iterdir()) == []
+
+    def test_worker_boot_recovers_stale_qa(self, tmp_path, repo, db):
+        qid = self._qa(db)
+        db.claim_next_qa_request("crashed", 999999, 1.0)
+        w = make_worker(tmp_path, repo, db, audit_tmp_dir=tmp_path / "clones")
+        assert w.recover_on_boot() == []
+        assert w.last_qa_recovered["requeued"] == [qid] and db.get_qa_request(qid)["status"] == "PENDING"
+
+
+class TestSupervisorSharedDb:
+    def test_memory_db_rejected(self, tmp_path, repo, no_leaked_locks):
+        sup, _ = make_sup(tmp_path, repo, db_path=":memory:", lock_path=tmp_path / "state" / "supervisor.lock",
+                          state_dir=tmp_path / "state")
+        with pytest.raises(CoordinatorError, match="share one persistent"):
+            sup.open()
+        assert sup.bot is None and not sup.lock.fh
+
+    def test_mismatched_paths_rejected(self, tmp_path, repo, monkeypatch, no_leaked_locks):
+        real = sup_mod.CoordinatorDB
+        made = []
+
+        def fake(path, **kw):
+            made.append(path)
+            return real(path if len(made) == 1 else Path(str(path) + ".other"), **kw)
+
+        monkeypatch.setattr(sup_mod, "CoordinatorDB", fake)
+        sup, _ = make_sup(tmp_path, repo)
+        with pytest.raises(CoordinatorError):
+            sup.open()
+        assert len(made) == 2 and sup.bot is None
+
+
+class TestConversationalParsing:
+    @pytest.mark.parametrize("text,intent", [
+        ("해열제 안내는 어디에 있어?", "ask"), ("이 함수는 왜 필요한가요", "ask"), ("what does calc do", "ask"),
+        ("해열제 안내 문구 다듬어줘", "edit"), ("버튼 색을 파란색으로 바꿔줘", "edit"), ("please fix the typo", "edit"),
+        ("해열제 문구", "ambiguous"), ("어떻게 고쳐야 할까?", "ambiguous"),
+    ])
+    def test_classify_intent(self, text, intent):
+        assert classify_intent(text) == intent
+
+    def test_validate_conversational_text(self):
+        assert validate_conversational_text("  질문 (괄호), a/b 가능?\r\n둘째 줄 ") == "질문 (괄호), a/b 가능?\n둘째 줄"
+        for bad in ("", "   ", "a\x00b", "bell\x07", "x --tests=tests/a.py", "고쳐 -- 줘", "--force 고쳐",
+                    "do it --dry-run", "가" * 683):
+            with pytest.raises(ValueError):
+                validate_conversational_text(bad)
+
+    def test_esc_html_budget(self):
+        import html as _html
+
+        f = SafeHtmlFormatter
+        s = f.esc_html_budget("<<<<" * 2000 + "\x01\x7f", 1000, 1500)
+        vis = _html.unescape(s)
+        assert len(vis) <= 1000 and len(s) <= 1500 and vis.endswith("…")
+        assert s == "&lt;" * 374 + "…"  # HTML budget binds first: 374*4 + 1 = 1497 <= 1500, never a cut entity
+        assert set(vis[:-1]) == {"<"} and "\x01" not in vis and "\x7f" not in vis
+        tight = f.esc_html_budget("<" * 50, 1000, 10)
+        assert tight == "&lt;&lt;…" and f.esc_html_budget("<" * 50, 3, 1000) == "&lt;&lt;…"
+        assert f.esc_html_budget("a\r\nb\rc\x00\td", 100, 100) == "a\nb\nc\td"
+        assert f.esc_html_budget("hello", 3, 100) == "he…" and f.esc_html_budget("hello", 0, 0) == ""
+        assert f.esc_html_budget("&&&&", 100, 9) == "&amp;…" and f.esc_html_budget("ok", 2, 2) == "ok"
+
+
+class TestConversationalBot:
+    def test_plain_text_without_focus_prompts_bot_pick(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids", "yolo"})
+        assert bot.handle_update(upd_msg("해열제 안내는 어디에 있어?")) == "text:no_focus"
+        btns = [b["callback_data"] for row in tr.sent[-1]["reply_markup"]["inline_keyboard"] for b in row]
+        assert btns == [f"af2|p|{encode_preset_token(a)}" for a in ("kids", "yolo")]
+        assert db.list_qa_requests() == [] and db.list_tasks() == []
+        bot2, tr2 = make_bot(tmp_path, repo, db)
+        assert bot2.handle_update(upd_msg("질문?")) == "text:no_focus" and tr2.sent[-1]["reply_markup"] is None
+
+    def test_focused_ask_enqueues_qa_and_dedupes(self, tmp_path, repo, db):
+        woke = []
+        bot, tr = _focused_bot(tmp_path, repo, db, on_wake=lambda: woke.append(1))
+        r = bot.handle_update(upd_msg("해열제 안내는 어디에 있어?"))
+        assert r.startswith("text:ask:queued:q") and woke == [1]
+        qid = r.rsplit(":", 1)[1]
+        row = db.get_qa_request(qid)
+        assert row["preset_alias"] == "kids" and row["question"] == "해열제 안내는 어디에 있어?" and row["chat_id"] == ADMIN
+        assert tr.sent[-1]["reply_to_message_id"] == _UPD[0]
+        assert bot.handle_update(upd_msg("해열제 안내는 어디에 있어?")) == f"text:ask:duplicate:{qid}"
+        assert "이미 처리 중" in tr.sent[-1]["text"] and woke == [1] and db.list_tasks() == []
+        focus = _json.loads(db.get_kv(f"focus:{ADMIN}"))
+        assert focus["expires_at"] > time.time() + 800  # refreshed on use
+
+    def test_focused_edit_creates_exact_preset_task(self, tmp_path, repo, db):
+        bot, tr = _focused_bot(tmp_path, repo, db)
+        r = bot.handle_update(upd_msg("해열제 안내 문구 다듬어줘"))
+        assert r.startswith("text:edit:created:")
+        t = db.get_task(r.rsplit(":", 1)[1])
+        kids = PRESETS["kids"]
+        assert t["risk_level"] == "L2" and sorted(t["allowed_paths"]) == sorted(kids.allowed_paths)
+        assert t["acceptance_spec"] == {"pytest": list(kids.tests), "preset": "kids", "preset_policy": PRESET_POLICY_VERSION}
+        assert bot.handle_update(upd_msg("/do kids 해열제 안내 문구 다듬어줘")) == f"cmd:do:duplicate:{t['id']}"
+        assert bot.handle_update(upd_msg("해열제 안내 문구 다듬어줘")) == f"text:edit:duplicate:{t['id']}"
+        assert bot.handle_update(upd_msg("fever.py 고쳐줘")) == "text:edit:rejected"
+        assert len(db.list_tasks()) == 1 and db.list_qa_requests() == []
+
+    def test_ambiguous_draft_buttons_and_single_use_ask(self, tmp_path, repo, db):
+        bot, tr = _focused_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("해열제 문구")) == "text:ambiguous"
+        msg = tr.sent[-1]
+        assert msg["reply_to_message_id"] == _UPD[0]
+        btns = tr.buttons()
+        assert set(btns) == {"q", "e", "z"} and len(set(btns.values())) == 1
+        for row in msg["reply_markup"]["inline_keyboard"]:
+            assert all(len(b["callback_data"].encode("ascii")) <= 64 for b in row)
+        assert db.get_kv(f"draft:{ADMIN}") is not None
+        r = bot.handle_update(upd_cb("q", btns["q"]))
+        assert r.startswith("callback:draft:ask:q") and db.get_kv(f"draft:{ADMIN}") is None
+        assert db.get_qa_request(r.rsplit(":", 1)[1])["question"] == "해열제 문구"
+        n_answers = len(tr.answers)
+        assert bot.handle_update(upd_cb("q", btns["q"])) == "callback:rejected:DRAFT_MISSING"  # double click
+        assert bot.handle_update(upd_cb("e", btns["e"])) == "callback:rejected:DRAFT_MISSING"
+        assert len(tr.answers) == n_answers + 2 and len(db.list_qa_requests()) == 1 and db.list_tasks() == []
+
+    def test_ambiguous_edit_and_cancel(self, tmp_path, repo, db):
+        bot, tr = _focused_bot(tmp_path, repo, db)
+        bot.handle_update(upd_msg("해열제 문구"))
+        r = bot.handle_update(upd_cb("e", tr.buttons()["e"]))
+        assert r.startswith("callback:draft:edit:")
+        t = db.get_task(r.rsplit(":", 1)[1])
+        assert t["request"] == "해열제 문구" and t["acceptance_spec"]["preset"] == "kids"
+        bot.handle_update(upd_msg("다른 문구"))
+        btns = tr.buttons()
+        bot.handle_update(upd_msg("세번째 문구"))  # replaces the draft: older buttons are stale
+        fresh = tr.buttons()
+        assert fresh["z"] != btns["z"]
+        assert bot.handle_update(upd_cb("z", btns["z"])) == "callback:rejected:TOKEN_MISMATCH"
+        assert db.get_kv(f"draft:{ADMIN}") is not None  # rejected press mutates nothing
+        assert bot.handle_update(upd_cb("z", fresh["z"])) == "callback:draft:cancel"
+        assert db.get_kv(f"draft:{ADMIN}") is None and len(db.list_tasks()) == 1 and db.list_qa_requests() == []
+
+    def test_focus_switch_rejects_old_draft_with_zero_mutation(self, tmp_path, repo, db):
+        bot, tr = _focused_bot(tmp_path, repo, db, unlocked={"kids", "yolo"})
+        bot.handle_update(upd_msg("해열제 문구"))
+        btns = tr.buttons()
+        raw = db.get_kv(f"draft:{ADMIN}")
+        focus = _json.loads(db.get_kv(f"focus:{ADMIN}"))
+        db.set_kv(f"focus:{ADMIN}", _json.dumps(dict(focus, ver="changed")))
+        assert bot.handle_update(upd_cb("q", btns["q"])) == "callback:rejected:FOCUS_CHANGED"
+        assert bot.handle_update(upd_cb("e", btns["e"])) == "callback:rejected:FOCUS_CHANGED"
+        assert db.get_kv(f"draft:{ADMIN}") == raw and db.list_qa_requests() == [] and db.list_tasks() == []
+        assert bot.handle_update(upd_cb("p", encode_preset_token("yolo"))) == "callback:preset:yolo"
+        assert db.get_kv(f"draft:{ADMIN}") is None  # a new pick clears the draft atomically
+        assert bot.handle_update(upd_cb("q", btns["q"])) == "callback:rejected:DRAFT_MISSING"
+
+    def test_db_consume_rejects_expired_and_locked(self, tmp_path):
+        d, clk = _qa_db(tmp_path)
+        try:
+            d.set_kv(f"focus:{ADMIN}", _json.dumps({"alias": "kids", "ver": "v", "expires_at": clk.t + 100}))
+            raw = _json.dumps({"token": "T" * 22, "alias": "kids", "focus_ver": "v", "text": "x", "expires_at": clk.t + 50})
+            d.set_kv(f"draft:{ADMIN}", raw)
+            with pytest.raises(ActionRejected, match="PRESET_LOCKED"):
+                d.consume_draft_for_qa(ADMIN, raw, "T" * 22, {"yolo"}, "x", QA_HASH)
+            with pytest.raises(ActionRejected, match="TOKEN_MISMATCH"):
+                d.consume_draft_for_qa(ADMIN, raw, "U" * 22, {"kids"}, "x", QA_HASH)
+            with pytest.raises(ActionRejected, match="DRAFT_STALE"):
+                d.consume_draft_for_task(ADMIN, raw + " ", "T" * 22, {"kids"}, lambda a, t: ("x", "L2", [], {}))
+            clk.t += 60
+            with pytest.raises(ActionRejected, match="DRAFT_EXPIRED"):
+                d.consume_draft_for_qa(ADMIN, raw, "T" * 22, {"kids"}, "x", QA_HASH)
+            assert d.get_kv(f"draft:{ADMIN}") == raw and d.list_qa_requests() == []
+            assert d.consume_draft_cancel(ADMIN, raw, "T" * 22) and d.get_kv(f"draft:{ADMIN}") is None
+            with pytest.raises(ActionRejected, match="DRAFT_MISSING"):
+                d.consume_draft_cancel(ADMIN, raw, "T" * 22)
+        finally:
+            d.close()
+
+    def test_leading_space_command_and_invalid_text(self, tmp_path, repo, db):
+        bot, tr = _focused_bot(tmp_path, repo, db)
+        n = tr.send_attempts
+        assert bot.handle_update(upd_msg(" /do kids 해열제 고쳐줘")) == "ignored:leading_space_command"
+        assert bot.handle_update(upd_msg("\t/ask 질문")) == "ignored:leading_space_command"
+        assert tr.send_attempts == n and db.list_tasks() == [] and db.list_qa_requests() == []
+        assert bot.handle_update(upd_msg("고쳐줘 --tests=tests/x.py")) == "text:invalid"
+        assert bot.handle_update(upd_msg("고쳐줘 -- 지금")) == "text:invalid"
+        assert db.list_tasks() == [] and db.list_qa_requests() == []
+
+    def test_ask_and_clear_commands(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
+        r = bot.handle_update(upd_msg("/ask 저장소 구조가 어떻게 되나요?"))
+        assert r.startswith("cmd:ask:queued:") and db.get_qa_request(r.rsplit(":", 1)[1])["preset_alias"] is None
+        r = bot.handle_update(upd_msg("/ask kids 해열제 용량은?"))
+        assert db.get_qa_request(r.rsplit(":", 1)[1])["preset_alias"] == "kids"
+        assert bot.handle_update(upd_msg("/ask yolo 질문?")) == "cmd:ask:rejected"
+        assert bot.handle_update(upd_msg("/ask")) == "cmd:ask:rejected"
+        assert bot.handle_update(upd_msg("/ask x --tests=a.py")) == "cmd:ask:rejected"
+        assert bot.handle_update(upd_cb("p", encode_preset_token("kids"))) == "callback:preset:kids"
+        r = bot.handle_update(upd_msg("/ask 포커스 기본값?"))
+        assert db.get_qa_request(r.rsplit(":", 1)[1])["preset_alias"] == "kids"
+        assert bot.handle_update(upd_msg("/clear")) == "cmd:clear" and db.get_kv(f"focus:{ADMIN}") is None
+        assert bot.handle_update(upd_msg("질문?")) == "text:no_focus"
+        assert len(db.list_qa_requests()) == 3 and db.list_tasks() == []
+
+    def test_expired_focus_and_unlocked_change(self, tmp_path, repo):
+        d, clk = _qa_db(tmp_path)
+        try:
+            bot, tr = make_bot(tmp_path, repo, d, unlocked_presets={"kids"})
+            bot.handle_update(upd_cb("p", encode_preset_token("kids")))
+            clk.t += 901
+            assert bot.handle_update(upd_msg("질문?")) == "text:no_focus"
+            bot.handle_update(upd_cb("p", encode_preset_token("kids")))
+            bot2, _ = make_bot(tmp_path, repo, d, unlocked_presets={"yolo"})
+            assert bot2.handle_update(upd_msg("질문?")) == "text:no_focus"  # alias no longer unlocked
+        finally:
+            d.close()
+
+    def test_help_status_and_clear_circuit(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        h = dev_bot_mod.HELP_TEXT
+        assert len(h) < 800 and SafeHtmlFormatter.visible_len(h) < 800
+        for needle in ("/bots", "/ask", "/clear", "/do", "자연어"):
+            assert needle in h
+        assert SafeHtmlFormatter().finalize(h) == h
+        for _ in range(3):
+            db.circuit_record(QA_CIRCUIT, False)
+            db.circuit_record(CIRCUIT, False)
+        bot.handle_update(upd_msg("/status"))
+        assert "qa_circuit: <b>OPEN</b>" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_msg("/resume clear-circuit")) == "cmd:resume"
+        assert not db.circuit_is_open(CIRCUIT) and not db.circuit_is_open(QA_CIRCUIT)
+        bot.handle_update(upd_msg("/status"))
+        assert "qa_circuit" not in tr.sent[-1]["text"]
+
+    def test_http_transport_reply_parameters(self, monkeypatch):
+        t = HttpTransport(VALID_TOKEN)
+        calls = []
+        monkeypatch.setattr(t, "_call", lambda method, payload, timeout=None: calls.append(payload) or {"message_id": 5})
+        assert t.send_message(ADMIN, "x", {"force_reply": True}, reply_to_message_id=9) == 5
+        assert calls[-1]["reply_parameters"] == {"message_id": 9, "allow_sending_without_reply": True}
+        t.send_message(ADMIN, "x")
+        assert "reply_parameters" not in calls[-1]
+
+
+class TestQAOutboxDispatch:
+    def _answered(self, d, answer, refs=("calc.py",), alias="kids"):
+        qid, _ = d.create_qa_request(ADMIN, alias, "질문 <b>?", QA_HASH)
+        d.claim_next_qa_request("w", 1, 1.0)
+        assert d.complete_qa_answer(qid, "w", 1, "codex", "a" * 40, answer, list(refs))
+        return qid
+
+    def test_answer_delivery_never_touches_tasks(self, tmp_path, repo, db, monkeypatch):
+        bot, tr = make_bot(tmp_path, repo, db)
+        qid = self._answered(db, f"답변 <script> {TG_SECRET}")
+
+        def boom(*a, **k):
+            raise AssertionError("_dispatch_qa_row must not call get_task")
+
+        monkeypatch.setattr(db, "get_task", boom)
+        assert bot.dispatch_once()["sent"] == 1
+        text = tr.sent[-1]["text"]
+        assert qid in text and "&lt;script&gt;" in text and "질문 &lt;b&gt;?" in text and TG_SECRET not in text
+        assert "<code>calc.py</code>" in text and SafeHtmlFormatter().finalize(text) == text
+        assert db.qa_outbox(qid)[0]["status"] == "SENT" and bot.dispatch_once()["sent"] == 0
+
+    def test_huge_answer_fits_limits(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        self._answered(db, "<<<<" * 2000 + "\x01\x02 끝", refs=["a/b.py"] * 5)
+        assert bot.dispatch_once()["sent"] == 1
+        text = tr.sent[-1]["text"]
+        assert len(text) <= 3500 and SafeHtmlFormatter.visible_len(text) <= 1800 and "…" in text
+        assert "\x01" not in text and text.endswith("<code>a/b.py</code>")
+
+    def test_fail_notice_and_429_and_unknown(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        qid, _ = db.create_qa_request(ADMIN, None, "q", QA_HASH)
+        db.claim_next_qa_request("w", 1, 1.0)
+        db.fail_qa_request(qid, "w", 1, "x", notify_text="답변 실패 안내", retryable=False)
+        tr.send_script = [TgRetryAfter(3)]
+        assert bot.dispatch_once()["retry"] == 1 and db.qa_outbox(qid)[0]["status"] == "PENDING"
+        db._conn.execute("UPDATE qa_outbox SET next_retry_at=0")
+        tr.send_script = [TgUnknown("timeout")]
+        assert bot.dispatch_once()["unknown"] == 1 and db.qa_outbox(qid)[0]["status"] == "UNKNOWN"
+        assert bot.dispatch_once() == {"sent": 0, "retry": 0, "unknown": 0, "failed": 0, "expired": 0}
+        qid2 = self._answered(db, "ok", alias=None)
+        assert bot.dispatch_once()["sent"] == 1 and "저장소 전체" in tr.sent[-1]["text"]
+        assert db.qa_outbox(qid2)[0]["status"] == "SENT"
+        assert db.claim_next_qa_request("w", 1, 1.0) is None  # nothing pending
+
+    def test_fail_notice_text(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        qid, _ = db.create_qa_request(ADMIN, "kids", "q", QA_HASH)
+        db.claim_next_qa_request("w", 1, 1.0)
+        db.fail_qa_request(qid, "w", 1, "x", notify_text="답변 실패 안내", retryable=False)
+        assert bot.dispatch_once()["sent"] == 1
+        assert "질문 처리 실패" in tr.sent[-1]["text"] and "답변 실패 안내" in tr.sent[-1]["text"]
+
+    def test_boot_quarantines_stale_qa_rows_and_non_admin_chat(self, tmp_path, repo, db):
+        qid = self._answered(db, "old answer")
+        db._conn.execute("UPDATE qa_outbox SET created_at=created_at-100")
+        bot, tr = make_bot(tmp_path, repo, db)  # boot: no compensatory redelivery
+        assert db.qa_outbox(qid)[0]["status"] == "EXPIRED" and bot.dispatch_once()["sent"] == 0
+        q2, _ = db.create_qa_request(OTHER, None, "x", "z" * 64)
+        db.claim_next_qa_request("w", 1, 1.0)
+        db.complete_qa_answer(q2, "w", 1, "codex", "a" * 40, "x", [])
+        assert bot.dispatch_once()["failed"] == 1 and tr.sent == []

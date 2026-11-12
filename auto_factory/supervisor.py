@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .db import CoordinatorDB, is_transient_db_error
+from .db import CoordinatorDB, CoordinatorError, is_transient_db_error
 from .dev_bot import (
     EXIT_LOCAL,
     EXIT_LOCKED,
@@ -120,6 +120,10 @@ class Supervisor:
         try:
             self.bot_db = CoordinatorDB(self.db_path, clock=self.clock)
             self.worker_db = CoordinatorDB(self.db_path, clock=self.clock)
+            # Q&A focus/draft/outbox rows are shared between threads: one persistent file only.
+            if self.bot_db.path == ":memory:" or \
+                    os.path.realpath(self.bot_db.path) != os.path.realpath(self.worker_db.path):
+                raise CoordinatorError("bot_db and worker_db must share one persistent SQLite file")
             self.bot = DevBot(
                 self.bot_db, self.transport, self.admin_chat_id, self.repo, artifacts_dir=self.artifacts_dir,
                 worktrees_dir=self.worktrees_dir, stop_flag=self.stop_flag, limiter=self.limiter,

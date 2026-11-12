@@ -33,8 +33,11 @@ from .adapters import (
     HandoffContract,
     MockAdapter,
     ProviderAdapter,
+    QAContract,
+    QAParseError,
     default_adapters,
     parse_audit_result,
+    parse_qa_result,
     route_writer,
     select_reviewer,
 )
@@ -59,16 +62,24 @@ from .worktree import (
     HANDOFF_DIRNAME,
     STOP_FLAG_NAME,
     SupervisorLocked,
+    UnsafePathError,
     WorktreeManager,
     _FileLock,
     _assert_no_link_or_reparse_ancestors,
     _is_link_or_reparse,
     default_state_dir,
     safe_write_atomic,
+    snapshot_tree,
     validate_state_layout,
 )
 
 CIRCUIT = "global"
+QA_CIRCUIT = "qa_provider"  # independent of CIRCUIT: an open coding circuit never stalls Q&A
+QA_PROVIDERS = ("codex", "claude", "gemini")
+QA_REQUEST_FILENAME = "__af_qa_request__.json"
+QA_NOTIFY_UNAVAILABLE = "⚠️ 지금은 답변 가능한 AI가 없어 질문 처리에 실패했습니다. 잠시 후 다시 질문해 주세요."
+QA_NOTIFY_TAMPER = "⚠️ 답변 중 저장소 변경이 감지되어 결과를 폐기했습니다 (TAMPER_DETECTED)."
+QA_NOTIFY_ERROR = "⚠️ 질문 처리 중 내부 오류가 발생했습니다. 잠시 후 다시 질문해 주세요."
 DEFAULT_COOLDOWN = 900.0
 RUNNABLE_STATES = MAIN_FLOW[: MAIN_FLOW.index("WORKTREE_READY") + 1] + ("RETRY_WAIT", "RECOVERY_PENDING")
 FAILURE_OUTCOMES = frozenset({"BLOCKED", "FAILED", "GUARDRAIL_BLOCKED"})
@@ -131,7 +142,17 @@ class PipelineWorker:
         db_busy_retries: int = 3,
         db_busy_backoff: float = 0.5,
         audit_tmp_dir: str | os.PathLike | None = None,
+        qa_circuit_threshold: int = 3,
+        qa_circuit_cooldown: float = 300.0,
+        max_qa_per_cycle: int = 5,
+        qa_lease_ttl: float = 300.0,
     ) -> None:
+        self.qa_circuit_threshold = qa_circuit_threshold
+        self.qa_circuit_cooldown = qa_circuit_cooldown
+        self.max_qa_per_cycle = max_qa_per_cycle
+        self.qa_lease_ttl = qa_lease_ttl
+        self.last_qa_recovered: dict[str, list[str]] = {}
+        self.qa_cleanup_errors: list[str] = []
         self.auto_audit_l2 = auto_audit_l2
         self.audit_tmp_dir = Path(audit_tmp_dir) if audit_tmp_dir else None
         self.external_stop = external_stop
@@ -670,6 +691,7 @@ class PipelineWorker:
             self._move(task, "RECOVERY_PENDING", f"boot recovery from {task['state']}", recovery_from=task["state"])
             self.db.force_release_lease(task["id"])
             recovered.append(task["id"])
+        self.last_qa_recovered = self.db.recover_stale_qa_requests(self.nonce, is_same_process)
         self.booted = True
         return recovered
 
@@ -769,31 +791,39 @@ class PipelineWorker:
         self.nonce = uuid.uuid4().hex
 
     def run_cycle(self) -> dict[str, Any]:
-        summary: dict[str, Any] = {"processed": [], "stopped": False, "circuit_open": False, "recovered": []}
+        summary: dict[str, Any] = {"processed": [], "stopped": False, "circuit_open": False, "recovered": [],
+                                   "qa_processed": []}
         if self.stop_requested():
             summary["stopped"] = True
             return summary
         if not self.booted:
             summary["recovered"] = self.recover_on_boot()
-        if self.db.circuit_is_open(CIRCUIT):
+        coding_open = self.db.circuit_is_open(CIRCUIT)
+        if coding_open:
             summary["circuit_open"] = True
-            self.sleep_fn(self.circuit_cooldown)
-            return summary
-        for task in self._runnable()[: self.max_tasks_per_cycle]:
+        else:
+            for task in self._runnable()[: self.max_tasks_per_cycle]:
+                try:
+                    final = self.process_task(task["id"])
+                except StopRequested:
+                    summary["stopped"] = True
+                    break
+                summary["processed"].append((task["id"], final))
+                if final in FAILURE_OUTCOMES:
+                    state = self.db.circuit_record(CIRCUIT, False, self.circuit_threshold, self.circuit_cooldown)
+                    if state["open_until"]:
+                        summary["circuit_open"] = True
+                        self.sleep_fn(self.circuit_cooldown)
+                        break
+                elif final in SUCCESS_OUTCOMES:
+                    self.db.circuit_record(CIRCUIT, True)
+        if not summary["stopped"]:  # Q&A runs on its own circuit, even while CIRCUIT is open
             try:
-                final = self.process_task(task["id"])
+                self._run_qa_cycle(summary["qa_processed"])
             except StopRequested:
                 summary["stopped"] = True
-                break
-            summary["processed"].append((task["id"], final))
-            if final in FAILURE_OUTCOMES:
-                state = self.db.circuit_record(CIRCUIT, False, self.circuit_threshold, self.circuit_cooldown)
-                if state["open_until"]:
-                    summary["circuit_open"] = True
-                    self.sleep_fn(self.circuit_cooldown)
-                    break
-            elif final in SUCCESS_OUTCOMES:
-                self.db.circuit_record(CIRCUIT, True)
+        if coding_open and not summary["qa_processed"] and not summary["stopped"]:
+            self.sleep_fn(self.circuit_cooldown)
         if len(summary["processed"]) >= self.max_tasks_per_cycle:
             self.restart()
         return summary
@@ -805,9 +835,118 @@ class PipelineWorker:
             cycles += 1
             if summary["stopped"]:
                 break
-            if not summary["processed"] and not summary["circuit_open"]:
+            if not summary["processed"] and not summary.get("qa_processed") and not summary["circuit_open"]:
                 self.sleep_fn(idle_sleep)
         return cycles
+
+    # ------------------------------------------------------------ Q&A
+    def _run_qa_cycle(self, out: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Answer up to `max_qa_per_cycle` queued questions, each under `merge.lock`."""
+        for _ in range(self.max_qa_per_cycle):
+            if self.stop_requested() or self.db.circuit_is_open(QA_CIRCUIT) or not self.db.has_due_qa():
+                break
+            # merge.lock BEFORE claiming: contention defers the question without consuming an attempt.
+            lock = _FileLock(self.wtm.merge_lock_path, role="merge")
+            if not lock.try_acquire():
+                break
+            try:
+                done = self._run_single_qa()
+            finally:
+                lock.release()
+            if done is None:
+                break
+            out.append(done)
+        return out
+
+    def _run_single_qa(self) -> tuple[str, str] | None:
+        row = self.db.claim_next_qa_request(self.nonce, self.pid, self.proc_start, self.qa_lease_ttl)
+        if row is None:
+            return None
+        qid, attempt = row["id"], row["attempt_count"]
+        snap_dir: Path | None = None
+        try:
+            try:
+                base_sha = self.wtm.head_sha()
+                if self.audit_tmp_dir is not None:
+                    self.audit_tmp_dir.mkdir(parents=True, exist_ok=True)
+                snap_dir = _make_audit_clone_dir(self.audit_tmp_dir)
+                snap = self.wtm.export_clean_snapshot(base_sha, snap_dir)
+                outcome = self._answer_qa(row, base_sha, snap)
+            except StopRequested:
+                self.db.fail_qa_request(qid, self.nonce, attempt, "STOP requested", retryable=True)
+                raise
+            except Exception as exc:  # never leave the claimed row RUNNING
+                self.db.fail_qa_request(qid, self.nonce, attempt, f"QA_ERROR {type(exc).__name__}: {exc}",
+                                        notify_text=QA_NOTIFY_ERROR, retryable=True)
+                outcome = "ERROR"
+        finally:
+            if snap_dir is not None:
+                try:
+                    self.wtm.remove_disposable_clone(snap_dir)
+                except Exception as exc:  # recorded; the answer (if any) is already committed
+                    self.qa_cleanup_errors.append(f"{qid}: {type(exc).__name__}: {exc}")
+        return qid, outcome
+
+    def _qa_failed(self, qid: str, attempt: int, error: str, notify: str, provider: str | None = None,
+                   retryable: bool = True) -> str:
+        self.db.fail_qa_request(qid, self.nonce, attempt, error, notify_text=notify, provider=provider,
+                                retryable=retryable)
+        self.db.circuit_record(QA_CIRCUIT, False, self.qa_circuit_threshold, self.qa_circuit_cooldown)
+        return self.db.get_qa_request(qid)["status"]
+
+    def _answer_qa(self, row: dict[str, Any], base_sha: str, snap: Path) -> str:
+        qid, attempt, alias = row["id"], row["attempt_count"], row["preset_alias"]
+        preset = PRESETS.get(alias) if alias else None
+        contract = QAContract(qa_id=qid, question=row["question"], preset_alias=alias,
+                              allowed_paths=list(preset.allowed_paths) if preset else [], base_sha=base_sha)
+        req_path = snap / QA_REQUEST_FILENAME
+        if os.path.lexists(req_path):
+            raise UnsafePathError(f"{QA_REQUEST_FILENAME} collides with a repository file")
+        safe_write_atomic(req_path, contract.to_json())
+        snap_before = snapshot_tree(snap)
+        main_before = self.wtm.main_snapshot()
+        last = "NO_PROVIDER"
+        for provider in QA_PROVIDERS:
+            self._check_stop()
+            if provider not in self.adapters or provider not in self.available_providers():
+                continue
+            if not self.db.reserve(provider, self.units, self.quota_ratio):
+                continue
+            result, tampered = None, False
+            try:
+                if not self.db.heartbeat_qa_request(qid, self.nonce, attempt, self.qa_lease_ttl):
+                    return "LEASE_LOST"
+                result = self.adapters[provider].invoke(contract, str(snap), "qa", QA_REQUEST_FILENAME,
+                                                        stop_check=self.stop_requested)
+            finally:
+                self.db.settle(provider, self.units, self.units if result is not None else 0.0)
+                try:
+                    tampered = snapshot_tree(snap) != snap_before or self.wtm.main_snapshot() != main_before
+                except Exception:  # an unreadable / link-planted snapshot counts as tampering
+                    tampered = True
+                if tampered:
+                    self._qa_failed(qid, attempt, f"TAMPER_DETECTED: provider={provider}", QA_NOTIFY_TAMPER,
+                                    provider, retryable=False)
+            if tampered:  # stdout is discarded unread
+                return "TAMPER_DETECTED"
+            self._check_stop()
+            if not result.ok:
+                last = f"{provider}:{result.code.value}"
+                if result.code in COOLDOWN_CODES:
+                    self._cool_down(provider, result)
+                continue  # read-only Q&A: any provider failure fails over to the next one
+            try:
+                parsed = parse_qa_result(result.stdout, qid)
+            except QAParseError as exc:
+                last = f"{provider}:QA_FORMAT {exc}"
+                continue
+            if self.db.complete_qa_answer(qid, self.nonce, attempt, provider, base_sha,
+                                          parsed["answer"], parsed["refs"]):
+                self.db.circuit_record(QA_CIRCUIT, True)
+                return "ANSWERED"
+            return "FENCED"
+        status = self._qa_failed(qid, attempt, f"QA_UNAVAILABLE: {last}", QA_NOTIFY_UNAVAILABLE)
+        return "RETRY" if status == "PENDING" else status
 
 
 # ---------------------------------------------------------------- demo
