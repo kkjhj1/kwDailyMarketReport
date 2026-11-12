@@ -1173,8 +1173,20 @@ class TestActionTokens:
         d, clock, tid = self._setup(tmp_path)
         try:
             tok = d.issue_action_token(tid, "d", ADMIN, ADMIN)
-            d.consume_action_token(tok, "d", ADMIN, ADMIN)
-            d.consume_action_token(tok, "d", ADMIN, ADMIN)
+            for _ in range(2):  # read-only diff token: reusable, no state change
+                action, task, _ = d.consume_action_token(tok, "d", ADMIN, ADMIN)
+                assert action["action"] == "d" and task["id"] == tid and task["state"] == "AWAITING_MERGE"
+            assert d.get_task(tid)["state"] == "AWAITING_MERGE"
+            xtok = d.issue_action_token(tid, "X", ADMIN, ADMIN)
+
+            def discard(c, action, task):
+                d._transition_in_tx(c, task["id"], task["state_version"], "DISCARDED", "human:x")
+
+            d.consume_action_token(xtok, "X", ADMIN, ADMIN, discard)
+            assert d.get_task(tid)["state"] == "DISCARDED"
+            with pytest.raises(ActionRejected) as e:  # mutating token is single-use
+                d.consume_action_token(xtok, "X", ADMIN, ADMIN, discard)
+            assert e.value.code == "REPLAY"
         finally:
             d.close()
 
@@ -2973,3 +2985,399 @@ class TestAutoAuditL2:
             assert theirs and not any("(I)" in ace for ace in theirs)  # mkdtemp(0o700) strips inheritance
         else:
             assert (os.stat(clone_dir).st_mode & 0o777) == 0o700
+
+
+# ######################################################################## Direction A: bot presets
+from auto_factory.dev_bot import UNLOCKED_PRESETS_ENV, parse_do_command
+from auto_factory.guardrails import is_forbidden
+from auto_factory.presets import (
+    CALLBACK_TOKEN_LEN,
+    PRESET_POLICY_VERSION,
+    PRESETS,
+    Preset,
+    decode_preset_token,
+    encode_preset_token,
+    parse_unlocked_presets,
+)
+
+ALL_PRESETS = ("brief", "travel", "admission", "portal", "silver", "kids", "yolo", "scripts")
+
+
+def _tg_action_count(d):
+    return d._query("SELECT COUNT(*) FROM tg_actions")[0][0]
+
+
+class TestPresetRegistry:
+    def test_registry_has_all_bots_and_real_files(self):
+        assert tuple(PRESETS) == ALL_PRESETS
+        for alias, p in PRESETS.items():
+            assert p.alias == alias and p.min_risk == "L2"
+            assert p.is_product is (alias != "scripts")
+            assert set(p.tests) <= set(p.allowed_paths)
+            for rel in p.allowed_paths + p.tests:
+                assert (REPO_ROOT / rel).is_file(), rel  # real workspace repo
+                assert rel.endswith(".py") and not rel.endswith("/") and "*" not in rel
+                assert not is_forbidden(rel) and not is_forbidden(rel + "/")
+                assert not rel.endswith("bot_runner.py") and ".sqlite" not in rel and not rel.endswith(".db")
+
+    def test_preset_validation_rejects_unsafe_definitions(self):
+        good = dict(alias="ok", label="L", description="d", allowed_paths=("a/b.py",), tests=("tests/test_b.py",))
+        assert Preset(**good).alias == "ok"
+        for over in (
+            {"alias": "Bad"}, {"alias": "kid-s"}, {"alias": "a" * 23}, {"alias": ""}, {"min_risk": "L1"},
+            {"allowed_paths": ()}, {"tests": ()}, {"allowed_paths": ("pkg/",)}, {"allowed_paths": ("pkg/*.py",)},
+            {"allowed_paths": ("data/x.py",)}, {"allowed_paths": ("x.db",)}, {"allowed_paths": ("x.sqlite3",)},
+            {"allowed_paths": (".env",)}, {"allowed_paths": ("telegram_bot_runner.py",)},
+            {"allowed_paths": ("admin_server.py",)}, {"allowed_paths": ("../x.py",)},
+            {"allowed_paths": ("holdout_eval/t.py",)}, {"allowed_paths": ("tests/conftest.py",)},
+            {"allowed_paths": ("reports/a.py",)}, {"allowed_paths": ("a.py", "a.py")}, {"tests": ("x.txt",)},
+        ):
+            with pytest.raises(ValueError):
+                Preset(**dict(good, **over))
+
+    def test_guardrails_additive_patterns(self):
+        for p in ("x.sqlite", "data/a.db", "a.db-wal", "a.db-shm", "data/x.py", ".git/config", ".github/w.yml",
+                  "AGENTS.md", "run_cron.sh", "admin_server.py", "telegram_bot_runner.py", "portal_bot_runner.py",
+                  ".env", "db.sqlite3", "reports/a.html", "holdout_eval/t.py", "STOP.flag"):
+            assert is_forbidden(p), p
+        for p in ("auto_factory/worker.py", "kids_compass/models.py", "tests/test_kids_compass.py", "calc.py"):
+            assert not is_forbidden(p), p
+
+    def test_preset_token_roundtrip(self):
+        for alias in ALL_PRESETS:
+            tok = encode_preset_token(alias)
+            assert len(tok) == CALLBACK_TOKEN_LEN and decode_preset_token(tok) == alias
+            assert len(f"af2|p|{tok}".encode("ascii")) <= 64
+            assert validate_callback_data(f"af2|p|{tok}") == f"af2|p|{tok}"
+        for bad in ("kids", "kids" + "-" * 19, "-" * 22, "-kids" + "-" * 17, "KIDS" + "-" * 18, "kids-x" + "-" * 16):
+            with pytest.raises(ValueError):
+                decode_preset_token(bad)
+        with pytest.raises(ValueError):
+            encode_preset_token("kid-s")
+
+    def test_task_parser_default_still_rejects_product_paths(self, repo):
+        for path in ("market_brief/core.py", "silver_care/models.py", "kids_compass/models.py",
+                     "yolo_brief/models.py", "travel_brief/models.py", "admin_server.py", "AGENTS.md"):
+            with pytest.raises(TaskParseError):
+                parse_task_command(f"/task L2 {path} -- r", repo)
+        assert "market_brief/" in dev_bot_mod.PROTECTED_PATHS and "silver_care/" in dev_bot_mod.PROTECTED_PATHS
+
+
+class TestPresetConfig:
+    def test_parse_unlocked_presets_strict(self):
+        assert parse_unlocked_presets(None) == frozenset() and parse_unlocked_presets("") == frozenset()
+        assert parse_unlocked_presets("kids,yolo") == {"kids", "yolo"}
+        for bad in ("kids, yolo", " kids", "kids ", "kids,,yolo", "kids,", ",kids", "kids,kids", "nope",
+                    "키즈", "KIDS", "kid-s", "kids\tyolo", "kids\nyolo"):
+            with pytest.raises(ValueError):
+                parse_unlocked_presets(bad)
+
+    def test_env_file_and_process_override(self, tmp_path):
+        base = {"AUTO_FACTORY_DEV_BOT_TOKEN": VALID_TOKEN, "AUTO_FACTORY_ADMIN_CHAT_ID": CHAT}
+        assert load_dev_env_file(_env_file(tmp_path, _good_env()), {}).unlocked_presets == frozenset()
+        f = _env_file(tmp_path, _good_env(extra=f"{UNLOCKED_PRESETS_ENV}=kids,yolo\n"))
+        assert load_dev_env_file(f, {}).unlocked_presets == {"kids", "yolo"}
+        assert load_dev_env_file(f, {UNLOCKED_PRESETS_ENV: ""}).unlocked_presets == frozenset()  # "" wins
+        assert load_dev_env_file(f, {UNLOCKED_PRESETS_ENV: "brief"}).unlocked_presets == {"brief"}
+        cfg = load_config(dict(base, **{UNLOCKED_PRESETS_ENV: "silver"}))
+        assert cfg.unlocked_presets == {"silver"} and "silver" in repr(cfg) and VALID_TOKEN not in repr(cfg)
+        for bad in ("kids, yolo", " kids", "kids,kids", "unknown", "키즈", "kids,,yolo"):
+            with pytest.raises(ConfigError) as e:
+                load_dev_env_file(f, {UNLOCKED_PRESETS_ENV: bad})
+            assert VALID_TOKEN not in str(e.value) and UNLOCKED_PRESETS_ENV in str(e.value)
+        with pytest.raises(ConfigError):
+            load_dev_env_file(_env_file(tmp_path, _good_env(extra=f"{UNLOCKED_PRESETS_ENV}='kids, yolo'\n")), {})
+
+    def test_run_check_reports_unlocked_count(self, tmp_path, repo):
+        st = tmp_path / "st"
+        st.mkdir()
+        lines = []
+        f = _env_file(tmp_path, _good_env(extra=f"{UNLOCKED_PRESETS_ENV}=kids,yolo\n"))
+        rc = run_check(repo=repo, db=st / "c.db", env_file=f, process_env={}, transport_factory=_GetMeTransport(),
+                       adapters=_mock_clis(), out=lines.append)
+        assert rc == 0, lines
+        assert any(ln.startswith("CHECK PASS config") and "unlocked_presets=2" in ln for ln in lines)
+
+    def test_devbot_validates_unlocked_and_demo_unlocks_nothing(self, tmp_path, repo, db, monkeypatch):
+        with pytest.raises(ConfigError):
+            make_bot(tmp_path, repo, db, boot=False, unlocked_presets={"nope"})
+        with pytest.raises(ConfigError):
+            make_bot(tmp_path, repo, db, boot=False, unlocked_presets="kids")
+        bot, _ = make_bot(tmp_path, repo, db, boot=False, unlocked_presets=["kids", "kids"])
+        assert bot.unlocked_presets == frozenset({"kids"})
+        seen = []
+        real_init = DevBot.__init__
+
+        def spy(self, *a, **k):
+            real_init(self, *a, **k)
+            seen.append(self.unlocked_presets)
+
+        monkeypatch.setattr(DevBot, "__init__", spy)
+        assert dev_bot_mod.run_demo(out=lambda s: None) == 0
+        assert seen == [frozenset()]
+
+    def test_supervisor_main_wires_unlocked_presets(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class _StopSup:
+            def __init__(self, **kw):
+                captured.update(kw)
+
+            def open(self):
+                raise SupervisorLocked("stop here")
+
+        f = _env_file(tmp_path, _good_env(extra=f"{UNLOCKED_PRESETS_ENV}=kids\n"))
+        for k in ("AUTO_FACTORY_DEV_BOT_TOKEN", "AUTO_FACTORY_ADMIN_CHAT_ID", UNLOCKED_PRESETS_ENV):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(sup_mod, "Supervisor", _StopSup)
+        monkeypatch.setattr(sup_mod, "HttpTransport", lambda token: object())
+        (tmp_path / "repo").mkdir()
+        rc = sup_mod.main(["--run", "--env-file", str(f), "--repo", str(tmp_path / "repo"),
+                           "--db", str(tmp_path / "state" / "c.db")])
+        assert rc == dev_bot_mod.EXIT_LOCKED
+        assert captured["bot_kwargs"] == {"unlocked_presets": frozenset({"kids"})}
+
+
+class _AliasingPath(type(Path())):
+    """Path whose resolve() maps `kids_compass` elsewhere (symlink/case-alias stand-in, no privilege)."""
+
+    target: "Path | None" = None
+    rename_case = False
+
+    def resolve(self, strict=False):
+        r = super().resolve(strict)
+        if "kids_compass" in r.parts:
+            if self.rename_case:
+                return type(self)(str(r).replace("kids_compass", "Kids_Compass"))
+            return type(self)(self.target) / r.name
+        return r
+
+
+class TestDoCommand:
+    @pytest.mark.parametrize("text", [
+        "/do zzz 고쳐줘", "/do yolo 고쳐줘", "/do Kids 고쳐줘", "/do kids",
+        "/do kids    ", "/do", "/do kids --tests=tests/x.py -- r", "/do kids evil.py -- r", "/do kids *.py -- r",
+        "/do kids calc.py,x.py -- r", "/do kids ../x.py 고쳐", "/do kids -- r", "/do kids -x 고쳐",
+        "/do kids 문구 tests/x.py -- r", "/do kids 문구 --tests=a.py -- r", "/do kids a\x00b",
+        "/do kids bell\x07", "/do kids a\\b.py 수정", "/do kids [x] -- r", "/do kids fever.py 고쳐",
+        "/do kids-x 고쳐", "/do kids " + "가" * 683,
+    ])
+    def test_rejects(self, repo, text):
+        with pytest.raises(TaskParseError):
+            parse_do_command(text, repo, {"kids"})
+
+    def test_accepts_prose_and_byte_limit(self, repo):
+        p, req = parse_do_command("/do@AfDevBot kids 해열제 안내 문구 다듬어줘\n둘째 줄", repo, {"kids"})
+        assert p is PRESETS["kids"] and req == "해열제 안내 문구 다듬어줘\n둘째 줄"
+        assert parse_do_command("/do kids\n해열제 문구 -- 짧게", repo, {"kids"})[1] == "해열제 문구 -- 짧게"
+        big = "가" * 682 + "aa"
+        assert len(big.encode("utf-8")) == 2048
+        assert parse_do_command(f"/do kids {big}", repo, ["kids"])[1] == big
+        assert parse_do_command("/do kids fix the fever dosage table", repo, {"kids"})[0].alias == "kids"
+
+    def test_rejects_aliased_preset_paths(self, tmp_path, repo, monkeypatch):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        monkeypatch.setattr(_AliasingPath, "target", outside)
+        monkeypatch.setattr(dev_bot_mod, "Path", _AliasingPath)
+        with pytest.raises(TaskParseError, match="escapes"):
+            parse_do_command("/do kids 고쳐줘", repo, {"kids"})
+        monkeypatch.setattr(_AliasingPath, "rename_case", True)
+        with pytest.raises(TaskParseError, match="not canonical"):
+            parse_do_command("/do kids 고쳐줘", repo, {"kids"})
+        assert parse_do_command("/do yolo 고쳐줘", repo, {"yolo"})[0].alias == "yolo"  # unaffected preset
+
+    def test_do_creates_exact_preset_task(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
+        assert bot.handle_update(upd_msg("/do yolo 고쳐줘")) == "cmd:do:rejected"
+        assert "locked" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_msg("/do nope 고쳐줘")) == "cmd:do:rejected"
+        assert "unknown preset" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_msg("/do kids --tests=tests/x.py -- r")) == "cmd:do:rejected"
+        assert db.list_tasks() == []
+        r = bot.handle_update(upd_msg("/do kids 해열제 안내 문구 다듬어줘"))
+        assert r.startswith("cmd:do:created:")
+        t = db.get_task(r.rsplit(":", 1)[1])
+        kids = PRESETS["kids"]
+        assert t["risk_level"] == "L2" and t["state"] == "RECEIVED"
+        assert sorted(t["allowed_paths"]) == sorted(kids.allowed_paths)
+        assert t["acceptance_spec"] == {"pytest": list(kids.tests), "preset": "kids",
+                                        "preset_policy": PRESET_POLICY_VERSION}
+        assert t["request"] == "해열제 안내 문구 다듬어줘" and len(db.list_tasks()) == 1
+        assert "키즈" in tr.sent[-1]["text"]
+
+    def test_duplicate_blocked_merged_and_active(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids", "yolo", "silver"})
+        tid = bot.handle_update(upd_msg("/do kids 차단될 요청")).rsplit(":", 1)[1]
+        _advance(db, tid, ["BLOCKED"])
+        assert bot.handle_update(upd_msg("/do kids 차단될 요청")) == f"cmd:do:duplicate:{tid}"
+        text = tr.sent[-1]["text"]
+        assert "이미 차단(BLOCKED)" in text and "자동 재시도 안 함" in text and tid in text
+        assert tr.sent[-1]["reply_markup"] is None
+
+        tid2 = bot.handle_update(upd_msg("/do yolo 진행중 요청")).rsplit(":", 1)[1]
+        db.add_artifact(tid2, "audit", tmp_path / "audit.json", "codex")
+        _to_state(db, tid2, "AWAITING_START_AUTH")
+        before = _tg_action_count(db)
+        assert bot.handle_update(upd_msg("/do yolo 진행중 요청")) == f"cmd:do:duplicate:{tid2}"
+        assert "duplicate of AWAITING_START_AUTH" in tr.sent[-1]["text"]
+        assert set(tr.buttons()) == {"s", "c"} and _tg_action_count(db) == before + 2
+
+        tid3 = bot.handle_update(upd_msg("/do silver 병합된 요청")).rsplit(":", 1)[1]
+        db._conn.execute("UPDATE tasks SET state='MERGED' WHERE id=?", (tid3,))  # terminal fixture
+        assert bot.handle_update(upd_msg("/do silver 병합된 요청")) == f"cmd:do:duplicate:{tid3}"
+        assert "MERGED" in tr.sent[-1]["text"] and "병합 완료" in tr.sent[-1]["text"]
+        assert len(db.list_tasks()) == 3
+
+    def test_task_duplicate_guardrail_blocked_message(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = bot.handle_update(upd_msg("/task L1 calc.py -- fix add")).rsplit(":", 1)[1]
+        db._conn.execute("UPDATE tasks SET state='GUARDRAIL_BLOCKED' WHERE id=?", (tid,))  # fixture
+        assert bot.handle_update(upd_msg("/task L1 calc.py -- fix add")) == f"cmd:task:duplicate:{tid}"
+        assert "이미 차단(GUARDRAIL_BLOCKED)" in tr.sent[-1]["text"]
+
+
+class TestBotsAndPresetCallback:
+    @staticmethod
+    def _buttons(msg):
+        return [b for row in (msg.get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
+
+    def test_bots_lists_unlocked_buttons_and_locked_text(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids", "yolo", "silver"})
+        before = _tg_action_count(db)
+        assert bot.handle_update(upd_msg("/bots")) == "cmd:bots:3"
+        msg = tr.sent[-1]
+        text = msg["text"]
+        assert SafeHtmlFormatter().finalize(text) == text
+        btns = self._buttons(msg)
+        assert [b["callback_data"] for b in btns] == [f"af2|p|{encode_preset_token(a)}"
+                                                      for a in ("silver", "kids", "yolo")]
+        assert all(len(b["callback_data"].encode("ascii")) <= 64 for b in btns)
+        assert [len(r) for r in msg["reply_markup"]["inline_keyboard"]] == [2, 1]
+        for a in ("brief", "travel", "admission", "portal", "scripts"):
+            assert f"\U0001f512 <code>{a}</code>" in text
+        assert "✅ 👶 키즈 나침반" in text and _tg_action_count(db) == before
+
+    def test_bots_with_nothing_unlocked_and_help(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("/bots")) == "cmd:bots:0"
+        assert tr.sent[-1]["reply_markup"] is None and UNLOCKED_PRESETS_ENV in tr.sent[-1]["text"]
+        help_text = dev_bot_mod.HELP_TEXT
+        assert len(help_text) < 800 and "/bots" in help_text and "/do" in help_text
+        assert bot.handle_update(upd_msg("/help")) == "cmd:help"
+
+    def test_preset_callback_is_stateless(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
+        before = _tg_action_count(db)
+        tok = encode_preset_token("kids")
+        assert bot.handle_update(upd_cb("p", tok)) == "callback:preset:kids"
+        text = tr.sent[-1]["text"]
+        assert "/do kids 원하는 작업 내용" in text and "tests/test_kids_compass.py" in text and "파일 5개" in text
+        assert bot.handle_update(upd_cb("p", tok)) == "callback:preset:kids"  # reusable: nothing consumed
+        assert _tg_action_count(db) == before and db.list_tasks() == [] and len(tr.answers) == 2
+
+    def test_preset_callback_rejects_unauthorized_locked_and_forged(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
+        assert bot.handle_update(upd_cb("p", encode_preset_token("kids"), frm=OTHER)) == "ignored:unauthorized"
+        assert bot.handle_update(upd_cb("p", encode_preset_token("kids"), chat=OTHER)) == "ignored:unauthorized"
+        assert tr.answers == [] and tr.send_attempts == 0
+        assert bot.handle_update(upd_cb("p", encode_preset_token("yolo"))) == "callback:preset:unavailable"
+        assert "사용할 수 없는" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_cb("p", "-kids" + "-" * 17)) == "callback:preset:unavailable"
+        assert bot.handle_update(upd_cb("p", "nope" + "-" * 18)) == "callback:preset:unavailable"
+        tr.answer_script = [False]
+        n = tr.send_attempts
+        assert bot.handle_update(upd_cb("p", encode_preset_token("kids"))) == "callback:answer_failed"
+        assert tr.send_attempts == n and _tg_action_count(db) == 0
+
+
+def _preset_spec(alias, **over):
+    p = PRESETS[alias]
+    spec = {"pytest": list(p.tests), "preset": alias, "preset_policy": PRESET_POLICY_VERSION}
+    spec.update(over)
+    return spec
+
+
+class TestPresetPreflight:
+    def test_valid_preset_passes_preflight(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db)
+        p = PRESETS["kids"]
+        tid, _ = db.create_task("r", "L2", list(p.allowed_paths), _preset_spec("kids"))
+        assert w._preflight(db.get_task(tid)) is True
+        assert db.get_task(tid)["state"] == "PREFLIGHTED"
+
+    @pytest.mark.parametrize("case", ["paths", "pytest", "risk", "unknown", "policy", "missing_policy"])
+    def test_tampered_preset_blocks(self, tmp_path, repo, db, case):
+        w = make_worker(tmp_path, repo, db)
+        p = PRESETS["kids"]
+        paths, risk, spec = list(p.allowed_paths), "L2", _preset_spec("kids")
+        if case == "paths":
+            paths = paths + ["auto_factory/worker.py"]
+        elif case == "pytest":
+            spec["pytest"] = ["tests/test_core.py"]
+        elif case == "risk":
+            risk = "L1"
+        elif case == "unknown":
+            spec["preset"] = "nope"
+        elif case == "policy":
+            spec["preset_policy"] = "v0"
+        else:
+            del spec["preset_policy"]
+        tid, _ = db.create_task("r", risk, paths, spec)
+        assert w.process_task(tid) == "BLOCKED"
+        assert "PREFLIGHT_PRESET" in db.events(tid)[-1]["reason"]
+        assert w.adapters["claude"].calls == [] and w.adapters["codex"].calls == []
+
+    def test_non_preset_task_unaffected(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        assert w._preflight(db.get_task(tid)) is True
+
+
+class TestPresetEndToEnd:
+    def test_preset_task_merges_with_human_summary(self, tmp_path, repo, db):
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "audit_test_quality.py").write_text("def score():\n    return 1\n", encoding="utf-8")
+        (repo / "tests" / "test_audit_test_quality.py").write_text(
+            "from scripts.audit_test_quality import score\n\n\ndef test_score():\n    assert score() == 2\n",
+            encoding="utf-8")
+        _git_main(repo, "add", "-A")
+        _git_main(repo, "commit", "-m", "add scripts preset files")
+
+        def fix_scripts(wt, contract, role):
+            Path(wt, "scripts", "audit_test_quality.py").write_text("def score():\n    return 2\n", encoding="utf-8")
+
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"scripts"})
+        w = make_auto_worker(tmp_path, repo, db, claude=[fix_scripts], gate_runner=_InstantGates())
+        r = bot.handle_update(upd_msg("/do scripts score 함수가 2를 반환하도록 고쳐줘"))
+        assert r.startswith("cmd:do:created:")
+        tid = r.rsplit(":", 1)[1]
+        assert w.process_task(tid) == "AWAITING_START_AUTH"
+        bot.dispatch_once()
+        assert bot.handle_update(upd_cb("s", tr.buttons()["s"])) == "callback:start"
+        assert w.process_task(tid) == "AWAITING_MERGE"
+        t = db.get_task(tid)
+        assert t["coder"] == "claude" and verify_phase1_artifacts(db, t)["auditor"] == "codex"
+        bot.dispatch_once()
+        assert bot.handle_update(upd_cb("m", tr.buttons()["m"])) == "callback:prompt:m"
+        assert bot.handle_update(upd_cb("M", tr.buttons(source="edits")["M"])) == "callback:merged"
+        t = db.get_task(tid)
+        assert t["state"] == "MERGED" and w.wtm.head_sha() == t["target_sha"]
+        assert "return 2" in (repo / "scripts" / "audit_test_quality.py").read_text(encoding="utf-8")
+        text = tr.edits[-1]["text"]
+        assert "Files: 1 file changed, 1 insertion(+), 1 deletion(-)" in text
+        assert "Tests: py_compile PASS · pytest PASS · holdout PASS" in text
+        assert len(text) <= 3500 and SafeHtmlFormatter.visible_len(text) <= 1800
+        assert bot.handle_update(upd_msg("/do scripts score 함수가 2를 반환하도록 고쳐줘")) == f"cmd:do:duplicate:{tid}"
+        assert "병합 완료(MERGED)" in tr.sent[-1]["text"]
+
+    def test_merge_summary_degrades_on_tampered_gate_report(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid, _ = db.create_task("r", "L1", ["calc.py"], {})
+        bad = tmp_path / "gates.json"
+        bad.write_bytes(b'[{"gate": "pytest", "ok": true}]')
+        db.add_artifact(tid, "gates", bad, "deterministic")
+        assert bot._merge_summary(db.get_task(tid), None) == ["Files: (no changes)", "Tests: pytest PASS"]
+        bad.write_bytes(b'[{"gate": "pytest", "ok": false}]')  # tampered after hashing
+        assert bot._merge_summary(db.get_task(tid), None) == ["Files: (no changes)",
+                                                              "Tests: (gate report unreadable)"]

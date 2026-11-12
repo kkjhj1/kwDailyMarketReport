@@ -8,7 +8,8 @@ Usage:
     python -m auto_factory.dev_bot --run [--db PATH] --repo PATH
 
 Credentials may come from a strict allowlisted env file (`--env-file`, default `<repo>/.env`
-if present): only AUTO_FACTORY_DEV_BOT_TOKEN / AUTO_FACTORY_ADMIN_CHAT_ID are extracted, the
+if present): only AUTO_FACTORY_DEV_BOT_TOKEN / AUTO_FACTORY_ADMIN_CHAT_ID (and the optional
+AUTO_FACTORY_UNLOCKED_PRESETS allowlist for `/do`, default: none) are extracted, the
 process environment overrides the file, and a dev token equal to ANY other `*TOKEN*` value
 (file or process env) is refused. Live modes hold `supervisor.lock` (exit 4 if held).
 
@@ -29,6 +30,7 @@ Security model (fail closed everywhere):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -53,6 +55,16 @@ from .db import (
     read_db_summary_readonly,
 )
 from .guardrails import GuardrailChecker, is_forbidden
+from .presets import (
+    PRESET_ALIAS_RE,
+    PRESET_POLICY_VERSION,
+    PRESETS,
+    Preset,
+    decode_preset_token,
+    encode_preset_token,
+    parse_unlocked_presets,
+    validate_unlocked,
+)
 from .worktree import (
     MergeConflictError,
     MergeError,
@@ -69,9 +81,10 @@ from .worktree import (
 
 TOKEN_ENV = "AUTO_FACTORY_DEV_BOT_TOKEN"
 CHAT_ENV = "AUTO_FACTORY_ADMIN_CHAT_ID"
+UNLOCKED_PRESETS_ENV = "AUTO_FACTORY_UNLOCKED_PRESETS"
 BOT_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 CALLBACK_PREFIX = "af2"
-CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxX])\|([A-Za-z0-9_-]{22})$")
+CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxXp])\|([A-Za-z0-9_-]{22})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_CALLBACK_BYTES = 64
 MAX_VISIBLE = 1800
@@ -105,14 +118,24 @@ class ConfigError(ValueError):
 class BotConfig:
     token: str
     admin_chat_id: int
+    unlocked_presets: frozenset[str] = frozenset()
 
     def __repr__(self) -> str:  # never leak the token into logs/tracebacks
-        return f"BotConfig(token='***', admin_chat_id={self.admin_chat_id})"
+        return (f"BotConfig(token='***', admin_chat_id={self.admin_chat_id}, "
+                f"unlocked_presets={sorted(self.unlocked_presets)})")
+
+
+def _load_unlocked(raw: Any) -> frozenset[str]:
+    try:
+        return parse_unlocked_presets(raw)
+    except ValueError as exc:  # messages carry aliases only, never raw secret values
+        raise ConfigError(f"{UNLOCKED_PRESETS_ENV}: {exc}") from None
 
 
 def load_config(env: dict[str, str] | None = None) -> BotConfig:
     """Read ONLY the dedicated dev-bot variables. No product-token fallback, ever."""
     env = os.environ if env is None else env
+    unlocked = _load_unlocked(env.get(UNLOCKED_PRESETS_ENV))
     token = (env.get(TOKEN_ENV) or "").strip()
     if not BOT_TOKEN_RE.match(token):
         raise ConfigError(f"{TOKEN_ENV} is missing or malformed")
@@ -123,7 +146,7 @@ def load_config(env: dict[str, str] | None = None) -> BotConfig:
         raise ConfigError(f"{CHAT_ENV} is missing or not an integer") from None
     if chat_id == 0:
         raise ConfigError(f"{CHAT_ENV} must be non-zero")
-    return BotConfig(token, chat_id)
+    return BotConfig(token, chat_id, unlocked)
 
 
 MAX_ENV_BYTES = 1024 * 1024
@@ -170,7 +193,10 @@ def _norm_env(v: Any) -> str:
 
 
 def load_dev_env_file(env_path: str | os.PathLike | None, process_env: Mapping[str, str] | None = None) -> BotConfig:
-    """Strict allowlisted loader: extracts ONLY the two dev-bot keys; never mutates os.environ.
+    """Strict allowlisted loader: extracts ONLY the dev-bot keys; never mutates os.environ.
+
+    Keys: AUTO_FACTORY_DEV_BOT_TOKEN, AUTO_FACTORY_ADMIN_CHAT_ID, AUTO_FACTORY_UNLOCKED_PRESETS
+    (the latter optional; unset or "" unlocks nothing).
 
     - file: no-follow regular file, <= 1 MiB, UTF-8 (BOM ok), no NUL, strict grammar
     - a key present in `process_env` (even as "") overrides the file (fail closed, no fallback)
@@ -196,7 +222,7 @@ def load_dev_env_file(env_path: str | os.PathLike | None, process_env: Mapping[s
             raise ConfigError("env file is not valid UTF-8") from None
         file_vals = parse_env_text(text)
     merged: dict[str, str] = {}
-    for key in (TOKEN_ENV, CHAT_ENV):
+    for key in (TOKEN_ENV, CHAT_ENV, UNLOCKED_PRESETS_ENV):
         if key in penv:
             merged[key] = penv[key]
         elif key in file_vals:
@@ -315,6 +341,79 @@ def parse_task_command(
     paths = _split_paths(paths_blob, repo_root, protected)
     tests = _split_paths(tests_blob, repo_root, protected) if tests_blob else ()
     return TaskSpec(risk, paths, tests, request)
+
+
+# ================================================================== /do parse
+_DO_RE = re.compile(r"^/do(?:@[A-Za-z0-9_]{1,64})?\s+(\S+)(?:\s+(.*))?$", re.S)
+_SEPARATOR_RE = re.compile(r"(?:^|\s)--(?:\s|$)")
+_SMUGGLE_CHARS = set("/\\,*?[]")
+_FILE_LIKE_RE = re.compile(r"^[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,5}$")
+
+
+def _smuggle_token(tok: str) -> bool:
+    """A token that looks like an option flag, a path, a glob or a file name."""
+    return (
+        tok.startswith("-") or "--tests" in tok or any(ch in _SMUGGLE_CHARS for ch in tok)
+        or bool(_FILE_LIKE_RE.match(tok))
+    )
+
+
+def _check_no_smuggling(request: str) -> None:
+    """`/do` has no path/flag syntax; reject `/task`-style smuggling (`--tests=`, `x.py --`, `*.py`)."""
+    tokens = request.split()
+    first = tokens[0]
+    if first.startswith("-") or "--tests" in first or any(ch in "*?[]\\" for ch in first) \
+            or _FILE_LIKE_RE.match(first) or (first.isascii() and any(ch in "/," for ch in first)):
+        raise TaskParseError("/do takes no paths or flags: write the request as plain prose")
+    sep = _SEPARATOR_RE.search(request)
+    if sep:
+        head = request[: sep.start()].split()
+        if any(_smuggle_token(t) for t in head):
+            raise TaskParseError("/do takes no paths or flags before '--' (paths come from the preset)")
+
+
+def _verify_preset_paths(preset: Preset, repo_root: str | os.PathLike) -> None:
+    """Every preset path must resolve canonically inside `repo_root` and never be forbidden.
+
+    Mirrors `sanitize_repo_path` symlink/case safety without requiring the file to exist.
+    """
+    root = Path(repo_root).resolve()
+    for rel in preset.allowed_paths + preset.tests:
+        if is_forbidden(rel) or is_forbidden(rel + "/"):
+            raise TaskParseError(f"preset {preset.alias}: forbidden path {rel}")
+        resolved = (root / rel).resolve()
+        try:
+            canon = resolved.relative_to(root).as_posix()
+        except ValueError:
+            raise TaskParseError(f"preset {preset.alias}: path escapes the repository") from None
+        if canon != rel:
+            raise TaskParseError(f"preset {preset.alias}: path is not canonical (symlink or alias)")
+
+
+def parse_do_command(
+    text: str, repo_root: str | os.PathLike, unlocked_presets: Iterable[str]
+) -> tuple[Preset, str]:
+    """`/do <alias> <request>`: scope (paths, tests, L2) comes ONLY from the code registry."""
+    if "\x00" in text:
+        raise TaskParseError("NUL byte")
+    m = _DO_RE.match(text)
+    if not m:
+        raise TaskParseError("usage: /do <preset> <request>  (see /bots)")
+    alias, request = m.group(1), (m.group(2) or "").strip()
+    if not PRESET_ALIAS_RE.match(alias) or alias not in PRESETS:
+        raise TaskParseError("unknown preset (see /bots)")
+    if alias not in frozenset(unlocked_presets):
+        raise TaskParseError(f"preset {alias} is locked (add it to {UNLOCKED_PRESETS_ENV})")
+    if not request:
+        raise TaskParseError("empty request")
+    if any((ord(ch) < 32 and ch not in "\n\t") or ord(ch) == 127 for ch in request):
+        raise TaskParseError("control character in request")
+    if len(request.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise TaskParseError(f"request exceeds {MAX_REQUEST_BYTES} UTF-8 bytes")
+    _check_no_smuggling(request)
+    preset = PRESETS[alias]
+    _verify_preset_paths(preset, repo_root)
+    return preset, request
 
 
 # ================================================================ formatting
@@ -774,6 +873,8 @@ class OutboxDispatcher:
 # ===================================================================== bot
 HELP_TEXT = (
     "<b>auto_factory dev bot</b>\n"
+    "/bots — product bot presets (✅ unlocked / 🔒 locked)\n"
+    "/do &lt;preset&gt; &lt;request&gt; — L2 task scoped by the preset (no paths needed)\n"
     "/task &lt;L0|L1|L2|L3&gt; &lt;path&gt;[,&lt;path&gt;] [--tests=a,b] -- &lt;request&gt;\n"
     "/status [task_id] — overview, or a task card with fresh buttons\n"
     "/kill — write STOP.flag (worker halts)\n"
@@ -801,9 +902,14 @@ class DevBot:
         on_wake: Callable[[], None] | None = None,
         require_supervisor_lock: bool = False,
         state_dir: str | os.PathLike | None = None,
+        unlocked_presets: Iterable[str] = (),
     ):
         if not isinstance(admin_chat_id, int) or isinstance(admin_chat_id, bool) or admin_chat_id == 0:
             raise ConfigError("admin_chat_id must be a non-zero int")
+        try:
+            self.unlocked_presets: frozenset[str] = validate_unlocked(unlocked_presets)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
         self.db = db
         self.transport = transport
         self.admin = admin_chat_id
@@ -935,7 +1041,8 @@ class DevBot:
         text = msg.get("text") or ""
         if not text.startswith("/"):
             return "ignored:text"
-        head, _, rest = text.partition(" ")
+        parts = re.split(r"\s+", text, maxsplit=1)
+        head, rest = parts[0], (parts[1] if len(parts) > 1 else "")
         cmd = head.split("@", 1)[0].lower()
         arg = rest.strip()
         if cmd in ("/help", "/start"):
@@ -943,6 +1050,10 @@ class DevBot:
             return "cmd:help"
         if cmd == "/task":
             return self._cmd_task(chat_id, text)
+        if cmd == "/do":
+            return self._cmd_do(chat_id, text)
+        if cmd == "/bots":
+            return self._cmd_bots(chat_id)
         if cmd == "/status":
             return self._cmd_status(chat_id, arg)
         if cmd == "/kill":
@@ -981,15 +1092,74 @@ class DevBot:
         tid, created = self.db.create_task(
             spec.request, spec.risk_level, list(spec.allowed_paths), {"pytest": list(spec.tests)}
         )
-        if created:
-            self._fire_wake()  # after commit
-        label = "\U0001f195 Task created" if created else "♻️ Duplicate of"
+        if not created:
+            self._reply_duplicate(chat_id, tid)
+            return f"cmd:task:duplicate:{tid}"
+        self._fire_wake()  # after commit
         self._send(
             chat_id,
-            f"{label} {self.fmt.code(tid, 64)} ({self.fmt.esc(spec.risk_level, 4)}). "
+            f"\U0001f195 Task created {self.fmt.code(tid, 64)} ({self.fmt.esc(spec.risk_level, 4)}). "
             "Start buttons arrive at AWAITING_START_AUTH.",
         )
-        return f"cmd:task:{'created' if created else 'duplicate'}:{tid}"
+        return f"cmd:task:created:{tid}"
+
+    def _reply_duplicate(self, chat_id: int, tid: str) -> None:
+        """Same request again: explain terminal/blocked outcomes, or re-show the live card."""
+        f = self.fmt
+        existing = self.db.get_task(tid)
+        state = existing["state"]
+        if state in ("BLOCKED", "GUARDRAIL_BLOCKED"):
+            self._send(chat_id, f"♻️ 이미 차단({f.esc(state, 40)})된 동일 요청입니다 (자동 재시도 안 함). "
+                                f"요청 내용을 수정해 다시 보내주세요.\nTask {f.code(tid, 64)}")
+            return
+        if state == "MERGED":
+            self._send(chat_id, f"♻️ 이미 main에 병합 완료(MERGED)된 동일 요청입니다.\nTask {f.code(tid, 64)}")
+            return
+        text, markup = self.renderer.task_card(existing, reason=f"duplicate of {state}")
+        self._send(chat_id, text, markup)
+
+    def _cmd_do(self, chat_id: int, text: str) -> str:
+        f = self.fmt
+        try:
+            preset, request = parse_do_command(text, self.wtm.repo_root, self.unlocked_presets)
+        except TaskParseError as exc:
+            self._send(chat_id, f"⚠️ /do rejected: {f.esc(exc, 200)}")
+            return "cmd:do:rejected"
+        tid, created = self.db.create_task(
+            request, preset.min_risk, list(preset.allowed_paths),
+            {"pytest": list(preset.tests), "preset": preset.alias, "preset_policy": PRESET_POLICY_VERSION},
+        )
+        if not created:
+            self._reply_duplicate(chat_id, tid)
+            return f"cmd:do:duplicate:{tid}"
+        self._fire_wake()  # after commit
+        self._send(
+            chat_id,
+            f"\U0001f195 {f.esc(preset.label, 40)} 작업 생성 {f.code(tid, 64)} ({f.esc(preset.min_risk, 4)} · "
+            f"파일 {len(preset.allowed_paths)}개 · 테스트 {len(preset.tests)}개).\n"
+            "감사(audit) 후 AWAITING_START_AUTH 에서 ▶️ Start 버튼이 도착합니다.",
+        )
+        return f"cmd:do:created:{tid}"
+
+    def _cmd_bots(self, chat_id: int) -> str:
+        f = self.fmt
+        unlocked = [p for p in PRESETS.values() if p.alias in self.unlocked_presets]
+        locked = [p for p in PRESETS.values() if p.alias not in self.unlocked_presets]
+        lines = [f"<b>\U0001f916 봇 프리셋</b> · 사용 가능 {len(unlocked)}/{len(PRESETS)}"]
+        if unlocked:
+            lines.append("<b>✅ 사용 가능</b>")
+            lines += [f"✅ {f.esc(p.label, 40)} {f.code(p.alias, 22)}" for p in unlocked]
+        if locked:
+            lines.append("<b>\U0001f512 잠김</b>")
+            lines += [f"\U0001f512 {f.code(p.alias, 22)} {f.esc(p.label, 40)}" for p in locked]
+        if unlocked:
+            lines.append("버튼을 누르거나 /do &lt;preset&gt; &lt;요청&gt; 으로 작업을 만드세요.")
+        else:
+            lines.append(f"잠금 해제: {f.code(UNLOCKED_PRESETS_ENV + '=kids,yolo', 80)} (.env)")
+        buttons = [f.button(p.label, "p", encode_preset_token(p.alias)) for p in unlocked]
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        self._send(chat_id, "\n".join(lines), f.markup(rows))
+        return f"cmd:bots:{len(unlocked)}"
 
     def _cmd_status(self, chat_id: int, arg: str) -> str:
         f = self.fmt
@@ -1038,6 +1208,8 @@ class DevBot:
         if not m:
             return "callback:malformed"
         op, token = m.groups()
+        if op == "p":  # stateless, read-only: never touches tg_actions
+            return self._cb_preset(token, chat_id)
         handler = {
             "s": self._cb_start, "c": self._cb_cancel, "d": self._cb_diff,
             "r": self._cb_prompt, "m": self._cb_prompt, "x": self._cb_prompt,
@@ -1052,6 +1224,53 @@ class DevBot:
     @staticmethod
     def _actor(user_id: int) -> str:
         return f"human:tg:{user_id}"
+
+    def _cb_preset(self, token: str, chat_id: int) -> str:
+        """Stateless preset info card: no DB token is issued or consumed, nothing is mutated."""
+        f = self.fmt
+        try:
+            alias = decode_preset_token(token)
+        except ValueError:
+            alias = ""
+        if alias not in PRESETS or alias not in self.unlocked_presets:
+            self._send(chat_id, "⚠️ 사용할 수 없는 프리셋입니다 (잠김 또는 미등록). /bots 로 다시 확인하세요.")
+            return "callback:preset:unavailable"
+        p = PRESETS[alias]
+        lines = [
+            f"<b>{f.esc(p.label, 40)}</b> · {f.code(p.alias, 22)} · {f.esc(p.min_risk, 4)}",
+            f.esc(p.description, 200),
+            f"파일 {len(p.allowed_paths)}개 · 테스트 스위트:",
+        ]
+        lines += [f"• {f.code(t, 80)}" for t in p.tests]
+        lines.append("아래 문장을 복사해 내용을 바꿔 보내세요:")
+        lines.append(f.code(f"/do {p.alias} 원하는 작업 내용", 120))
+        self._send(chat_id, "\n".join(lines))
+        return f"callback:preset:{alias}"
+
+    def _merge_summary(self, task: dict[str, Any], head: str | None) -> list[str]:
+        """Human-friendly `Files:` / `Tests:` lines; any failure degrades to a neutral note."""
+        f = self.fmt
+        stat = ""
+        if task.get("base_sha") and head:
+            try:
+                stat = self.wtm.git("diff", "--shortstat", task["base_sha"], head, check=False).strip()
+            except Exception as exc:
+                self.log(f"merge summary shortstat failed: {type(exc).__name__}")
+        gates_txt = "(no gate report)"
+        rows = self.db.artifacts(task["id"], "gates")
+        if rows:
+            try:
+                raw = safe_read_bytes(rows[-1]["path"], 64 * 1024)
+                if rows[-1].get("sha256") and hashlib.sha256(raw).hexdigest() != rows[-1]["sha256"]:
+                    raise ValueError("gate report sha256 mismatch")
+                report = json.loads(raw.decode("utf-8"))
+                parts = [f"{str(g.get('gate', '?'))[:20]} {'PASS' if g.get('ok') is True else 'FAIL'}"
+                         for g in report if isinstance(g, dict)]
+                gates_txt = " · ".join(parts[:6]) or gates_txt
+            except Exception as exc:
+                self.log(f"merge summary gates unreadable: {type(exc).__name__}")
+                gates_txt = "(gate report unreadable)"
+        return [f"Files: {f.esc(stat or '(no changes)', 200)}", f"Tests: {f.esc(gates_txt, 200)}"]
 
     def _cb_start(self, op, token, chat_id, user_id, message_id) -> str:
         def effect(c, action, task):
@@ -1127,8 +1346,10 @@ class DevBot:
         f = self.fmt
         if outcome.ok:
             note = "" if outcome.cleanup_ok else " (cleanup pending: ORPHAN_CLEANUP)"
+            summary = "\n".join(self._merge_summary(task, outcome.head))
             self._edit(chat_id, message_id,
-                       f"\U0001f500 Merged {f.code(task['id'], 64)} → main {f.code((outcome.head or '')[:12], 12)}{f.esc(note, 60)}")
+                       f"\U0001f500 Merged {f.code(task['id'], 64)} → main {f.code((outcome.head or '')[:12], 12)}"
+                       f"{f.esc(note, 60)}\n{summary}")
             return "callback:merged"
         self._edit(chat_id, message_id,
                    f"⛔ Merge refused for {f.code(task['id'], 64)}: {f.code(outcome.code, 40)} {f.esc(outcome.detail, 300)}")
@@ -1363,7 +1584,7 @@ def run_check(
             emit("FAIL", f"config: {exc}")
             return EXIT_LOCAL
         emit("PASS", f"config admin_chat_id={cfg.admin_chat_id} token=*** env_file={'yes' if env_file else 'no'} "
-                     "token_reuse=none")
+                     f"token_reuse=none unlocked_presets={len(cfg.unlocked_presets)}")
         try:
             layout = resolve_state_paths(repo, db, artifacts, worktrees, stop_flag)
         except ValueError as exc:
@@ -1483,7 +1704,7 @@ def main(argv: list[str] | None = None) -> int:
                 db, HttpTransport(cfg.token), cfg.admin_chat_id, args.repo,
                 artifacts_dir=layout["artifacts"], worktrees_dir=layout["worktrees"],
                 stop_flag=layout["stop_flag"], state_dir=layout["state_dir"], require_supervisor_lock=True,
-                log=lambda m: print(f"[dev_bot] {m}", file=sys.stderr),
+                log=lambda m: print(f"[dev_bot] {m}", file=sys.stderr), unlocked_presets=cfg.unlocked_presets,
             )
             try:
                 bot.boot()

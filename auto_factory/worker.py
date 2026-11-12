@@ -52,6 +52,7 @@ from .db import (
     verify_phase1_artifacts,
 )
 from .guardrails import DeterministicRunner, GuardrailChecker, OscillationDetector, is_forbidden
+from .presets import PRESET_POLICY_VERSION, PRESETS
 from .win_job import build_sandbox_env, current_identity, is_same_process
 from .worktree import (
     DB_FILENAME,
@@ -280,8 +281,35 @@ class PipelineWorker:
         if bad:
             self._move(task, "BLOCKED", f"PREFLIGHT: forbidden allowed_paths {bad}")
             return False
+        preset_error = self._preset_binding_error(task)
+        if preset_error:
+            self._move(task, "BLOCKED", f"PREFLIGHT_PRESET: {preset_error}"[:500])
+            return False
         self._move(task, "PREFLIGHTED", "preflight ok", base_sha=self.wtm.head_sha())
         return True
+
+    @staticmethod
+    def _preset_binding_error(task: dict[str, Any]) -> str:
+        """Re-bind a `/do` preset task to the code registry; any drift (DB tampering) blocks it."""
+        spec = task.get("acceptance_spec") or {}
+        if not isinstance(spec, dict) or "preset" not in spec:
+            return ""
+        alias = spec.get("preset")
+        if spec.get("preset_policy") != PRESET_POLICY_VERSION:
+            return f"policy {spec.get('preset_policy')!r} != {PRESET_POLICY_VERSION}"
+        if not isinstance(alias, str) or alias not in PRESETS:
+            return "unknown preset"
+        preset = PRESETS[alias]
+        if tuple(sorted(task["allowed_paths"])) != tuple(sorted(preset.allowed_paths)):
+            return f"allowed_paths drift for preset {alias}"
+        pytest_targets = spec.get("pytest", [])
+        if not isinstance(pytest_targets, list) or tuple(sorted(pytest_targets)) != tuple(sorted(preset.tests)):
+            return f"pytest drift for preset {alias}"
+        if task["risk_level"] != preset.min_risk:
+            return f"risk_level {task['risk_level']} != {preset.min_risk} for preset {alias}"
+        if any(is_forbidden(p) for p in preset.allowed_paths):
+            return f"preset {alias} contains a forbidden path"
+        return ""
 
     def _classify(self, task: dict[str, Any]) -> bool:
         if task["risk_level"] == "L3":

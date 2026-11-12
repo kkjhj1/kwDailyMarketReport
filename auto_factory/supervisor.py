@@ -439,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         adapters=default_adapters(), holdout_dir=Path(args.repo) / "holdout_eval", auto_audit_l2=True,
         idle_sleep=args.idle_sleep, max_cycles=args.max_cycles,
         log=lambda m: print(f"[supervisor] {m}", file=sys.stderr),
+        bot_kwargs={"unlocked_presets": cfg.unlocked_presets},
     )
     try:
         sup.open()

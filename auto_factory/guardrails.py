@@ -29,6 +29,18 @@ FORBIDDEN_PATTERNS = (
     "conftest.py",
     "pyproject.toml",
     "STOP.flag",
+    # additive (preset registry hardening): DB files, data/VCS/CI dirs, constitution, runners
+    "*.sqlite",
+    "*.db",
+    "*.db-wal",
+    "*.db-shm",
+    "data/",
+    ".git/",
+    ".github/",
+    "AGENTS.md",
+    "run_cron.sh",
+    "admin_server.py",
+    "*bot_runner.py",
 )
 SECRET_PATTERNS = (
     re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),  # Telegram bot token
