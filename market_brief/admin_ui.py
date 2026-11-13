@@ -1929,7 +1929,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn btn-primary" onclick="openNewUserModal()">➕ 신규 유저 등록</button>
-              <button class="btn btn-outline" style="background:#f0fdf4; color:#166534; border-color:#bbf7d0; font-weight:700;" onclick="triggerProfileBatchSync()" title="수동 수정 실명은 보존하고 텔레그램 프로필을 조회하여 실명을 동기화합니다.">🔄 프로필 실명 일괄 동기화</button>
             </div>
           </div>
 
@@ -2643,34 +2642,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function triggerProfileBatchSync() {
-      if (!confirm(`텔레그램 프로필을 조회하여 실명을 일괄 동기화합니다.\n(관리자가 직접 수정한 실명은 안전하게 보존됩니다)\n진행하시겠습니까?`)) {
-        return;
-      }
-      toast('⏳ 텔레그램 프로필 실명 동기화 중...');
-      try {
-        const res = await req('/api/platform/users/sync-telegram-names', { method: 'POST' });
-        toast(`✅ 동기화 완료: ${res.updated || 0}명 갱신 (수동보존 ${res.skipped_custom || 0}명, 유지 ${res.unchanged || 0}명)`);
-        await loadUsers();
-      } catch (e) {
-        toast('❌ 동기화 실패: ' + e.message);
-      }
-    }
-
-    async function resetUserNameToTelegram(userId) {
-      if (!confirm(`이 유저의 이름을 텔레그램 최신 프로필명으로 복원하시겠습니까?\n(수동 지정 상태가 해제됩니다)`)) {
-        return;
-      }
-      try {
-        const res = await req(`/api/platform/users/${encodeURIComponent(userId)}/reset-name`, { method: 'POST' });
-        toast(`✅ 텔레그램 이름으로 복원 완료: ${res.name || ''}`);
-        await loadUsers();
-        toggleUserAccordion(userId, true);
-      } catch (e) {
-        toast('❌ 복원 실패: ' + e.message);
-      }
-    }
-
     async function loadUsers() {
       const q = document.getElementById('userSearch').value.trim();
       const p = new URLSearchParams();
@@ -2703,8 +2674,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           const isBlocked = u.status === 'BLOCKED';
           const dotColor = isBlocked ? '#ef4444' : '#10b981';
           const cleanUname = (u.username || '').trim().replace(/^@/, '');
-          const aliasHtml = cleanUname ? `@${esc(cleanUname)}` : '';
-          const isCustom = Number(u.is_name_custom || 0) === 1;
 
           const pendingReq = (S.upgradeRequests || []).find(r => r.telegram_user_id === u.telegram_user_id && r.status === 'PENDING');
           const pendingBadge = pendingReq
@@ -2737,8 +2706,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="user-row-left">
                   <span class="user-status-dot" style="background:${dotColor};" title="${isBlocked ? '차단됨' : '정상 가동'}"></span>
                   <span class="user-row-name">${esc(u.full_name)}</span>
-                  ${isCustom ? '<span class="user-source-tag" style="background:#fef3c7; color:#92400e; border:1px solid #fde68a;">수동</span>' : ''}
-                  ${aliasHtml ? `<span class="user-row-uname">(${aliasHtml})</span>` : ''}
                 </div>
                 <div class="user-row-right">
                   ${tierBadge(u.tier)}
@@ -2756,8 +2723,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                     <div class="drawer-card-title">🆔 계정 및 식별 정보</div>
                     <div style="font-size:12.5px; display:flex; flex-direction:column; gap:4px;">
                       <div>ID: <code style="font-weight:700;">${esc(u.telegram_user_id)}</code> <button class="btn btn-sm" style="padding:1px 6px; font-size:10.5px; margin-left:4px;" onclick="event.stopPropagation(); navigator.clipboard.writeText('${esc(u.telegram_user_id)}'); toast('ID가 복사되었습니다');">복사</button></div>
-                      <div>사용자명: <b>@${esc(cleanUname || '없음')}</b></div>
-                      <div>실명 출처: <b>${isCustom ? '✍️ 관리자 직접 지정' : '🤖 텔레그램 프로필 연동'}</b> ${u.name_synced_at ? `<span style="font-size:11px; color:var(--text-muted);">(${esc(u.name_synced_at.slice(0,10))})</span>` : ''}</div>
+                      <div>사용자명: <b>${cleanUname ? `@${esc(cleanUname)}` : '<span style="color:var(--text-muted); font-weight:normal;">(사용자명 없음)</span>'}</b></div>
                       <div>가입일시: <span style="color:var(--text-muted); font-size:11.5px;">${esc(u.created_at || '-')}</span></div>
                     </div>
                   </div>
@@ -2804,7 +2770,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="drawer-actions">
                   <button class="btn btn-sm" onclick="event.stopPropagation(); openEditUserModal('${esc(u.telegram_user_id)}')">✏️ 실명/메모 수정</button>
                   <button class="btn btn-sm user-history-btn" onclick="event.stopPropagation(); openUserHistoryModal('${esc(u.telegram_user_id)}')">📜 변경·수신 이력</button>
-                  ${isCustom ? `<button class="btn btn-sm btn-outline" style="color:#0284c7; border-color:#bae6fd;" onclick="event.stopPropagation(); resetUserNameToTelegram('${esc(u.telegram_user_id)}')">🔄 텔레그램명으로 복원</button>` : ''}
                   <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteUser('${esc(u.telegram_user_id)}')">🗑️ 회원 삭제</button>
                 </div>
               </div>

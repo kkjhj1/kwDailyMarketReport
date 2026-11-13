@@ -1247,12 +1247,36 @@ class SubscriptionEngine:
                 user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
             else:
                 user = self._enforce_user_expiry_in_tx(conn, user)
+                self._sync_telegram_full_name_in_tx(conn, uid, user, full_name, now_str)
                 if clean_uname and clean_uname != (user["username"] or ""):
                     conn.execute(
                         "UPDATE users SET username = ?, updated_at = ? WHERE telegram_user_id = ?",
                         (clean_uname, now_str, uid),
                     )
         return self.get_user_profile(uid) or {"telegram_user_id": uid}
+
+    def _sync_telegram_full_name_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        uid: str,
+        user: sqlite3.Row | dict[str, Any],
+        full_name: str,
+        now_str: str,
+    ) -> bool:
+        """Auto-syncs the latest Telegram profile name unless an admin pinned it (is_name_custom=1)."""
+        clean_name = (full_name or "").strip()
+        if not clean_name or clean_name == (user["full_name"] or ""):
+            return False
+        updated_rows = conn.execute(
+            """UPDATE users
+               SET full_name = ?, name_synced_at = ?, updated_at = ?
+               WHERE telegram_user_id = ? AND COALESCE(is_name_custom, 0) = 0""",
+            (clean_name, now_str, now_str, uid),
+        ).rowcount
+        if updated_rows > 0:
+            conn.execute("UPDATE recipients SET name = ? WHERE chat_id = ?", (clean_name, uid))
+            return True
+        return False
 
     def attempt_subscribe(
         self,
@@ -1284,8 +1308,12 @@ class SubscriptionEngine:
                 user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
             else:
                 user = self._enforce_user_expiry_in_tx(conn, user)
+                name_changed = self._sync_telegram_full_name_in_tx(conn, uid, user, full_name, now_str)
                 if clean_uname and clean_uname != (user["username"] or ""):
                     conn.execute("UPDATE users SET username = ? WHERE telegram_user_id = ?", (clean_uname, uid))
+                if name_changed:
+                    # Re-read so downstream recipient sync receives the effective (latest) full_name.
+                    user = conn.execute("SELECT * FROM users WHERE telegram_user_id = ?", (uid,)).fetchone()
 
             if user["status"] == "BLOCKED":
                 return {

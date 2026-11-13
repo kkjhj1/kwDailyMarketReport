@@ -218,6 +218,78 @@ class AdminApiTests(unittest.TestCase):
         self.assertIn("username: uname", html)
         self.assertIn('id="userAccordionContainer"', html)
 
+    def test_user_list_real_name_only_and_no_empty_username_bug(self):
+        html = self.client.get("/").text
+        # Header shows real name only (no alias / manual tag)
+        self.assertIn('<span class="user-row-name">${esc(u.full_name)}</span>', html)
+        self.assertNotIn("aliasHtml", html)
+        self.assertNotIn('class="user-source-tag"', html)
+        # Drawer: no "@없음" fallback, shows explicit placeholder instead
+        self.assertNotIn("@${esc(cleanUname || '없음')}", html)
+        self.assertNotIn("없음')}", html)
+        self.assertIn("(사용자명 없음)", html)
+        # Removed metadata / buttons / JS helpers
+        self.assertNotIn("실명 출처", html)
+        self.assertNotIn("프로필 실명 일괄 동기화", html)
+        self.assertNotIn("triggerProfileBatchSync", html)
+        self.assertNotIn("텔레그램명으로 복원", html)
+        self.assertNotIn("resetUserNameToTelegram", html)
+
+    def test_ensure_user_auto_syncs_name_unless_custom(self):
+        sub_engine = self.app.state.sub_engine
+        sub_engine.upsert_user(telegram_user_id="66601", full_name="옛이름", tier="WHITE")
+        sub_engine.upsert_user(telegram_user_id="66602", full_name="관리자지정", tier="WHITE")
+        with sub_engine.db._connect() as conn:
+            conn.execute("UPDATE users SET is_name_custom = 0 WHERE telegram_user_id = '66601'")
+            conn.execute("UPDATE users SET is_name_custom = 1 WHERE telegram_user_id = '66602'")
+            conn.execute(
+                "INSERT OR REPLACE INTO recipients (chat_id, name) VALUES ('66601', '옛이름')"
+            )
+
+        sub_engine.ensure_user("66601", full_name="  새실명  ", username="@newbie")
+        sub_engine.ensure_user("66602", full_name="텔레그램명", username="")
+
+        with sub_engine.db._connect() as conn:
+            auto = conn.execute(
+                "SELECT full_name, username, name_synced_at FROM users WHERE telegram_user_id = '66601'"
+            ).fetchone()
+            custom = conn.execute(
+                "SELECT full_name, is_name_custom FROM users WHERE telegram_user_id = '66602'"
+            ).fetchone()
+            rec = conn.execute("SELECT name FROM recipients WHERE chat_id = '66601'").fetchone()
+
+        self.assertEqual(auto["full_name"], "새실명")
+        self.assertEqual(auto["username"], "newbie")
+        self.assertTrue(auto["name_synced_at"])
+        self.assertEqual(rec["name"], "새실명")
+        self.assertEqual(custom["full_name"], "관리자지정")
+        self.assertEqual(custom["is_name_custom"], 1)
+
+        # Empty incoming name must never wipe an existing name
+        sub_engine.ensure_user("66601", full_name="   ")
+        self.assertEqual(sub_engine.get_user_profile("66601")["full_name"], "새실명")
+
+    def test_get_job_recipients_prefers_users_full_name(self):
+        sub_engine = self.app.state.sub_engine
+        db = sub_engine.db
+        sub_engine.upsert_user(telegram_user_id="70001", full_name="실명우선", tier="WHITE")
+        with db._connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO recipients (chat_id, name) VALUES ('70001', '레거시명')")
+            conn.execute("INSERT OR REPLACE INTO recipients (chat_id, name) VALUES ('70002', '레거시만')")
+            conn.execute("INSERT OR REPLACE INTO recipients (chat_id, name) VALUES ('70003', '   ')")
+            for cid in ("70001", "70002", "70003", "70004"):
+                conn.execute(
+                    "INSERT INTO delivery_job_recipients (job_id, chat_id, status) VALUES ('job_name_test', ?, 'SENT')",
+                    (cid,),
+                )
+
+        rows = {r["chat_id"]: r for r in db.get_job_recipients("job_name_test")}
+        self.assertEqual(rows["70001"]["name"], "실명우선")
+        self.assertEqual(rows["70002"]["name"], "레거시만")
+        self.assertEqual(rows["70003"]["name"], "수신자")
+        self.assertEqual(rows["70004"]["name"], "수신자")
+        self.assertEqual(rows["70001"]["channel"], "TELEGRAM")
+
     def test_platform_user_username_create_and_update(self):
         res_post = self.client.post(
             "/api/platform/users",

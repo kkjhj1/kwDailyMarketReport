@@ -1040,8 +1040,15 @@ class MarketBriefDatabase:
     def get_job_recipients(self, job_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
-                """SELECT jr.*, r.name, r.channel
+                """SELECT jr.*,
+                          COALESCE(
+                              NULLIF(TRIM(u.full_name), ''),
+                              NULLIF(TRIM(r.name), ''),
+                              '수신자'
+                          ) AS name,
+                          r.channel
                    FROM delivery_job_recipients jr
+                   LEFT JOIN users u ON jr.chat_id = u.telegram_user_id
                    LEFT JOIN recipients r ON jr.chat_id = r.chat_id
                    WHERE jr.job_id = ?
                    ORDER BY jr.updated_at ASC""",
