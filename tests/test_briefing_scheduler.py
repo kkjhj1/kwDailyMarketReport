@@ -75,29 +75,29 @@ class TestInternalBriefingScheduler(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_next_trigger_calculation(self):
-        # 1. Trading day morning before 06:30 -> Today 06:30
-        now = datetime(2026, 11, 2, 6, 0, tzinfo=KST)  # Mon
+        # 1. Trading day morning before 07:50 -> Today 07:50
+        now = datetime(2026, 11, 2, 7, 0, tzinfo=KST)  # Mon
         nxt = self.scheduler.calculate_next_trigger_kst(now)
-        self.assertEqual(nxt, datetime(2026, 11, 2, 6, 30, tzinfo=KST))
+        self.assertEqual(nxt, datetime(2026, 11, 2, 7, 50, tzinfo=KST))
 
-        # 2. Trading day between 06:30 and 15:40 -> Today 15:40
+        # 2. Trading day between 07:50 and 15:40 -> Today 15:40
         now = datetime(2026, 11, 2, 10, 0, tzinfo=KST)
         nxt = self.scheduler.calculate_next_trigger_kst(now)
         self.assertEqual(nxt, datetime(2026, 11, 2, 15, 40, tzinfo=KST))
 
-        # 3. Trading day after 15:40 -> Tomorrow 06:30
+        # 3. Trading day after 15:40 -> Tomorrow 07:50
         now = datetime(2026, 11, 2, 16, 0, tzinfo=KST)
         nxt = self.scheduler.calculate_next_trigger_kst(now)
-        self.assertEqual(nxt, datetime(2026, 11, 3, 6, 30, tzinfo=KST))
+        self.assertEqual(nxt, datetime(2026, 11, 3, 7, 50, tzinfo=KST))
 
-        # 4. Friday after 15:40 -> Next Monday 06:30
+        # 4. Friday after 15:40 -> Next Monday 07:50
         now = datetime(2026, 11, 6, 16, 0, tzinfo=KST)  # Fri
         nxt = self.scheduler.calculate_next_trigger_kst(now)
-        self.assertEqual(nxt, datetime(2026, 11, 9, 6, 30, tzinfo=KST))
+        self.assertEqual(nxt, datetime(2026, 11, 9, 7, 50, tzinfo=KST))
 
     async def test_morning_trigger_success_and_idempotency(self):
-        # Monday 06:30:00 KST
-        now = datetime(2026, 11, 2, 6, 30, 0, tzinfo=KST)
+        # Monday 07:50:00 KST
+        now = datetime(2026, 11, 2, 7, 50, 0, tzinfo=KST)
 
         # 1. First trigger -> Dispatches successfully
         await self.scheduler._check_and_trigger(now)
@@ -108,8 +108,8 @@ class TestInternalBriefingScheduler(unittest.IsolatedAsyncioTestCase):
         # Verify DB records
         self.assertTrue(self.db.is_regular_briefing_sent("morning", now.date()))
 
-        # 2. Second trigger at 06:35:00 KST -> Idempotent, does not dispatch again!
-        now_later = datetime(2026, 11, 2, 6, 35, 0, tzinfo=KST)
+        # 2. Second trigger at 07:55:00 KST -> Idempotent, does not dispatch again!
+        now_later = datetime(2026, 11, 2, 7, 55, 0, tzinfo=KST)
         await self.scheduler._check_and_trigger(now_later)
         self.assertEqual(len(self.fake_deliverer.calls), 1)
 
@@ -139,8 +139,8 @@ class TestInternalBriefingScheduler(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.db.is_regular_briefing_sent("closing", now.date()))
 
     async def test_skip_on_weekend(self):
-        # Sunday 06:30:00 KST
-        now = datetime(2026, 11, 1, 6, 30, 0, tzinfo=KST)
+        # Sunday 07:50:00 KST
+        now = datetime(2026, 11, 1, 7, 50, 0, tzinfo=KST)
 
         await self.scheduler._check_and_trigger(now)
         self.assertEqual(len(self.fake_deliverer.calls), 0)
@@ -155,7 +155,7 @@ class TestInternalBriefingScheduler(unittest.IsolatedAsyncioTestCase):
             get_report_base_url=lambda: "https://example.com",
             deliverer=self.fake_deliverer,
         )
-        now = datetime(2026, 11, 2, 6, 30, 0, tzinfo=KST)
+        now = datetime(2026, 11, 2, 7, 50, 0, tzinfo=KST)
         await no_token_scheduler._check_and_trigger(now)
         self.assertEqual(len(self.fake_deliverer.calls), 0)
         st = no_token_scheduler.get_status()
@@ -171,7 +171,7 @@ class TestInternalBriefingScheduler(unittest.IsolatedAsyncioTestCase):
             get_report_base_url=lambda: "https://example.com",
             deliverer=unknown_deliverer,
         )
-        now = datetime(2026, 11, 2, 6, 30, 0, tzinfo=KST)
+        now = datetime(2026, 11, 2, 7, 50, 0, tzinfo=KST)
         await unknown_scheduler._check_and_trigger(now)
         self.assertEqual(len(unknown_deliverer.calls), 1)
 

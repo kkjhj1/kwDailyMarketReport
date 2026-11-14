@@ -152,7 +152,7 @@ class BotServiceType(str, Enum):
     @property
     def one_line_desc(self) -> str:
         descs = {
-            BotServiceType.BRIEF: "매일 06:30 글로벌 증시/환율 & 장전 3줄 요약",
+            BotServiceType.BRIEF: "매일 07:50 글로벌 증시/환율 & 장전 3줄 요약",
             BotServiceType.ADMISSION: "고교/수험생 주간 필수 To-Do & 대입 설명회 요약",
             BotServiceType.TRAVEL: "주간 최저가 항공권 발굴 & 테마 여행지 큐레이션",
             BotServiceType.SILVER: "부모님 맞춤 동사무소·보건소 복지 & 일요일 효도 브리핑",

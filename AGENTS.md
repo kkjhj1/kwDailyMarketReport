@@ -5,7 +5,7 @@
 - 운영 서버: OCI VM `161.33.196.211`, `systemd` `multibot.service`, 포트 `8002`, 24/7
 - 웹 리포트: 오라클 클라우드 VM 자체 서빙 (`http://161.33.196.211:8002/reports/`)
 - Render Cloud: 퇴역 완료, 사용 금지
-- 봇: `telegram_bot_runner.py`(시황, 06:30 KST·±3% 긴급), `travel_bot_runner.py`, `admission_bot_runner.py`, `portal_bot_runner.py`(FREE/GREEN/RED/BLACK), 관리자 콘솔 `admin_server.py`
+- 봇: `telegram_bot_runner.py`(시황, 07:50 KST·±3% 긴급), `travel_bot_runner.py`, `admission_bot_runner.py`, `portal_bot_runner.py`(FREE/GREEN/RED/BLACK), 관리자 콘솔 `admin_server.py`
 
 ## 2. 포트 가드 (전역 [DEV-PORT])
 - 기본 `ADMIN_PORT=8002`. 충돌 시 `find_available_port(8002)`로 8003+ 전환하고 `[PORT FALLBACK]` + 실제 `http://127.0.0.1:<PORT>` 출력

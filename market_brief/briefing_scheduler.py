@@ -1,11 +1,11 @@
 """Internal Scheduled Dispatcher for Daily Market Brief v2.0 & Urgent Volatility Daemon.
 
 Runs as a 24/7 background asyncio task inside FastAPI (Oracle Cloud VM / multibot.service).
-Fires morning briefing at 06:30 KST and closing briefing at 15:40 KST on KR trading days.
+Fires morning briefing at 07:50 KST and closing briefing at 15:40 KST on KR trading days.
 Monitors ±3.0% sudden breaches during regular KR trading hours (09:00~15:30 KST).
 
 Enforces:
-- [PROD-LIVE] Zero Accidental Redelivery: Strict 15-minute start window (06:30~06:45, 15:40~15:55).
+- [PROD-LIVE] Zero Accidental Redelivery: Strict 15-minute start window (07:50~08:05, 15:40~15:55).
 - Dual-DB Consistency: Cross-checks both portal.sqlite3 and alerts.sqlite3.
 """
 from __future__ import annotations
@@ -127,8 +127,8 @@ class MarketBriefingDeliverer:
 class InternalBriefingScheduler:
     """Asyncio background daemon scheduler running inside FastAPI lifespan."""
 
-    MORNING_START = time(6, 30)
-    MORNING_WINDOW_END = time(6, 45)  # Strict 15-minute start window
+    MORNING_START = time(7, 50)
+    MORNING_WINDOW_END = time(8, 5)   # Strict 15-minute start window
     MORNING_CUTOFF = time(8, 50)      # Hard expiration
 
     CLOSING_START = time(15, 40)
@@ -360,12 +360,12 @@ class InternalBriefingScheduler:
 
         current_time = now_kst.time()
 
-        # Morning Briefing: Only trigger within strict 15-minute start window (06:30 ~ 06:45 KST)
+        # Morning Briefing: Only trigger within strict 15-minute start window (07:50 ~ 08:05 KST)
         if self.MORNING_START <= current_time <= self.MORNING_WINDOW_END:
             if not await asyncio.to_thread(self.is_briefing_already_sent, "morning", today):
                 await self._run_briefing_job("morning", now_kst)
         elif self.MORNING_WINDOW_END < current_time <= self.MORNING_CUTOFF:
-            # Server restart after 06:45: strictly block compensatory auto-redelivery
+            # Server restart after 08:05: strictly block compensatory auto-redelivery
             pass
 
         # Closing Briefing: Only trigger within strict 15-minute start window (15:40 ~ 15:55 KST)

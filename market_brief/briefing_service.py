@@ -135,7 +135,7 @@ def get_bot_presets(bot_id: str) -> List[Dict[str, str]]:
     """Returns supported briefing preset options for each bot."""
     if bot_id == "brief_bot":
         return [
-            {"id": "morning", "label": "🌅 06:30 모닝 시황"},
+            {"id": "morning", "label": "🌅 07:50 모닝 시황"},
             {"id": "closing", "label": "📊 15:40 마감 시황"},
             {"id": "urgent", "label": "⚡ 변동성 긴급 알림"},
         ]
@@ -517,7 +517,7 @@ def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) ->
             f"<b>🧭 [통합 안내 포털] 봇 구독 서비스에 오신 것을 환영합니다!</b>\n\n"
             f"원하시는 전문 정보봇을 선택하여 구독하시면 정기 브리핑을 실시간으로 수신하실 수 있습니다.\n\n"
             f"<b>[현재 운영 중인 6대 전문 정보봇]</b>\n"
-            f"📈 <b>시황</b> (@{brief_un}): 06:30 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
+            f"📈 <b>시황</b> (@{brief_un}): 07:50 모닝시황, 15:40 마감시황, 급변동 긴급알림\n"
             f"✈️ <b>여행</b> (@{travel_un}): 실시간 특가 항공권 및 AI 시즌별 추천지 가이드\n"
             f"🎓 <b>입시</b> (@{edu_un}): 학년별 주간 입시 큐레이션 및 설명회 티켓팅 알림\n"
             f"👵 <b>실버케어</b> (@{silver_un}): 부모님 맞춤 동사무소·보건소 복지 및 주간 효도 브리핑\n"

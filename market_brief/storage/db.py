@@ -406,7 +406,12 @@ class MarketBriefDatabase:
             db.execute(
                 """INSERT OR IGNORE INTO system_settings (setting_key, setting_value, description)
                    VALUES ('schedules', ?, '정기 브리핑 기준 발송 시각')""",
-                (json.dumps({"morning": "06:30", "closing": "15:40"}),),
+                (json.dumps({"morning": "07:50", "closing": "15:40"}),),
+            )
+            # Migration: legacy 06:30 morning schedule -> 07:50 (additive, idempotent)
+            db.execute(
+                "UPDATE system_settings SET setting_value = ? WHERE setting_key = 'schedules' AND setting_value LIKE '%06:30%'",
+                (json.dumps({"morning": "07:50", "closing": "15:40"}),),
             )
 
             # Seed recipients and tokens from .env
@@ -499,7 +504,7 @@ class MarketBriefDatabase:
                     env_brief_token,
                     "금융·시황",
                     "📈",
-                    "장전 06:30 모닝 시황, 15:40 장마감 브리핑 및 ±3% 급변동 긴급 알림을 발송합니다.",
+                    "장전 07:50 모닝 시황, 15:40 장마감 브리핑 및 ±3% 급변동 긴급 알림을 발송합니다.",
                     "FINANCE",
                     1,
                     1,
@@ -618,6 +623,11 @@ class MarketBriefDatabase:
                             "UPDATE bots SET token = ? WHERE bot_id = ? AND (token IS NULL OR token = '')",
                             (tok, bid),
                         )
+
+                # Migration: legacy 06:30 morning label -> 07:50 (idempotent)
+                db.execute(
+                    "UPDATE bots SET description = replace(description, '06:30', '07:50') WHERE bot_id = 'brief_bot'"
+                )
 
             # Migrate existing legacy `recipients` seamlessly into `users` and `brief_bot` subscriptions
             legacy_rows = db.execute("SELECT * FROM recipients").fetchall()

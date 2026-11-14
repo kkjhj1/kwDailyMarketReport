@@ -419,7 +419,7 @@ def render_subscribe_onboarding_view(
 ) -> tuple[str, dict[str, Any]]:
     """Renders subscription-complete card with schedule guidance and 1-tap deep link."""
     schedule_map = {
-        BotServiceType.BRIEF: "매 영업일 아침 06:30 (장전 핵심 요약)",
+        BotServiceType.BRIEF: "매 영업일 아침 07:50 (장전 핵심 요약)",
         BotServiceType.ADMISSION: "매주 월요일 아침 08:00 (대입 To-Do & 설명회)",
         BotServiceType.TRAVEL: "매주 화·목 오전 10:00 (최저가 특가 딜)",
         BotServiceType.SILVER: "매주 일요일 오전 09:00 (부모님 복지 브리핑)",

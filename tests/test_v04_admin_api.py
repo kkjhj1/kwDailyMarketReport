@@ -99,7 +99,7 @@ class AdminApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("telegram_html", data)
-        self.assertIn("06:30 장전 모닝 브리핑", data["telegram_html"])
+        self.assertIn("07:50 장전 모닝 브리핑", data["telegram_html"])
 
     def test_github_sync_endpoints_without_token(self):
         # 1. Sync status without token should be graceful
@@ -670,7 +670,7 @@ class ScheduleApiTests(unittest.TestCase):
             "SHELL=/bin/bash",
             "0 4 * * * cp -p /home/ubuntu/kwDailyMarketReport/alerts.sqlite3 /home/ubuntu/backups/",
             "# [1. 시황봇]",
-            f"33 6 * * 1-5 {self.APP_DIR}/run_cron.sh market_auto",
+            f"53 7 * * 1-5 {self.APP_DIR}/run_cron.sh market_auto",
             f"42 15 * * 1-5 {self.APP_DIR}/run_cron.sh market_auto",
             f"7,22,37,52 9-15 * * 1-5 {self.APP_DIR}/run_cron.sh market_check_urgent",
             "# [2. 여행봇]",

@@ -41,7 +41,7 @@ LIVE_OCI_CRONTAB = "\n".join(
         DB_BACKUP_LINE,
         "",
         "# [1. 시황봇]",
-        f"33 6 * * 1-5 {APP_DIR}/run_cron.sh market_auto",
+        f"53 7 * * 1-5 {APP_DIR}/run_cron.sh market_auto",
         f"42 15 * * 1-5 {APP_DIR}/run_cron.sh market_auto",
         f"7,22,37,52 9-15 * * 1-5 {APP_DIR}/run_cron.sh market_check_urgent",
         "# [2. 여행봇]",
@@ -74,8 +74,8 @@ class CronCompilerTests(unittest.TestCase):
         self.assertEqual(thu[1], "2026-11-19 (Thu) 12:00 KST")
         sun = next_runs_kst(["0 20 * * 0"], FIXED_NOW, 1)
         self.assertEqual(sun[0], "2026-11-15 (Sun) 20:00 KST")
-        wk = next_runs_kst(["33 6 * * 1-5"], datetime(2026, 11, 13, 7, 0, tzinfo=KST), 1)  # Fri after slot
-        self.assertEqual(wk[0], "2026-11-16 (Mon) 06:33 KST")
+        wk = next_runs_kst(["53 7 * * 1-5"], datetime(2026, 11, 13, 8, 0, tzinfo=KST), 1)  # Fri after slot
+        self.assertEqual(wk[0], "2026-11-16 (Mon) 07:53 KST")
 
     def test_next_runs_strictly_future_no_compensation(self):
         runs = next_runs_kst(["30 7,12,18 * * *"], datetime(2026, 11, 11, 12, 30, tzinfo=KST), 3)
@@ -194,7 +194,7 @@ class MigrationTests(_ManagerCase):
         tasks = {t["task_id"]: t for t in ov["tasks"]}
         self.assertEqual(tasks["travel_watches"]["source"], "CRONTAB_UNMANAGED")
         self.assertEqual(tasks["travel_watches"]["config"]["times_kst"], ["07:30", "12:30", "18:30"])
-        self.assertEqual(tasks["market_auto"]["cron_exprs"], ["33 6 * * 1-5", "42 15 * * 1-5"])
+        self.assertEqual(tasks["market_auto"]["cron_exprs"], ["53 7 * * 1-5", "42 15 * * 1-5"])
         self.assertFalse(tasks["market_auto"]["editable"])
         self.assertEqual(tasks["market_auto"]["control_mode"], "READ_ONLY_DUAL_PATH")
         self.assertFalse(tasks["market_auto"]["mismatch"])
@@ -233,7 +233,7 @@ class MigrationTests(_ManagerCase):
         self.assertEqual(new.count(MANAGED_START), 1)
         block = parsed.managed_block_text()
         # Read-only market lines imported verbatim; others keep live times
-        self.assertIn(f"33 6 * * 1-5 {APP_DIR}/run_cron.sh market_auto", block)
+        self.assertIn(f"53 7 * * 1-5 {APP_DIR}/run_cron.sh market_auto", block)
         self.assertIn(f"42 15 * * 1-5 {APP_DIR}/run_cron.sh market_auto", block)
         self.assertIn(f"7,22,37,52 9-15 * * 1-5 {APP_DIR}/run_cron.sh market_check_urgent", block)
         self.assertIn(f"0 12 * * 4 {APP_DIR}/run_cron.sh travel_weekly", block)
@@ -308,7 +308,7 @@ class MigrationTests(_ManagerCase):
         self.assertEqual(self.driver.writes, [])
 
     def test_read_only_and_unknown_tasks(self):
-        self.assertEqual(self.mgr.apply("market_auto", _payload(["06:30"]))["status"], "READ_ONLY")
+        self.assertEqual(self.mgr.apply("market_auto", _payload(["07:50"]))["status"], "READ_ONLY")
         self.assertEqual(self.mgr.apply("market_check_urgent", _payload(["09:00"]))["status"], "READ_ONLY")
         self.assertEqual(self.mgr.apply("rm -rf", _payload(["09:00"]))["status"], "UNKNOWN_TASK")
         self.assertEqual(self.driver.writes, [])

@@ -295,7 +295,7 @@ def main() -> int:
     parser.add_argument("--discover", action="store_true", help="Verify bot token and auto-discover Chat IDs from getUpdates")
     parser.add_argument("--send-now", choices=["morning", "closing", "urgent"], help="Send a briefing immediately")
     parser.add_argument("--check-urgent", action="store_true", help="Single-pass intraday ±3%% check (ideal for GitHub Actions cron)")
-    parser.add_argument("--auto-schedule", action="store_true", help="Auto-detect morning(06:30)/closing(15:40)/urgent based on current KST time (for GitHub Actions cron)")
+    parser.add_argument("--auto-schedule", action="store_true", help="Auto-detect morning(07:50)/closing(15:40)/urgent based on current KST time (for GitHub Actions cron)")
     parser.add_argument("--live-naver", action="store_true", help="Fetch live market quotes from Naver Finance (falls back to fixture on error)")
     parser.add_argument("--attach-html", action="store_true", help="Also send the standalone .html report file directly into Telegram chat")
     parser.add_argument("--daemon", action="store_true", help="Run 24/7 scheduler + built-in web report server (port 8080) + ±3%% watch")
@@ -395,11 +395,11 @@ def main() -> int:
                 print(f"✅ [AutoSchedule] 금일({today}) 마감 브리핑 이미 발송 완료됨. (정규장 종료 상태)")
                 return 0
 
-        # 2) 평일 아침 장전 (06:30 ~ 08:50 KST):
+        # 2) 평일 아침 장전 (07:50 ~ 08:50 KST):
         # 정규장 개장(09:00) 10분 전인 08:50까지만 장전 모닝 브리핑 발송 허용!
         # 08:50 이후에는 장전 브리핑이 유효기간 만료(EXPIRED)되었으므로 절대 발송하지 않고
         # 개장 후 장중 변동성 감시(check_urgent) 모드로 강제 전환한다!
-        elif is_kr_trading and (dtime(6, 30) <= current_time <= dtime(8, 50)):
+        elif is_kr_trading and (dtime(7, 50) <= current_time <= dtime(8, 50)):
             if check_oracle_server_sent("morning"):
                 print(f"✅ [AutoSchedule] 오라클 클라우드 서버(OCI)에서 금일({today}) 모닝 브리핑이 이미 발송 완료되었습니다. (중복 방지 스킵)")
                 return 0

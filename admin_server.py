@@ -1470,7 +1470,7 @@ def create_admin_app(
         thresholds_raw = db.get_setting("thresholds")
         thresholds = json.loads(thresholds_raw) if thresholds_raw else DEFAULT_THRESHOLDS
         schedules_raw = db.get_setting("schedules")
-        schedules = json.loads(schedules_raw) if schedules_raw else {"morning": "06:30", "closing": "15:40"}
+        schedules = json.loads(schedules_raw) if schedules_raw else {"morning": "07:50", "closing": "15:40"}
         return {"thresholds": thresholds, "schedules": schedules}
 
     @app.post("/api/settings")

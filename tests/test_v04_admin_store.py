@@ -109,7 +109,7 @@ class AdminStoreAndLimiterTests(unittest.TestCase):
     def test_safe_dispatcher_telegram_error_isolation(self):
         dispatcher = SafeTelegramDispatcher(rate_limiter=TelegramRateLimiter(max_global_rate=1000.0, min_chat_interval=0.0))
         briefing = Briefing(
-            "morning", "헤드라인", "06:30 KST", (AssetSummary("국내", "KOSPI", "+0.5%", "상승"),), "https://example.com/r1"
+            "morning", "헤드라인", "07:50 KST", (AssetSummary("국내", "KOSPI", "+0.5%", "상승"),), "https://example.com/r1"
         )
 
         # 1. 403 Bot Blocked by user -> deactivates recipient in DB

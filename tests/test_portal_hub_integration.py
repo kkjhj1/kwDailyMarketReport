@@ -812,7 +812,7 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         from portal_hub.interactive import render_subscribe_onboarding_view
         text, markup = render_subscribe_onboarding_view(BotServiceType.BRIEF)
         self.assertIn("정규 발송 시점", text)
-        self.assertIn("매 영업일 아침 06:30", text)
+        self.assertIn("매 영업일 아침 07:50", text)
         self.assertIn("시작(START)", text)
 
 

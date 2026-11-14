@@ -888,7 +888,7 @@ class MultiBotInteractionRouter:
                     "━━━━━━━━━━━━━━━━━━\n"
                     "📈 <b>주요 지수 및 환율 요약</b>\n"
                     "• <b>KOSPI</b> / <b>S&amp;P 500</b> / <b>USD/KRW</b> 최신 장전·마감 시황 브리핑이 제공됩니다.\n"
-                    "• 매일 <b>06:30 모닝 시황</b>, <b>15:40 마감 시황</b> 및 장중 급등락 알림이 발송됩니다."
+                    "• 매일 <b>07:50 모닝 시황</b>, <b>15:40 마감 시황</b> 및 장중 급등락 알림이 발송됩니다."
                 )
                 GATE_REGISTRY.update_preset_url("bf_rep", report_url)
                 kb = [[build_gate_button("bf_rep", "📊 웹 리포트 상세 분석 보기")]]

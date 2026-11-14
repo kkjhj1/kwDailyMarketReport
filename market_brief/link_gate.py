@@ -114,7 +114,7 @@ class LinkGateRegistry:
                 token="bot_brief",
                 target_name="📈 시황 브리핑 봇 대화방",
                 dest_url="https://t.me/KwDailyMarketInfo_bot",
-                description="06:30 모닝시황, 15:40 마감시황 및 긴급 변동성 브리핑 봇으로 이동합니다.",
+                description="07:50 모닝시황, 15:40 마감시황 및 긴급 변동성 브리핑 봇으로 이동합니다.",
                 restore_route="portal:menu",
             ),
             LinkTarget(

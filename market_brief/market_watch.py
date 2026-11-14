@@ -1,7 +1,7 @@
 """User-configured intraday volatility target watches for `brief_bot` (L2).
 
 Separation of concerns:
-- Regular 06:30 / 15:40 KST briefings stay universal FINANCE broadcasts (`MarketBriefingPipeline`).
+- Regular 07:50 / 15:40 KST briefings stay universal FINANCE broadcasts (`MarketBriefingPipeline`).
 - Intraday alerts are *per-user* target watches evaluated here (`MarketWatchEvaluator`).
 - The legacy global ±3% broadcast is gated by `LEGACY_URGENT_BROADCAST_ENABLED` (default "false").
 
@@ -685,7 +685,7 @@ class MarketWatchService:
                 kb.append([{"text": f"🗑 {i}번 삭제", "callback_data": _cb(f"mbw:x:{int(w['watch_id'])}")}])
         else:
             lines.append("등록된 타겟이 없습니다. 원하는 자산과 조건을 골라 주세요.")
-        lines += ["", "💡 <i>정기 06:30/15:40 브리핑은 그대로 받고, 장중 알림은 설정한 조건에만 발송됩니다.</i>"]
+        lines += ["", "💡 <i>정기 07:50/15:40 브리핑은 그대로 받고, 장중 알림은 설정한 조건에만 발송됩니다.</i>"]
         kb.insert(0, [{"text": "➕ 새 타겟 추가", "callback_data": _cb("mbw:a")}, {"text": "⚡ ±3% 기본 알림", "callback_data": _cb("mbw:q3")}])
         return self._out("\n".join(lines), kb, "", "WATCH_HOME")
 
