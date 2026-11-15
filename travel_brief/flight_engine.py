@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import hashlib
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +24,90 @@ AIRLINES_BY_REGION = {
 }
 
 FSC_CARRIERS = {"대한항공", "아시아나항공", "가루다인도네시아", "중화항공", "에바항공"}
+
+# ----------------------------------------------------------------------
+# Watch slot model (horizon / weekday option / fixed dates)
+# ----------------------------------------------------------------------
+WATCH_HORIZON_MONTHS = (1, 3, 6, 12)
+WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY")
+# (departure weekday, nights): Mon=0 ... Sun=6
+WEEKDAY_OPTION_PATTERNS: dict[str, tuple[tuple[int, int], ...]] = {
+    "WEEKEND": ((3, 3), (4, 3)),                  # Thu->Sun, Fri->Mon
+    "WEEKDAY": ((0, 3), (1, 3)),                  # Mon->Thu, Tue->Fri
+    "ANY": ((0, 3), (1, 3), (3, 3), (4, 3)),
+}
+FIXED_MIN_NIGHTS = 1
+FIXED_MAX_NIGHTS = 30
+DOW_KO = ["월", "화", "수", "목", "금", "토", "일"]
+_KST_OFFSET = timedelta(hours=9)
+
+
+def kst_today() -> date:
+    return (datetime.now(timezone.utc) + _KST_OFFSET).date()
+
+
+def add_months(d: date, months: int) -> date:
+    """Calendar-month arithmetic (day clamped to the target month's length)."""
+    total = d.month - 1 + int(months)
+    year, month = d.year + total // 12, total % 12 + 1
+    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
+
+
+def normalize_weekday_option(option: Optional[str]) -> str:
+    opt = (option or "WEEKEND").strip().upper()
+    return opt if opt in WATCH_WEEKDAY_OPTIONS else "WEEKEND"
+
+
+def make_slot(dep: date, ret: date) -> tuple[date, date, str, str, int]:
+    return dep, ret, DOW_KO[dep.weekday()], DOW_KO[ret.weekday()], (ret - dep).days
+
+
+def generate_watch_slots(
+    ref_date: Optional[date] = None, horizon_months: int = 6, weekday_option: str = "WEEKEND"
+) -> list[tuple[date, date, str, str, int]]:
+    """Calendar-month horizon slots for watches: departures in (ref, ref + horizon_months]."""
+    ref = ref_date or kst_today()
+    months = int(horizon_months) if int(horizon_months) in WATCH_HORIZON_MONTHS else 6
+    patterns = dict(WEEKDAY_OPTION_PATTERNS[normalize_weekday_option(weekday_option)])
+    end = add_months(ref, months)
+    slots = []
+    cur = ref + timedelta(days=1)
+    while cur <= end:
+        nights = patterns.get(cur.weekday())
+        if nights:
+            slots.append(make_slot(cur, cur + timedelta(days=nights)))
+        cur += timedelta(days=1)
+    return slots
+
+
+def validate_fixed_dates(dep: date, ret: date, today: Optional[date] = None) -> Optional[str]:
+    """Returns None when valid, else a short Korean reason (never auto-corrects the dates)."""
+    base = today or kst_today()
+    if dep < base:
+        return "출발일이 이미 지났어요"
+    if ret <= dep:
+        return "귀국일은 출발일 이후여야 해요"
+    nights = (ret - dep).days
+    if nights < FIXED_MIN_NIGHTS or nights > FIXED_MAX_NIGHTS:
+        return f"여행 기간은 {FIXED_MIN_NIGHTS}~{FIXED_MAX_NIGHTS}박만 가능해요"
+    return None
+
+
+def build_fixed_slot(dep: date, ret: date, today: Optional[date] = None) -> Optional[tuple[date, date, str, str, int]]:
+    return None if validate_fixed_dates(dep, ret, today) else make_slot(dep, ret)
+
+
+def build_fixed_neighbor_slots(
+    dep: date, ret: date, today: Optional[date] = None, delta_days: int = 1
+) -> list[tuple[date, date, str, str, int]]:
+    """Bounded ±1d comparison slots (whole trip shifted, same nights); invalid neighbours are dropped."""
+    out = []
+    for shift in (-int(delta_days), int(delta_days)):
+        nd, nr = dep + timedelta(days=shift), ret + timedelta(days=shift)
+        slot = build_fixed_slot(nd, nr, today)
+        if slot is not None:
+            out.append(slot)
+    return out
 
 
 class FlightEngine:
@@ -243,6 +327,12 @@ class FlightEngine:
         )
         return max(floor_krw, round(final_price, -3))
 
+    @staticmethod
+    def generate_watch_slots(
+        ref_date: Optional[date] = None, horizon_months: int = 6, weekday_option: str = "WEEKEND"
+    ) -> list[tuple[date, date, str, str, int]]:
+        return generate_watch_slots(ref_date=ref_date, horizon_months=horizon_months, weekday_option=weekday_option)
+
     def generate_weekend_slots(self, ref_date: Optional[date] = None, months_ahead: int = 6) -> list[tuple[date, date, str, str, int]]:
         """Generate weekend departure-return date pairs:
         - Thursday to Sunday (3 nights)
@@ -280,13 +370,19 @@ class FlightEngine:
         ref_date: Optional[date] = None,
         fast_live: bool = False,
         custom_destinations: Optional[dict[str, DestinationMeta]] = None,
+        slots: Optional[list[tuple[date, date, str, str, int]]] = None,
+        slot_signature: Optional[str] = None,
+        live_deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
         """Search flight deals across destinations and weekend dates.
         `fast_live=True` limits live SSE verification to the cheapest slot per destination (on-demand UX).
         `custom_destinations` is a request-scoped mapping (e.g. CityCatalog FALLBACK city) used only when
         `dest_code` targets it; it never mutates `self.destinations` and never joins the ALL search.
+        `slots` / `slot_signature` (watch horizons & weekday options) replace the default weekend slots and
+        isolate the live cache namespace so a WEEKEND entry is never served for WEEKDAY/ANY requests.
         """
-        slots = self.generate_weekend_slots(ref_date=ref_date, months_ahead=months_ahead)
+        if slots is None:
+            slots = self.generate_weekend_slots(ref_date=ref_date, months_ahead=months_ahead)
         if dest_code:
             code = dest_code.strip().upper()
             if code in self.destinations:
@@ -301,6 +397,11 @@ class FlightEngine:
 
         if self.live_naver and self._live_client is not None:
             target_dest_map = {t.code: t for t in targets}
+            live_kwargs: dict = {}
+            if slot_signature is not None:
+                live_kwargs["slot_signature"] = slot_signature
+            if live_deadline is not None:
+                live_kwargs["deadline"] = live_deadline
             live_all = self._live_client.fetch_all_weekend_deals(
                 destinations=target_dest_map,
                 slots=slots,
@@ -308,6 +409,7 @@ class FlightEngine:
                 ref_date=ref_date,
                 months_ahead=months_ahead,
                 fast_mode=fast_live,
+                **live_kwargs,
             )
             if live_all:
                 target_codes = {t.code for t in targets}
@@ -383,6 +485,70 @@ class FlightEngine:
             return deals
         dest_map = {**custom_destinations, **self.destinations} if custom_destinations else self.destinations
         return self._live_client.ensure_deals_sse_verified(deals, dest_map)
+
+    # ------------------------------------------------------------------
+    # Watch entry points (horizon / weekday option / fixed dates)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def watch_slot_signature(horizon_months: int, weekday_option: str) -> str:
+        """Cache namespace suffix for watch searches (no `:`/`,` so disk keys stay parseable)."""
+        return f"#w{normalize_weekday_option(weekday_option)}{int(horizon_months)}"
+
+    def search_watch_deals(
+        self,
+        dest_code: str,
+        horizon_months: int = 6,
+        weekday_option: str = "WEEKEND",
+        custom_destinations: Optional[dict[str, DestinationMeta]] = None,
+        ref_date: Optional[date] = None,
+        fast_live: bool = True,
+        live_deadline: Optional[float] = None,
+    ) -> list[FlightDeal]:
+        """One destination over a watch horizon (calendar months) with the WEEKEND/WEEKDAY/ANY slot set."""
+        slots = generate_watch_slots(ref_date=ref_date, horizon_months=horizon_months, weekday_option=weekday_option)
+        kwargs: dict = {
+            "dest_code": dest_code,
+            "months_ahead": int(horizon_months),
+            "fast_live": fast_live,
+            "ref_date": ref_date,
+            "slots": slots,
+            "slot_signature": self.watch_slot_signature(horizon_months, weekday_option),
+        }
+        if custom_destinations:
+            kwargs["custom_destinations"] = custom_destinations
+        if live_deadline is not None:
+            kwargs["live_deadline"] = live_deadline
+        return self.search_deals(**kwargs)
+
+    def fetch_fixed_quotes(
+        self,
+        dest_code: str,
+        dep_iso: str,
+        ret_iso: str,
+        include_neighbors: bool = True,
+        custom_destinations: Optional[dict[str, DestinationMeta]] = None,
+        deadline: Optional[float] = None,
+    ) -> list[FlightDeal]:
+        """Exact fixed-date (+ optional ±1d) quotes. Live mode returns only LIVE_SSE + FRESH verified fares;
+        offline mode returns [] — fixed-date prices are never estimated or guessed ([DATA-01])."""
+        if not self.live_naver or self._live_client is None:
+            return []
+        code = (dest_code or "").strip().upper()
+        dest = self.destinations.get(code) or (custom_destinations or {}).get(code)
+        if dest is None:
+            return []
+        try:
+            dep, ret = date.fromisoformat(dep_iso), date.fromisoformat(ret_iso)
+        except (TypeError, ValueError):
+            return []
+        today = kst_today()
+        main = build_fixed_slot(dep, ret, today)
+        if main is None:
+            return []
+        slots = [main] + (build_fixed_neighbor_slots(dep, ret, today) if include_neighbors else [])
+        return self._live_client.fetch_fixed_date_quotes(
+            dest, slots, holiday_fn=self.get_peak_holiday_info, deadline=deadline
+        )
 
     def invalidate_scope(self, scope_codes: set[str] | list[str] | tuple[str, ...]) -> None:
         """Scope-isolated refresh: demotes only cache entries whose destination set intersects `scope_codes`.

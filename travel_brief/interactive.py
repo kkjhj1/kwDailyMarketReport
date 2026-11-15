@@ -30,8 +30,13 @@ from typing import Any, Callable, Optional
 
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
-from travel_brief.city_catalog import CityCatalog
-from travel_brief.flight_engine import FlightEngine
+from travel_brief.city_catalog import (
+    CityCatalog,
+    get_watch_country_meta,
+    is_country_watch_code,
+    list_watch_countries,
+)
+from travel_brief.flight_engine import FlightEngine, kst_today, validate_fixed_dates
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.fx_client import FXClient
 from travel_brief.models import TravelRecommendation
@@ -57,8 +62,113 @@ WATCH_PRICE_MIN_KRW = 50_000
 WATCH_PRICE_MAX_KRW = 5_000_000
 WATCH_QUICK_ADD_CODES = ("NRT", "KIX", "FUK", "TPE", "DAD", "BKK")
 WATCH_DAY_LABELS = {"ANY": "전체 요일", "FRI_MON": "금~월", "THU_SUN": "목~일"}
-WATCH_PRESET_LABELS = {"DEAL": "실속 특가", "FLOOR": "바닥가", "CUSTOM": "직접 입력"}
+WATCH_PRESET_LABELS = {"DEAL": "실속 특가", "FLOOR": "바닥가", "CUSTOM": "직접 입력", "BASELINE": "평균가 기준"}
 CANCEL_COMMANDS = {"/cancel", "/취소"}
+
+# V2 watch wizard (country / horizon / weekday / fixed dates / cadence)
+STATE_AWAITING_WATCH_DATES = "AWAITING_WATCH_DATES"
+WATCH_DRAFT_TTL_SECONDS = 1800.0
+MAX_WATCH_DRAFTS = 2000
+WATCH_DEFAULT_DRAFT = {"watch_mode": "FLEX", "horizon_months": 3, "weekday_option": "ANY", "notify_mode": "DROP"}
+WATCH_HORIZON_CHOICES = (1, 3, 6, 12)
+WATCH_MODE_CODES = {"F": "FLEX", "X": "FIXED"}
+WATCH_WEEKDAY_CODES = {"W": "WEEKEND", "D": "WEEKDAY", "A": "ANY"}
+WATCH_NOTIFY_CODES = {"D": "DROP", "Y": "DAILY"}
+WATCH_WEEKDAY_LABELS = {"WEEKEND": "주말(목~일·금~월)", "WEEKDAY": "평일(월~목·화~금)", "ANY": "주말+평일 전체"}
+WATCH_WEEKDAY_SHORT = {"WEEKEND": "주말", "WEEKDAY": "평일", "ANY": "전체"}
+WATCH_NOTIFY_LABELS = {"DROP": "목표가 도달·추가 하락 시 즉시", "DAILY": "매일 아침 7:30 브리핑 + 급락 시"}
+WATCH_PICKER_CITIES = ("NRT", "KIX", "FUK", "TPE", "DAD", "BKK")
+_DOW_KO = ["월", "화", "수", "목", "금", "토", "일"]
+
+_DATE_TOKEN_RE = re.compile(
+    r"(?P<y>\d{4})\s*[-./년]\s*(?P<m>\d{1,2})\s*[-./월]\s*(?P<d>\d{1,2})\s*일?"
+    r"|(?P<c8>\d{8})"
+    r"|(?P<c6>\d{6})"
+    r"|(?P<m2>\d{1,2})\s*[./월]\s*(?P<d2>\d{1,2})\s*일?"
+)
+_DATE_LEFTOVER_RE = re.compile(r"^[\s~〜\-–—→>,부터까지]*$")
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _token_to_date(m: re.Match) -> tuple[Optional[tuple[int, int, int]], bool]:
+    """(y, m, d) with y=0 when the year was omitted; bool = explicit year."""
+    if m.group("y"):
+        return (int(m.group("y")), int(m.group("m")), int(m.group("d"))), True
+    if m.group("c8"):
+        s = m.group("c8")
+        return (int(s[:4]), int(s[4:6]), int(s[6:])), True
+    if m.group("c6"):
+        s = m.group("c6")
+        return (2000 + int(s[:2]), int(s[2:4]), int(s[4:])), True
+    return (0, int(m.group("m2")), int(m.group("d2"))), False
+
+
+def parse_watch_date_range(text: str, today: Optional[Any] = None) -> tuple[Optional[Any], Optional[Any], Optional[str]]:
+    """Parses `YYYY-MM-DD ~ YYYY-MM-DD`, `YYYY.MM.DD-YYYY.MM.DD`, `YYMMDD YYYYMMDD`, `MM.DD~MM.DD`, `5/1~5/4`.
+    A year-less departure is the nearest future date (KST); a year-less return before the departure rolls
+    into the next year (`12/30~1/3`). Explicit past dates are rejected, never silently corrected.
+    Returns (dep, ret, None) or (None, None, reason)."""
+    from datetime import date as _date
+
+    base = today or kst_today()
+    raw = unicodedata.normalize("NFKC", text or "").strip()
+    tokens = list(_DATE_TOKEN_RE.finditer(raw))
+    leftover = _DATE_TOKEN_RE.sub(" ", raw)
+    if len(tokens) != 2 or not _DATE_LEFTOVER_RE.match(leftover):
+        return None, None, "출발일과 귀국일 두 날짜를 입력해 주세요"
+    (dep_t, dep_explicit), (ret_t, ret_explicit) = (_token_to_date(t) for t in tokens)
+    try:
+        if dep_explicit:
+            dep = _date(*dep_t)
+        else:
+            dep = _date(base.year, dep_t[1], dep_t[2])
+            if dep < base:
+                dep = _date(base.year + 1, dep_t[1], dep_t[2])
+        if ret_explicit:
+            ret = _date(*ret_t)
+        else:
+            ret = _date(dep.year, ret_t[1], ret_t[2])
+            if ret < dep:
+                ret = _date(dep.year + 1, ret_t[1], ret_t[2])
+    except ValueError:
+        return None, None, "존재하지 않는 날짜예요"
+    reason = validate_fixed_dates(dep, ret, base)
+    if reason:
+        return None, None, reason
+    return dep, ret, None
+
+
+def _short_iso(value: Optional[str]) -> str:
+    from datetime import date as _date
+
+    try:
+        d = _date.fromisoformat(value or "")
+    except ValueError:
+        return value or ""
+    return f"{d.month:02d}/{d.day:02d}({_DOW_KO[d.weekday()]})"
+
+
+def _trip_nights_iso(dep: Optional[str], ret: Optional[str]) -> int:
+    from datetime import date as _date
+
+    try:
+        return (_date.fromisoformat(ret or "") - _date.fromisoformat(dep or "")).days
+    except ValueError:
+        return 0
+
+
+@dataclass
+class WatchDraft:
+    """Per-(chat, user, scope) wizard choices; saved to the DB only on an explicit confirm."""
+    scope: str
+    watch_mode: str = "FLEX"
+    horizon_months: int = 3
+    weekday_option: str = "ANY"
+    notify_mode: str = "DROP"
+    fixed_dep_date: str = ""
+    fixed_ret_date: str = ""
+    expires_at: float = 0.0
+
 
 _PRICE_TEXT_RE = re.compile(r"^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,4}))?(만)?(?:원)?(?:이하|미만)?$")
 _PRICE_LIKE_RE = re.compile(r"^[-+]?[\d,.]+(?:만)?(?:원)?(?:이하|미만)?$")
@@ -313,6 +423,9 @@ class TravelInteractiveHandler:
         self._chat_states: OrderedDict[tuple[str, str], ChatState] = OrderedDict()
         self.chat_state_ttl = CHAT_STATE_TTL_SECONDS
         self._watch_cards: OrderedDict[tuple[str, int], None] = OrderedDict()
+        # Watch wizard drafts: (chat_id, user_id, scope) -> WatchDraft (TTL, bounded LRU)
+        self._watch_drafts: OrderedDict[tuple[str, str, str], WatchDraft] = OrderedDict()
+        self.watch_draft_ttl = WATCH_DRAFT_TTL_SECONDS
         self._closed = False
 
     def _load_admin_ids(self) -> set[str]:
@@ -331,6 +444,9 @@ class TravelInteractiveHandler:
         return res.code if res else None
 
     def label_for(self, code: str) -> str:
+        country = get_watch_country_meta(code)
+        if country is not None:
+            return country["label"]
         if code in CITY_LABELS:
             return CITY_LABELS[code]
         res = self.catalog.get(code)
@@ -713,6 +829,8 @@ class TravelInteractiveHandler:
                     cid = str(chat_id)
                     for k in [k for k in self._chat_states if k[0] == cid]:
                         self._chat_states.pop(k, None)
+                    for k in [k for k in self._watch_drafts if k[0] == cid]:
+                        self._watch_drafts.pop(k, None)
                 else:
                     self._chat_states.pop(self._state_key(chat_id, user_id), None)
                 return
@@ -875,6 +993,12 @@ class TravelInteractiveHandler:
             return True, "travel_help"
 
         ctx = self.get_chat_context(chat_id, user_id)
+        if ctx is not None and ctx.state == STATE_AWAITING_WATCH_DATES:
+            handled = self._handle_watch_dates_input(chat_id, user_id, query, ctx)
+            if handled is not None:
+                return handled
+            # A recognised city / country / ALL keyword escapes the date prompt (never traps the user).
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
         if ctx is not None and ctx.state == STATE_AWAITING_WATCH_PRICE:
             handled = self._handle_watch_price_input(chat_id, user_id, query, ctx)
             if handled is not None:
@@ -889,6 +1013,13 @@ class TravelInteractiveHandler:
 
         res = self.catalog.resolve(query)
         if res is None:
+            country = self.catalog.resolve_country(query)
+            if country and self.db is not None:
+                # Countries have no briefing search; they open the country watch setup hub instead.
+                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+                text, markup = self.build_watch_setup_card(chat_id, user_id, country)
+                self._render_watch_card(chat_id, 0, text, markup, edit=False)
+                return True, "travel_watch_country_hub"
             self._send_card(chat_id, self.build_help_card(query), self.build_inline_keyboard("ALL"))
             return True, "travel_help_unknown_city"
         self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
@@ -939,7 +1070,34 @@ class TravelInteractiveHandler:
         "l": "📋 내 알림 목록을 불러옵니다.",
         "x": "🗑️ 삭제 여부를 확인해 주세요.",
         "X": "🗑️ 알림을 삭제했습니다.",
+        # V2 wizard
+        "g": "🌏 알림 대상을 골라 주세요.",
+        "s": "🔔 알림 조건을 불러옵니다.",
+        "e": "⚙️ 저장된 조건을 불러옵니다.",
+        "m2": "⚙️ 탐색 방식을 변경합니다.",
+        "h": "📅 탐색 기간을 변경합니다.",
+        "d": "🗓️ 요일 조건을 변경합니다.",
+        "f": "🗓️ 여행 날짜를 채팅창에 입력해 주세요.",
+        "n": "🔔 알림 방식을 변경합니다.",
+        "k": "✅ 알림을 저장하는 중입니다...",
     }
+    _WATCH_ARGS = {
+        "p": ("D", "F"),
+        "t": ("day", "pk"),
+        "m2": tuple(WATCH_MODE_CODES),
+        "h": tuple(str(h) for h in WATCH_HORIZON_CHOICES),
+        "d": tuple(WATCH_WEEKDAY_CODES),
+        "n": tuple(WATCH_NOTIFY_CODES),
+        "k": ("1", "W"),
+    }
+
+    def normalize_watch_scope(self, raw: Optional[str]) -> Optional[str]:
+        """`@JP`-style country scopes or a catalog city code; ALL / unknown -> None."""
+        token = (raw or "").strip()
+        if is_country_watch_code(token):
+            return token.upper()
+        norm = self.normalize_filter(token) if token else None
+        return None if (not norm or norm == "ALL") else norm
 
     def _handle_watch_callback(
         self, cq_id: str, chat_id: str, message_id: int, user_id: str, parts: list[str]
@@ -952,40 +1110,46 @@ class TravelInteractiveHandler:
             self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
             return
         code = ""
-        if sub != "l":
+        if sub not in ("l", "g"):
             raw = parts[3] if len(parts) > 3 else ""
-            norm = self.normalize_filter(raw) if raw else None
-            if not norm or norm == "ALL":
+            norm = self.normalize_watch_scope(raw)
+            if not norm:
                 self._answer(cq_id, "지원하지 않는 지역입니다. 도시를 먼저 선택해 주세요.")
                 return
             code = norm
         arg = parts[4] if len(parts) > 4 else ""
-        if sub == "p" and arg not in ("D", "F"):
-            self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
-            return
-        if sub == "t" and arg not in ("day", "pk"):
+        allowed = self._WATCH_ARGS.get(sub)
+        if allowed is not None and arg not in allowed:
             self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
             return
 
         self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
         if sub == "i":
             self._set_chat_state(chat_id, STATE_AWAITING_WATCH_PRICE, user_id=user_id, dest_code=code)
+        elif sub == "f":
+            self._set_chat_state(chat_id, STATE_AWAITING_WATCH_DATES, user_id=user_id, dest_code=code)
         else:
             st = self.get_chat_context(chat_id, user_id)
-            if st is not None and st.state == STATE_AWAITING_WATCH_PRICE:
+            if st is not None and st.state in (STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES):
                 self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
-        self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg)
+        self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg, user_id)
 
-    def _run_watch_action(self, chat_id: str, message_id: int, sub: str, code: str, arg: str) -> None:
+    def _run_watch_action(
+        self, chat_id: str, message_id: int, sub: str, code: str, arg: str, user_id: str = ""
+    ) -> None:
+        uid = str(user_id or chat_id)
+        in_place = self._is_watch_card(chat_id, message_id)
         try:
+            if sub == "m" and is_country_watch_code(code):
+                sub = "s"  # countries only have the V2 setup hub
             if sub == "m":
                 text, markup = self.build_watch_manage_card(chat_id, code)
-                self._render_watch_card(chat_id, message_id, text, markup, edit=self._is_watch_card(chat_id, message_id))
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "l":
                 text, markup = self.build_watch_list_card(chat_id)
-                self._render_watch_card(chat_id, message_id, text, markup, edit=self._is_watch_card(chat_id, message_id))
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "p":
-                text, markup = self._save_preset_watch(chat_id, code, arg)
+                text, markup = self._save_preset_watch(chat_id, code, arg, user_id=uid)
                 self._render_watch_card(chat_id, message_id, text, markup)
             elif sub == "t":
                 watch = self.db.toggle_travel_watch_option(chat_id, code, arg)
@@ -1002,11 +1166,28 @@ class TravelInteractiveHandler:
                 self._render_watch_card(chat_id, message_id, text, markup)
             elif sub == "X":
                 removed = self.db.deactivate_travel_watch(chat_id, code)
+                self._drop_draft(chat_id, uid, code)
                 notice = (
                     f"🗑️ {html.escape(self.label_for(code))} 알림을 삭제했어요."
                     if removed else "ℹ️ 이미 삭제되었거나 활성화된 알림이 없어요."
                 )
                 text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "g":
+                text, markup = self.build_watch_target_picker_card()
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
+            elif sub in ("s", "e"):
+                self._get_draft(chat_id, uid, code, reset=(sub == "e"))
+                text, markup = self.build_watch_setup_card(chat_id, uid, code)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
+            elif sub == "f":
+                text, markup = self.build_watch_dates_prompt_card(code)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub in ("m2", "h", "d", "n"):
+                text, markup = self._apply_draft_option(chat_id, uid, code, sub, arg)
+                self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "k":
+                text, markup = self._confirm_draft_watch(chat_id, uid, code, arg)
                 self._render_watch_card(chat_id, message_id, text, markup)
         except Exception as exc:
             logger.error("Watch action %s/%s failed for %s: %s", sub, code, chat_id, exc, exc_info=True)
@@ -1016,7 +1197,9 @@ class TravelInteractiveHandler:
                 {"inline_keyboard": [[{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}]]},
             )
 
-    def _save_preset_watch(self, chat_id: str, code: str, arg: str) -> tuple[str, dict[str, Any]]:
+    def _save_preset_watch(
+        self, chat_id: str, code: str, arg: str, user_id: Optional[str] = None
+    ) -> tuple[str, dict[str, Any]]:
         presets = self.watch_reference_prices(code)
         kind = "DEAL" if arg == "D" else "FLOOR"
         target = presets.get(kind)
@@ -1024,20 +1207,159 @@ class TravelInteractiveHandler:
             return self.build_watch_manage_card(
                 chat_id, code, notice="ℹ️ 이 도시는 기준가 정보가 없어 목표가를 직접 입력해 주세요."
             )
-        return self._save_watch(chat_id, code, target, kind)
+        return self._save_watch(chat_id, code, target, kind, user_id=user_id)
 
-    def _save_watch(self, chat_id: str, code: str, target: int, kind: str) -> tuple[str, dict[str, Any]]:
+    def _save_watch(
+        self, chat_id: str, code: str, target: int, kind: str, user_id: Optional[str] = None
+    ) -> tuple[str, dict[str, Any]]:
+        """Saves the watch. A live wizard draft of this user/scope (V2 options) is applied atomically in the
+        same upsert; without a draft the legacy upsert keeps every stored option untouched."""
         from travel_brief.storage.db import WatchLimitError
 
+        draft = self._peek_draft(chat_id, user_id, code) if user_id else None
+        v2: dict[str, Any] = {}
+        if draft is not None:
+            if draft.watch_mode == "FIXED":
+                reason = self._draft_dates_problem(draft)
+                if reason:
+                    self._set_chat_state(chat_id, STATE_AWAITING_WATCH_DATES, user_id=user_id, dest_code=code)
+                    return self.build_watch_dates_prompt_card(code, notice=f"⚠️ {reason}. 날짜를 다시 입력해 주세요.")
+                v2 = {"watch_mode": "FIXED", "fixed_dep_date": draft.fixed_dep_date,
+                      "fixed_ret_date": draft.fixed_ret_date, "notify_mode": draft.notify_mode}
+            else:
+                v2 = {"watch_mode": "FLEX", "horizon_months": draft.horizon_months,
+                      "weekday_option": draft.weekday_option, "notify_mode": draft.notify_mode}
         try:
-            watch = self.db.upsert_travel_watch(chat_id, code, target, preset_kind=kind)
+            watch = self.db.upsert_travel_watch(chat_id, code, target, preset_kind=kind, **v2)
         except WatchLimitError as exc:
             text, markup = self.build_watch_list_card(
                 chat_id,
                 notice=f"⚠️ 특가 알림은 최대 {exc.limit}개까지 설정할 수 있어요. 기존 알림을 정리한 뒤 다시 시도해 주세요.",
             )
             return text, markup
+        if draft is not None:
+            self._drop_draft(chat_id, user_id, code)
         return self.build_watch_saved_card(watch, title="✅ 특가 알림이 설정되었습니다")
+
+    # ------------------------------------------------------------------
+    # Wizard drafts
+    # ------------------------------------------------------------------
+    def _draft_key(self, chat_id: str, user_id: Optional[str], scope: str) -> tuple[str, str, str]:
+        cid = str(chat_id)
+        return cid, str(user_id or cid), scope.upper()
+
+    def _peek_draft(self, chat_id: str, user_id: Optional[str], scope: str) -> Optional[WatchDraft]:
+        key = self._draft_key(chat_id, user_id, scope)
+        with self._seq_lock:
+            d = self._watch_drafts.get(key)
+            if d is None:
+                return None
+            if d.expires_at <= time.monotonic():
+                self._watch_drafts.pop(key, None)
+                return None
+            return d
+
+    def _drop_draft(self, chat_id: str, user_id: Optional[str], scope: str) -> None:
+        with self._seq_lock:
+            self._watch_drafts.pop(self._draft_key(chat_id, user_id, scope), None)
+
+    def _get_draft(self, chat_id: str, user_id: Optional[str], scope: str, reset: bool = False) -> WatchDraft:
+        """Live draft for (chat, user, scope); seeded from the stored watch (or defaults) when absent/reset."""
+        draft = None if reset else self._peek_draft(chat_id, user_id, scope)
+        if draft is None:
+            draft = WatchDraft(scope=scope.upper(), **WATCH_DEFAULT_DRAFT)
+            watch = self._get_watch(chat_id, scope)
+            if watch and watch.get("is_active"):
+                draft.watch_mode = str(watch.get("watch_mode") or "FLEX").upper()
+                draft.horizon_months = int(watch.get("horizon_months") or 3)
+                draft.weekday_option = str(watch.get("weekday_option") or "ANY").upper()
+                draft.notify_mode = str(watch.get("notify_mode") or "DROP").upper()
+                draft.fixed_dep_date = watch.get("fixed_dep_date") or ""
+                draft.fixed_ret_date = watch.get("fixed_ret_date") or ""
+        key = self._draft_key(chat_id, user_id, scope)
+        with self._seq_lock:
+            draft.expires_at = time.monotonic() + self.watch_draft_ttl
+            self._watch_drafts[key] = draft
+            self._watch_drafts.move_to_end(key)
+            while len(self._watch_drafts) > MAX_WATCH_DRAFTS:
+                self._watch_drafts.popitem(last=False)
+        return draft
+
+    @staticmethod
+    def _draft_dates_problem(draft: WatchDraft) -> Optional[str]:
+        from datetime import date as _date
+
+        if not draft.fixed_dep_date or not draft.fixed_ret_date:
+            return "여행 날짜가 아직 없어요"
+        try:
+            dep, ret = _date.fromisoformat(draft.fixed_dep_date), _date.fromisoformat(draft.fixed_ret_date)
+        except ValueError:
+            return "날짜 형식이 올바르지 않아요"
+        return validate_fixed_dates(dep, ret, kst_today())
+
+    def _apply_draft_option(
+        self, chat_id: str, user_id: str, code: str, sub: str, arg: str
+    ) -> tuple[str, dict[str, Any]]:
+        draft = self._get_draft(chat_id, user_id, code)
+        notice = ""
+        if sub == "m2":
+            draft.watch_mode = WATCH_MODE_CODES[arg]
+            if draft.watch_mode == "FIXED":
+                if self._draft_dates_problem(draft):
+                    self._set_chat_state(chat_id, STATE_AWAITING_WATCH_DATES, user_id=user_id, dest_code=code)
+                    return self.build_watch_dates_prompt_card(
+                        code, notice="📌 날짜 고정: 정한 날짜의 실시간 요금만 추적해요 (±1일 요금도 함께 비교)."
+                    )
+                notice = "📌 날짜 고정: 정한 날짜의 실시간 요금만 추적해요 (±1일 요금도 함께 비교)."
+            else:
+                notice = "📅 기간 탐색: 정한 기간 안에서 가장 싼 날짜를 찾아드려요."
+        elif sub == "h":
+            draft.watch_mode = "FLEX"
+            draft.horizon_months = int(arg)
+        elif sub == "d":
+            draft.watch_mode = "FLEX"
+            draft.weekday_option = WATCH_WEEKDAY_CODES[arg]
+        elif sub == "n":
+            draft.notify_mode = WATCH_NOTIFY_CODES[arg]
+        return self.build_watch_setup_card(chat_id, user_id, code, notice=notice)
+
+    def _confirm_draft_watch(self, chat_id: str, user_id: str, code: str, arg: str) -> tuple[str, dict[str, Any]]:
+        refs = self.watch_reference_prices(code)
+        kind, target = ("DEAL", refs.get("DEAL")) if arg == "1" else ("BASELINE", refs.get("BASELINE"))
+        self._get_draft(chat_id, user_id, code)  # keep (or seed) the draft the user is looking at
+        if not target:
+            return self.build_watch_setup_card(
+                chat_id, user_id, code, notice="ℹ️ 기준가 정보가 없어 목표가를 직접 입력해 주세요."
+            )
+        return self._save_watch(chat_id, code, int(target), kind, user_id=user_id)
+
+    def _handle_watch_dates_input(
+        self, chat_id: str, user_id: str, query: str, ctx: ChatState
+    ) -> Optional[tuple[bool, str]]:
+        """Consumes date text for the FIXED wizard; returns None to fall through (city / country / ALL)."""
+        code = ctx.dest_code
+        if _HAS_DIGIT_RE.search(query):
+            dep, ret, reason = parse_watch_date_range(query)
+            if reason:
+                self._send_card(chat_id, self.build_watch_dates_error_card(code, query, reason))
+                return True, "travel_watch_dates_invalid"
+            draft = self._get_draft(chat_id, user_id, code)
+            draft.watch_mode = "FIXED"
+            draft.fixed_dep_date, draft.fixed_ret_date = dep.isoformat(), ret.isoformat()
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            if self.db is None:
+                self._send_card(chat_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+                return True, "travel_watch_unavailable"
+            text, markup = self.build_watch_setup_card(
+                chat_id, user_id, code, notice="✅ 여행 날짜를 반영했어요. 목표가를 골라 저장해 주세요."
+            )
+            self._render_watch_card(chat_id, 0, text, markup, edit=False)
+            return True, "travel_watch_dates_set"
+        folded = query.casefold().replace(" ", "")
+        if folded in ALL_WORDS or self.catalog.resolve(query) is not None or self.catalog.resolve_country(query):
+            return None
+        self._send_card(chat_id, self.build_watch_dates_error_card(code, query, "날짜로 인식할 수 없어요"))
+        return True, "travel_watch_dates_invalid"
 
     def _handle_watch_price_input(
         self, chat_id: str, user_id: str, query: str, ctx: ChatState
@@ -1054,7 +1376,7 @@ class TravelInteractiveHandler:
             if self.db is None:
                 self._send_card(chat_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
                 return True, "travel_watch_unavailable"
-            text, markup = self._save_watch(chat_id, code, target, "CUSTOM")
+            text, markup = self._save_watch(chat_id, code, target, "CUSTOM", user_id=user_id)
             self._render_watch_card(chat_id, 0, text, markup, edit=False)
             return True, "travel_watch_saved"
         if query.casefold().replace(" ", "") in ALL_WORDS or self.catalog.resolve(query) is not None:
@@ -1064,7 +1386,14 @@ class TravelInteractiveHandler:
 
     def watch_reference_prices(self, code: str) -> dict[str, int]:
         """FLOOR (바닥가) / DEAL (실속 특가) / BASELINE (평균가) for a curated or fallback city.
-        Values outside the allowed watch range are omitted (manual input only)."""
+        Country scopes use the cheapest member-city benchmark per key (the watch alerts on the cheapest
+        member airport). Values outside the allowed watch range are omitted (manual input only)."""
+        if is_country_watch_code(code):
+            agg: dict[str, int] = {}
+            for member in self.catalog.watch_target_codes(code):
+                for k, v in self.watch_reference_prices(member).items():
+                    agg[k] = min(v, agg.get(k, v))
+            return agg
         res = self.catalog.get(code)
         meta = res.meta if res else None
         if meta is None:
@@ -1081,7 +1410,23 @@ class TravelInteractiveHandler:
     def _watch_options_line(self, watch: dict[str, Any]) -> str:
         day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
         peak = "연휴 포함" if watch.get("include_peak") else "연휴 제외"
-        return f"{day} · {peak}"
+        daily = " · 매일 브리핑" if str(watch.get("notify_mode") or "") == "DAILY" else ""
+        if str(watch.get("watch_mode") or "") == "FIXED" and watch.get("fixed_dep_date"):
+            return f"📌 {_short_iso(watch.get('fixed_dep_date'))}~{_short_iso(watch.get('fixed_ret_date'))}{daily}"
+        horizon = watch.get("horizon_months")
+        span = ""
+        if horizon:
+            wopt = WATCH_WEEKDAY_SHORT.get(str(watch.get("weekday_option") or "ANY"), "전체")
+            span = f"{int(horizon)}개월·{wopt} · "
+        return f"{span}{day} · {peak}{daily}"
+
+    def _watch_schedule_lines(self, watch: dict[str, Any]) -> list[str]:
+        if str(watch.get("watch_mode") or "") == "FIXED" and watch.get("fixed_dep_date"):
+            dep, ret = watch.get("fixed_dep_date"), watch.get("fixed_ret_date")
+            return [f"📌 날짜 고정: {_short_iso(dep)}~{_short_iso(ret)} · {_trip_nights_iso(dep, ret)}박 (±1일 비교)"]
+        horizon = int(watch.get("horizon_months") or 6)
+        wopt = WATCH_WEEKDAY_LABELS.get(str(watch.get("weekday_option") or "ANY"), "주말+평일 전체")
+        return [f"📅 기간 탐색: 앞으로 {horizon}개월 · {wopt}"]
 
     def build_watch_manage_card(
         self, chat_id: str, code: str, notice: str = ""
@@ -1122,6 +1467,7 @@ class TravelInteractiveHandler:
         if preset_row:
             rows.append(preset_row)
         rows.append([{"text": "✍️ 목표가 직접 입력", "callback_data": f"trv:w:i:{code}"}])
+        rows.append([{"text": "⚙️ 기간·평일/주말·날짜 고정·매일 브리핑", "callback_data": f"trv:w:s:{code}"}])
         if active:
             day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
             peak = "포함" if watch.get("include_peak") else "제외"
@@ -1139,22 +1485,36 @@ class TravelInteractiveHandler:
         kind = WATCH_PRESET_LABELS.get(watch.get("preset_kind") or "", "")
         day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
         peak = "포함" if watch.get("include_peak") else "제외"
+        fixed = str(watch.get("watch_mode") or "") == "FIXED" and bool(watch.get("fixed_dep_date"))
+        daily = str(watch.get("notify_mode") or "") == "DAILY"
         lines = [
             f"{title}",
             f"🔔 <b>[{html.escape(label)}]</b>",
             "━━━━━━━━━━━━━━━━━━",
             f"🎯 목표가: <b>{int(watch['target_price_krw']):,}원 이하</b>" + (f" ({kind})" if kind else ""),
-            f"🗓️ 요일: {day}",
-            f"🎉 연휴·성수기: {peak}",
-            "⏰ 실시간 관측 최저가가 목표가 이하가 되면 알려드려요 (같은 일정은 7일에 1번).",
         ]
-        rows = [
-            [{"text": f"🗓️ 요일: {day} (변경)", "callback_data": f"trv:w:t:{code}:day"}],
-            [{"text": f"🎉 연휴·성수기: {peak} (변경)", "callback_data": f"trv:w:t:{code}:pk"}],
+        lines += self._watch_schedule_lines(watch)
+        if not fixed:
+            lines += [f"🗓️ 요일: {day}", f"🎉 연휴·성수기: {peak}"]
+        lines.append(f"🔔 알림: {WATCH_NOTIFY_LABELS['DAILY' if daily else 'DROP']}")
+        if daily:
+            lines.append("⏰ 매일 아침 7:30 실시간 최저가 브리핑 (놓친 날은 보충 발송하지 않아요).")
+        elif fixed:
+            lines.append("⏰ 목표가 이하이거나 직전 알림보다 1만 원 이상 더 내리면 알려드려요.")
+        else:
+            lines.append("⏰ 실시간 관측 최저가가 목표가 이하가 되면 알려드려요 (같은 일정은 7일에 1번).")
+        if is_country_watch_code(code):
+            lines.append("🌏 국가 전체: 여러 공항 중 가장 싼 실시간 요금으로 알려드려요.")
+        rows: list[list[dict[str, Any]]] = []
+        if not fixed:
+            rows.append([{"text": f"🗓️ 요일: {day} (변경)", "callback_data": f"trv:w:t:{code}:day"}])
+            rows.append([{"text": f"🎉 연휴·성수기: {peak} (변경)", "callback_data": f"trv:w:t:{code}:pk"}])
+        rows += [
             [
                 {"text": "✍️ 목표가 변경", "callback_data": f"trv:w:i:{code}"},
                 {"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"},
             ],
+            [{"text": "⚙️ 기간·날짜·알림 방식 변경", "callback_data": f"trv:w:e:{code}"}],
             [{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}],
         ]
         return "\n".join(lines), {"inline_keyboard": rows}
@@ -1181,8 +1541,9 @@ class TravelInteractiveHandler:
                 f"{i}. {html.escape(label)} · {_man_label(int(w['target_price_krw']))} 이하 · "
                 f"{self._watch_options_line(w)}{seen_txt}"
             )
+            settings_sub = "s" if is_country_watch_code(w["dest_code"]) else "m"
             rows.append([
-                {"text": f"⚙️ {label}", "callback_data": f"trv:w:m:{w['dest_code']}"},
+                {"text": f"⚙️ {label}", "callback_data": f"trv:w:{settings_sub}:{w['dest_code']}"},
                 {"text": "🗑️ 삭제", "callback_data": f"trv:w:x:{w['dest_code']}"},
             ])
         if len(watches) < 3:
@@ -1190,8 +1551,138 @@ class TravelInteractiveHandler:
             quick = [c for c in WATCH_QUICK_ADD_CODES if c not in watched and self.catalog.get(c)][:3]
             if quick:
                 rows.append([{"text": f"➕ {self.label_for(c)}", "callback_data": f"trv:w:m:{c}"} for c in quick])
+        rows.append([{"text": "🌏 국가 전체·날짜 고정 알림 추가", "callback_data": "trv:w:g"}])
         rows.append([{"text": "🔍 다른 도시 검색", "callback_data": "trv:c:guide"}])
         return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_target_picker_card(self) -> tuple[str, dict[str, Any]]:
+        text = (
+            "🌏 <b>[특가 알림 대상 선택]</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "• <b>국가 전체</b>: 여러 공항 중 가장 싼 실시간 요금을 알려드려요.\n"
+            "• <b>도시</b>: 한 도시만 집중해서 추적해요.\n"
+            "💡 목록에 없는 도시는 이름을 입력해 검색한 뒤 [🔔 이 도시 특가 알림 설정]을 눌러 주세요."
+        )
+        countries = [
+            {"text": m["label"], "callback_data": f"trv:w:s:{m['code']}"} for m in list_watch_countries()
+        ]
+        cities = [
+            {"text": self.label_for(c), "callback_data": f"trv:w:s:{c}"}
+            for c in WATCH_PICKER_CITIES if self.catalog.get(c)
+        ]
+        rows = [countries[i:i + 3] for i in range(0, len(countries), 3)]
+        rows += [cities[i:i + 3] for i in range(0, len(cities), 3)]
+        rows.append([{"text": "📋 내 알림", "callback_data": "trv:w:l"}])
+        return text, {"inline_keyboard": rows}
+
+    def build_watch_setup_card(
+        self, chat_id: str, user_id: Optional[str], code: str, notice: str = ""
+    ) -> tuple[str, dict[str, Any]]:
+        """V2 setup hub: scope, baseline context, current choices and one-tap options (mobile-first)."""
+        draft = self._get_draft(chat_id, user_id, code)
+        label = self.label_for(code)
+        refs = self.watch_reference_prices(code)
+        watch = self._get_watch(chat_id, code)
+        active = bool(watch and watch.get("is_active"))
+        country = is_country_watch_code(code)
+        lines = [notice] if notice else []
+        lines += [f"🔔 <b>[{html.escape(label)} 특가 알림 설정]</b>", "━━━━━━━━━━━━━━━━━━"]
+        if country:
+            names = [self.label_for(c).split(" ", 1)[-1] for c in self.catalog.watch_target_codes(code)]
+            lines.append(f"📍 대상: {html.escape(' · '.join(names))} ({len(names)}곳 중 최저가)")
+        if refs:
+            parts = []
+            for key, name in (("FLOOR", "바닥"), ("DEAL", "실속"), ("BASELINE", "평균")):
+                if key in refs:
+                    parts.append(f"{name} {_man_label(refs[key])}")
+            basis = " · 국가 내 최저 기준" if country else ""
+            lines.append(f"📊 참고 시세(왕복 직항 1인{basis}): {' · '.join(parts)}")
+        else:
+            lines.append("📊 참고 시세가 없어요. 목표가를 직접 입력해 주세요.")
+        if active:
+            lines.append(f"✅ 현재 알림: <b>{int(watch['target_price_krw']):,}원 이하</b>")
+            seen = watch.get("last_seen_price_krw")
+            if seen:
+                lines.append(f"👀 최근 실시간 관측 최저가: {int(seen):,}원")
+        lines.append("━━ 선택한 조건 ━━")
+        if draft.watch_mode == "FIXED":
+            if draft.fixed_dep_date and draft.fixed_ret_date:
+                nights = _trip_nights_iso(draft.fixed_dep_date, draft.fixed_ret_date)
+                lines.append(
+                    f"📌 날짜 고정: {_short_iso(draft.fixed_dep_date)}~{_short_iso(draft.fixed_ret_date)} · {nights}박"
+                )
+            else:
+                lines.append("📌 날짜 고정: 날짜 입력 전")
+            lines.append("💡 정한 날짜의 실시간 요금과 ±1일 요금을 함께 비교해 드려요.")
+        else:
+            wlabel = WATCH_WEEKDAY_LABELS.get(draft.weekday_option, "주말+평일 전체")
+            lines.append(f"📅 기간 탐색: 앞으로 {draft.horizon_months}개월 · {wlabel} (3박)")
+            if draft.horizon_months > 6:
+                lines.append("ℹ️ 9~12개월 먼 일정은 LCC 특가가 아직 미오픈일 수 있어요.")
+        lines.append(f"🔔 알림: {WATCH_NOTIFY_LABELS.get(draft.notify_mode, WATCH_NOTIFY_LABELS['DROP'])}")
+        lines.append("👇 조건을 고른 뒤 [💾 저장] 버튼을 눌러 주세요. 실시간 검증 요금만 알려드려요.")
+
+        def mark(selected: bool, text: str) -> str:
+            return f"✅ {text}" if selected else text
+
+        flex = draft.watch_mode != "FIXED"
+        rows: list[list[dict[str, Any]]] = [[
+            {"text": mark(flex, "📅 기간 탐색"), "callback_data": f"trv:w:m2:{code}:F"},
+            {"text": mark(not flex, "📌 날짜 고정"), "callback_data": f"trv:w:m2:{code}:X"},
+        ]]
+        if flex:
+            rows.append([
+                {"text": mark(draft.horizon_months == h, f"{h}개월"), "callback_data": f"trv:w:h:{code}:{h}"}
+                for h in WATCH_HORIZON_CHOICES
+            ])
+            rows.append([
+                {"text": mark(draft.weekday_option == opt, WATCH_WEEKDAY_SHORT[opt]),
+                 "callback_data": f"trv:w:d:{code}:{c}"}
+                for c, opt in WATCH_WEEKDAY_CODES.items()
+            ])
+        else:
+            rows.append([{"text": "🗓️ 여행 날짜 입력·변경", "callback_data": f"trv:w:f:{code}"}])
+        rows.append([
+            {"text": mark(draft.notify_mode == "DROP", "🔔 하락 시 알림"), "callback_data": f"trv:w:n:{code}:D"},
+            {"text": mark(draft.notify_mode == "DAILY", "📰 매일 아침"), "callback_data": f"trv:w:n:{code}:Y"},
+        ])
+        if "DEAL" in refs:
+            rows.append([{"text": f"💾 실속 특가 {_man_label(refs['DEAL'])} 이하로 저장",
+                          "callback_data": f"trv:w:k:{code}:1"}])
+        if "BASELINE" in refs:
+            rows.append([{"text": f"💾 평균가 {_man_label(refs['BASELINE'])} 이하로 저장",
+                          "callback_data": f"trv:w:k:{code}:W"}])
+        rows.append([{"text": "✍️ 목표가 직접 입력 후 저장", "callback_data": f"trv:w:i:{code}"}])
+        if active:
+            rows.append([{"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"}])
+        rows.append([
+            {"text": "📋 내 알림", "callback_data": "trv:w:l"},
+            {"text": "🌏 대상 바꾸기", "callback_data": "trv:w:g"},
+        ])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_dates_prompt_card(self, code: str, notice: str = "") -> tuple[str, dict[str, Any]]:
+        label = self.label_for(code)
+        minutes = max(1, int(self.chat_state_ttl // 60))
+        lines = [notice] if notice else []
+        lines += [
+            f"🗓️ <b>[{html.escape(label)} 여행 날짜 입력]</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"출발일~귀국일을 채팅창에 입력해 주세요 ({minutes}분 안에).",
+            "예) <code>2027-05-01~2027-05-04</code> · <code>5.1~5.4</code> · <code>270501 270504</code>",
+            "• 오늘 이후 출발 · 1~30박 · 연도를 생략하면 가장 가까운 미래 날짜",
+            "• 취소: /cancel",
+        ]
+        return "\n".join(lines), {"inline_keyboard": [[{"text": "↩️ 돌아가기", "callback_data": f"trv:w:s:{code}"}]]}
+
+    def build_watch_dates_error_card(self, code: str, raw: str, reason: str) -> str:
+        shown = raw if len(raw) <= 30 else raw[:29] + "…"
+        label = self.label_for(code) if code else "선택한 지역"
+        return (
+            f"⚠️ '<b>{html.escape(shown)}</b>' — {html.escape(reason)}.\n"
+            f"{html.escape(label)} 날짜를 <code>2027-05-01~2027-05-04</code> 또는 <code>5.1~5.4</code> 처럼 입력해 주세요.\n"
+            "• 오늘 이후 출발 · 1~30박 · 취소: /cancel"
+        )
 
     def build_watch_input_card(self, code: str) -> tuple[str, dict[str, Any]]:
         label = self.label_for(code)

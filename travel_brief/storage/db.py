@@ -38,7 +38,7 @@ DEFAULT_THRESHOLDS = {
 logger = logging.getLogger(__name__)
 
 WATCH_MAX_ACTIVE_PER_CHAT = 10
-WATCH_PRESET_KINDS = ("DEAL", "FLOOR", "CUSTOM")
+WATCH_PRESET_KINDS = ("DEAL", "FLOOR", "CUSTOM", "BASELINE")
 WATCH_DAY_PATTERNS = ("ANY", "FRI_MON", "THU_SUN")
 WATCH_DELIVERY_STATUSES = ("IN_FLIGHT", "SENT", "UNKNOWN", "FAILED")
 # Statuses that count as "delivered" for duplicate / cooldown purposes (UNKNOWN is never auto-retried).
@@ -46,6 +46,28 @@ WATCH_BLOCKING_STATUSES = ("SENT", "UNKNOWN", "IN_FLIGHT")
 WATCH_COOLDOWN_DAYS = 7
 WATCH_MIN_REDROP_KRW = 10_000
 TRAVEL_BOT_ID = "travel_bot"
+# V2 watch model (additive columns; legacy rows keep their behaviour, see `_migrate_travel_watch_schema`)
+WATCH_MODES = ("FLEX", "FIXED")
+WATCH_HORIZONS = (1, 3, 6, 12)
+WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY")
+WATCH_NOTIFY_MODES = ("DROP", "DAILY")
+WATCH_DELIVERY_KINDS = ("DAILY", "DROP")
+# Pre-upgrade rows were 6-month weekend-only watches: backfilled once so they keep that exact scope.
+LEGACY_WATCH_BACKFILL = {"horizon_months": 6, "weekday_option": "WEEKEND"}
+_WATCH_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("watch_mode", "TEXT NOT NULL DEFAULT 'FLEX'"),
+    ("horizon_months", "INTEGER NOT NULL DEFAULT 3"),
+    ("weekday_option", "TEXT NOT NULL DEFAULT 'ANY'"),
+    ("fixed_dep_date", "TEXT DEFAULT NULL"),
+    ("fixed_ret_date", "TEXT DEFAULT NULL"),
+    ("notify_mode", "TEXT NOT NULL DEFAULT 'DROP'"),
+    ("initial_price_krw", "INTEGER DEFAULT NULL"),
+    ("last_daily_sent_date", "TEXT DEFAULT NULL"),
+)
+_DELIVERY_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("delivery_kind", "TEXT NOT NULL DEFAULT 'DROP'"),
+    ("kst_date", "TEXT DEFAULT NULL"),
+)
 
 
 class WatchLimitError(Exception):
@@ -75,15 +97,21 @@ def _topics_of(raw: Optional[str]) -> list[str]:
 
 
 def watch_cooldown_block_reason(
-    recent_rows: list[Any], dep_date: str, ret_date: str, price_krw: int, min_drop_krw: int = WATCH_MIN_REDROP_KRW
+    recent_rows: list[Any],
+    dep_date: str,
+    ret_date: str,
+    price_krw: int,
+    min_drop_krw: int = WATCH_MIN_REDROP_KRW,
+    allow_same_slot_drop: bool = False,
 ) -> Optional[str]:
     """7-day anti-spam rule over recent SENT/UNKNOWN/IN_FLIGHT rows of ONE watch.
-    Same (dep, ret) slot -> `slot_cooldown`; otherwise the price must undercut the cheapest recent alert by
+    Same (dep, ret) slot -> `slot_cooldown` (unless `allow_same_slot_drop`, used ONLY by FIXED watches whose
+    whole point is one exact slot); otherwise the price must undercut the cheapest recent alert by
     `min_drop_krw` -> else `insufficient_drop`. Returns None when the alert may be claimed.
     """
     if not recent_rows:
         return None
-    if any(r["dep_date"] == dep_date and r["ret_date"] == ret_date for r in recent_rows):
+    if not allow_same_slot_drop and any(r["dep_date"] == dep_date and r["ret_date"] == ret_date for r in recent_rows):
         return "slot_cooldown"
     floor = min(int(r["price_krw"]) for r in recent_rows)
     if int(price_krw) > floor - int(min_drop_krw):
@@ -96,6 +124,36 @@ def make_watch_delivery_key(
 ) -> str:
     """Ledger key always embeds `watch_id` so two watches can never collide on the same candidate."""
     return f"watch:{int(watch_id)}:{str(chat_id).strip()}:{dest_code.upper()}:{dep_date}:{ret_date}:{int(price_krw)}"
+
+
+def make_watch_daily_key(watch_id: int, kst_date: str) -> str:
+    """One DAILY briefing per watch per KST date (no price: a price change never re-opens the day)."""
+    return f"travel-watch:v2:{int(watch_id)}:DAILY:{kst_date}"
+
+
+def make_watch_drop_key_v2(watch_id: int, dep_date: str, ret_date: str, price_krw: int) -> str:
+    return f"travel-watch:v2:{int(watch_id)}:DROP:{dep_date}:{ret_date}:{int(price_krw)}"
+
+
+def kst_date_of(dt: Optional[datetime] = None) -> str:
+    return ((dt or datetime.now(timezone.utc)).astimezone(timezone.utc) + timedelta(hours=9)).date().isoformat()
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: tuple[tuple[str, str], ...]) -> list[str]:
+    """Idempotent additive migration (`PRAGMA table_info` + `ALTER TABLE ADD COLUMN`); never drops/rebuilds.
+    A concurrent initialiser that added the column first is tolerated (`duplicate column name`)."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    added: list[str] = []
+    for name, ddl in columns:
+        if name in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            added.append(name)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    return added
 
 
 class TravelBriefDatabase:
@@ -365,6 +423,7 @@ class TravelBriefDatabase:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_travel_watch_deliveries_watch ON travel_watch_deliveries (watch_id, created_at)"
             )
+            self._migrate_travel_watch_schema(db)
 
             # 10. Singleton tick lease (manager vs cron cross-process guard)
             db.execute(
@@ -376,6 +435,24 @@ class TravelBriefDatabase:
                     expires_at TEXT NOT NULL
                 )"""
             )
+
+    @staticmethod
+    def _migrate_travel_watch_schema(conn: sqlite3.Connection) -> dict[str, list[str]]:
+        """V2 watch columns + delivery cadence columns (additive, idempotent). Rows that existed before the
+        upgrade were 6-month weekend-only watches; they are backfilled once (in the same transaction as the
+        ALTER) so the upgrade never silently widens or narrows a live user's alert scope."""
+        added_watch = _add_missing_columns(conn, "travel_price_watches", _WATCH_V2_COLUMNS)
+        if "horizon_months" in added_watch and "weekday_option" in added_watch:
+            conn.execute(
+                "UPDATE travel_price_watches SET horizon_months = ?, weekday_option = ?",
+                (LEGACY_WATCH_BACKFILL["horizon_months"], LEGACY_WATCH_BACKFILL["weekday_option"]),
+            )
+        added_delivery = _add_missing_columns(conn, "travel_watch_deliveries", _DELIVERY_V2_COLUMNS)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_travel_watch_deliveries_kind "
+            "ON travel_watch_deliveries (watch_id, delivery_kind, kst_date)"
+        )
+        return {"travel_price_watches": added_watch, "travel_watch_deliveries": added_delivery}
 
     def _seed_initial_data(self) -> None:
         with self._connect() as db:
@@ -756,9 +833,21 @@ class TravelBriefDatabase:
         day_pattern: Optional[str] = None,
         include_peak: Optional[int] = None,
         max_active: int = WATCH_MAX_ACTIVE_PER_CHAT,
+        *,
+        watch_mode: Optional[str] = None,
+        horizon_months: Optional[int] = None,
+        weekday_option: Optional[str] = None,
+        fixed_dep_date: Optional[str] = None,
+        fixed_ret_date: Optional[str] = None,
+        notify_mode: Optional[str] = None,
+        initial_price_krw: Optional[int] = None,
     ) -> dict[str, Any]:
         """Creates/updates/re-activates the `(chat_id, dest_code)` watch atomically.
         `day_pattern` / `include_peak` default to ANY / 1 for new watches and keep existing toggles otherwise.
+        V2 options (`watch_mode` .. `notify_mode`) follow the same rule: `None` keeps the stored value (column
+        defaults for new rows). `dest_code` may be a city code or an `@`-country scope (e.g. `@JP`).
+        FIXED requires both fixed dates (passed or stored); switching to FLEX clears them. A re-activation or a
+        mode/date change resets the `initial_price_krw` anchor unless a new anchor is passed.
         Raises `WatchLimitError` when a new or re-activated watch would exceed `max_active`.
         """
         cid = str(chat_id).strip()
@@ -773,18 +862,47 @@ class TravelBriefDatabase:
             raise ValueError(f"invalid preset_kind: {preset_kind}")
         if day_pattern is not None and day_pattern not in WATCH_DAY_PATTERNS:
             raise ValueError(f"invalid day_pattern: {day_pattern}")
+        mode = watch_mode.upper() if watch_mode else None
+        if mode is not None and mode not in WATCH_MODES:
+            raise ValueError(f"invalid watch_mode: {watch_mode}")
+        if horizon_months is not None and int(horizon_months) not in WATCH_HORIZONS:
+            raise ValueError(f"invalid horizon_months: {horizon_months}")
+        wopt = weekday_option.upper() if weekday_option else None
+        if wopt is not None and wopt not in WATCH_WEEKDAY_OPTIONS:
+            raise ValueError(f"invalid weekday_option: {weekday_option}")
+        notify = notify_mode.upper() if notify_mode else None
+        if notify is not None and notify not in WATCH_NOTIFY_MODES:
+            raise ValueError(f"invalid notify_mode: {notify_mode}")
+        for raw in (fixed_dep_date, fixed_ret_date):
+            if raw is not None:
+                date.fromisoformat(raw)  # ValueError on malformed dates
+        if initial_price_krw is not None and int(initial_price_krw) <= 0:
+            raise ValueError("initial_price_krw must be positive")
         now = _utc_str()
 
         with self._immediate_tx() as db:
             row = db.execute(
                 "SELECT * FROM travel_price_watches WHERE chat_id = ? AND dest_code = ?", (cid, code)
             ).fetchone()
-            if row is None or not row["is_active"]:
+            reactivating = row is None or not row["is_active"]
+            if reactivating:
                 active = db.execute(
                     "SELECT COUNT(*) FROM travel_price_watches WHERE chat_id = ? AND is_active = 1", (cid,)
                 ).fetchone()[0]
                 if active >= max_active:
                     raise WatchLimitError(max_active, active)
+
+            cur_mode = mode or (row["watch_mode"] if row is not None else "FLEX")
+            if cur_mode == "FIXED":
+                dep = fixed_dep_date or (row["fixed_dep_date"] if row is not None else None)
+                ret = fixed_ret_date or (row["fixed_ret_date"] if row is not None else None)
+                if not dep or not ret:
+                    raise ValueError("FIXED watch requires fixed_dep_date and fixed_ret_date")
+                if date.fromisoformat(ret) <= date.fromisoformat(dep):
+                    raise ValueError("fixed_ret_date must be after fixed_dep_date")
+            else:
+                dep = ret = None
+
             if row is None:
                 db.execute(
                     """INSERT INTO travel_price_watches
@@ -804,10 +922,58 @@ class TravelBriefDatabase:
                      row["include_peak"] if include_peak is None else (1 if include_peak else 0),
                      now, row["watch_id"]),
                 )
+            # V2 columns: only touched when a V2 option was passed (legacy callers keep legacy rows intact).
+            v2_sets: dict[str, Any] = {}
+            if mode is not None:
+                v2_sets["watch_mode"] = mode
+            if mode is not None or fixed_dep_date is not None or fixed_ret_date is not None:
+                v2_sets["fixed_dep_date"] = dep
+                v2_sets["fixed_ret_date"] = ret
+            if horizon_months is not None:
+                v2_sets["horizon_months"] = int(horizon_months)
+            if wopt is not None:
+                v2_sets["weekday_option"] = wopt
+            if notify is not None:
+                v2_sets["notify_mode"] = notify
+            schedule_changed = row is not None and "fixed_dep_date" in v2_sets and (
+                cur_mode != row["watch_mode"] or dep != row["fixed_dep_date"] or ret != row["fixed_ret_date"]
+            )
+            if initial_price_krw is not None:
+                v2_sets["initial_price_krw"] = int(initial_price_krw)
+            elif row is not None and (reactivating or schedule_changed):
+                v2_sets["initial_price_krw"] = None
+            if v2_sets:
+                assignments = ", ".join(f"{k} = ?" for k in v2_sets)
+                db.execute(
+                    f"UPDATE travel_price_watches SET {assignments} WHERE chat_id = ? AND dest_code = ?",
+                    (*v2_sets.values(), cid, code),
+                )
             out = db.execute(
                 "SELECT * FROM travel_price_watches WHERE chat_id = ? AND dest_code = ?", (cid, code)
             ).fetchone()
             return dict(out)
+
+    def expire_fixed_watches(self, today_kst_iso: str) -> int:
+        """Pre-fetch expiry: FIXED watches whose departure date already passed (KST) -> `is_active = 0`."""
+        date.fromisoformat(today_kst_iso)
+        with self._immediate_tx() as db:
+            cur = db.execute(
+                """UPDATE travel_price_watches SET is_active = 0, updated_at = ?
+                   WHERE is_active = 1 AND watch_mode = 'FIXED'
+                     AND fixed_dep_date IS NOT NULL AND fixed_dep_date < ?""",
+                (_utc_str(), today_kst_iso),
+            )
+            return cur.rowcount
+
+    def set_watch_initial_price_if_null(self, watch_id: int, price_krw: int) -> bool:
+        """Anchors the first verified live price after (re-)registration; never overwrites an anchor."""
+        with self._immediate_tx() as db:
+            cur = db.execute(
+                "UPDATE travel_price_watches SET initial_price_krw = ? "
+                "WHERE watch_id = ? AND initial_price_krw IS NULL",
+                (int(price_krw), int(watch_id)),
+            )
+            return cur.rowcount > 0
 
     def list_travel_watches(self, chat_id: Optional[str] = None, active_only: bool = True) -> list[dict[str, Any]]:
         sql = "SELECT * FROM travel_price_watches WHERE 1 = 1"
@@ -1041,19 +1207,79 @@ class TravelBriefDatabase:
         cooldown_days: int = WATCH_COOLDOWN_DAYS,
         min_drop_krw: int = WATCH_MIN_REDROP_KRW,
         now: Optional[datetime] = None,
+        *,
+        allow_same_slot_drop: bool = False,
+        key_version: int = 1,
     ) -> WatchClaim:
-        """Atomically claims an IN_FLIGHT lease for one watch alert.
+        """Atomically claims an IN_FLIGHT lease for one DROP watch alert.
         Rules (inside one `BEGIN IMMEDIATE`):
         1. Expired IN_FLIGHT rows are quarantined to UNKNOWN first.
         2. Same delivery_key already SENT / UNKNOWN / IN_FLIGHT -> rejected (only FAILED may be re-claimed).
         3. Within `cooldown_days` of any SENT/UNKNOWN/IN_FLIGHT for this watch: the same (dep, ret) slot is
-           rejected, and a new slot must be at least `min_drop_krw` cheaper than the cheapest recent alert.
+           rejected (unless `allow_same_slot_drop`, FIXED watches only), and the price must be at least
+           `min_drop_krw` cheaper than the cheapest recent alert.
+        `key_version=1` keeps the legacy `watch:...` key; `2` uses `travel-watch:v2:{id}:DROP:...`.
         """
         now_dt = now or datetime.now(timezone.utc)
+        if key_version == 2:
+            key = make_watch_drop_key_v2(watch_id, dep_date, ret_date, price_krw)
+        else:
+            key = make_watch_delivery_key(watch_id, chat_id, dest_code, dep_date, ret_date, price_krw)
+        return self._claim_delivery(
+            key, watch_id, chat_id, dest_code, dep_date, ret_date, int(price_krw), lease_owner, lease_ttl_seconds,
+            now_dt, kind="DROP", cooldown_days=cooldown_days, min_drop_krw=min_drop_krw,
+            allow_same_slot_drop=allow_same_slot_drop,
+        )
+
+    def claim_watch_daily_delivery(
+        self,
+        watch_id: int,
+        chat_id: str,
+        dest_code: str,
+        kst_date: str,
+        dep_date: str,
+        ret_date: str,
+        price_krw: int,
+        lease_owner: str,
+        lease_ttl_seconds: int = 300,
+        now: Optional[datetime] = None,
+    ) -> WatchClaim:
+        """One DAILY briefing per watch per KST date (`travel-watch:v2:{id}:DAILY:{kst_date}`).
+        SENT / UNKNOWN / IN_FLIGHT for that date block the whole day (UNKNOWN is never retried, [PROD-LIVE]);
+        only a non-ambiguous FAILED may be re-claimed. The 7-day DROP cooldown does not apply to DAILY, but
+        DAILY rows do count as "last notified" for later DROP claims. The claim also stamps the
+        `last_daily_sent_date` projection in the same transaction."""
+        date.fromisoformat(kst_date)
+        key = make_watch_daily_key(watch_id, kst_date)
+        return self._claim_delivery(
+            key, watch_id, chat_id, dest_code, dep_date, ret_date, int(price_krw), lease_owner, lease_ttl_seconds,
+            now or datetime.now(timezone.utc), kind="DAILY", kst_date=kst_date,
+        )
+
+    def _claim_delivery(
+        self,
+        key: str,
+        watch_id: int,
+        chat_id: str,
+        dest_code: str,
+        dep_date: str,
+        ret_date: str,
+        price: int,
+        lease_owner: str,
+        lease_ttl_seconds: int,
+        now_dt: datetime,
+        *,
+        kind: str,
+        kst_date: Optional[str] = None,
+        cooldown_days: int = WATCH_COOLDOWN_DAYS,
+        min_drop_krw: int = WATCH_MIN_REDROP_KRW,
+        allow_same_slot_drop: bool = False,
+    ) -> WatchClaim:
+        if kind not in WATCH_DELIVERY_KINDS:
+            raise ValueError(f"invalid delivery kind: {kind}")
         now_str = _utc_str(now_dt)
         since_str = _utc_str(now_dt - timedelta(days=cooldown_days))
-        key = make_watch_delivery_key(watch_id, chat_id, dest_code, dep_date, ret_date, price_krw)
-        price = int(price_krw)
+        day = kst_date or kst_date_of(now_dt)
 
         with self._immediate_tx() as db:
             self._expire_stale_in_tx(db, now_str)
@@ -1063,10 +1289,13 @@ class TravelBriefDatabase:
             if existing is not None and existing["status"] != "FAILED":
                 return WatchClaim(False, f"duplicate_{existing['status'].lower()}", key)
 
-            recent = self._blocking_rows_in_tx(db, watch_id, since_str)
-            blocked = watch_cooldown_block_reason(recent, dep_date, ret_date, price, min_drop_krw)
-            if blocked:
-                return WatchClaim(False, blocked, key)
+            if kind == "DROP":
+                recent = self._blocking_rows_in_tx(db, watch_id, since_str)
+                blocked = watch_cooldown_block_reason(
+                    recent, dep_date, ret_date, price, min_drop_krw, allow_same_slot_drop=allow_same_slot_drop
+                )
+                if blocked:
+                    return WatchClaim(False, blocked, key)
 
             token = uuid.uuid4().hex
             expires = _utc_str(now_dt + timedelta(seconds=lease_ttl_seconds))
@@ -1075,10 +1304,11 @@ class TravelBriefDatabase:
                 db.execute(
                     """INSERT INTO travel_watch_deliveries
                        (delivery_key, watch_id, chat_id, dest_code, dep_date, ret_date, price_krw, status,
-                        lease_token, lease_owner, lease_expires_at, attempt_no, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'IN_FLIGHT', ?, ?, ?, 1, ?, ?)""",
+                        lease_token, lease_owner, lease_expires_at, attempt_no, created_at, updated_at,
+                        delivery_kind, kst_date)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'IN_FLIGHT', ?, ?, ?, 1, ?, ?, ?, ?)""",
                     (key, int(watch_id), str(chat_id).strip(), dest_code.upper(), dep_date, ret_date, price,
-                     token, lease_owner, expires, now_str, now_str),
+                     token, lease_owner, expires, now_str, now_str, kind, day),
                 )
             else:
                 attempt_no = int(existing["attempt_no"] or 1) + 1
@@ -1086,12 +1316,18 @@ class TravelBriefDatabase:
                     """UPDATE travel_watch_deliveries
                        SET status = 'IN_FLIGHT', lease_token = ?, lease_owner = ?, lease_expires_at = ?,
                            attempt_no = ?, error_detail = NULL, provider_msg_id = NULL,
+                           dep_date = ?, ret_date = ?, price_krw = ?,
                            created_at = ?, updated_at = ?
                        WHERE delivery_key = ? AND status = 'FAILED'""",
-                    (token, lease_owner, expires, attempt_no, now_str, now_str, key),
+                    (token, lease_owner, expires, attempt_no, dep_date, ret_date, price, now_str, now_str, key),
                 )
                 if cur.rowcount == 0:
                     return WatchClaim(False, "concurrent_claim_conflict", key)
+            if kind == "DAILY":
+                db.execute(
+                    "UPDATE travel_price_watches SET last_daily_sent_date = ? WHERE watch_id = ?",
+                    (day, int(watch_id)),
+                )
             return WatchClaim(True, "claimed", key, token, attempt_no)
 
     def finalize_watch_delivery(

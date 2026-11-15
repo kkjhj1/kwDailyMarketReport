@@ -53,6 +53,47 @@ KST = timezone(timedelta(hours=9))
 # consumes their thinner SSE coverage; fast lookups still reuse a fresh full-batch entry first.
 FAST_CACHE_REF_SUFFIX = "#fast"
 FAST_MODE_MAX_SSE_TARGETS = 6
+# GraphQL alias payload guard: 12-month ANY horizons are 104~208 slots per airport -> chunked requests.
+MAX_PG_SLOTS_PER_QUERY = 32
+# Overall monotonic budget for one watch collection (PG chunks + SSE) so a cron tick never hangs.
+WATCH_COLLECTION_DEADLINE_SECONDS = 45.0
+_LEGACY_WEEKEND_PATTERNS = {(3, 3), (4, 3)}
+_SIG_SAFE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#_-")
+
+
+def _remaining(deadline: Optional[float]) -> Optional[float]:
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _deadline_passed(deadline: Optional[float]) -> bool:
+    rem = _remaining(deadline)
+    return rem is not None and rem <= 0
+
+
+def normalize_slot_signature(signature: Optional[str]) -> str:
+    """Strips anything that would break `ref:months:dests` disk keys (`:` / `,` / spaces)."""
+    sig = "".join(ch for ch in (signature or "") if ch in _SIG_SAFE_CHARS)
+    if sig and not sig.startswith("#"):
+        sig = "#" + sig
+    return sig[:40]
+
+
+def slot_signature_for(slots: Iterable[tuple]) -> str:
+    """Implicit cache namespace for callers that pass custom slots without a signature.
+    The legacy weekend 3N set (Thu->Sun / Fri->Mon) keeps the legacy key (""); any other slot set gets a
+    deterministic digest so it can never be served from (or pollute) the weekend cache entry."""
+    pairs = []
+    legacy = True
+    for s in slots:
+        dep, ret = s[0], s[1]
+        pairs.append(f"{dep.isoformat()}~{ret.isoformat()}")
+        if (dep.weekday(), (ret - dep).days) not in _LEGACY_WEEKEND_PATTERNS:
+            legacy = False
+    if legacy:
+        return ""
+    import hashlib
+
+    return "#s" + hashlib.sha1("|".join(sorted(pairs)).encode("utf-8")).hexdigest()[:10]
 
 IATA_AIRLINE_KO: dict[str, str] = {
     "7C": "제주항공",
@@ -417,10 +458,40 @@ class NaverFlightLiveClient:
         self,
         dest_code: str,
         slots: list[tuple[date, date, str, str, int]],
+        deadline: Optional[float] = None,
     ) -> dict[tuple[str, str], tuple[int, int]]:
-        """Stage 1: Queries all ~52 weekend 3N4D slots for a single destination in ONE GraphQL request."""
+        """Stage 1: price-graph lowest fares for one destination, `MAX_PG_SLOTS_PER_QUERY` aliases per
+        GraphQL request (a 6-month weekend set is 2 requests, a 12-month ANY set ~7). Chunks run in order
+        under the optional monotonic `deadline`; a chunk failure keeps the chunks already collected and
+        only re-raises when nothing at all could be collected (legacy single-request semantics)."""
         if not slots:
             return {}
+        out: dict[tuple[str, str], tuple[int, int]] = {}
+        last_exc: Optional[BaseException] = None
+        succeeded = 0
+        for start in range(0, len(slots), MAX_PG_SLOTS_PER_QUERY):
+            chunk = slots[start:start + MAX_PG_SLOTS_PER_QUERY]
+            rem = _remaining(deadline)
+            if rem is not None and rem <= 0.5:
+                logger.info("PG chunking for %s stopped at deadline (%d/%d slots).", dest_code, start, len(slots))
+                break
+            timeout = self.gql_timeout if rem is None else max(0.5, min(self.gql_timeout, rem))
+            try:
+                out.update(self._fetch_pg_chunk(dest_code, chunk, timeout))
+                succeeded += 1
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("PG chunk %d for %s failed: %s", start // MAX_PG_SLOTS_PER_QUERY, dest_code, exc)
+        if not succeeded and last_exc is not None:
+            raise last_exc
+        return out
+
+    def _fetch_pg_chunk(
+        self,
+        dest_code: str,
+        slots: list[tuple[date, date, str, str, int]],
+        timeout: float,
+    ) -> dict[tuple[str, str], tuple[int, int]]:
         fields: list[str] = []
         compact_pairs: list[tuple[str, str, str, str]] = []
         for idx, (dep_d, ret_d, _, _, _) in enumerate(slots):
@@ -434,6 +505,17 @@ class NaverFlightLiveClient:
             compact_pairs.append((dep_d.isoformat(), ret_d.isoformat(), dep_c, ret_c))
 
         query_str = "query BATCH_CITY_PG {\n" + "\n".join(fields) + "\n}"
+        res = self._post_pg_query(query_str, timeout)
+
+        data = res.get("data") or {}
+        out: dict[tuple[str, str], tuple[int, int]] = {}
+        for idx, (dep_iso, ret_iso, _, _) in enumerate(compact_pairs):
+            latest_fare, avg_fare = extract_latest_valid_pg_fare(data.get(f"s{idx}"))
+            if latest_fare is not None:
+                out[(dep_iso, ret_iso)] = (latest_fare, avg_fare)
+        return out
+
+    def _post_pg_query(self, query_str: str, timeout: float) -> dict:
         payload = json.dumps({"operationName": "BATCH_CITY_PG", "variables": {}, "query": query_str}).encode("utf-8")
         req = urllib.request.Request(
             NAVER_GQL_URL,
@@ -446,16 +528,8 @@ class NaverFlightLiveClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.gql_timeout) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-
-        data = res.get("data") or {}
-        out: dict[tuple[str, str], tuple[int, int]] = {}
-        for idx, (dep_iso, ret_iso, _, _) in enumerate(compact_pairs):
-            latest_fare, avg_fare = extract_latest_valid_pg_fare(data.get(f"s{idx}"))
-            if latest_fare is not None:
-                out[(dep_iso, ret_iso)] = (latest_fare, avg_fare)
-        return out
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
     def fetch_live_sse_slot(
         self,
@@ -672,15 +746,22 @@ class NaverFlightLiveClient:
         ref_date: Optional[date] = None,
         months_ahead: int = 6,
         fast_mode: bool = False,
+        slot_signature: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
         """Executes full 2-stage live Naver collection with thread-safe Future Single-Flight,
         narrowed cache locking, KST baseline date, and Post-SSE Re-Rank protection.
         `fast_mode=True` (Telegram on-demand) SSE-verifies only the cheapest deal per destination.
+        `slot_signature` namespaces the cache by slot set (WEEKEND / WEEKDAY / ANY / custom): it is folded
+        into the ref component of the key, so weekend entries can never be served for other slot sets.
+        Without a signature, non-weekend slot sets get an implicit digest namespace (`slot_signature_for`).
+        `deadline` (monotonic) bounds the leader's network work (PG chunks + SSE).
         """
+        sig = normalize_slot_signature(slot_signature) if slot_signature is not None else slot_signature_for(slots)
         if ref_date is None:
-            eff_ref = datetime.now(KST).date().isoformat()
+            eff_ref = datetime.now(KST).date().isoformat() + sig
         else:
-            eff_ref = ref_date.isoformat()
+            eff_ref = ref_date.isoformat() + sig
         full_key: _CacheKey = (eff_ref, months_ahead, _dests_tuple(destinations.keys()))
         mem_key: _CacheKey = (
             (eff_ref + FAST_CACHE_REF_SUFFIX, months_ahead, full_key[2]) if fast_mode else full_key
@@ -718,8 +799,12 @@ class NaverFlightLiveClient:
 
         # Follower execution path: wait for Leader's Future outside the lock
         if not is_leader:
+            wait_sec = MAX_COLLECTION_DEADLINE_SECONDS
+            rem = _remaining(deadline)
+            if rem is not None:
+                wait_sec = max(0.1, min(wait_sec, rem))
             try:
-                res_deals = fut.result(timeout=MAX_COLLECTION_DEADLINE_SECONDS)
+                res_deals = fut.result(timeout=wait_sec)
                 if res_deals:
                     return list(res_deals)
             except Exception as exc:
@@ -733,10 +818,10 @@ class NaverFlightLiveClient:
         # Leader execution path: perform network I/O strictly outside the lock
         deals: list[FlightDeal] = []
         try:
-            if fast_mode:
-                deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn, fast_mode=True)
-            else:
-                deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn)
+            collect_kwargs: dict = {"fast_mode": True} if fast_mode else {}
+            if deadline is not None:
+                collect_kwargs["deadline"] = deadline
+            deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn, **collect_kwargs)
             if deals:
                 with _CACHE_LOCK:
                     # Epoch guard: a refresh happened mid-flight -> do not resurrect pre-refresh data as fresh.
@@ -843,6 +928,7 @@ class NaverFlightLiveClient:
         slots: list[tuple[date, date, str, str, int]],
         holiday_fn: Callable[[date, Optional[date]], tuple[bool, str, float]],
         fast_mode: bool = False,
+        deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
         slot_meta_map: dict[tuple[str, str], tuple[date, date, str, str, int]] = {
             (dep.isoformat(), ret.isoformat()): (dep, ret, dep_dow, ret_dow, nights)
@@ -853,8 +939,9 @@ class NaverFlightLiveClient:
         # Stage 1: Parallel batched GET_PRICE_GRAPH across all destinations (~0.45s)
         pg_by_city: dict[str, dict[tuple[str, str], tuple[int, int]]] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            pg_kwargs: dict = {} if deadline is None else {"deadline": deadline}
             future_map = {
-                ex.submit(self.fetch_city_batch_pg, code, slots): code
+                ex.submit(self.fetch_city_batch_pg, code, slots, **pg_kwargs): code
                 for code in destinations
             }
             for fut in concurrent.futures.as_completed(future_map):
@@ -895,6 +982,8 @@ class NaverFlightLiveClient:
                         "목요일 직항 출발 (출도착 시각 실시간 링크 확인 · 연차 1~2일)"
                         if dep_dow == "목"
                         else "금요일 직항 출발 (출도착 시각 실시간 링크 확인 · 연차 1~2일)"
+                        if dep_dow == "금"
+                        else f"{dep_dow}요일 직항 출발 (출도착 시각 실시간 링크 확인)"
                     ),
                     time_category="morning",
                     price_min_krw=lowest_fare,
@@ -906,6 +995,9 @@ class NaverFlightLiveClient:
 
         if not deals_by_key:
             return []
+        if _deadline_passed(deadline):
+            # Budget exhausted: PG-only result (never pushable as a watch trigger, honestly LIVE_PG).
+            return sorted(deals_by_key.values(), key=lambda d: d.price_krw)
 
         cookie_hdr = self._fetch_session_cookie_header()
 
@@ -918,6 +1010,8 @@ class NaverFlightLiveClient:
                 if cur is None or d.price_krw < cur.price_krw:
                     city_best[d.destination_code] = d
             fast_targets = sorted(city_best.values(), key=lambda d: d.price_krw)[:FAST_MODE_MAX_SSE_TARGETS]
+            if _deadline_passed(deadline):
+                fast_targets = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
                 fut_map = {
                     ex.submit(
@@ -1000,7 +1094,7 @@ class NaverFlightLiveClient:
 
         def _run_sse_batch(targets: set[tuple[str, str, str]]) -> None:
             pending = [t for t in targets if t not in attempted_sse]
-            if not pending:
+            if not pending or _deadline_passed(deadline):
                 return
             attempted_sse.update(pending)
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
@@ -1103,3 +1197,61 @@ class NaverFlightLiveClient:
             upgraded_map.get((d.destination_code, d.departure_date, d.return_date), d)
             for d in deals
         ]
+
+    def fetch_fixed_date_quotes(
+        self,
+        dest: DestinationMeta,
+        slots: list[tuple[date, date, str, str, int]],
+        holiday_fn: Callable[[date, Optional[date]], tuple[bool, str, float]],
+        deadline: Optional[float] = None,
+    ) -> list[FlightDeal]:
+        """Fixed-date watch quotes: direct `searchFlights` SSE per slot (main fixed slot first, then the
+        bounded ±1d neighbours). Only verified `LIVE_SSE` + `FRESH` fares are returned; an unverified slot
+        is simply absent (never estimated from price-graph or offline data, [DATA-01]). Not cached: a fixed
+        watch costs at most 1 + 2 SSE calls per tick, and the deadline stops the remaining calls."""
+        if not slots or dest is None:
+            return []
+        code = dest.code.upper()
+        if deadline is None:
+            deadline = time.monotonic() + WATCH_COLLECTION_DEADLINE_SECONDS
+        if _deadline_passed(deadline):
+            return []
+        cookie_hdr = self._fetch_session_cookie_header()
+        out: list[FlightDeal] = []
+        for dep_d, ret_d, dep_dow, ret_dow, nights in slots:
+            if _deadline_passed(deadline):
+                logger.info("Fixed-date SSE for %s stopped at deadline.", code)
+                break
+            dep_iso, ret_iso = dep_d.isoformat(), ret_d.isoformat()
+            try:
+                sse_res = self.fetch_live_sse_slot(code, dep_iso, ret_iso, cookie_hdr)
+            except Exception as exc:
+                logger.debug("Fixed-date SSE failed for %s %s~%s: %s", code, dep_iso, ret_iso, exc)
+                sse_res = None
+            if not sse_res:
+                continue
+            is_peak, holiday_name, _ = holiday_fn(dep_d, ret_d)
+            base = FlightDeal(
+                destination_code=code,
+                destination_name=dest.name,
+                origin_code="ICN",
+                departure_date=dep_iso,
+                return_date=ret_iso,
+                departure_day_of_week=dep_dow,
+                return_day_of_week=ret_dow,
+                nights=int(nights),
+                airline="네이버 직항 최저가",
+                price_krw=dest.flight_baseline_krw,
+                baseline_krw=dest.flight_baseline_krw,
+                is_peak_holiday=is_peak,
+                holiday_name=holiday_name,
+                data_source="LIVE_PG",
+            )
+            try:
+                verified = self.apply_sse_to_deal(base, dest, sse_res)
+            except Exception as exc:
+                logger.debug("Fixed-date SSE parse failed for %s %s~%s: %s", code, dep_iso, ret_iso, exc)
+                continue
+            if verified.data_source == "LIVE_SSE" and verified.freshness == "FRESH" and verified.price_krw > 0:
+                out.append(verified)
+        return out

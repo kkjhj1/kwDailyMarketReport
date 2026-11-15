@@ -110,6 +110,62 @@ _COUNTRY_FLAGS: dict[str, str] = {
     "인도네시아": "🇮🇩", "싱가포르": "🇸🇬",
 }
 
+# ----------------------------------------------------------------------
+# Country watch scopes (MVP 5 countries). `@` prefix keeps them disjoint from IATA codes so they fit
+# the existing `UNIQUE(chat_id, dest_code)` watch identity. Member airports are an explicit allowlist
+# (every code exists in the CURATED JSON or the FALLBACK table above) — never a free-form fan-out.
+# ----------------------------------------------------------------------
+COUNTRY_WATCH_PREFIX = "@"
+_WATCH_COUNTRIES: dict[str, dict] = {
+    "@JP": {"name": "일본", "flag": "🇯🇵", "codes": ("NRT", "KIX", "FUK", "CTS", "OKA"),
+            "aliases": ("일본", "일본전체", "japan", "jp")},
+    "@VN": {"name": "베트남", "flag": "🇻🇳", "codes": ("DAD", "CXR", "HAN", "SGN", "PQC"),
+            "aliases": ("베트남", "베트남전체", "vietnam", "vn")},
+    "@TH": {"name": "태국", "flag": "🇹🇭", "codes": ("BKK", "CNX", "HKT"),
+            "aliases": ("태국", "태국전체", "thailand", "th")},
+    "@TW": {"name": "대만", "flag": "🇹🇼", "codes": ("TPE", "KHH"),
+            # bare "대만" stays the TPE city alias (legacy search contract)
+            "aliases": ("대만전체", "taiwan", "tw")},
+    "@PH": {"name": "필리핀", "flag": "🇵🇭", "codes": ("CEB", "KLO", "MNL"),
+            "aliases": ("필리핀", "필리핀전체", "philippines", "ph")},
+}
+
+
+def is_country_watch_code(code: Optional[str]) -> bool:
+    return (code or "").strip().upper() in _WATCH_COUNTRIES
+
+
+def resolve_watch_target_codes(code: Optional[str]) -> tuple[str, ...]:
+    """`@JP` -> its member airports; a plain code -> `(code,)`; empty -> `()`."""
+    c = (code or "").strip().upper()
+    if not c:
+        return ()
+    spec = _WATCH_COUNTRIES.get(c)
+    if spec is not None:
+        return tuple(spec["codes"])
+    if c.startswith(COUNTRY_WATCH_PREFIX):
+        return ()  # unknown country scope never fans out
+    return (c,)
+
+
+def get_watch_country_meta(code: Optional[str]) -> Optional[dict]:
+    c = (code or "").strip().upper()
+    spec = _WATCH_COUNTRIES.get(c)
+    if spec is None:
+        return None
+    return {
+        "code": c,
+        "name": spec["name"],
+        "flag": spec["flag"],
+        "label": f"{spec['flag']} {spec['name']} 전체",
+        "codes": tuple(spec["codes"]),
+    }
+
+
+def list_watch_countries() -> list[dict]:
+    return [m for m in (get_watch_country_meta(c) for c in _WATCH_COUNTRIES) if m is not None]
+
+
 _ZERO_WIDTH_RE = re.compile(r"[​-‏⁠﻿­]")
 _WS_RE = re.compile(r"\s+")
 _STRIP_PUNCT_RE = re.compile(r"[-()._·,/!?~]")
@@ -253,6 +309,24 @@ class CityCatalog:
             # Arbitrary IATA-like codes never pass through: only catalog codes resolve.
             return None
         return self.get(code)
+
+    def resolve_country(self, query: str) -> Optional[str]:
+        """Free text (`일본`, `베트남 전체`, `@JP`) -> country watch scope, or None. City aliases win:
+        a text that resolves to a city (e.g. `대만` -> TPE) is never treated as a country."""
+        raw = (query or "").strip()
+        if is_country_watch_code(raw):
+            return raw.upper()
+        key = _lookup_key(raw)
+        if not key or key in self._index:
+            return None
+        for code, spec in _WATCH_COUNTRIES.items():
+            if key in {_lookup_key(a) for a in spec["aliases"]}:
+                return code
+        return None
+
+    def watch_target_codes(self, code: str) -> tuple[str, ...]:
+        """Catalog-verified airports a watch scope expands to (unknown members are dropped)."""
+        return tuple(c for c in resolve_watch_target_codes(code) if self.is_known_code(c))
 
     def custom_destinations_for(self, code: str) -> Optional[dict[str, DestinationMeta]]:
         """Request-scoped mapping for FALLBACK cities (None for curated / unknown codes)."""

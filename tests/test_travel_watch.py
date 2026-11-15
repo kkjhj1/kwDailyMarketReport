@@ -682,3 +682,697 @@ def test_runner_check_watches_demo_is_isolated(capsys):
 def test_run_cron_has_travel_watches_task():
     text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
     assert "travel_watches)" in text and "travel_bot_runner.py --check-watches --live-naver" in text
+
+
+# ======================================================================
+# V2: country scopes / horizons / weekday options / fixed dates / DAILY cadence
+# ======================================================================
+from datetime import date  # noqa: E402
+
+from travel_brief import naver_live as nl  # noqa: E402
+from travel_brief.city_catalog import (  # noqa: E402
+    CityCatalog,
+    get_watch_country_meta,
+    is_country_watch_code,
+    list_watch_countries,
+    resolve_watch_target_codes,
+)
+from travel_brief.flight_engine import (  # noqa: E402
+    FlightEngine,
+    build_fixed_neighbor_slots,
+    generate_watch_slots,
+    kst_today,
+    validate_fixed_dates,
+)
+from travel_brief.interactive import STATE_AWAITING_WATCH_DATES, parse_watch_date_range  # noqa: E402
+from travel_brief.storage.db import make_watch_daily_key  # noqa: E402
+from travel_brief.watch_engine import KST, WatchFetchSpec, make_live_quote_fetcher  # noqa: E402
+
+LEGACY_WATCH_DDL = """CREATE TABLE travel_price_watches (
+    watch_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, dest_code TEXT NOT NULL,
+    target_price_krw INTEGER NOT NULL, preset_kind TEXT NOT NULL DEFAULT 'DEAL',
+    day_pattern TEXT NOT NULL DEFAULT 'ANY', include_peak INTEGER NOT NULL DEFAULT 1,
+    is_active INTEGER NOT NULL DEFAULT 1, last_seen_price_krw INTEGER, last_seen_slot TEXT, last_seen_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(chat_id, dest_code))"""
+LEGACY_DELIVERY_DDL = """CREATE TABLE travel_watch_deliveries (
+    delivery_key TEXT PRIMARY KEY, watch_id INTEGER NOT NULL, chat_id TEXT NOT NULL, dest_code TEXT NOT NULL,
+    dep_date TEXT NOT NULL, ret_date TEXT NOT NULL, price_krw INTEGER NOT NULL, status TEXT NOT NULL,
+    lease_token TEXT, lease_owner TEXT, lease_expires_at TEXT, attempt_no INTEGER NOT NULL DEFAULT 1,
+    provider_msg_id INTEGER, error_detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+
+
+def kst_clock(y, m, d, hh, mm=0):
+    return lambda: datetime(y, m, d, hh, mm, tzinfo=KST).astimezone(timezone.utc)
+
+
+def mk_live(code="FUK", dep="2027-01-14", ret="2027-01-17", price=200_000, source="LIVE_SSE", freshness="FRESH",
+            airline="제주항공", dep_time="", ret_time="", arr_time="", nights=None):
+    d0, d1 = date.fromisoformat(dep), date.fromisoformat(ret)
+    dow = ["월", "화", "수", "목", "금", "토", "일"]
+    return FlightDeal(
+        destination_code=code, destination_name=code, origin_code="ICN", departure_date=dep, return_date=ret,
+        departure_day_of_week=dow[d0.weekday()], return_day_of_week=dow[d1.weekday()],
+        nights=(d1 - d0).days if nights is None else nights, airline=airline, price_krw=price,
+        baseline_krw=price + 50_000, data_source=source, freshness=freshness,
+        exact_dep_time=dep_time, exact_ret_time=ret_time, exact_ret_arr_time=arr_time,
+    )
+
+
+def fixed_fetcher_from(deals_by_key):
+    calls = []
+
+    def fetch(code, custom, dep, ret, include_neighbors):
+        calls.append((code, dep, ret, include_neighbors))
+        return list(deals_by_key.get((code, dep, ret), []))
+
+    fetch.calls = calls
+    return fetch
+
+
+def spec_fetcher_from(deals_by_code):
+    calls = []
+
+    def fetch(code, custom, max_target, spec=None):
+        calls.append((code, spec))
+        return list(deals_by_code.get(code, []))
+
+    fetch.accepts_spec = True
+    fetch.calls = calls
+    return fetch
+
+
+def ledger_rows(db, watch_id):
+    with db._connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM travel_watch_deliveries WHERE watch_id = ? ORDER BY created_at, delivery_key",
+            (watch_id,)).fetchall()]
+
+
+# ----------------------------------------------------------------------
+# V2-1. Idempotent additive migration, FIXED pre-fetch expiry, atomic limit
+# ----------------------------------------------------------------------
+def test_v2_migration_is_additive_idempotent_and_backfills_legacy_rows(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(LEGACY_WATCH_DDL)
+    conn.execute(LEGACY_DELIVERY_DDL)
+    conn.execute("""INSERT INTO travel_price_watches (chat_id, dest_code, target_price_krw, created_at, updated_at)
+                    VALUES ('c1', 'FUK', 250000, '2026-11-01 00:00:00', '2026-11-01 00:00:00')""")
+    conn.execute("""INSERT INTO travel_watch_deliveries (delivery_key, watch_id, chat_id, dest_code, dep_date,
+                    ret_date, price_krw, status, created_at, updated_at) VALUES
+                    ('watch:1:c1:FUK:2027-01-14:2027-01-17:200000', 1, 'c1', 'FUK', '2027-01-14', '2027-01-17',
+                     200000, 'SENT', '2026-11-01 00:00:00', '2026-11-01 00:00:00')""")
+    conn.commit()
+    conn.close()
+
+    db = TravelBriefDatabase(db_path=str(path))
+    with db._connect() as c:
+        wcols = {r[1] for r in c.execute("PRAGMA table_info(travel_price_watches)")}
+        dcols = {r[1] for r in c.execute("PRAGMA table_info(travel_watch_deliveries)")}
+    assert {"watch_mode", "horizon_months", "weekday_option", "fixed_dep_date", "fixed_ret_date",
+            "notify_mode", "initial_price_krw", "last_daily_sent_date"} <= wcols
+    assert {"delivery_kind", "kst_date"} <= dcols
+    legacy = db.get_travel_watch("c1", "FUK")
+    # pre-upgrade rows keep their exact legacy scope (6-month weekend), cadence DROP, FLEX
+    assert (legacy["watch_mode"], legacy["horizon_months"], legacy["weekday_option"], legacy["notify_mode"],
+            legacy["fixed_dep_date"], legacy["target_price_krw"]) == ("FLEX", 6, "WEEKEND", "DROP", None, 250_000)
+    assert db.get_watch_delivery("watch:1:c1:FUK:2027-01-14:2027-01-17:200000")["delivery_kind"] == "DROP"
+
+    # second init on the migrated file: no error, no re-backfill, data intact
+    db2 = TravelBriefDatabase(db_path=str(path))
+    probe = db2._open_file_conn()
+    try:
+        assert TravelBriefDatabase._migrate_travel_watch_schema(probe) == {
+            "travel_price_watches": [], "travel_watch_deliveries": []}
+    finally:
+        probe.close()
+    new = db2.upsert_travel_watch("c2", "NRT", 300_000)
+    assert (new["horizon_months"], new["weekday_option"], new["watch_mode"]) == (3, "ANY", "FLEX")
+    assert db2.get_travel_watch("c1", "FUK")["horizon_months"] == 6
+    # legacy-key duplicate protection still works on the migrated ledger
+    dup = db2.claim_watch_delivery(1, "c1", "FUK", "2027-01-14", "2027-01-17", 200_000, "T")
+    assert (dup.claimed, dup.reason) == (False, "duplicate_sent")
+
+
+def test_v2_upsert_validation_country_scope_and_atomic_limit(mem_db):
+    w = mem_db.upsert_travel_watch("c", "@jp", 250_000, watch_mode="FLEX", horizon_months=12,
+                                   weekday_option="WEEKEND", notify_mode="DAILY")
+    assert (w["dest_code"], w["horizon_months"], w["weekday_option"], w["notify_mode"]) == ("@JP", 12, "WEEKEND", "DAILY")
+    with pytest.raises(ValueError):
+        mem_db.upsert_travel_watch("c", "FUK", 250_000, watch_mode="FIXED")  # FIXED needs dates
+    with pytest.raises(ValueError):
+        mem_db.upsert_travel_watch("c", "FUK", 250_000, horizon_months=2)
+    with pytest.raises(ValueError):
+        mem_db.upsert_travel_watch("c", "FUK", 250_000, weekday_option="SAT")
+    with pytest.raises(ValueError):
+        mem_db.upsert_travel_watch("c", "FUK", 250_000, watch_mode="FIXED",
+                                   fixed_dep_date="2027-01-17", fixed_ret_date="2027-01-14")
+    f = mem_db.upsert_travel_watch("c", "FUK", 250_000, watch_mode="FIXED",
+                                   fixed_dep_date="2027-01-14", fixed_ret_date="2027-01-18", initial_price_krw=270_000)
+    assert (f["watch_mode"], f["fixed_dep_date"], f["fixed_ret_date"], f["initial_price_krw"]) == \
+        ("FIXED", "2027-01-14", "2027-01-18", 270_000)
+    # legacy re-save keeps V2 options; switching to FLEX clears the dates and resets the anchor
+    assert mem_db.upsert_travel_watch("c", "FUK", 240_000, preset_kind="CUSTOM")["watch_mode"] == "FIXED"
+    flex = mem_db.upsert_travel_watch("c", "FUK", 240_000, watch_mode="FLEX")
+    assert (flex["fixed_dep_date"], flex["fixed_ret_date"], flex["initial_price_krw"]) == (None, None, None)
+    # the 10-watch limit is shared by city / country / fixed watches
+    for i in range(8):
+        mem_db.upsert_travel_watch("c", f"Z{i:02d}", 200_000, watch_mode="FIXED",
+                                   fixed_dep_date="2027-02-01", fixed_ret_date="2027-02-04")
+    with pytest.raises(WatchLimitError):
+        mem_db.upsert_travel_watch("c", "@VN", 200_000)
+    assert len(mem_db.list_travel_watches("c")) == 10
+
+
+def test_fixed_watch_prefetch_expiry_and_dry_run_is_read_only(mem_db):
+    seed_recipient(mem_db, "c")
+    past = mem_db.upsert_travel_watch("c", "FUK", 300_000, watch_mode="FIXED",
+                                      fixed_dep_date="2027-02-28", fixed_ret_date="2027-03-03")
+    live = mem_db.upsert_travel_watch("c", "NRT", 300_000, watch_mode="FIXED",
+                                      fixed_dep_date="2027-03-10", fixed_ret_date="2027-03-13")
+    fetch = fixed_fetcher_from({
+        ("NRT", "2027-03-10", "2027-03-13"): [mk_live("NRT", "2027-03-10", "2027-03-13", 250_000)],
+        ("FUK", "2027-02-28", "2027-03-03"): [mk_live("FUK", "2027-02-28", "2027-03-03", 100_000)],
+    })
+    clock = kst_clock(2027, 3, 1, 12, 30)
+    # dry run: the expired watch is skipped in memory but never written
+    res = WatchCheckEngine(mem_db, fetcher_from({}), sender=None, dry_run=True, now_fn=clock,
+                           fixed_quote_fetcher=fetch).run_once()
+    assert res.expired_fixed_count == 0 and res.eligible_watch_count == 1
+    assert mem_db.get_travel_watch("c", "FUK")["is_active"] == 1
+    assert [c[0] for c in fetch.calls] == ["NRT"]
+    fetch.calls.clear()
+    sender = Recorder()
+    res = WatchCheckEngine(mem_db, fetcher_from({}), sender=sender, now_fn=clock, fixed_quote_fetcher=fetch).run_once()
+    assert res.expired_fixed_count == 1 and res.eligible_watch_count == 1
+    assert mem_db.get_travel_watch("c", "FUK")["is_active"] == 0
+    assert [c[0] for c in fetch.calls] == ["NRT"]  # the expired watch is never fetched
+    assert [c for c, _, _ in sender.calls] == ["c"] and "ICN→NRT" in sender.calls[0][1]
+    assert ledger_rows(mem_db, past["watch_id"]) == []
+    assert ledger_rows(mem_db, live["watch_id"])[0]["delivery_key"].startswith("travel-watch:v2:")
+
+
+# ----------------------------------------------------------------------
+# V2-2. Country allowlist, slot generation, cache isolation, PG chunking
+# ----------------------------------------------------------------------
+def test_country_scope_allowlist_resolution():
+    assert resolve_watch_target_codes("@JP") == ("NRT", "KIX", "FUK", "CTS", "OKA")
+    assert resolve_watch_target_codes("@vn") == ("DAD", "CXR", "HAN", "SGN", "PQC")
+    assert resolve_watch_target_codes("@XX") == () and resolve_watch_target_codes("FUK") == ("FUK",)
+    assert is_country_watch_code("@TH") and not is_country_watch_code("BKK")
+    assert get_watch_country_meta("@PH")["label"] == "🇵🇭 필리핀 전체"
+    cat = CityCatalog(FlightEngine(live_naver=False).destinations)
+    for meta in list_watch_countries():
+        assert cat.watch_target_codes(meta["code"]) == meta["codes"]  # every member exists in the catalog
+    assert [m["code"] for m in list_watch_countries()] == ["@JP", "@VN", "@TH", "@TW", "@PH"]
+    assert cat.resolve_country("일본") == "@JP" and cat.resolve_country("베트남 전체") == "@VN"
+    assert cat.resolve_country("대만") is None  # the city alias (TPE) wins
+    assert cat.resolve_country("도쿄") is None and cat.resolve_country("@tw") == "@TW"
+
+
+def test_watch_slot_generation_weekday_options_and_fixed_helpers():
+    ref = date(2026, 11, 15)
+    pats = {opt: {(d.weekday(), n) for d, _r, _a, _b, n in generate_watch_slots(ref, 6, opt)}
+            for opt in ("WEEKEND", "WEEKDAY", "ANY")}
+    assert pats["WEEKEND"] == {(3, 3), (4, 3)} and pats["WEEKDAY"] == {(0, 3), (1, 3)}
+    assert pats["ANY"] == pats["WEEKEND"] | pats["WEEKDAY"]
+    one = generate_watch_slots(ref, 1, "WEEKEND")
+    assert min(s[0] for s in one) > ref and max(s[0] for s in one) <= date(2026, 12, 15)
+    twelve = generate_watch_slots(ref, 12, "ANY")
+    assert max(s[0] for s in twelve) <= date(2027, 11, 15) and 200 <= len(twelve) <= 212
+    assert all(s[1] == s[0] + timedelta(days=3) for s in twelve)
+    # the legacy weekend generator is untouched (Thu->Sun / Fri->Mon, 30-day months)
+    legacy = FlightEngine(live_naver=False).generate_weekend_slots(ref_date=ref, months_ahead=6)
+    assert {(s[2], s[3]) for s in legacy} == {("목", "일"), ("금", "월")}
+    assert max(s[0] for s in legacy) <= ref + timedelta(days=180)
+    # fixed-date rules
+    assert validate_fixed_dates(date(2026, 11, 20), date(2026, 11, 23), ref) is None
+    assert validate_fixed_dates(date(2026, 11, 14), date(2026, 11, 17), ref)
+    assert validate_fixed_dates(date(2026, 11, 20), date(2026, 11, 20), ref)
+    assert validate_fixed_dates(date(2026, 11, 20), date(2026, 12, 21), ref)  # 31 nights
+    assert validate_fixed_dates(date(2026, 11, 20), date(2026, 12, 20), ref) is None  # 30 nights
+    nb = build_fixed_neighbor_slots(ref, ref + timedelta(days=3), today=ref)
+    assert [(s[0], s[1]) for s in nb] == [(ref + timedelta(days=1), ref + timedelta(days=4))]  # -1d is past
+    assert FlightEngine(live_naver=False).fetch_fixed_quotes("FUK", "2027-01-14", "2027-01-17") == []  # never guessed
+
+
+def _clear_live_caches():
+    with nl._CACHE_LOCK:
+        nl._MEM_CACHE.clear()
+        nl._FAIL_CACHE.clear()
+        nl._IN_FLIGHT.clear()
+        nl._STALE_BACKUP.clear()
+
+
+@pytest.fixture
+def clean_live_client(tmp_path):
+    _clear_live_caches()
+    yield nl.NaverFlightLiveClient(cache_path=tmp_path / "cache.json")
+    _clear_live_caches()
+
+
+def test_live_cache_key_isolation_between_weekday_options(clean_live_client):
+    client = clean_live_client
+    engine = FlightEngine(live_naver=False)
+    dests = {"FUK": engine.destinations["FUK"]}
+    ref = date(2026, 11, 15)
+    calls = []
+
+    def fake_collect(destinations, slots, holiday_fn, fast_mode=False, deadline=None):
+        calls.append({(s[0].weekday(), s[4]) for s in slots})
+        d0 = slots[0]
+        return [mk_live("FUK", d0[0].isoformat(), d0[1].isoformat(), 200_000 + len(calls))]
+
+    def fetch(opt, signature=True):
+        slots = generate_watch_slots(ref, 6, opt)
+        sig = FlightEngine.watch_slot_signature(6, opt) if signature else None
+        return client.fetch_all_weekend_deals(dests, slots, engine.get_peak_holiday_info, ref_date=ref,
+                                              months_ahead=6, fast_mode=True, slot_signature=sig)
+
+    with patch.object(client, "_collect_live_deals_uncached", side_effect=fake_collect):
+        we, wd, an = fetch("WEEKEND"), fetch("WEEKDAY"), fetch("ANY")
+        assert len(calls) == 3 and calls[0] == {(3, 3), (4, 3)} and calls[1] == {(0, 3), (1, 3)}
+        assert {we[0].price_krw, wd[0].price_krw, an[0].price_krw} == {200_001, 200_002, 200_003}
+        assert fetch("WEEKEND")[0].price_krw == 200_001 and len(calls) == 3  # same namespace -> cache hit
+        # implicit namespace: weekday slots without a signature never reuse a weekend entry
+        fetch("WEEKDAY", signature=False)
+        assert len(calls) == 4
+    refs = {k[0] for k in nl._MEM_CACHE}
+    assert {"2026-11-15#wWEEKEND6#fast", "2026-11-15#wWEEKDAY6#fast", "2026-11-15#wANY6#fast"} <= refs
+    for k in list(nl._MEM_CACHE):
+        assert nl._parse_disk_key(nl._disk_key_for(k)) == k  # disk keys stay parseable
+    # legacy weekend calls without a signature keep the legacy key shape
+    assert nl.slot_signature_for(engine.generate_weekend_slots(ref_date=ref, months_ahead=6)) == ""
+
+
+def test_pg_chunking_max_32_slots_for_12_month_horizon(clean_live_client):
+    client = clean_live_client
+    slots = generate_watch_slots(date(2026, 11, 15), 12, "ANY")
+    sizes = []
+
+    def fake_post(query, timeout):
+        n = query.count("priceGraph(")
+        sizes.append(n)
+        return {"data": {f"s{i}": {"averageLowestFare": 250_000, "fares": [{"lowestFare": 200_000 + i}]}
+                         for i in range(n)}}
+
+    with patch.object(client, "_post_pg_query", side_effect=fake_post):
+        out = client.fetch_city_batch_pg("FUK", slots)
+    assert nl.MAX_PG_SLOTS_PER_QUERY == 32 and max(sizes) <= 32
+    assert len(sizes) == -(-len(slots) // 32) and sum(sizes) == len(slots) == len(out)
+    assert out[(slots[32][0].isoformat(), slots[32][1].isoformat())][0] == 200_000  # alias index per chunk
+
+    # one failing chunk keeps the rest; all chunks failing re-raises; an exhausted deadline makes no call
+    state = {"n": 0}
+
+    def flaky(query, timeout):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise TimeoutError("chunk 2")
+        return fake_post(query, timeout)
+
+    with patch.object(client, "_post_pg_query", side_effect=flaky):
+        assert len(client.fetch_city_batch_pg("FUK", slots)) == len(slots) - 32
+    with patch.object(client, "_post_pg_query", side_effect=TimeoutError("down")):
+        with pytest.raises(TimeoutError):
+            client.fetch_city_batch_pg("FUK", slots[:10])
+    with patch.object(client, "_post_pg_query", side_effect=AssertionError("no call")) as spy:
+        assert client.fetch_city_batch_pg("FUK", slots, deadline=time.monotonic() - 1) == {}
+        assert spy.call_count == 0
+
+
+def test_fixed_date_sse_only_verified_and_live_fetcher_spec(clean_live_client):
+    client = clean_live_client
+    engine = FlightEngine(live_naver=False)
+    dest = engine.destinations["FUK"]
+    dep = kst_today() + timedelta(days=40)
+    slots = [(dep, dep + timedelta(days=3), "x", "y", 3),
+             (dep + timedelta(days=1), dep + timedelta(days=4), "x", "y", 3)]
+    sse = {"cheapest": {"airline": "제주항공", "dep_time": "08:00", "ret_dep_time": "20:00", "ret_arr_time": "22:10",
+                        "next_day_arrival": False, "min_card": 210_000, "min_general": 215_000}, "popular": None}
+    with patch.object(client, "_fetch_session_cookie_header", return_value=""), \
+         patch.object(client, "fetch_live_sse_slot", side_effect=[sse, None]):
+        out = client.fetch_fixed_date_quotes(dest, slots, engine.get_peak_holiday_info)
+    assert [(d.departure_date, d.data_source, d.freshness, d.price_krw) for d in out] == \
+        [(dep.isoformat(), "LIVE_SSE", "FRESH", 210_000)]  # the unverified neighbour is simply absent
+    with patch.object(client, "fetch_live_sse_slot", side_effect=AssertionError("no call")):
+        assert client.fetch_fixed_date_quotes(dest, slots, engine.get_peak_holiday_info,
+                                              deadline=time.monotonic() - 1) == []
+
+    eng = MagicMock()
+    eng.live_naver = False
+    eng.search_watch_deals.return_value = [mk_live(price=1)]
+    fetch = make_live_quote_fetcher(eng)
+    assert fetch.accepts_spec and callable(fetch.fetch_fixed)
+    fetch("FUK", None, 300_000, WatchFetchSpec(12, "WEEKDAY", 1))
+    kw = eng.search_watch_deals.call_args.kwargs
+    assert (kw["horizon_months"], kw["weekday_option"]) == (12, "WEEKDAY") and kw["live_deadline"] > time.monotonic()
+    fetch("FUK", None, 300_000)  # the legacy call keeps the 6-month weekend search
+    eng.search_deals.assert_called_once_with(dest_code="FUK", months_ahead=6, fast_live=True)
+
+
+# ----------------------------------------------------------------------
+# V2-3. Interactive wizard callbacks, date input state, legacy contracts
+# ----------------------------------------------------------------------
+def _all_markups(h):
+    out = [m for _mid, _t, m in h.edits if m]
+    out += [c.kwargs.get("reply_markup") for c in h.tg.send_text.call_args_list if c.kwargs.get("reply_markup")]
+    return out
+
+
+def _assert_callbacks_fit(h):
+    for mk in _all_markups(h):
+        for cb in all_callbacks(mk):
+            assert cb.startswith("trv:") and len(cb.encode("utf-8")) <= 64, cb
+
+
+def test_v2_country_flex_wizard_callbacks(handler, mem_db):
+    _cb(handler, "trv:w:g")
+    text, markup = handler.tg.send_text.call_args[0][1], handler.tg.send_text.call_args[1]["reply_markup"]
+    assert "알림 대상 선택" in text
+    assert {"trv:w:s:@JP", "trv:w:s:@VN", "trv:w:s:@TH", "trv:w:s:@TW", "trv:w:s:@PH", "trv:w:s:FUK"} <= \
+        set(all_callbacks(markup))
+    _cb(handler, "trv:w:s:@JP", mid=900)
+    _mid, text, markup = handler.edits[-1]
+    assert "일본 전체" in text and "도쿄" in text and "5곳 중 최저가" in text and "참고 시세" in text
+    assert {"trv:w:m2:@JP:F", "trv:w:m2:@JP:X", "trv:w:h:@JP:12", "trv:w:d:@JP:D", "trv:w:n:@JP:Y",
+            "trv:w:k:@JP:1", "trv:w:i:@JP"} <= set(all_callbacks(markup))
+    for h in (1, 3, 6, 12):
+        _cb(handler, f"trv:w:h:@JP:{h}", mid=900)
+        assert f"앞으로 {h}개월" in handler.edits[-1][1]
+        assert f"✅ {h}개월" in [b["text"] for row in handler.edits[-1][2]["inline_keyboard"] for b in row]
+    assert "미오픈" in handler.edits[-1][1]  # honest 12M disclosure
+    for code, label in (("W", "주말(목~일·금~월)"), ("D", "평일(월~목·화~금)"), ("A", "주말+평일 전체")):
+        _cb(handler, f"trv:w:d:@JP:{code}", mid=900)
+        assert label in handler.edits[-1][1]
+    _cb(handler, "trv:w:n:@JP:Y", mid=900)
+    assert "매일 아침 7:30" in handler.edits[-1][1]
+    assert mem_db.get_travel_watch("c1", "@JP") is None  # nothing persisted before an explicit save
+    # another user in the same chat has an independent draft
+    _cb(handler, "trv:w:s:@JP", mid=901, user="u2")  # untracked message -> fresh card
+    assert "앞으로 3개월" in handler.tg.send_text.call_args[0][1]
+
+    _cb(handler, "trv:w:k:@JP:1", mid=900)
+    w = mem_db.get_travel_watch("c1", "@JP")
+    refs = handler.watch_reference_prices("@JP")
+    assert (w["watch_mode"], w["horizon_months"], w["weekday_option"], w["notify_mode"], w["target_price_krw"]) == \
+        ("FLEX", 12, "ANY", "DAILY", refs["DEAL"])
+    assert refs["DEAL"] == min(handler.watch_reference_prices(c)["DEAL"] for c in ("NRT", "KIX", "FUK", "CTS", "OKA"))
+    assert "특가 알림이 설정되었습니다" in handler.edits[-1][1] and "국가 전체" in handler.edits[-1][1]
+    assert "trv:w:e:@JP" in all_callbacks(handler.edits[-1][2])
+
+    # list card: country settings route to the hub; delete confirm works for countries
+    _cb(handler, "trv:w:l", mid=900)
+    cbs = all_callbacks(handler.edits[-1][2])
+    assert {"trv:w:s:@JP", "trv:w:x:@JP", "trv:w:g"} <= set(cbs) and "일본 전체" in handler.edits[-1][1]
+    _cb(handler, "trv:w:e:@JP", mid=900)
+    assert "앞으로 12개월" in handler.edits[-1][1] and "✅ 현재 알림" in handler.edits[-1][1]
+    _cb(handler, "trv:w:x:@JP", mid=900)
+    assert all_callbacks(handler.edits[-1][2]) == ["trv:w:X:@JP", "trv:w:l"]
+    _cb(handler, "trv:w:X:@JP", mid=900)
+    assert mem_db.get_travel_watch("c1", "@JP")["is_active"] == 0
+
+    # malformed V2 callbacks are rejected with one ack and no writes
+    for bad in ("trv:w:h:@JP:2", "trv:w:d:@JP:Z", "trv:w:s:@XX", "trv:w:k:ALL:1", "trv:w:m2:FUK:Q", "trv:w:n:FUK"):
+        _cb(handler, bad)
+        assert "지원하지 않는" in handler.tg.answer_callback.call_args[1]["text"]
+    assert mem_db.get_travel_watch("c1", "FUK") is None
+    _assert_callbacks_fit(handler)
+
+
+def test_v2_city_fixed_wizard_and_date_input_state(handler, mem_db):
+    handler._launch_search = MagicMock()
+    dep = kst_today() + timedelta(days=45)
+    ret = dep + timedelta(days=4)
+    dates_text = f"{dep.isoformat()} ~ {ret.isoformat()}"
+    _cb(handler, "trv:w:s:FUK", chat="g1", user="u1")
+    _cb(handler, "trv:w:m2:FUK:X", chat="g1", mid=900, user="u1")
+    assert handler.get_chat_state("g1", "u1") == STATE_AWAITING_WATCH_DATES
+    assert handler.get_chat_state("g1", "u2") == STATE_IDLE
+    assert "여행 날짜 입력" in handler.edits[-1][1]
+    # another member's date text is not consumed by u1's prompt
+    assert handler.handle_text_message("g1", 1, "u2", dates_text) == (True, "travel_help_unknown_city")
+    # invalid dates keep the prompt alive; HTML is escaped
+    assert handler.handle_text_message("g1", 2, "u1", "2027-02-30~2027-03-02") == (True, "travel_watch_dates_invalid")
+    assert handler.handle_text_message("g1", 3, "u1", "<b>x</b> 1") == (True, "travel_watch_dates_invalid")
+    assert "&lt;b&gt;" in handler.tg.send_text.call_args[0][1]
+    assert handler.handle_text_message("g1", 3, "u1", "아무거나") == (True, "travel_watch_dates_invalid")
+    assert handler.get_chat_state("g1", "u1") == STATE_AWAITING_WATCH_DATES
+    assert handler.handle_text_message("g1", 4, "u1", dates_text) == (True, "travel_watch_dates_set")
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    hub = handler.tg.send_text.call_args[0][1]
+    assert "📌 날짜 고정" in hub and "4박" in hub and "±1일" in hub
+    assert mem_db.get_travel_watch("g1", "FUK") is None
+    _cb(handler, "trv:w:n:FUK:D", chat="g1", mid=900, user="u1")
+    _cb(handler, "trv:w:k:FUK:W", chat="g1", mid=900, user="u1")
+    w = mem_db.get_travel_watch("g1", "FUK")
+    assert (w["watch_mode"], w["fixed_dep_date"], w["fixed_ret_date"], w["notify_mode"], w["preset_kind"]) == \
+        ("FIXED", dep.isoformat(), ret.isoformat(), "DROP", "BASELINE")
+    saved = handler.edits[-1][1]
+    assert "날짜 고정" in saved and "1만 원 이상" in saved
+    assert "trv:w:t:FUK:day" not in all_callbacks(handler.edits[-1][2])  # FIXED has no weekday toggles
+
+    # a custom target through the legacy price prompt applies this user's draft
+    _cb(handler, "trv:w:s:NRT", chat="g1", mid=900, user="u1")
+    _cb(handler, "trv:w:h:NRT:6", chat="g1", mid=900, user="u1")
+    _cb(handler, "trv:w:d:NRT:D", chat="g1", mid=900, user="u1")
+    _cb(handler, "trv:w:i:NRT", chat="g1", mid=900, user="u1")
+    assert handler.handle_text_message("g1", 5, "u1", "22만") == (True, "travel_watch_saved")
+    n = mem_db.get_travel_watch("g1", "NRT")
+    assert (n["target_price_krw"], n["horizon_months"], n["weekday_option"], n["preset_kind"]) == \
+        (220_000, 6, "WEEKDAY", "CUSTOM")
+
+    # /cancel, any slash command, a city and a country all release the date prompt
+    _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
+    assert handler.get_chat_state("g1", "u1") == STATE_AWAITING_WATCH_DATES
+    assert handler.handle_text_message("g1", 6, "u1", "/cancel") == (True, "travel_cancel")
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
+    assert handler.handle_text_message("g1", 7, "u1", "/help") == (True, "travel_help")
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
+    assert handler.handle_text_message("g1", 8, "u1", "삿포로") == (True, "travel_search_started")
+    assert handler._launch_search.call_args[0][2] == "CTS" and handler.get_chat_state("g1", "u1") == STATE_IDLE
+    _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
+    assert handler.handle_text_message("g1", 9, "u1", "베트남") == (True, "travel_watch_country_hub")
+    assert "베트남 전체" in handler.tg.send_text.call_args[0][1]
+    assert mem_db.get_travel_watch("g1", "FUK")["fixed_dep_date"] == dep.isoformat()  # untouched
+    # TTL expiry releases the date prompt as well
+    handler.chat_state_ttl = 0.05
+    _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
+    time.sleep(0.1)
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    _assert_callbacks_fit(handler)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2027-05-01~2027-05-04", ("2027-05-01", "2027-05-04")),
+    ("2027.05.01-2027.05.04", ("2027-05-01", "2027-05-04")),
+    ("2027/05/01 ~ 2027/05/04", ("2027-05-01", "2027-05-04")),
+    ("270501 20270504", ("2027-05-01", "2027-05-04")),
+    ("5.1~5.4", ("2027-05-01", "2027-05-04")),
+    ("5월 1일 ~ 5월 4일", ("2027-05-01", "2027-05-04")),
+    ("11/20~11/23", ("2026-11-20", "2026-11-23")),
+    ("11.10~11.13", ("2027-11-10", "2027-11-13")),  # already passed this year -> next year
+    ("12.30~1.3", ("2026-12-30", "2027-01-03")),
+    ("２０２７－０５－０１~2027-05-04", ("2027-05-01", "2027-05-04")),
+    ("2026-11-10~2026-11-13", None),  # an explicit past date is never auto-corrected
+    ("2027-05-04~2027-05-01", None),
+    ("2027-05-01~2027-05-01", None),
+    ("2027-05-01~2027-06-15", None),  # > 30 nights
+    ("2027-02-30~2027-03-02", None),
+    ("5.1", None),
+    ("2027-05-01~2027-05-04~2027-05-06", None),
+    ("5.1 오후~5.4", None),
+])
+def test_parse_watch_date_range(raw, expected):
+    dep, ret, reason = parse_watch_date_range(raw, today=date(2026, 11, 15))
+    if expected is None:
+        assert dep is None and ret is None and reason
+    else:
+        assert (dep.isoformat(), ret.isoformat(), reason) == (*expected, None)
+
+
+def test_v2_preserves_legacy_keyboard_and_selection_contracts(handler, mem_db):
+    for scope in ("ALL", "FUK", "CTS"):
+        kb = handler.build_inline_keyboard(scope, chat_id="c1")["inline_keyboard"]
+        assert kb[0][0]["callback_data"].startswith("trv:r:") and kb[-2][0]["callback_data"] == "trv:c:guide"
+    assert handler.build_selected_target_keyboard("FUK")["inline_keyboard"][0][0]["callback_data"] == "trv:q:FUK"
+    _cb(handler, "trv:w:m:FUK")
+    assert "trv:w:s:FUK" in all_callbacks(handler.tg.send_text.call_args[1]["reply_markup"])
+    _cb(handler, "trv:w:m:@TH")  # the legacy manage callback with a country opens the V2 hub
+    assert "태국 전체" in handler.tg.send_text.call_args[0][1]
+    _assert_callbacks_fit(handler)
+
+
+# ----------------------------------------------------------------------
+# V2-4. Engine cadence: DAILY morning window, FIXED re-drop, PG/STALE, UNKNOWN
+# ----------------------------------------------------------------------
+def test_daily_briefing_morning_window_no_compensation_and_unknown(mem_db):
+    seed_recipient(mem_db, "c")
+    w = mem_db.upsert_travel_watch("c", "FUK", 150_000, watch_mode="FLEX", horizon_months=6,
+                                   weekday_option="WEEKEND", notify_mode="DAILY")
+    wid = w["watch_id"]
+    deals = {"FUK": [mk_live(price=200_000), mk_live(price=210_000, source="LIVE_PG"),
+                     mk_live(dep="2027-01-15", ret="2027-01-18", price=190_000, freshness="STALE")]}
+    sender = Recorder()
+
+    def tick(clock, snd=sender, d=deals):
+        return WatchCheckEngine(mem_db, fetcher_from(d), sender=snd, now_fn=clock).run_once()
+
+    # 12:30 is the first tick of the day: no compensatory DAILY briefing
+    res = tick(kst_clock(2026, 12, 1, 12, 30))
+    assert (res.sent_count, res.daily_count, res.daily_skipped_window_count) == (0, 0, 1)
+    assert (res.dropped_pg_count, res.dropped_stale_count) == (1, 1)
+    # 07:30 -> the day's briefing (above target, still a briefing)
+    res = tick(kst_clock(2026, 12, 2, 7, 30))
+    assert (res.sent_count, res.daily_count) == (1, 1)
+    text = sender.calls[-1][1]
+    assert "[일일 브리핑]" in text and "실시간 최저가" in text and "200,000원" in text
+    assert {"trv:w:l", "trv:w:x:FUK"} <= set(all_callbacks(sender.calls[-1][2]))
+    row = mem_db.get_watch_delivery(make_watch_daily_key(wid, "2026-12-02"))
+    assert (row["status"], row["delivery_kind"], row["kst_date"]) == ("SENT", "DAILY", "2026-12-02")
+    assert mem_db.get_travel_watch("c", "FUK")["last_daily_sent_date"] == "2026-12-02"
+    # same-morning re-run: no second briefing, no DROP (no further drop)
+    assert tick(kst_clock(2026, 12, 2, 8, 0)).sent_count == 0 and len(sender.calls) == 1
+    # the next day only a 12:30 tick ran -> nothing (a missed morning is never compensated)
+    assert tick(kst_clock(2026, 12, 3, 12, 30)).sent_count == 0 and len(sender.calls) == 1
+    # later tick: a >= 10,000 KRW further drop on another slot is a DROP ("특가 포착") even above target
+    drop = {"FUK": [mk_live(price=200_000), mk_live(dep="2027-01-21", ret="2027-01-24", price=188_000)]}
+    res = tick(kst_clock(2026, 12, 3, 18, 30), d=drop)
+    assert res.sent_count == 1 and "[특가 포착]" in sender.calls[-1][1]
+    assert mem_db.get_watch_delivery(f"travel-watch:v2:{wid}:DROP:2027-01-21:2027-01-24:188000")["status"] == "SENT"
+    # an ambiguous DAILY send -> UNKNOWN quarantine, never retried that day
+    boom = Recorder(status=TimeoutError("read timed out"))
+    res = tick(kst_clock(2026, 12, 4, 7, 30), snd=boom, d=drop)
+    assert res.unknown_count == 1 and len(boom.calls) == 1
+    assert mem_db.get_watch_delivery(make_watch_daily_key(wid, "2026-12-04"))["status"] == "UNKNOWN"
+    res = tick(kst_clock(2026, 12, 4, 8, 30), snd=boom, d=drop)
+    assert len(boom.calls) == 1 and res.daily_count == 0
+
+
+def test_fixed_same_slot_redrop_vs_flex_slot_cooldown(mem_db):
+    for cid in ("fx", "fl"):
+        seed_recipient(mem_db, cid)
+    fx = mem_db.upsert_travel_watch("fx", "FUK", 300_000, watch_mode="FIXED",
+                                    fixed_dep_date="2027-01-14", fixed_ret_date="2027-01-17")
+    fl = mem_db.upsert_travel_watch("fl", "FUK", 300_000)
+    sender = Recorder()
+
+    def tick(price, minutes):
+        main = mk_live(price=price)
+        return WatchCheckEngine(
+            mem_db, fetcher_from({"FUK": [main]}), sender=sender, now_fn=kst_clock(2026, 12, 1, 12, minutes),
+            fixed_quote_fetcher=fixed_fetcher_from({("FUK", "2027-01-14", "2027-01-17"): [main]}),
+        ).run_once()
+
+    assert tick(250_000, 0).sent_count == 2
+    res = tick(245_000, 10)  # 5,000 drop: FIXED insufficient_drop, FLEX slot_cooldown
+    assert (res.sent_count, res.skipped_cooldown_count) == (0, 2)
+    res = tick(238_000, 20)  # 12,000 drop on the SAME slot
+    assert res.sent_count == 1 and sender.calls[-1][0] == "fx" and "[목표가 도달]" in sender.calls[-1][1]
+    keys = [r["delivery_key"] for r in ledger_rows(mem_db, fx["watch_id"])]
+    assert len(keys) == 2
+    assert all(k.startswith(f"travel-watch:v2:{fx['watch_id']}:DROP:2027-01-14:2027-01-17:") for k in keys)
+    assert [r["delivery_key"] for r in ledger_rows(mem_db, fl["watch_id"])] == \
+        [make_watch_delivery_key(fl["watch_id"], "fl", "FUK", "2027-01-14", "2027-01-17", 250_000)]
+    # FIXED above target with no prior alert never triggers; PG / STALE never trigger
+    nrt = mem_db.upsert_travel_watch("fx", "NRT", 200_000, watch_mode="FIXED",
+                                     fixed_dep_date="2027-02-04", fixed_ret_date="2027-02-07")
+    seen = Recorder()
+    res = WatchCheckEngine(
+        mem_db, fetcher_from({}), sender=seen, now_fn=kst_clock(2026, 12, 1, 13),
+        fixed_quote_fetcher=fixed_fetcher_from({("NRT", "2027-02-04", "2027-02-07"): [
+            mk_live("NRT", "2027-02-04", "2027-02-07", 100_000, source="LIVE_PG"),
+            mk_live("NRT", "2027-02-04", "2027-02-07", 90_000, freshness="STALE"),
+            mk_live("NRT", "2027-02-04", "2027-02-07", 210_000)]}),
+    ).run_once()
+    assert ledger_rows(mem_db, nrt["watch_id"]) == []
+    assert all("ICN→NRT" not in t for _c, t, _m in seen.calls)
+    assert res.dropped_pg_count == 1 and res.dropped_stale_count == 1
+
+
+def test_fixed_drop_unknown_quarantine_and_verified_neighbor_tip(mem_db):
+    seed_recipient(mem_db, "c")
+    mem_db.upsert_travel_watch("c", "FUK", 300_000, watch_mode="FIXED",
+                               fixed_dep_date="2027-01-14", fixed_ret_date="2027-01-17")
+    main = mk_live(price=260_000)
+    nb_ok = mk_live(dep="2027-01-15", ret="2027-01-18", price=230_000)
+    nb_pg = mk_live(dep="2027-01-13", ret="2027-01-16", price=150_000, source="LIVE_PG")
+    ff = fixed_fetcher_from({("FUK", "2027-01-14", "2027-01-17"): [main, nb_ok, nb_pg]})
+    boom = Recorder(status=TimeoutError("timed out"))
+    res = WatchCheckEngine(mem_db, fetcher_from({}), sender=boom, now_fn=kst_clock(2026, 12, 1, 12),
+                           fixed_quote_fetcher=ff).run_once()
+    assert res.unknown_count == 1 and ff.calls == [("FUK", "2027-01-14", "2027-01-17", True)]
+    card = boom.calls[0][1]
+    assert "±1일 비교" in card and "01/15(금)~01/18(월) 230,000원 (30,000원 ↓)" in card
+    assert "150,000" not in card  # an unverified LIVE_PG neighbour is never shown
+    again = Recorder()
+    res = WatchCheckEngine(mem_db, fetcher_from({}), sender=again, now_fn=kst_clock(2026, 12, 1, 18, 30),
+                           fixed_quote_fetcher=ff).run_once()
+    assert again.calls == [] and res.skipped_cooldown_count == 1  # UNKNOWN is never retried
+
+
+def test_country_watch_grouping_union_spec_and_card(mem_db):
+    for cid in ("a", "b"):
+        seed_recipient(mem_db, cid)
+    mem_db.upsert_travel_watch("a", "@JP", 200_000, watch_mode="FLEX", horizon_months=12, weekday_option="WEEKEND")
+    mem_db.upsert_travel_watch("b", "FUK", 200_000, watch_mode="FLEX", horizon_months=3, weekday_option="WEEKDAY")
+    deals = {
+        "NRT": [mk_live("NRT", "2027-01-14", "2027-01-17", 180_000)],
+        "KIX": [mk_live("KIX", "2027-01-15", "2027-01-18", 160_000, dep_time="09:00", ret_time="19:00")],
+        "FUK": [mk_live("FUK", "2027-01-11", "2027-01-14", 150_000)],  # Mon->Thu (weekday)
+    }
+    fetch = spec_fetcher_from(deals)
+    sender = Recorder()
+    WatchCheckEngine(mem_db, fetch, sender=sender, now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    by_code = {c: s for c, s in fetch.calls}
+    assert sorted(by_code) == ["CTS", "FUK", "KIX", "NRT", "OKA"] and len(fetch.calls) == 5  # one fetch per airport
+    assert (by_code["FUK"].horizon_months, by_code["FUK"].weekday_option, by_code["FUK"].sse_cap) == (12, "ANY", 3)
+    assert (by_code["NRT"].horizon_months, by_code["NRT"].weekday_option, by_code["NRT"].sse_cap) == (12, "WEEKEND", 1)
+    got = {chat: (text, mk) for chat, text, mk in sender.calls}
+    a_text, a_kb = got["a"]
+    assert "일본 전체" in a_text and "ICN→KIX" in a_text and "160,000원" in a_text  # FUK weekday excluded
+    assert "9~12개월" in a_text
+    assert "ICN-KIX-20270115" in a_kb["inline_keyboard"][0][0]["url"]
+    assert set(all_callbacks(a_kb)) == {"trv:w:s:@JP", "trv:w:x:@JP", "trv:w:l"}
+    assert "ICN→FUK" in got["b"][0] and "150,000원" in got["b"][0]
+
+
+def test_mobile_decision_card_contents_and_limits():
+    from travel_bot_runner import fits_tg01, visible_text_len
+    from travel_brief.models import BudgetBreakdown, round_man
+
+    res = CityCatalog(FlightEngine(live_naver=False).destinations).get("FUK")
+    watch = {"dest_code": "FUK", "target_price_krw": 300_000, "horizon_months": 12, "watch_mode": "FLEX"}
+    deal = mk_live(dep="2027-01-14", ret="2027-01-18", price=250_000, dep_time="19:30", ret_time="08:10",
+                   arr_time="10:20", nights=3)  # stale `nights` field: the card must use the real 4 nights
+    nb = mk_live(dep="2027-01-15", ret="2027-01-19", price=235_000)
+    text = build_watch_alert_card(watch, deal, res, prev_seen=275_000, initial_price=320_000, neighbor_deal=nb)
+    for token in ("[목표가 도달]", "ICN→FUK", "01/14(목)~01/18(월) · 4박", "제주항공", "19:30", "08:10", "10:20",
+                  "첫날 저녁 출발", "귀국편 오전 출발", "실시간 최저가", "50,000원(16.7%)", "등록 기준 320,000원",
+                  "70,000원 하락", "지난 관측 대비 25,000원 하락", "1인 총예산", "4박 항공+숙박",
+                  "±1일 비교", "위탁수하물", "9~12개월"):
+        assert token in text, token
+    assert f"{round_man(BudgetBreakdown.calculate(res.meta, 250_000, nights=4).total_per_person_krw)}만 원" in text
+    assert fits_tg01(text) and visible_text_len(text) <= 1800
+
+    # omissions: unverified / pricier neighbour, FIXED horizon note, FSC baggage, no short-stay flags
+    fixed = {**watch, "watch_mode": "FIXED", "fixed_dep_date": "2027-01-14", "fixed_ret_date": "2027-01-18"}
+    calm = mk_live(dep="2027-01-14", ret="2027-01-18", price=250_000, airline="대한항공", dep_time="09:00",
+                   ret_time="15:00")
+    t2 = build_watch_alert_card(fixed, calm, res, neighbor_deal=mk_live(price=200_000, source="LIVE_PG"))
+    t3 = build_watch_alert_card(fixed, calm, res, neighbor_deal=mk_live(price=260_000))
+    for t in (t2, t3):
+        assert "±1일" not in t and "9~12개월" not in t and "위탁수하물" not in t
+        assert "첫날 저녁" not in t and "귀국편 오전" not in t
+    # escaping + rising anchor + above-target wording
+    hostile = mk_live(price=330_000, airline="<script>x</script>")
+    t4 = build_watch_alert_card(watch, hostile, res, initial_price=300_000)
+    assert "&lt;script&gt;" in t4 and "<script>" not in t4 and "30,000원 상승" in t4
+    assert "[특가 포착]" in t4 and "30,000원 남음" in t4
+    # country scope label + DAILY headline
+    t5 = build_watch_alert_card({"dest_code": "@JP", "target_price_krw": 300_000}, deal, res, kind="DAILY",
+                                scope_label="🇯🇵 일본 전체")
+    assert t5.startswith("📰 <b>[일일 브리핑] [목표가 도달] 🇯🇵 일본 전체 · ")
+    assert all(fits_tg01(t) for t in (t2, t3, t4, t5))
