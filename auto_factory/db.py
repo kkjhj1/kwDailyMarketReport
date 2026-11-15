@@ -398,6 +398,75 @@ def read_db_summary_readonly(db_path: str | Path) -> dict[str, Any]:
         conn.close()
 
 
+def read_runtime_snapshot_readonly(db_path: str | Path, task_id: str | None = None) -> dict[str, Any]:
+    """Runtime view of an EXISTING DB via `mode=ro` + `query_only` (never creates or migrates).
+
+    Returns {"tasks": [row...], "outbox": {...}, "open_merge_intents": n}; each row carries
+    task columns, `state_entered_at`, `attempt_count`, `last_attempt` and `lease` (owner nonce
+    is never exposed). An unknown `task_id` yields an empty task list.
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"coordinator DB not found: {p}")
+    conn = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=1")
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = (_REQUIRED_TABLES | {"leases", "attempts"}) - tables
+        if missing:
+            raise ValueError(f"not a coordinator DB (missing tables: {sorted(missing)})")
+        sql = ("SELECT id, risk_level, state, state_version, retry_count, created_at, updated_at,"
+               " (SELECT MAX(e.created_at) FROM events e WHERE e.task_id=t.id) AS state_entered_at,"
+               " (SELECT COUNT(*) FROM attempts a WHERE a.task_id=t.id) AS attempt_count"
+               " FROM tasks t")
+        params: tuple[Any, ...] = ()
+        if task_id is not None:
+            sql += " WHERE id=?"
+            params = (task_id,)
+        rows = [dict(r) for r in conn.execute(sql + " ORDER BY created_at, id", params)]
+        for row in rows:
+            att = conn.execute(
+                "SELECT seq, provider, role, failure_code, started_at, finished_at FROM attempts"
+                " WHERE task_id=? ORDER BY seq DESC LIMIT 1", (row["id"],)).fetchone()
+            row["last_attempt"] = dict(att) if att else None
+            lease = conn.execute(
+                "SELECT pid, proc_start_time, heartbeat_at, expires_at FROM leases WHERE task_id=?",
+                (row["id"],)).fetchone()
+            row["lease"] = dict(lease) if lease else None
+        outbox = {s: 0 for s in OUTBOX_STATUSES}
+        for r in conn.execute("SELECT status, COUNT(*) AS n FROM tg_outbox GROUP BY status"):
+            outbox[r["status"]] = r["n"]
+        open_intents = conn.execute(
+            "SELECT COUNT(*) FROM merge_intents WHERE status IN ('PREPARING','GIT_MERGED')").fetchone()[0]
+        return {"tasks": rows, "outbox": outbox, "open_merge_intents": open_intents}
+    finally:
+        conn.close()
+
+
+def heartbeat_nowait(
+    db_path: str | Path, task_id: str, owner_nonce: str, ttl: float, *, now: float | None = None
+) -> bool:
+    """Non-blocking lease renewal for `LeaseKeeper` (separate connection, `busy_timeout=0`).
+
+    Returns True if renewed, False if the lease is no longer ours (rowcount 0). A busy/locked
+    DB raises `sqlite3.OperationalError` immediately (caller skips this tick). Pass
+    `now=db.clock()` so fake-clock tests stay consistent. Never creates the DB file.
+    """
+    now = time.time() if now is None else float(now)
+    p = Path(db_path)
+    conn = sqlite3.connect(p.resolve().as_uri() + "?mode=rw", uri=True, timeout=0, isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout=0")
+        cur = conn.execute(
+            "UPDATE leases SET heartbeat_at=?, expires_at=? WHERE task_id=? AND owner_nonce=?",
+            (now, now + float(ttl), task_id, owner_nonce),
+        )
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------- Phase 1 artifact integrity
 AUDITOR_PROVIDERS = ("codex", "gemini")  # claude is never an auditor
 AUDIT_KEYS = frozenset({"schema_version", "task_id", "verdict", "summary", "base_sha", "allowed_paths", "auditor"})

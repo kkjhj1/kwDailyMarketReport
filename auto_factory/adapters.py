@@ -382,6 +382,7 @@ class ProviderAdapter:
         role: str,
         contract_path: str,
         stop_check: Callable[[], bool] | None = None,
+        progress_sink: Any = None,
     ) -> AdapterResult:
         exe = self.resolve_executable()
         if exe is None:
@@ -393,12 +394,20 @@ class ProviderAdapter:
             return AdapterResult(self.provider, role, FailureCode.INTERNAL, stderr="unsafe prompt for shim")
         cmd = self.build_command(role, prompt)
         cmd[0] = exe
+        progress: dict[str, Any] = {}
+        if progress_sink is not None:  # only forwarded when set: custom runners keep their signature
+            progress = {"progress_sink": progress_sink, "progress_step": role}
         try:
             res = self.runner.run(
-                cmd, cwd=wt_path, env=build_sandbox_env(passthrough=self.env_passthrough), stop_check=stop_check
+                cmd, cwd=wt_path, env=build_sandbox_env(passthrough=self.env_passthrough), stop_check=stop_check,
+                **progress,
             )
         except (FileNotFoundError, PermissionError) as exc:
             return AdapterResult(self.provider, role, FailureCode.UNAVAILABLE, stderr=str(exc))
+        if getattr(res, "timeout_kind", None) == "lease_lost":
+            # Never a TIMEOUT (that would fail over to another writer); the worker aborts on LeaseLostError.
+            return AdapterResult(self.provider, role, FailureCode.INTERNAL, stderr="LEASE_LOST",
+                                 duration=getattr(res, "duration", 0.0))
         code = classify_failure(res.returncode, res.stdout, res.stderr, res.timed_out)
         return AdapterResult(
             provider=self.provider,
@@ -533,7 +542,7 @@ class MockAdapter(ProviderAdapter):
     def default_qa(contract, answer: str = "mock qa answer", refs: Sequence[str] = ("calc.py",)) -> dict[str, Any]:
         return {"schema_version": 1, "qa_id": contract.qa_id, "answer": answer, "refs": list(refs)}
 
-    def invoke(self, contract, wt_path, role, contract_path, stop_check=None) -> AdapterResult:
+    def invoke(self, contract, wt_path, role, contract_path, stop_check=None, progress_sink=None) -> AdapterResult:
         self.calls.append((role, getattr(contract, "qa_id", None) or getattr(contract, "task_id", "")))
         step = self.script.pop(0) if self.script else None
         if step is None:

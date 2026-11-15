@@ -418,7 +418,14 @@ class DeterministicRunner:
         th = None if ok else (traceback_hash(out) or hashlib.sha256(out.encode()).hexdigest()[:16])
         return GateResult(name, ok, res.returncode, out[-4000:], th, 0 if ok else max(1, failure_count(out)))
 
-    def py_compile(self, wt_path: str, files: list[str]) -> GateResult:
+    @staticmethod
+    def _progress(sink, step: str, redaction: str = "normal") -> dict:
+        """Progress kwargs for JobRunner.run (omitted entirely when no sink: custom runners stay compatible)."""
+        if sink is None:
+            return {}
+        return {"progress_sink": sink, "progress_step": step, "progress_redaction": redaction}
+
+    def py_compile(self, wt_path: str, files: list[str], progress_sink=None) -> GateResult:
         if not files:
             return GateResult("py_compile", True, 0)
         code = (
@@ -427,15 +434,16 @@ class DeterministicRunner:
             "for i,f in enumerate(sys.argv[1:]):\n"
             "    py_compile.compile(f, cfile=os.path.join(d, '%d.pyc' % i), doraise=True)\n"
         )
-        res = self.runner.run([self.python, "-c", code, *files], cwd=wt_path, env=self._env(wt_path))
+        res = self.runner.run([self.python, "-c", code, *files], cwd=wt_path, env=self._env(wt_path),
+                              **self._progress(progress_sink, "py_compile"))
         return self._result("py_compile", res)
 
-    def pytest(self, wt_path: str, targets: list[str], name: str = "pytest") -> GateResult:
+    def pytest(self, wt_path: str, targets: list[str], name: str = "pytest", progress_sink=None) -> GateResult:
         cmd = [self.python, "-m", "pytest", "-q", "-p", "no:cacheprovider", *targets]
-        res = self.runner.run(cmd, cwd=wt_path, env=self._env(wt_path))
+        res = self.runner.run(cmd, cwd=wt_path, env=self._env(wt_path), **self._progress(progress_sink, "pytest"))
         return self._result(name, res)
 
-    def holdout(self, wt_path: str, holdout_dir: str) -> GateResult:
+    def holdout(self, wt_path: str, holdout_dir: str, progress_sink=None) -> GateResult:
         """Run an immutable copy of the external holdout suite against the candidate."""
         src = Path(holdout_dir)
         if not src.is_dir():
@@ -449,7 +457,9 @@ class DeterministicRunner:
                 self.python, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                 "-c", str(ini), "--rootdir", tmp, str(dst),
             ]
-            res = self.runner.run(cmd, cwd=wt_path, env=self._env(wt_path))
+            # holdout redaction: the sink gets no output-derived signal (zero leak of names/assertions)
+            res = self.runner.run(cmd, cwd=wt_path, env=self._env(wt_path),
+                                  **self._progress(progress_sink, "holdout", "holdout"))
         return self._result("holdout", res)
 
 

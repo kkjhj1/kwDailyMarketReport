@@ -4,6 +4,7 @@ Usage:
     python -m auto_factory.dev_bot --demo                       # offline, zero network/env/DB access
     python -m auto_factory.dev_bot --check  [--env-file F] --repo PATH   # read-only preflight + getMe
     python -m auto_factory.dev_bot --status [--db PATH] --repo PATH      # read-only (mode=ro) DB view
+    python -m auto_factory.dev_bot --status --task TID | --logs TID [--lines N] --repo PATH
     python -m auto_factory.dev_bot --poll-once [--db PATH] --repo PATH
     python -m auto_factory.dev_bot --run [--db PATH] --repo PATH
 
@@ -56,6 +57,13 @@ from .db import (
     read_db_summary_readonly,
 )
 from .guardrails import GuardrailChecker, is_forbidden
+from .live_progress import (
+    REDACTION_HOLDOUT,
+    RuntimeSnapshot,
+    fmt_age,
+    read_live_log_tail,
+    runtime_snapshots,
+)
 from .presets import (
     PRESET_ALIAS_RE,
     PRESET_POLICY_VERSION,
@@ -86,8 +94,12 @@ UNLOCKED_PRESETS_ENV = "AUTO_FACTORY_UNLOCKED_PRESETS"
 BOT_TOKEN_RE = re.compile(r"^\d{8,10}:[A-Za-z0-9_-]{35}$")
 CALLBACK_PREFIX = "af2"
 CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxXpqez])\|([A-Za-z0-9_-]{22})$")
+# Stateless read-only views (no tg_actions token): v = live status / refresh, l = live.log tail.
+STATELESS_TASK_CB_RE = re.compile(r"^af2\|([vl])\|([A-Za-z0-9][A-Za-z0-9._-]{0,57})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_CALLBACK_BYTES = 64
+LOGS_DEFAULT_LINES = 20
+LOGS_MAX_LINES = 80
 MAX_VISIBLE = 1800
 MAX_HTML = 3500
 MAX_REQUEST_BYTES = 2048
@@ -479,9 +491,17 @@ def validate_callback_data(data: str) -> str:
         raise ValueError("callback_data must be ASCII") from None
     if len(raw) > MAX_CALLBACK_BYTES:
         raise ValueError(f"callback_data is {len(raw)} bytes (> {MAX_CALLBACK_BYTES})")
-    if not CALLBACK_RE.match(data):
+    if not (CALLBACK_RE.match(data) or STATELESS_TASK_CB_RE.match(data)):
         raise ValueError("callback_data does not match af2|<op>|<token>")
     return data
+
+
+def stateless_task_button(label: str, op: str, task_id: str) -> dict[str, str] | None:
+    """`af2|v|<tid>` / `af2|l|<tid>` button, or None if the task id would not fit in 64 bytes."""
+    data = f"{CALLBACK_PREFIX}|{op}|{task_id}"
+    if len(data.encode("utf-8")) > MAX_CALLBACK_BYTES or not STATELESS_TASK_CB_RE.match(data):
+        return None
+    return {"text": label, "callback_data": validate_callback_data(data)}
 
 
 class SafeHtmlFormatter:
@@ -860,7 +880,9 @@ class TaskRenderer:
         self.wtm = wtm
         self.artifacts_dir = Path(artifacts_dir)
 
-    def task_card(self, task: dict[str, Any], reason: str = "", with_buttons: bool = True) -> tuple[str, dict | None]:
+    def task_card(self, task: dict[str, Any], reason: str = "", with_buttons: bool = True,
+                  extra_lines: Iterable[str] = ()) -> tuple[str, dict | None]:
+        """`extra_lines` must already be escaped HTML (built with `self.fmt`)."""
         f = self.fmt
         lines = [
             f"<b>auto_factory</b> · {f.code(task['id'], 64)}",
@@ -872,6 +894,7 @@ class TaskRenderer:
             lines.append(f"Reason: {f.i(reason, 300)}")
         if task.get("target_sha"):
             lines.append(f"target {f.code(task['target_sha'][:12], 12)} · diff {f.code((task.get('diff_sha256') or '')[:12], 12)}")
+        lines.extend(extra_lines)
         markup = None
         if with_buttons:
             row = []
@@ -1038,6 +1061,7 @@ HELP_TEXT = (
     "/do &lt;preset&gt; &lt;request&gt; — L2 task scoped by the preset\n"
     "/task &lt;L0|L1|L2|L3&gt; &lt;path&gt;[,&lt;path&gt;] [--tests=a,b] -- &lt;request&gt;\n"
     "/status [task_id] — overview or task card\n"
+    "/live &lt;id&gt; · /logs &lt;id&gt; [n] — 실시간 진행·로그 (읽기 전용)\n"
     "/kill — write STOP.flag · /resume [clear-circuit]\n"
     "Merges are 2-step and bound to task + target_sha + diff_sha256."
 )
@@ -1229,6 +1253,10 @@ class DevBot:
             return "cmd:clear"
         if cmd == "/status":
             return self._cmd_status(chat_id, arg)
+        if cmd == "/live":
+            return self._cmd_live(chat_id, arg)
+        if cmd == "/logs":
+            return self._cmd_logs(chat_id, arg)
         if cmd == "/kill":
             try:  # no-follow atomic write; the bot itself keeps running
                 safe_write_atomic(self.stop_flag, f"killed via dev bot at {time.time():.0f}\n")
@@ -1486,8 +1514,15 @@ class DevBot:
             except KeyError:
                 self._send(chat_id, f"unknown task {f.code(arg, 64)}")
                 return "cmd:status:unknown"
-            text, markup = self.renderer.task_card(task)
-            self._send(chat_id, text, markup)
+            snap = self._runtime(arg).get(arg)
+            extra = self._runtime_lines(snap) if snap else [f"Runtime: {f.i('unavailable', 20)}"]
+            gated = task["state"] in _STATE_BUTTONS
+            live_markup = None if gated else self._live_markup(arg)
+            if not gated and live_markup is None:
+                extra.append(self._long_id_hint(arg))
+            text, markup = self.renderer.task_card(task, extra_lines=extra)
+            # Human-gated states keep exactly their workflow buttons; others get stateless Refresh/Logs.
+            self._send(chat_id, text, markup if gated else live_markup)
             return "cmd:status:task"
         counts = self.db.outbox_counts()
         tasks = [t for t in self.db.list_tasks() if t["state"] not in TERMINAL_STATES]
@@ -1500,10 +1535,176 @@ class DevBot:
         ]
         if self.db.circuit_is_open(QA_CIRCUIT):
             lines.insert(2, f"qa_circuit: {f.b('OPEN', 8)}")
-        for t in tasks[:15]:
-            lines.append(f"{f.code(t['id'], 64)} {f.esc(t['state'], 40)} {f.esc(t['risk_level'], 4)}")
+        runtime = self._runtime() if tasks else {}
+        reserve = 40  # room for the "+N more" line
+        for idx, t in enumerate(tasks):
+            line = self._overview_line(t, runtime.get(t["id"]))
+            candidate = "\n".join(lines + [line])
+            if (f.visible_len(candidate) > f.max_visible - reserve
+                    or len(candidate) > f.max_html - reserve):
+                lines.append(f"+{len(tasks) - idx} more (/status &lt;id&gt;)")
+                break
+            lines.append(line)
         self._send(chat_id, "\n".join(lines))
         return "cmd:status"
+
+    # ------------------------------------------------------- live progress
+    def _runtime(self, task_id: str | None = None) -> dict[str, RuntimeSnapshot]:
+        """Strictly read-only (`mode=ro`) runtime snapshots; {} if unavailable (never raises)."""
+        try:
+            snaps, _ = runtime_snapshots(self.db.path, self.artifacts_dir, self.db.clock(), task_id)
+        except Exception as exc:
+            self.log(f"runtime snapshot unavailable: {type(exc).__name__}")
+            return {}
+        return {s.task_id: s for s in snaps}
+
+    def _overview_line(self, t: dict[str, Any], s: RuntimeSnapshot | None) -> str:
+        f = self.fmt
+        head = f"{f.code(t['id'], 64)} {f.esc(t['state'], 40)} {f.esc(t['risk_level'], 4)}"
+        if s is None:
+            return head
+        age = s.elapsed if s.elapsed is not None else s.state_age
+        return (f"{head} · {f.esc(s.stage, 32)} · {f.b(s.liveness, 16)} · {f.esc(fmt_age(age), 12)}"
+                f" · {f.esc(s.attempt, 48)} · hb {f.esc(fmt_age(s.hb_age), 12)}"
+                f"/out {f.esc(fmt_age(s.output_age), 12)}")
+
+    def _runtime_lines(self, s: RuntimeSnapshot) -> list[str]:
+        f = self.fmt
+        lines = [
+            f"Stage: {f.code(s.stage, 40)} · Liveness: {f.b(s.liveness, 16)}",
+            f"Elapsed: {f.esc(fmt_age(s.elapsed), 12)} · in state {f.esc(fmt_age(s.state_age), 12)}"
+            f" · Attempt: {f.code(s.attempt, 60)}",
+            f"hb_age {f.esc(fmt_age(s.hb_age), 12)} · output_age {f.esc(fmt_age(s.output_age), 12)}",
+        ]
+        if s.step:
+            who = "/".join(x for x in (s.provider, s.role) if x)
+            lines.append(f"Step: {f.code(s.step, 32)}" + (f" · {f.esc(who, 40)}" if who else ""))
+        if s.redaction == REDACTION_HOLDOUT:
+            lines.append(f.i("holdout: coarse metadata only", 40))
+        return lines
+
+    def _live_markup(self, task_id: str, logs_view: bool = False) -> dict[str, Any] | None:
+        if logs_view:
+            row = [stateless_task_button("\U0001f4ca Status", "v", task_id),
+                   stateless_task_button("\U0001f4cb Refresh Logs", "l", task_id)]
+        else:
+            row = [stateless_task_button("\U0001f504 Refresh", "v", task_id),
+                   stateless_task_button("\U0001f4cb Logs", "l", task_id)]
+        if any(b is None for b in row):
+            return None
+        return self.fmt.markup([row])
+
+    def _long_id_hint(self, task_id: str) -> str:
+        f = self.fmt
+        return f"{f.code('/status ' + task_id, 80)} · {f.code('/logs ' + task_id, 80)}"
+
+    def _live_view(self, task_id: str) -> tuple[str, dict | None] | None:
+        """Pure DB read-only runtime card (zero tg_actions rows); None if the task is unknown."""
+        f = self.fmt
+        s = self._runtime(task_id).get(task_id)
+        if s is None:
+            return None
+        lines = [
+            f"<b>live</b> · {f.code(task_id, 64)}",
+            f"State: {f.b(s.state, 40)} (v{int(s.state_version)}) · {f.esc(s.risk_level, 4)}",
+            *self._runtime_lines(s),
+        ]
+        markup = self._live_markup(task_id)
+        if markup is None:
+            lines.append(self._long_id_hint(task_id))
+        return "\n".join(lines), markup
+
+    def _logs_view(self, task_id: str, n: int) -> tuple[str, dict | None] | None:
+        """Bounded tail of the metadata-only live.log inside <pre>, within [TG-01] budgets."""
+        f = self.fmt
+        s = self._runtime(task_id).get(task_id)
+        if s is None:
+            return None
+        n = max(1, min(int(n), LOGS_MAX_LINES))
+        head = [f"<b>live log</b> · {f.code(task_id, 64)} · last {n}",
+                f"{f.esc(s.stage, 32)} · {f.b(s.liveness, 16)}"]
+        if s.redaction == REDACTION_HOLDOUT:
+            head.append(f.i("holdout: coarse metadata only", 40))
+        markup = self._live_markup(task_id, logs_view=True)
+        if markup is None:
+            head.append(self._long_id_hint(task_id))
+        tail = read_live_log_tail(self.artifacts_dir, task_id, n)
+        if not tail:
+            return "\n".join(head + ["live log unavailable"]), markup
+        body = [f.normalize_plain(x)[:300] for x in tail]
+        while body:
+            text = "\n".join(head) + "\n<pre>" + html.escape("\n".join(body), quote=True) + "</pre>"
+            if f.visible_len(text) <= f.max_visible and len(text) <= f.max_html:
+                return text, markup
+            body.pop(0)  # drop the oldest line first
+        return "\n".join(head + ["live log unavailable"]), markup
+
+    def _parse_tid(self, chat_id: int, raw: str, usage: str) -> str | None:
+        if not raw:
+            self._send(chat_id, f"usage: {self.fmt.esc(usage, 60)}")
+            return None
+        if not TASK_ID_RE.match(raw):
+            self._send(chat_id, "invalid task id")
+            return None
+        return raw
+
+    def _cmd_live(self, chat_id: int, arg: str) -> str:
+        tid = self._parse_tid(chat_id, arg.strip(), "/live <task_id>")
+        if tid is None:
+            return "cmd:live:bad-id"
+        view = self._live_view(tid)
+        if view is None:
+            self._send(chat_id, f"unknown task {self.fmt.code(tid, 64)}")
+            return "cmd:live:unknown"
+        self._send(chat_id, *view)
+        return "cmd:live"
+
+    def _cmd_logs(self, chat_id: int, arg: str) -> str:
+        parts = arg.split()
+        if len(parts) > 2:
+            self._send(chat_id, "usage: /logs &lt;task_id&gt; [n]")
+            return "cmd:logs:bad-arg"
+        tid = self._parse_tid(chat_id, parts[0] if parts else "", "/logs <task_id> [n]")
+        if tid is None:
+            return "cmd:logs:bad-id"
+        n = LOGS_DEFAULT_LINES
+        if len(parts) == 2:
+            if not re.fullmatch(r"\d{1,6}", parts[1]):
+                self._send(chat_id, "usage: /logs &lt;task_id&gt; [n]")
+                return "cmd:logs:bad-arg"
+            n = max(1, min(int(parts[1]), LOGS_MAX_LINES))
+        view = self._logs_view(tid, n)
+        if view is None:
+            self._send(chat_id, f"unknown task {self.fmt.code(tid, 64)}")
+            return "cmd:logs:unknown"
+        self._send(chat_id, *view)
+        return "cmd:logs"
+
+    def _edit_in_place(self, chat_id: int, message_id: Any, text: str, markup: dict | None) -> str:
+        """Edit the pressed message; never sends a new one. 'message is not modified' is fine."""
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return "no_message"
+        self.limiter.wait(chat_id)
+        try:
+            self.transport.edit_message_text(chat_id, message_id, self.fmt.finalize(text), markup)
+            return "edited"
+        except TgRejected as exc:
+            if "message is not modified" in str(exc).lower():
+                return "unchanged"
+            self.log(f"edit failed: {type(exc).__name__}")
+            return "failed"
+        except Exception as exc:
+            self.log(f"edit failed: {type(exc).__name__}")
+            return "failed"
+
+    def _cb_stateless(self, op: str, task_id: str, chat_id: int, message_id: Any) -> str:
+        """Read-only refresh (`v`) / logs (`l`): no tg_actions, no task mutation, edit in place."""
+        view = self._live_view(task_id) if op == "v" else self._logs_view(task_id, LOGS_DEFAULT_LINES)
+        name = "live" if op == "v" else "logs"
+        if view is None:
+            text = f"unknown task {self.fmt.code(task_id, 64)}"
+            return f"callback:{name}:unknown:{self._edit_in_place(chat_id, message_id, text, None)}"
+        return f"callback:{name}:{self._edit_in_place(chat_id, message_id, *view)}"
 
     # ----------------------------------------------------------- callbacks
     def _on_callback(self, cq: dict[str, Any]) -> str:
@@ -1520,6 +1721,10 @@ class DevBot:
             answered = False
         if answered is not True:
             return "callback:answer_failed"
+        data = cq.get("data") or ""
+        sm = STATELESS_TASK_CB_RE.match(data) if isinstance(data, str) else None
+        if sm and len(data.encode("utf-8")) <= MAX_CALLBACK_BYTES:
+            return self._cb_stateless(sm.group(1), sm.group(2), chat_id, msg.get("message_id"))
         m = CALLBACK_RE.match(cq.get("data") or "")
         if not m:
             return "callback:malformed"
@@ -2031,11 +2236,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worktrees", help="worktrees dir (default: <state>/worktrees)")
     parser.add_argument("--stop-flag", help="STOP.flag path (default: <state>/STOP.flag)")
     parser.add_argument("--env-file", help="strict env file (default: <repo>/.env if present)")
+    from .worker import add_status_args, resolve_state_paths, status_from_args
+
+    add_status_args(parser)
     args = parser.parse_args(argv)
 
     if args.demo:  # decided before any env/token/DB/network access
         return run_demo()
-    from .worker import print_status_readonly, resolve_state_paths
 
     if args.status:
         try:
@@ -2043,7 +2250,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"[dev_bot] FAIL-CLOSED: {exc}", file=sys.stderr)
             return EXIT_LOCAL
-        return print_status_readonly(layout["db"])
+        return status_from_args(args, layout)
     env_file = default_env_file(args.repo, args.env_file)
     if args.check:
         return run_check(repo=args.repo, db=args.db, artifacts=args.artifacts, worktrees=args.worktrees,

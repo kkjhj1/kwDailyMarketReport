@@ -4,6 +4,7 @@ Usage:
     python -m auto_factory --demo                         # offline: FakeTransport + MockAdapters, temp repo
     python -m auto_factory --check  [--env-file F] --repo PATH   # read-only preflight + Telegram getMe
     python -m auto_factory --status [--db PATH] --repo PATH      # read-only (mode=ro) DB summary
+    python -m auto_factory --status --task TID | --logs TID [--lines N] --repo PATH   # runtime / live.log
     python -m auto_factory --poll-once [--db PATH] --repo PATH   # one bot step + one worker cycle
     python -m auto_factory --run [--db PATH] --repo PATH [--max-cycles N]
 
@@ -44,7 +45,7 @@ from .dev_bot import (
     load_dev_env_file,
     run_check,
 )
-from .worker import PipelineWorker, print_status_readonly, resolve_state_paths
+from .worker import PipelineWorker, add_status_args, resolve_state_paths, status_from_args
 from .worktree import SUPERVISOR_LOCK_NAME, SupervisorLocked, _FileLock
 
 
@@ -412,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-flag", help="STOP.flag path (default: <state>/STOP.flag)")
     parser.add_argument("--max-cycles", type=int, default=None, help="stop after N worker cycles (--run)")
     parser.add_argument("--idle-sleep", type=float, default=30.0, help="worker fallback poll interval (s)")
+    add_status_args(parser)
     args = parser.parse_args(argv)
 
     if args.demo:  # decided before any env/.env/DB/network access
@@ -422,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"[supervisor] FAIL-CLOSED: {exc}", file=sys.stderr)
             return EXIT_LOCAL
-        return print_status_readonly(layout["db"])
+        return status_from_args(args, layout)
     env_file = default_env_file(args.repo, args.env_file)
     if args.check:
         return run_check(repo=args.repo, db=args.db, artifacts=args.artifacts, worktrees=args.worktrees,

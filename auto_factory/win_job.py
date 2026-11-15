@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
@@ -267,12 +268,21 @@ class RunResult:
 
 
 class _Reader(threading.Thread):
-    def __init__(self, pipe, activity: list[float]):
+    """Drains one pipe into a bounded buffer (last `_MAX_CAPTURE_BYTES`).
+
+    The optional progress sink only receives in-memory counters (`sink.output`); the reader
+    never performs file or DB I/O, and sink failures never stop the drain.
+    """
+
+    def __init__(self, pipe, activity: list[float], sink=None, stream: str = ""):
         super().__init__(daemon=True)
         self.pipe = pipe
         self.activity = activity
-        self.chunks: list[bytes] = []
+        self.chunks: deque[bytes] = deque()
         self.size = 0
+        self.total = 0
+        self.sink = sink
+        self.stream = stream
 
     def run(self) -> None:
         try:
@@ -283,8 +293,14 @@ class _Reader(threading.Thread):
                 self.activity[0] = time.monotonic()
                 self.chunks.append(chunk)
                 self.size += len(chunk)
+                self.total += len(chunk)
                 while self.size > _MAX_CAPTURE_BYTES and len(self.chunks) > 1:
-                    self.size -= len(self.chunks.pop(0))
+                    self.size -= len(self.chunks.popleft())
+                if self.sink is not None:
+                    try:
+                        self.sink.output(self.stream, self.total)
+                    except Exception:
+                        pass
         except (OSError, ValueError):
             pass
 
@@ -311,7 +327,15 @@ class JobRunner:
         wall_timeout: float | None = None,
         idle_timeout: float | None = None,
         stop_check: Callable[[], bool] | None = None,
+        progress_sink=None,
+        progress_step: str | None = None,
+        progress_redaction: str = "normal",
     ) -> RunResult:
+        """Run `cmd` contained; optional `progress_sink` gets start/output/pulse/finish metadata.
+
+        `progress_redaction="holdout"` makes the sink drop every output-derived signal. A sink
+        reporting `is_lease_lost()` terminates the child (timeout_kind "lease_lost").
+        """
         wall = self.wall_timeout if wall_timeout is None else wall_timeout
         idle = self.idle_timeout if idle_timeout is None else idle_timeout
         env = dict(env) if env is not None else build_sandbox_env()
@@ -322,62 +346,104 @@ class JobRunner:
             cwd=None if cwd is None else str(cwd),
             env=env,
         )
-        job = JobObject() if IS_WINDOWS else None
         if IS_WINDOWS:
             kwargs["creationflags"] = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
+        sink = progress_sink
+        redaction = "holdout" if progress_redaction == "holdout" else "metadata_only"
+
+        def sink_call(name: str, *a, **k) -> None:
+            if sink is None:
+                return
+            try:
+                getattr(sink, name)(*a, **k)
+            except Exception:  # monitoring never fails the run
+                pass
+
+        def lease_lost() -> bool:
+            if sink is None:
+                return False
+            try:
+                return bool(sink.is_lease_lost())
+            except Exception:
+                return False
 
         started = time.monotonic()
+        job: JobObject | None = None
+        proc: subprocess.Popen | None = None
+        readers: list[_Reader] = []
+        contained = False
+        start_time: float | None = None
+        kind: str | None = None
         try:
+            job = JobObject() if IS_WINDOWS else None
             proc = subprocess.Popen(list(cmd), **kwargs)
-        except BaseException:
+            if job:
+                try:
+                    job.assign(proc.pid)
+                    contained = True
+                except JobObjectError:
+                    proc.kill()  # fail closed: never run an uncontained provider
+                    proc.wait()
+                    raise
+                _resume_process(proc.pid)
+            start_time = process_start_time(proc.pid)
+            sink_call("start", proc.pid, start_time, progress_step, redaction=redaction)
+
+            activity = [time.monotonic()]
+            readers = [_Reader(proc.stdout, activity, sink, "stdout"), _Reader(proc.stderr, activity, sink, "stderr")]
+            for r in readers:
+                r.start()
+
+            while proc.poll() is None:
+                now = time.monotonic()
+                if wall and now - started > wall:
+                    kind = "wall"
+                elif idle and now - activity[0] > idle:
+                    kind = "idle"
+                elif stop_check is not None and stop_check():
+                    kind = "stop"
+                elif lease_lost():
+                    kind = "lease_lost"  # fail closed: a worker without the lease must not keep writing
+                if kind:
+                    self._kill_tree(proc, job)
+                    break
+                sink_call("pulse")
+                time.sleep(self.poll_interval)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._kill_tree(proc, job, last_resort=True)
+                proc.wait(timeout=10)
+        finally:
+            # 1) kill the process tree first (exception paths included) ...
+            if proc is not None and proc.poll() is None:
+                try:
+                    self._kill_tree(proc, job, last_resort=True)
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+            # 2) ... reap grandchildren still holding pipes/files (Job handle closed on every path) ...
             if job:
                 job.close()
-            raise
-        contained = False
-        if job:
-            try:
-                job.assign(proc.pid)
-                contained = True
-            except JobObjectError:
-                proc.kill()  # fail closed: never run an uncontained provider
-                proc.wait()
-                job.close()
-                raise
-            _resume_process(proc.pid)
-        start_time = process_start_time(proc.pid)
-
-        activity = [time.monotonic()]
-        readers = [_Reader(proc.stdout, activity), _Reader(proc.stderr, activity)]
-        for r in readers:
-            r.start()
-
-        kind: str | None = None
-        while proc.poll() is None:
-            now = time.monotonic()
-            if wall and now - started > wall:
-                kind = "wall"
-            elif idle and now - activity[0] > idle:
-                kind = "idle"
-            elif stop_check is not None and stop_check():
-                kind = "stop"
-            if kind:
-                self._kill_tree(proc, job)
-                break
-            time.sleep(self.poll_interval)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self._kill_tree(proc, job, last_resort=True)
-            proc.wait(timeout=10)
-        # Provider exited: reap any grandchildren still holding pipes or files.
-        if job:
-            job.close()
-        else:
-            self._killpg(proc.pid)
-        for r in readers:
-            r.join(timeout=5)
+            elif proc is not None:
+                self._killpg(proc.pid)
+            # 3) ... join readers (bounded) BEFORE closing pipes; a pipe whose reader is still
+            # blocked in read1() is never closed (buffered-reader lock deadlock).
+            for r in readers:
+                if r.ident is not None:
+                    r.join(timeout=5)
+            pipes = [r.pipe for r in readers if not r.is_alive()]
+            if proc is not None and not readers:  # no reader ever touched these pipes
+                pipes = [p for p in (proc.stdout, proc.stderr) if p is not None]
+            for p in pipes:
+                try:
+                    p.close()
+                except Exception:
+                    pass
+            if proc is not None:
+                sink_call("finish", proc.returncode, kind is not None, kind)
         return RunResult(
             returncode=proc.returncode,
             stdout=readers[0].text(),

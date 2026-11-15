@@ -4147,3 +4147,856 @@ class TestQAOutboxDispatch:
         db.claim_next_qa_request("w", 1, 1.0)
         db.complete_qa_answer(q2, "w", 1, "codex", "a" * 40, "x", [])
         assert bot.dispatch_once()["failed"] == 1 and tr.sent == []
+
+
+# ######################################################################## LIVE PROGRESS
+import re as _re
+
+import auto_factory.live_progress as lp_mod
+import auto_factory.win_job as win_job_mod
+from auto_factory.adapters import FAILOVER_CODES as _FAILOVER_CODES
+from auto_factory.db import heartbeat_nowait, read_runtime_snapshot_readonly
+from auto_factory.dev_bot import STATELESS_TASK_CB_RE, stateless_task_button
+from auto_factory.guardrails import DeterministicRunner
+from auto_factory.live_progress import (
+    LeaseKeeper,
+    LeaseLostError,
+    LiveProgressSink,
+    ProgressSink,
+    build_runtime_snapshot,
+    classify_liveness,
+    read_live_log_tail,
+    read_live_sidecar,
+    stage_label,
+)
+from auto_factory.win_job import RunResult
+from auto_factory.worker import call_with_progress
+
+
+class _RecSink(ProgressSink):
+    def __init__(self, lost_after: float | None = None):
+        super().__init__()
+        self.calls: list[tuple] = []
+        self.totals: dict[str, int] = {}
+        self.lost_after = lost_after
+        self._t0 = None
+        self.lock = _threading.Lock()
+
+    def start(self, pid, proc_start_time, step=None, provider=None, role=None, attempt_id=None, *, redaction=None):
+        self._t0 = time.monotonic()
+        self.calls.append(("start", pid, proc_start_time, step, redaction))
+
+    def output(self, stream, bytes_seen, last_output_at=None):
+        assert _threading.current_thread() is not _threading.main_thread()  # reader threads only
+        with self.lock:
+            self.totals[stream] = bytes_seen
+
+    def pulse(self):
+        self.calls.append(("pulse",))
+
+    def finish(self, returncode, timed_out=False, timeout_kind=None):
+        self.calls.append(("finish", returncode, timed_out, timeout_kind))
+
+    def is_lease_lost(self):
+        return self.lost_after is not None and self._t0 is not None and time.monotonic() - self._t0 > self.lost_after
+
+
+class _BoomSink:
+    def __getattr__(self, name):
+        def boom(*a, **k):
+            raise RuntimeError("sink exploded")
+        return boom
+
+
+def _live_files_text(art, tid) -> str:
+    d = Path(art) / tid
+    return "".join(p.read_text(encoding="utf-8", errors="replace") for p in d.glob("live.*"))
+
+
+def _make_sink(tmp_path, tid="t1", clock=None, **kw):
+    return LiveProgressSink(tmp_path / "artifacts", tid, clock=clock or Clock(1_000_000.0), **kw)
+
+
+def _try_dir_link(link: Path, target: Path) -> bool:
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if IS_WINDOWS:
+        try:
+            import _winapi
+
+            _winapi.CreateJunction(str(target), str(link))
+            return True
+        except OSError:
+            return False
+    return False
+
+
+# ============================================================ sidecar sink
+class TestLiveProgressSink:
+    def test_lifecycle_fields_and_counters(self, tmp_path):
+        clock = Clock(1_000_000.0)
+        s = _make_sink(tmp_path, clock=clock)
+        assert s.begin_run("IMPLEMENTING") == 1
+        s.set_stage("implement", "claude", "writer", 7)
+        clock.t += 3
+        s.start(4242, 123.5, "writer")
+        s.output("stdout", 10)
+        s.output("stdout", 25)
+        s.output("stderr", 5)
+        s.flush()
+        live = read_live_sidecar(tmp_path / "artifacts", "t1")
+        assert set(live) == {
+            "schema_version", "task_id", "generation", "state", "step", "provider", "role", "attempt_id", "pid",
+            "proc_start_time", "started_at", "last_heartbeat_at", "last_output_at", "bytes_seen", "redaction",
+            "running", "finished_at", "lease_lost"}
+        assert live["schema_version"] == 1 and live["task_id"] == "t1" and live["generation"] == 1
+        assert (live["step"], live["provider"], live["role"], live["attempt_id"]) == ("writer", "claude", "writer", 7)
+        assert live["pid"] == 4242 and live["proc_start_time"] == 123.5 and live["bytes_seen"] == 30
+        assert live["running"] is True and live["redaction"] == "metadata_only" and live["lease_lost"] is False
+        assert live["started_at"] == 1_000_000.0 and live["last_output_at"] == 1_000_003.0  # db clock, not wall
+        clock.t += 2
+        s.finish(0, False, None)
+        s.close("CHECKPOINTED")
+        live = read_live_sidecar(tmp_path / "artifacts", "t1")
+        assert live["running"] is False and live["finished_at"] == 1_000_005.0 and live["state"] == "CHECKPOINTED"
+        log = read_live_log_tail(tmp_path / "artifacts", "t1", 50)
+        assert any("event=start" in ln and "provider=claude" in ln and "pid=4242" in ln for ln in log)
+        assert any("event=finish" in ln and "status=exit:0" in ln for ln in log)
+        assert all(_re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ gen=1 ", ln) for ln in log)
+
+    def test_output_is_memory_only(self, tmp_path):
+        s = _make_sink(tmp_path)
+        s.begin_run("IMPLEMENTING")
+        writes = []
+        s._writer = lambda p, d: writes.append(p)
+        for i in range(500):
+            s.output("stdout", i)
+        assert writes == [] and s.snapshot()["bytes_seen"] == 499
+
+    def test_pulse_is_throttled(self, tmp_path):
+        mono = [100.0]
+        s = _make_sink(tmp_path, monotonic=lambda: mono[0], pulse_interval=5.0)
+        s.begin_run("IMPLEMENTING")
+        writes = []
+        real = s._writer
+        s._writer = lambda p, d: (writes.append(p), real(p, d))
+        for _ in range(50):
+            s.pulse()
+        assert writes == []
+        mono[0] += 5.1
+        s.pulse()
+        assert len(writes) >= 1
+
+    def test_generation_monotonic_blocks_stale_overwrite(self, tmp_path):
+        old = _make_sink(tmp_path)
+        assert old.begin_run("IMPLEMENTING") == 1
+        new = _make_sink(tmp_path)
+        assert new.begin_run("IMPLEMENTING") == 2
+        new.set_stage("review", "gemini", "reviewer", 9)
+        old.set_stage("implement", "claude", "writer", 3)  # stale owner must not win
+        old.close("BLOCKED")
+        live = read_live_sidecar(tmp_path / "artifacts", "t1")
+        assert live["generation"] == 2 and live["provider"] == "gemini" and old.superseded
+        third = _make_sink(tmp_path)
+        assert third.begin_run() == 3
+
+    def test_windows_sharing_violation_retry_and_preserve(self, tmp_path):
+        from auto_factory.worktree import safe_write_atomic
+
+        s = _make_sink(tmp_path, retry_delays=(0.0, 0.0, 0.0), sleep=lambda x: None)
+        s.begin_run("IMPLEMENTING")
+        good = read_live_sidecar(tmp_path / "artifacts", "t1")
+        fails = [PermissionError(32, "sharing violation"), OSError(13, "access denied")]
+
+        def flaky(p, d):
+            if fails:
+                raise fails.pop(0)
+            return safe_write_atomic(p, d)
+
+        s._writer = flaky
+        s.set_stage("pytest", "deterministic", "verify")
+        assert read_live_sidecar(tmp_path / "artifacts", "t1")["step"] == "pytest" and s.write_errors == 0
+
+        def always(p, d):
+            raise PermissionError(32, "sharing violation")
+
+        s._writer = always
+        s.set_stage("holdout", "deterministic", "verify")  # never raises
+        after = read_live_sidecar(tmp_path / "artifacts", "t1")
+        assert after["step"] == "pytest" and after["generation"] == good["generation"] and s.write_errors >= 1
+        assert not [p for p in (tmp_path / "artifacts" / "t1").iterdir() if p.name.endswith(".tmp")]
+
+    def test_invalid_task_ids_rejected(self, tmp_path):
+        for bad in ("../x", "a/b", "", ".hidden", "a\\b", "x" * 65, None):
+            with pytest.raises(ValueError):
+                LiveProgressSink(tmp_path / "artifacts", bad)
+            assert read_live_sidecar(tmp_path / "artifacts", bad) is None
+            assert read_live_log_tail(tmp_path / "artifacts", bad) is None
+        assert not (tmp_path / "x").exists()
+
+    def test_symlink_or_junction_task_dir_rejected(self, tmp_path):
+        art = tmp_path / "artifacts"
+        outside = tmp_path / "outside"
+        if not _try_dir_link(art / "tlink", outside):
+            pytest.skip("cannot create symlink/junction here")
+        (outside / "live.json").write_text(_json.dumps({"schema_version": 1, "task_id": "tlink", "generation": 5}))
+        (outside / "live.log").write_text("planted\n")
+        with pytest.raises(ValueError):  # UnsafePathError
+            LiveProgressSink(art, "tlink")
+        assert read_live_sidecar(art, "tlink") is None and read_live_log_tail(art, "tlink") is None
+        assert (outside / "live.log").read_text() == "planted\n"
+
+    def test_corrupt_or_mismatched_sidecar_ignored(self, tmp_path):
+        d = tmp_path / "artifacts" / "t1"
+        d.mkdir(parents=True)
+        for body in ("{not json", "[]", '{"schema_version": 2, "task_id": "t1", "generation": 1}',
+                     '{"schema_version": 1, "task_id": "t2", "generation": 1}',
+                     '{"schema_version": 1, "task_id": "t1", "generation": true}', "x" * 20000):
+            (d / "live.json").write_text(body)
+            assert read_live_sidecar(tmp_path / "artifacts", "t1") is None
+        s = _make_sink(tmp_path)
+        assert s.begin_run() == 1  # corrupt file never blocks a new run
+
+    def test_log_is_bounded(self, tmp_path):
+        s = _make_sink(tmp_path, max_log_bytes=4096)
+        s.begin_run("IMPLEMENTING")
+        for i in range(400):
+            s.set_stage(f"step{i}", "claude", "writer", i)
+        raw = (tmp_path / "artifacts" / "t1" / "live.log").read_bytes()
+        assert len(raw) <= 4096 and raw.endswith(b"\n")
+        assert all(_re.match(rb"^\d{4}-", ln) for ln in raw.splitlines())
+        s2 = _make_sink(tmp_path)
+        s2.begin_run()
+        for i in range(1500):
+            s2.set_stage(f"s{i}", "codex", "writer", i)
+        assert (tmp_path / "artifacts" / "t1" / "live.log").stat().st_size <= lp_mod.MAX_LOG_BYTES
+
+    def test_holdout_redaction_freezes_output_signals(self, tmp_path):
+        clock = Clock(1_000_000.0)
+        s = _make_sink(tmp_path, clock=clock)
+        s.begin_run("VERIFYING")
+        s.set_stage("holdout", "deterministic", "verify", redaction="holdout")
+        s.start(99, 1.0, "holdout", redaction="holdout")
+        clock.t += 7
+        s.output("stdout", 12345)
+        s.finish(1, False, None)
+        live = read_live_sidecar(tmp_path / "artifacts", "t1")
+        assert live["redaction"] == "holdout" and live["bytes_seen"] == 0 and live["last_output_at"] is None
+        hold = [ln for ln in read_live_log_tail(tmp_path / "artifacts", "t1", 50) if "step=holdout" in ln]
+        assert hold and all("provider=" not in ln and "pid=" not in ln and "bytes_seen" not in ln for ln in hold)
+        assert any(_re.search(r"step=holdout status=exit:1 elapsed=7s$", ln) for ln in hold)
+
+
+# ============================================================ JobRunner + sink
+class TestJobRunnerProgress:
+    def test_sink_lifecycle(self):
+        sink = _RecSink()
+        res = JobRunner(poll_interval=0.02).run(_py("""
+            import sys, time
+            sys.stdout.write("a" * 1000); sys.stdout.flush()
+            sys.stderr.write("b" * 300); sys.stderr.flush()
+            time.sleep(0.3)
+        """), progress_sink=sink, progress_step="writer")
+        assert res.ok
+        kinds = [c[0] for c in sink.calls]
+        assert kinds[0] == "start" and kinds[-1] == "finish" and "pulse" in kinds
+        start = sink.calls[0]
+        assert start[1] == res.pid and start[2] == res.start_time and start[3] == "writer"
+        assert start[4] == "metadata_only"
+        assert sink.totals == {"stdout": 1000, "stderr": 300}
+        assert sink.calls[-1] == ("finish", 0, False, None)
+
+    def test_defaults_unchanged_without_sink(self):
+        res = JobRunner().run(_py("print('x')"))
+        assert res.ok and res.stdout.strip() == "x"
+
+    def test_sink_exceptions_never_fail_the_run(self):
+        res = JobRunner(poll_interval=0.02).run(_py("print('hello'); import time; time.sleep(0.2)"),
+                                                progress_sink=_BoomSink(), progress_step="writer")
+        assert res.ok and res.stdout.strip() == "hello" and not res.timed_out
+
+    def test_lease_lost_terminates_child(self):
+        sink = _RecSink(lost_after=0.3)
+        res = JobRunner(poll_interval=0.02).run(_py("import time; time.sleep(60)"), wall_timeout=60,
+                                                idle_timeout=60, progress_sink=sink)
+        assert res.timed_out and res.timeout_kind == "lease_lost" and res.duration < 20
+        assert sink.calls[-1][0] == "finish" and sink.calls[-1][3] == "lease_lost"
+        assert process_start_time(res.pid) is None
+
+    def test_bounded_memory_and_full_byte_count(self):
+        sink = _RecSink()
+        res = JobRunner().run(_py("""
+            import sys
+            chunk = b"z" * 65536
+            for _ in range(48):
+                sys.stdout.buffer.write(chunk)
+            sys.stdout.flush()
+        """), progress_sink=sink)
+        assert res.ok and sink.totals["stdout"] == 48 * 65536
+        assert len(res.stdout) <= win_job_mod._MAX_CAPTURE_BYTES + 65536
+
+    @pytest.mark.skipif(not IS_WINDOWS, reason="Job Objects are Windows-only")
+    def test_job_handle_closed_on_spawn_failure_and_timeout(self, tmp_path, monkeypatch):
+        made = []
+
+        class _TrackedJob(win_job_mod.JobObject):
+            def __init__(self):
+                super().__init__()
+                self.closed = False
+                made.append(self)
+
+            def close(self):
+                self.closed = True
+                super().close()
+
+        monkeypatch.setattr(win_job_mod, "JobObject", _TrackedJob)
+        with pytest.raises(OSError):
+            JobRunner().run([str(tmp_path / "definitely-missing.exe")], progress_sink=_RecSink())
+        assert len(made) == 1 and made[0].closed and made[0].handle is None
+        sink = _RecSink()
+        res = JobRunner(poll_interval=0.02).run(_py("import time; time.sleep(60)"), wall_timeout=30,
+                                                idle_timeout=1.0, progress_sink=sink)
+        assert res.timeout_kind == "idle" and made[-1].closed and made[-1].handle is None
+        assert sink.calls[-1] == ("finish", res.returncode, True, "idle")
+
+    def test_adapter_maps_lease_lost_to_non_failover(self, tmp_path):
+        class _LostRunner:
+            def run(self, cmd, cwd=None, env=None, stop_check=None, **kw):
+                self.kw = kw
+                return RunResult(returncode=1, stdout="", stderr="", timed_out=True, timeout_kind="lease_lost")
+
+        runner = _LostRunner()
+        a = CodexAdapter(runner)
+        a.resolve_executable = lambda: "codex"
+        c = HandoffContract("t1", "L1", "a" * 40, "a" * 40, ["calc.py"], ["pytest"], "writer")
+        res = a.invoke(c, str(tmp_path), "writer", "x.json", progress_sink=_RecSink())
+        assert res.code == FailureCode.INTERNAL and res.code not in _FAILOVER_CODES
+        assert runner.kw["progress_step"] == "writer" and isinstance(runner.kw["progress_sink"], _RecSink)
+
+    def test_adapter_without_sink_keeps_runner_signature(self, tmp_path):
+        class _StrictRunner:
+            def run(self, cmd, cwd=None, env=None, stop_check=None):
+                return RunResult(returncode=0, stdout="ok", stderr="")
+
+        a = CodexAdapter(_StrictRunner())
+        a.resolve_executable = lambda: "codex"
+        c = HandoffContract("t1", "L1", "a" * 40, "a" * 40, ["calc.py"], ["pytest"], "writer")
+        assert a.invoke(c, str(tmp_path), "writer", "x.json").ok
+
+    def test_call_with_progress_tolerates_legacy_signatures(self):
+        seen = []
+        assert call_with_progress(lambda a, b: seen.append((a, b)) or "ok", 1, 2, progress_sink=_RecSink()) == "ok"
+        assert call_with_progress(lambda a, progress_sink=None: progress_sink, 1, progress_sink="S") == "S"
+        assert call_with_progress(lambda a, **kw: kw, 1, progress_sink="S") == {"progress_sink": "S"}
+        assert call_with_progress(lambda a, **kw: kw, 1, progress_sink=None) == {}
+        assert seen == [(1, 2)]
+
+
+class TestHoldoutZeroLeak:
+    def test_holdout_gate_sidecar_has_no_names_paths_or_assertions(self, tmp_path):
+        hold = tmp_path / "secret_holdout_dir_zebra"
+        hold.mkdir()
+        (hold / "test_secret_zebra_name.py").write_text(
+            "def test_hidden_quokka_case():\n    assert 1 == 2, 'QUOKKA_ASSERT_MSG'\n", encoding="utf-8")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        sink = _make_sink(tmp_path, tid="th1")
+        sink.begin_run("VERIFYING")
+        sink.set_stage("holdout", "deterministic", "verify", redaction="holdout")
+        res = DeterministicRunner().holdout(str(wt), str(hold), progress_sink=sink)
+        sink.close("VERIFYING")
+        assert not res.ok and "QUOKKA_ASSERT_MSG" in res.output_tail  # it really was in the output
+        blob = _live_files_text(tmp_path / "artifacts", "th1")
+        for needle in ("zebra", "quokka", "QUOKKA", "test_secret", "test_hidden", "secret_holdout",
+                       str(tmp_path), "pytest", "assert"):
+            assert needle not in blob, needle
+        live = read_live_sidecar(tmp_path / "artifacts", "th1")
+        assert live["bytes_seen"] == 0 and live["last_output_at"] is None
+        assert "step=holdout" in blob
+
+
+# ============================================================ lease keeper
+class TestLeaseKeeper:
+    def _leased(self, tmp_path, ttl=60.0):
+        clock = Clock(1_000_000.0)
+        d = CoordinatorDB(tmp_path / "lk.db", clock=clock)
+        tid, _ = d.create_task("r", "L1", ["calc.py"], {})
+        assert d.acquire_lease(tid, "owner-nonce", os.getpid(), process_start_time(os.getpid()), ttl=ttl)
+        return d, clock, tid
+
+    def test_interval_formula(self):
+        for ttl, want in ((900.0, 15.0), (12.0, 5.0), (60.0, 10.0), (30.0, 5.0)):
+            assert LeaseKeeper("x.db", "t1", "n", ttl).interval == want
+
+    def test_busy_is_skipped_then_renews(self, tmp_path):
+        d, clock, tid = self._leased(tmp_path)
+        try:
+            sink = LiveProgressSink(tmp_path / "artifacts", tid, clock=clock)
+            sink.begin_run("IMPLEMENTING")
+            k = LeaseKeeper(d.path, tid, "owner-nonce", 60.0, clock=clock, sink=sink)
+            blocker = _sqlite3.connect(d.path, timeout=0, isolation_level=None)
+            blocker.execute("BEGIN IMMEDIATE")
+            t0 = time.monotonic()
+            assert k.tick() is True and k.busy_skips == 1 and not k.is_lease_lost()
+            assert time.monotonic() - t0 < 2.0  # busy_timeout=0: never blocks
+            blocker.execute("ROLLBACK")
+            blocker.close()
+            clock.t += 20
+            assert k.tick() is True and k.beats == 1
+            lease = d.get_lease(tid)
+            assert lease["heartbeat_at"] == 1_000_020.0 and lease["expires_at"] == 1_000_080.0
+            assert "owner-nonce" not in repr(k) and "owner-nonce" not in _live_files_text(tmp_path / "artifacts", tid)
+        finally:
+            d.close()
+
+    def test_prolonged_busy_past_margin_is_lease_lost(self, tmp_path):
+        d, clock, tid = self._leased(tmp_path)
+        try:
+            sink = LiveProgressSink(tmp_path / "artifacts", tid, clock=clock)
+            sink.begin_run("IMPLEMENTING")
+            k = LeaseKeeper(d.path, tid, "owner-nonce", 60.0, clock=clock, sink=sink)
+            blocker = _sqlite3.connect(d.path, timeout=0, isolation_level=None)
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                clock.t += 60 - k.safety_margin - 1
+                assert k.tick() is True and not k.is_lease_lost()
+                clock.t += 2
+                assert k.tick() is False and k.is_lease_lost() and sink.is_lease_lost()
+            finally:
+                blocker.execute("ROLLBACK")
+                blocker.close()
+            assert k.tick() is False  # latched: never silently recovers
+            live = read_live_sidecar(tmp_path / "artifacts", tid)
+            assert live["lease_lost"] is True
+            assert any("LEASE_DEGRADED" in ln for ln in read_live_log_tail(tmp_path / "artifacts", tid, 20))
+        finally:
+            d.close()
+
+    def test_taken_lease_is_lost_immediately(self, tmp_path):
+        d, clock, tid = self._leased(tmp_path)
+        try:
+            d.force_release_lease(tid)
+            assert d.acquire_lease(tid, "thief", 1, 1.0, ttl=60)
+            k = LeaseKeeper(d.path, tid, "owner-nonce", 60.0, clock=clock)
+            assert k.tick() is False and k.is_lease_lost()
+            assert d.get_lease(tid)["owner_nonce"] == "thief"  # never touched the new owner's row
+        finally:
+            d.close()
+
+    def test_heartbeat_nowait_never_creates_db(self, tmp_path):
+        missing = tmp_path / "nope" / "c.db"
+        with pytest.raises(_sqlite3.OperationalError):
+            heartbeat_nowait(missing, "t1", "n", 10.0, now=1.0)
+        assert not missing.exists()
+
+    def test_keeper_thread_kills_child_when_lease_stolen(self, tmp_path):
+        d, clock, tid = self._leased(tmp_path)
+        try:
+            sink = LiveProgressSink(tmp_path / "artifacts", tid, clock=clock)
+            sink.begin_run("IMPLEMENTING")
+            k = LeaseKeeper(d.path, tid, "owner-nonce", 60.0, clock=clock, sink=sink, interval=0.1).start()
+            d.force_release_lease(tid)
+            assert d.acquire_lease(tid, "thief", 1, 1.0, ttl=60)
+            res = JobRunner(poll_interval=0.02).run(_py("import time; time.sleep(60)"), wall_timeout=60,
+                                                    idle_timeout=60, progress_sink=sink)
+            k.stop()
+            assert res.timeout_kind == "lease_lost" and res.duration < 20
+            assert read_live_sidecar(tmp_path / "artifacts", tid)["lease_lost"] is True
+        finally:
+            d.close()
+
+
+# ============================================================ worker wiring
+class TestWorkerLiveProgress:
+    def test_worker_writes_metadata_only_sidecar(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db, claude=[_fix])
+        tid = submit(db, request="fix add REQUEST_TEXT_MARKER")
+        assert w.process_task(tid) == "AWAITING_MERGE"
+        live = read_live_sidecar(tmp_path / "artifacts", tid)
+        assert live["generation"] == 1 and live["running"] is False and live["state"] == "AWAITING_MERGE"
+        assert live["lease_lost"] is False and db.get_lease(tid) is None
+        log = "\n".join(read_live_log_tail(tmp_path / "artifacts", tid, 500))
+        for needle in ("step=implement provider=claude role=writer", "step=py_compile", "step=pytest",
+                       "step=holdout", "step=review provider=", "event=run_end"):
+            assert needle in log, needle
+        blob = _live_files_text(tmp_path / "artifacts", tid)
+        task = db.get_task(tid)
+        for secret in ("REQUEST_TEXT_MARKER", w.nonce, str(task["worktree_path"]), str(repo), "handoff",
+                       "test_holdout"):
+            assert secret not in blob, secret
+        assert w.progress_errors == []
+
+    def test_generation_increments_per_run(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        assert w.process_task(tid) == "AWAITING_START_AUTH"
+        assert read_live_sidecar(tmp_path / "artifacts", tid)["generation"] == 1
+        db.add_approval(tid, "start")
+        w.process_task(tid)
+        assert read_live_sidecar(tmp_path / "artifacts", tid)["generation"] == 2
+
+    def test_lease_lost_aborts_without_mutating_task(self, tmp_path, repo, db):
+        tid = submit(db)
+
+        def steal(wt, contract, role):
+            Path(wt, "calc.py").write_text(FIX, encoding="utf-8")
+            db.force_release_lease(tid)
+            assert db.acquire_lease(tid, "thief-nonce", 1, 1.0, ttl=900)
+
+        w = make_worker(tmp_path, repo, db, claude=[steal])
+        assert not issubclass(LeaseLostError, worker_mod.StopRequested)
+        assert w.process_task(tid) == "LEASE_LOST"
+        task = db.get_task(tid)
+        assert task["state"] == "IMPLEMENTING" and task["last_error"] is None
+        assert [e["to_state"] for e in db.events(tid)][-1] == "IMPLEMENTING"
+        writer = db.attempts(tid, "writer")
+        assert len(writer) == 1 and writer[0]["finished_at"] is None  # not settled as TIMEOUT/failover
+        assert w.adapters["codex"].calls == [] and w.adapters["gemini"].calls == []
+        assert db.get_lease(tid)["owner_nonce"] == "thief-nonce"  # new owner untouched
+        live = read_live_sidecar(tmp_path / "artifacts", tid)
+        assert live["lease_lost"] is True and live["running"] is False
+
+    def test_sink_failures_never_fail_the_worker(self, tmp_path, repo, db, monkeypatch):
+        def boom(self, *a, **k):
+            raise RuntimeError("disk on fire")
+
+        monkeypatch.setattr(LiveProgressSink, "set_stage", boom)
+        monkeypatch.setattr(LiveProgressSink, "close", boom)
+        w = make_worker(tmp_path, repo, db, claude=[_fix])
+        tid = submit(db)
+        assert w.process_task(tid) == "AWAITING_MERGE" and w.progress_errors
+
+    def test_sink_construction_failure_keeps_running(self, tmp_path, repo, db, monkeypatch):
+        def bad_init(self, *a, **k):
+            raise OSError("cannot create sidecar dir")
+
+        monkeypatch.setattr(LiveProgressSink, "__init__", bad_init)
+        w = make_worker(tmp_path, repo, db, claude=[_fix])
+        tid = submit(db)
+        assert w.process_task(tid) == "AWAITING_MERGE"
+        assert any(e.startswith("sink:") for e in w.progress_errors)
+
+    def test_live_progress_can_be_disabled(self, tmp_path, repo, db):
+        w = make_worker(tmp_path, repo, db, claude=[_fix], live_progress=False)
+        tid = submit(db)
+        assert w.process_task(tid) == "AWAITING_MERGE"
+        assert read_live_sidecar(tmp_path / "artifacts", tid) is None
+
+
+# ============================================================ stage / liveness
+class TestLiveness:
+    NOW = 1_000_000.0
+
+    def _lease(self, **over):
+        d = {"pid": 11, "proc_start_time": 5.0, "heartbeat_at": self.NOW - 5, "expires_at": self.NOW + 300}
+        d.update(over)
+        return d
+
+    def _live(self, **over):
+        d = {"task_id": "t1", "generation": 1, "running": True, "pid": 22, "proc_start_time": 6.0,
+             "last_heartbeat_at": self.NOW - 2, "last_output_at": self.NOW - 3, "started_at": self.NOW - 100,
+             "redaction": "metadata_only", "lease_lost": False}
+        d.update(over)
+        return d
+
+    def test_stage_map(self):
+        assert stage_label("RECEIVED") == "01/14 RECEIVED" and stage_label("MERGED") == "14/14 MERGED"
+        assert stage_label("IMPLEMENTING") == "09/14 IMPLEMENTING"
+        assert stage_label("RETRY_WAIT") == "09R/14" and stage_label("RECOVERY_PENDING") == "08R/14"
+        assert stage_label("SINGLE_PROVIDER_REVIEW_REQUIRED") == "EXCEPTION/REVIEW"
+        for s in ("BLOCKED", "FAILED", "CANCELLED", "DISCARDED", "GUARDRAIL_BLOCKED"):
+            assert stage_label(s) == f"EXCEPTION/{s}"
+        assert not any("%" in stage_label(s) for s in MAIN_FLOW + EXCEPTION_STATES)
+
+    def test_four_state_matrix(self):
+        def alive(pid, st):
+            return True
+
+        def dead(pid, st):
+            return False
+
+        n = self.NOW
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(), n, same_process=alive) == "ACTIVE"
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(last_output_at=n - 600), n,
+                                 same_process=alive) == "QUIET"
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(), n, same_process=dead) == "STALLED"
+        assert classify_liveness("IMPLEMENTING", self._lease(expires_at=n - 1), self._live(), n,
+                                 same_process=alive) == "STALLED"
+        assert classify_liveness("IMPLEMENTING", self._lease(heartbeat_at=n - 900),
+                                 self._live(last_heartbeat_at=n - 900), n, same_process=alive) == "STALLED"
+        assert classify_liveness("IMPLEMENTING", None, None, n, same_process=alive) == "STALLED"
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(lease_lost=True), n,
+                                 same_process=alive) == "STALLED"
+        for s in ("AWAITING_START_AUTH", "AWAITING_MERGE", "SINGLE_PROVIDER_REVIEW_REQUIRED", "BLOCKED",
+                  "GUARDRAIL_BLOCKED"):
+            assert classify_liveness(s, None, None, n, same_process=dead) == "WAITING_HUMAN"
+        assert classify_liveness("MERGED", None, None, n) == "DONE"
+        for s in ("FAILED", "CANCELLED", "DISCARDED"):
+            assert classify_liveness(s, None, None, n) == "FAILED"
+        assert classify_liveness("PREFLIGHTED", None, None, n) == "QUEUED"
+        assert classify_liveness("IMPLEMENTING", self._lease(), None, n, same_process=alive) == "ACTIVE"
+
+    def test_child_dead_only_stalls_after_grace(self):
+        n = self.NOW
+
+        def owner_only(pid, st):
+            return pid == 11
+
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(last_heartbeat_at=n - 1), n,
+                                 same_process=owner_only) != "STALLED"
+        assert classify_liveness("IMPLEMENTING", self._lease(), self._live(last_heartbeat_at=n - 100), n,
+                                 same_process=owner_only) == "STALLED"
+
+    def test_pid_reuse_defense_with_real_process_identity(self):
+        pid = os.getpid()
+        st = process_start_time(pid)
+        n = time.time()
+        lease = {"pid": pid, "proc_start_time": st, "heartbeat_at": n, "expires_at": n + 60}
+        assert classify_liveness("IMPLEMENTING", lease, None, n) == "ACTIVE"
+        reused = dict(lease, proc_start_time=st - 1000)  # same PID, different process start time
+        assert classify_liveness("IMPLEMENTING", reused, None, n) == "STALLED"
+
+    def test_holdout_snapshot_hides_output_age(self):
+        row = {"id": "t1", "state": "VERIFYING", "state_version": 3, "risk_level": "L1",
+               "state_entered_at": self.NOW - 50, "lease": self._lease(), "last_attempt": None}
+        s = build_runtime_snapshot(row, self._live(redaction="holdout", last_output_at=self.NOW - 999),
+                                   self.NOW, same_process=lambda p, t: True)
+        assert s.output_age is None and s.liveness == "ACTIVE" and s.stage == "11/14 VERIFYING"
+        assert s.state_age == 50 and s.elapsed == 100 and s.attempt == "-"
+        bad = build_runtime_snapshot(row, self._live(task_id="other"), self.NOW, same_process=lambda p, t: True)
+        assert bad.generation is None and bad.step is None
+
+    def test_runtime_snapshot_readonly_never_creates_db(self, tmp_path):
+        missing = tmp_path / "s" / "c.db"
+        with pytest.raises(FileNotFoundError):
+            read_runtime_snapshot_readonly(missing)
+        assert not missing.parent.exists()
+        d = CoordinatorDB(tmp_path / "c.db")
+        tid, _ = d.create_task("r", "L1", [], {})
+        d.add_attempt(tid, "claude", "writer")
+        d.acquire_lease(tid, "secret-nonce", 1, 2.0, ttl=30)
+        d.close()
+        snap = read_runtime_snapshot_readonly(tmp_path / "c.db", tid)
+        row = snap["tasks"][0]
+        assert row["last_attempt"]["provider"] == "claude" and row["attempt_count"] == 1
+        assert "owner_nonce" not in row["lease"] and "secret-nonce" not in repr(snap)
+        assert read_runtime_snapshot_readonly(tmp_path / "c.db", "tnope")["tasks"] == []
+
+
+# ============================================================ dev bot views
+def _implementing(db, tid):
+    _to_state(db, tid, "AWAITING_START_AUTH")
+    db.add_approval(tid, "start")
+    _advance(db, tid, ["WORKTREE_READY", "IMPLEMENTING"])
+
+
+def _write_log(tmp_path, tid, lines):
+    d = tmp_path / "artifacts" / tid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "live.log").write_text("".join(ln + "\n" for ln in lines), encoding="utf-8")
+
+
+class TestDevBotLive:
+    def test_validate_callback_data_stateless(self):
+        assert validate_callback_data("af2|v|t-abc.1") and validate_callback_data("af2|l|" + "a" * 58)
+        for bad in ("af2|v|../x", "af2|v|" + "a" * 59, "af2|l|-x", "af2|v|a b", "af2|w|tid", "af2|v|"):
+            with pytest.raises(ValueError):
+                validate_callback_data(bad)
+        assert stateless_task_button("x", "v", "a" * 59) is None
+        assert stateless_task_button("x", "l", "t1")["callback_data"] == "af2|l|t1"
+        assert not STATELESS_TASK_CB_RE.match("af2|q|" + "A" * 22)  # q stays draft-ask
+
+    def test_help_mentions_live_and_logs(self):
+        h = dev_bot_mod.HELP_TEXT
+        assert len(h) < 800 and "/live" in h and "/logs" in h and SafeHtmlFormatter().finalize(h) == h
+
+    def test_status_overview_has_runtime_columns(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        assert bot.handle_update(upd_msg("/status")) == "cmd:status"
+        text = tr.sent[-1]["text"]
+        assert "09/14 IMPLEMENTING" in text and "STALLED" in text and "hb " in text  # no lease => stalled
+
+    def test_status_overview_budget_plus_more(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        for i in range(80):
+            db.create_task(f"req {i} <b>&", "L1", ["calc.py"], {}, task_id=f"t{i:03d}-" + "x" * 50)
+        assert bot.handle_update(upd_msg("/status")) == "cmd:status"
+        text = tr.sent[-1]["text"]
+        assert _re.search(r"\+\d+ more", text)
+        assert SafeHtmlFormatter.visible_len(text) <= 1800 and len(text) <= 3500
+
+    def test_status_task_buttons_by_state(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        before = _tg_action_count(db)
+        assert bot.handle_update(upd_msg(f"/status {tid}")) == "cmd:status:task"
+        assert tr.buttons() == {"v": tid, "l": tid} and _tg_action_count(db) == before
+        text = tr.sent[-1]["text"]
+        for needle in ("Stage:", "09/14 IMPLEMENTING", "Liveness:", "Elapsed:", "Attempt:", "hb_age", "output_age"):
+            assert needle in text
+        tid2 = submit(db, request="gated", start=False)
+        _to_state(db, tid2, "AWAITING_START_AUTH")
+        bot.handle_update(upd_msg(f"/status {tid2}"))
+        assert set(tr.buttons()) == {"s", "c"}  # workflow buttons untouched, no extra row
+        assert "WAITING_HUMAN" in tr.sent[-1]["text"]
+
+    def test_live_command_is_read_only(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        before, ver = _tg_action_count(db), db.get_task(tid)["state_version"]
+        assert bot.handle_update(upd_msg(f"/live {tid}")) == "cmd:live"
+        assert tr.buttons() == {"v": tid, "l": tid} and _tg_action_count(db) == before
+        assert db.get_task(tid)["state_version"] == ver and "09/14 IMPLEMENTING" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_msg("/live ../etc")) == "cmd:live:bad-id"
+        assert bot.handle_update(upd_msg("/live tnope")) == "cmd:live:unknown"
+        assert bot.handle_update(upd_msg("/live")) == "cmd:live:bad-id"
+        long_id = "t" + "a" * 60
+        db.create_task("long", "L1", ["calc.py"], {}, task_id=long_id)
+        assert bot.handle_update(upd_msg(f"/live {long_id}")) == "cmd:live"
+        assert tr.sent[-1]["reply_markup"] is None and f"/logs {long_id}" in tr.sent[-1]["text"]
+
+    def test_logs_command_escape_caps_and_missing(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        assert bot.handle_update(upd_msg(f"/logs {tid}")) == "cmd:logs"
+        assert "live log unavailable" in tr.sent[-1]["text"] and tr.buttons() == {"v": tid, "l": tid}
+        _write_log(tmp_path, tid, [f"line{i} <b>&amp; x" for i in range(5)])
+        assert bot.handle_update(upd_msg(f"/logs {tid} 2")) == "cmd:logs"
+        text = tr.sent[-1]["text"]
+        assert "last 2" in text and "line4 &lt;b&gt;&amp;amp; x" in text and "line2" not in text
+        assert "<pre>" in text and SafeHtmlFormatter().finalize(text) == text
+        _write_log(tmp_path, tid, [f"{i:05d} " + "&" * 200 for i in range(300)])
+        assert bot.handle_update(upd_msg(f"/logs {tid} 500")) == "cmd:logs"
+        text = tr.sent[-1]["text"]
+        assert "last 80" in text and len(text) <= 3500 and SafeHtmlFormatter.visible_len(text) <= 1800
+        assert "00299 " in text and "00219 " not in text  # newest kept, clamp to 80
+        assert bot.handle_update(upd_msg(f"/logs {tid} 0")) == "cmd:logs"
+        assert "last 1" in tr.sent[-1]["text"]
+        for bad, code in ((f"/logs {tid} x", "cmd:logs:bad-arg"), ("/logs ../x", "cmd:logs:bad-id"),
+                          ("/logs tnope", "cmd:logs:unknown"), (f"/logs {tid} 1 2", "cmd:logs:bad-arg")):
+            assert bot.handle_update(upd_msg(bad)) == code
+
+    def test_logs_holdout_is_coarse(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        s = LiveProgressSink(tmp_path / "artifacts", tid, clock=db.clock)
+        s.begin_run("VERIFYING")
+        s.set_stage("holdout", "deterministic", "verify", redaction="holdout")
+        s.start(4321, 1.0, "holdout", redaction="holdout")
+        bot.handle_update(upd_msg(f"/logs {tid}"))
+        text = tr.sent[-1]["text"]
+        assert "holdout: coarse metadata only" in text and "step=holdout status=running" in text
+        assert "pid=4321" not in text
+
+    def test_stateless_callbacks_edit_in_place(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        _write_log(tmp_path, tid, ["2026-01-01T00:00:00Z gen=1 event=start step=implement"])
+        before, n_sent = _tg_action_count(db), len(tr.sent)
+        order = []
+        real_answer, real_edit = tr.answer_callback_query, tr.edit_message_text
+
+        def answer(*a, **k):
+            order.append("answer")
+            return real_answer(*a, **k)
+
+        def edit(*a, **k):
+            order.append("edit")
+            return real_edit(*a, **k)
+
+        tr.answer_callback_query, tr.edit_message_text = answer, edit
+        assert bot.handle_update(upd_cb("v", tid, message_id=55)) == "callback:live:edited"
+        assert order == ["answer", "edit"] and tr.edits[-1]["message_id"] == 55
+        assert "09/14 IMPLEMENTING" in tr.edits[-1]["text"] and tr.buttons(source="edits") == {"v": tid, "l": tid}
+        assert bot.handle_update(upd_cb("l", tid, message_id=55)) == "callback:logs:edited"
+        assert "event=start step=implement" in tr.edits[-1]["text"]
+        tr.edit_script = [TgRejected("HTTP 400: Bad Request: message is not modified")]
+        assert bot.handle_update(upd_cb("v", tid, message_id=55)) == "callback:live:unchanged"
+        assert len(tr.sent) == n_sent and _tg_action_count(db) == before  # never a duplicate message
+        assert bot.handle_update(upd_cb("v", "tnope", message_id=55)) == "callback:live:unknown:edited"
+        assert len(tr.sent) == n_sent
+
+    def test_stateless_callback_auth_and_answer_first(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        assert bot.handle_update(upd_cb("v", tid, frm=OTHER)) == "ignored:unauthorized"
+        assert bot.handle_update(upd_cb("l", tid, chat=OTHER)) == "ignored:unauthorized"
+        assert tr.answers == [] and tr.edits == [] and tr.sent == []
+        tr.answer_script = [False]
+        assert bot.handle_update(upd_cb("v", tid)) == "callback:answer_failed"
+        assert tr.edits == [] and tr.sent == []
+        u = upd_cb("v", tid)
+        u["callback_query"]["data"] = "af2|v|" + "a" * 70
+        assert bot.handle_update(u) == "callback:malformed" and tr.edits == []
+
+    def test_dev_bot_demo_still_passes(self):
+        lines = []
+        assert dev_bot_mod.run_demo(out=lines.append) == 0, "\n".join(lines)
+
+
+# ============================================================ status CLIs
+class TestStatusCliLive:
+    def _entries(self):
+        from auto_factory.worker import main as worker_main
+
+        return (dev_bot_mod.main, worker_main, sup_mod.main)
+
+    def test_missing_db_exit_2_never_created(self, tmp_path, repo):
+        dbp = tmp_path / "state" / "c.db"
+        for entry in self._entries():
+            for extra in ([], ["--task", "t1"], ["--logs", "t1", "--lines", "5"]):
+                assert entry(["--status", "--db", str(dbp), "--repo", str(repo), *extra]) == 2
+                assert not dbp.exists()
+
+    def test_status_task_and_logs_read_only(self, tmp_path, repo, monkeypatch, capsys):
+        dbp = tmp_path / "state" / "c.db"
+        dbp.parent.mkdir()
+        d = CoordinatorDB(dbp)
+        tid, _ = d.create_task("r", "L1", ["calc.py"], {})
+        d.close()
+        s = LiveProgressSink(tmp_path / "state" / "artifacts", tid)
+        s.begin_run("RECEIVED")
+        for i in range(10):
+            s.set_stage(f"stepno{i}", "claude", "writer", i)
+        before = dbp.read_bytes()
+        for mod in (dev_bot_mod, worker_mod, sup_mod):
+            monkeypatch.setattr(mod, "CoordinatorDB", lambda *a, **k: pytest.fail("RW DB opened"))
+        capsys.readouterr()
+        for entry in self._entries():
+            args = ["--db", str(dbp), "--repo", str(repo)]
+            assert entry(["--status", *args]) == 0
+            out = capsys.readouterr().out
+            assert tid in out and "stage=01/14 RECEIVED" in out and "liveness=QUEUED" in out and "hb_age=" in out
+            assert entry(["--status", "--task", tid, *args]) == 0
+            out = capsys.readouterr().out
+            assert "liveness=QUEUED" in out and "generation=1" in out and "step=stepno9" in out
+            assert entry(["--status", "--logs", tid, "--lines", "3", *args]) == 0
+            out = capsys.readouterr().out.splitlines()
+            assert len(out) == 4 and "stepno9" in out[-1] and "stepno6" not in "\n".join(out)
+            assert entry(["--status", "--task", "tnope", *args]) == 2
+            assert entry(["--status", "--task", "../x", *args]) == 2
+            assert entry(["--status", "--logs", "tnope", *args]) == 2
+            capsys.readouterr()
+        assert dbp.read_bytes() == before
+
+    def test_print_status_one_arg_compat_and_missing_log(self, tmp_path):
+        dbp = tmp_path / "c.db"
+        d = CoordinatorDB(dbp)
+        tid, _ = d.create_task("r", "L1", [], {})
+        d.close()
+        lines = []
+        assert worker_mod.print_status_readonly(dbp, lines.append) == 0
+        assert lines[0].startswith(f"{tid}\tL1\tRECEIVED\tv0\t") and lines[-1].startswith("[auto_factory] tasks=1")
+        lines.clear()
+        assert worker_mod.print_status_readonly(dbp, lines.append, logs_task=tid) == 0
+        assert lines[-1] == "live log unavailable"

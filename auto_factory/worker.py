@@ -3,6 +3,7 @@
 Usage:
     python -m auto_factory.worker --demo            # offline full-FSM dry-run in a temp repo
     python -m auto_factory.worker --status [--db PATH]          # read-only (mode=ro) inspection
+    python -m auto_factory.worker --status --task TID | --logs TID [--lines N]   # runtime detail / live.log
     python -m auto_factory.worker --run [--db PATH] --repo PATH [--max-cycles N] [--auto-audit-l2]
 
 `--db` defaults to `default_state_dir(repo)/coordinator.db` (outside the repo); STOP.flag,
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import sqlite3
@@ -55,6 +57,16 @@ from .db import (
     verify_phase1_artifacts,
 )
 from .guardrails import DeterministicRunner, GuardrailChecker, OscillationDetector, is_forbidden
+from .live_progress import (
+    TASK_ID_RE,
+    LeaseKeeper,
+    LeaseLostError,
+    LiveProgressSink,
+    ProgressSink,
+    fmt_age,
+    read_live_log_tail,
+    runtime_snapshots,
+)
 from .presets import PRESET_POLICY_VERSION, PRESETS
 from .win_job import build_sandbox_env, current_identity, is_same_process
 from .worktree import (
@@ -88,6 +100,34 @@ SUCCESS_OUTCOMES = frozenset({"AWAITING_MERGE", "SINGLE_PROVIDER_REVIEW_REQUIRED
 
 class StopRequested(Exception):
     pass
+
+
+_KW_CACHE: dict[Any, bool] = {}
+
+
+def _accepts_progress_sink(fn: Callable[..., Any]) -> bool:
+    """True if `fn` takes a `progress_sink` kwarg (test fakes / custom gates may not)."""
+    key = getattr(fn, "__func__", fn)
+    try:
+        return _KW_CACHE[key]
+    except (KeyError, TypeError):
+        pass
+    try:
+        params = inspect.signature(fn).parameters.values()
+        ok = any(p.name == "progress_sink" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+    except (TypeError, ValueError):
+        ok = False
+    try:
+        _KW_CACHE[key] = ok
+    except TypeError:
+        pass
+    return ok
+
+
+def call_with_progress(fn: Callable[..., Any], *args: Any, progress_sink: Any = None, **kwargs: Any) -> Any:
+    if progress_sink is not None and _accepts_progress_sink(fn):
+        kwargs["progress_sink"] = progress_sink
+    return fn(*args, **kwargs)
 
 
 AUDIT_CLONE_PREFIX = "af_audit_"
@@ -146,7 +186,14 @@ class PipelineWorker:
         qa_circuit_cooldown: float = 300.0,
         max_qa_per_cycle: int = 5,
         qa_lease_ttl: float = 300.0,
+        live_progress: bool = True,
+        lease_keeper_interval: float | None = None,
     ) -> None:
+        self.live_progress = live_progress
+        self.lease_keeper_interval = lease_keeper_interval
+        self._sink: ProgressSink | None = None
+        self._keeper: LeaseKeeper | None = None
+        self.progress_errors: list[str] = []
         self.qa_circuit_threshold = qa_circuit_threshold
         self.qa_circuit_cooldown = qa_circuit_cooldown
         self.max_qa_per_cycle = max_qa_per_cycle
@@ -208,8 +255,81 @@ class PipelineWorker:
         return self.stop_flag.exists()
 
     def _check_stop(self) -> None:
+        self._check_lease()
         if self.stop_requested():
             raise StopRequested(str(self.stop_flag))
+
+    # ------------------------------------------------------- live progress
+    def _lease_is_lost(self) -> bool:
+        return (self._keeper is not None and self._keeper.is_lease_lost()) or (
+            self._sink is not None and self._sink.is_lease_lost())
+
+    def _check_lease(self, active: bool = False) -> None:
+        """Raise LeaseLostError if the task lease is gone. `active` re-verifies it right now
+        (non-blocking UPDATE; a busy DB is not a loss) - used right after every provider/gate run."""
+        if self._keeper is not None and active:
+            self._keeper.check_now()
+        if self._lease_is_lost():
+            raise LeaseLostError("task lease lost; aborting without mutating the task")
+
+    def _start_progress(self, task_id: str, expires_at: float) -> None:
+        self._sink, self._keeper = None, None
+        if not self.live_progress:
+            return
+        keeper: LeaseKeeper | None = None
+        if self.db.path != ":memory:" and Path(self.db.path).is_file():
+            try:
+                keeper = LeaseKeeper(self.db.path, task_id, self.nonce, self.lease_ttl, clock=self.db.clock,
+                                     interval=self.lease_keeper_interval, expires_at=expires_at)
+            except Exception as exc:
+                self.progress_errors.append(f"keeper: {type(exc).__name__}")
+        sink: ProgressSink
+        try:
+            sink = LiveProgressSink(self.artifacts_dir, task_id, clock=self.db.clock,
+                                    lease_signal=keeper.is_lease_lost if keeper else None)
+            sink.begin_run(self.db.get_task(task_id)["state"])
+        except Exception as exc:  # monitoring is optional; the lease signal is not
+            self.progress_errors.append(f"sink: {type(exc).__name__}")
+            sink = ProgressSink(lease_signal=keeper.is_lease_lost if keeper else None)
+        if keeper is not None:
+            keeper.sink = sink
+            keeper.start()
+        self._sink, self._keeper = sink, keeper
+
+    def _stop_progress(self, task_id: str) -> None:
+        """Final sidecar flush + keeper stop; runs BEFORE the lease is released. Never raises."""
+        sink, keeper = self._sink, self._keeper
+        self._sink, self._keeper = None, None
+        if keeper is not None:
+            try:
+                keeper.stop()
+            except Exception as exc:
+                self.progress_errors.append(f"keeper stop: {type(exc).__name__}")
+        if isinstance(sink, LiveProgressSink):
+            try:
+                state = None
+                try:
+                    state = self.db.get_task(task_id)["state"]
+                except Exception:
+                    pass
+                sink.close(state)
+            except Exception as exc:
+                self.progress_errors.append(f"sink close: {type(exc).__name__}")
+
+    def _progress_stage(self, step: str, provider: str | None = None, role: str | None = None,
+                        attempt_id: int | None = None, redaction: str | None = None) -> None:
+        if isinstance(self._sink, LiveProgressSink):
+            try:
+                self._sink.set_stage(step, provider, role, attempt_id, redaction or "metadata_only")
+            except Exception as exc:
+                self.progress_errors.append(f"stage: {type(exc).__name__}")
+
+    def _progress_state(self, state: str) -> None:
+        if isinstance(self._sink, LiveProgressSink):
+            try:
+                self._sink.set_state(state)
+            except Exception as exc:
+                self.progress_errors.append(f"state: {type(exc).__name__}")
 
     def _move(self, task: dict[str, Any], to_state: str, reason: str = "", **fields: Any) -> None:
         self.db.transition(task["id"], task["state_version"], to_state, self.actor, reason, fields)
@@ -400,6 +520,7 @@ class PipelineWorker:
             if not self.db.reserve(provider, self.units, self.quota_ratio):
                 continue
             attempt_id = self.db.add_attempt(tid, provider, "auditor", sha256_text(text))
+            self._progress_stage("audit", provider, "auditor", attempt_id)
             result, problem = self._audit_in_clone(task, provider, contract, cpath)
             code = problem.split(":", 1)[0] if problem else (result.code.value if result else "NO_RESULT")
             self.db.finish_attempt(attempt_id, failure_code=code,
@@ -456,9 +577,11 @@ class PipelineWorker:
                 problem = "AUDIT_CLONE_FAILED: clone is not a clean checkout of base_sha"
             if problem is None:
                 consumed = self.units
-                result = self.adapters[provider].invoke(
-                    contract, str(clone), "auditor", str(cpath), self.stop_requested
+                result = call_with_progress(
+                    self.adapters[provider].invoke, contract, str(clone), "auditor", str(cpath),
+                    self.stop_requested, progress_sink=self._sink,
                 )
+                self._check_lease(active=True)
                 if self.wtm.clone_snapshot(clone) != clone_before:
                     problem = f"AUDITOR_MUTATED_REPO: {provider} changed the disposable clone"
                 if self.wtm.main_snapshot() != main_before:
@@ -534,10 +657,13 @@ class PipelineWorker:
             contract = self._contract(task, "writer", checkpoint, failure=failure)
             attempt_id = self.db.add_attempt(task["id"], writer, "writer", sha256_text(contract.to_json()))
             cpath = self._write_contract(task, contract, f"attempt{attempt_id}-{writer}")
+            self._progress_stage("implement", writer, "writer", attempt_id)
             try:
-                result = self.adapters[writer].invoke(contract, wt, "writer", str(cpath), self.stop_requested)
+                result = call_with_progress(self.adapters[writer].invoke, contract, wt, "writer", str(cpath),
+                                            self.stop_requested, progress_sink=self._sink)
             finally:
                 self.db.settle(writer, self.units, self.units)
+            self._check_lease(active=True)  # lost lease: abort before touching attempt/task rows
             self.db.finish_attempt(
                 attempt_id, failure_code=result.code.value, output_digest=sha256_text(result.stdout)
             )
@@ -584,14 +710,22 @@ class PipelineWorker:
         wt, base = task["worktree_path"], task["base_sha"]
         changed = self.wtm.changed_files(wt, base)
         py_files = [c.path for c in changed if c.status != "D" and c.path.endswith(".py")]
-        results = [self.gates.py_compile(wt, py_files)]
+        self._progress_stage("py_compile", "deterministic", "verify")
+        results = [call_with_progress(self.gates.py_compile, wt, py_files, progress_sink=self._sink)]
+        self._check_lease(active=True)
         targets = task["acceptance_spec"].get("pytest", [])
         if results[-1].ok and targets:
             self._check_stop()
-            results.append(self.gates.pytest(wt, targets))
+            self._progress_stage("pytest", "deterministic", "verify")
+            results.append(call_with_progress(self.gates.pytest, wt, targets, progress_sink=self._sink))
+            self._check_lease(active=True)
         if results[-1].ok and self.holdout_dir:
             self._check_stop()
-            results.append(self.gates.holdout(wt, str(self.holdout_dir)))
+            self._progress_stage("holdout", "deterministic", "verify", redaction="holdout")
+            results.append(call_with_progress(self.gates.holdout, wt, str(self.holdout_dir),
+                                              progress_sink=self._sink))
+            self._check_lease(active=True)
+            self._progress_stage("verify_done", "deterministic", "verify")
         report = [{"gate": r.name, "ok": r.ok, "rc": r.returncode, "hash": r.traceback_hash} for r in results]
         self._save_artifact(task["id"], "gates", f"gates-v{task['state_version']}.json", json.dumps(report), "deterministic")
         failed = next((r for r in results if not r.ok), None)
@@ -651,10 +785,13 @@ class PipelineWorker:
             contract = self._contract(task, "reviewer", target_sha, diff_sha256=diff_sha)
             attempt_id = self.db.add_attempt(task["id"], reviewer, "reviewer", sha256_text(contract.to_json()))
             cpath = self._write_contract(task, contract, f"attempt{attempt_id}-{reviewer}-review")
+            self._progress_stage("review", reviewer, "reviewer", attempt_id)
             try:
-                result = self.adapters[reviewer].invoke(contract, wt, "reviewer", str(cpath), self.stop_requested)
+                result = call_with_progress(self.adapters[reviewer].invoke, contract, wt, "reviewer", str(cpath),
+                                            self.stop_requested, progress_sink=self._sink)
             finally:
                 self.db.settle(reviewer, self.units, self.units)
+            self._check_lease(active=True)
             self.db.finish_attempt(attempt_id, failure_code=result.code.value, output_digest=sha256_text(result.stdout))
             self._check_stop()
             task = self.db.get_task(task["id"])
@@ -747,29 +884,38 @@ class PipelineWorker:
 
     def _process_task_once(self, task_id: str) -> str:
         self._check_stop()
+        lease_expires = self.db.clock() + self.lease_ttl
         if not self.db.acquire_lease(task_id, self.nonce, self.pid, self.proc_start, self.lease_ttl):
             return "LEASED_ELSEWHERE"
         try:
+            self._start_progress(task_id, lease_expires)
             while True:
                 self._check_stop()
                 task = self.db.get_task(task_id)
+                self._progress_state(task["state"])
                 handler = self._handlers.get(task["state"])
                 if handler is None:
                     return task["state"]
                 self.db.heartbeat(task_id, self.nonce, self.lease_ttl)
                 if not handler(task):
                     return self.db.get_task(task_id)["state"]
+        except LeaseLostError:
+            # Split-brain guard: we no longer own this task, so we never transition or block it.
+            return "LEASE_LOST"
         except StopRequested:
             raise
         except Exception as exc:  # fail closed: park the task for a human
             if is_transient_db_error(exc):
                 raise  # lock contention is retried by process_task, never BLOCKED
+            if self._lease_is_lost():
+                return "LEASE_LOST"  # never mutate a task we no longer own
             task = self.db.get_task(task_id)
             reason = f"EXCEPTION {type(exc).__name__}: {exc}"[:500]
             if task["state"] not in ("BLOCKED", "FAILED", "DISCARDED", "CANCELLED", "MERGED"):
                 self.db.transition(task_id, task["state_version"], "BLOCKED", self.actor, reason, {"last_error": reason})
             return "BLOCKED"
         finally:
+            self._stop_progress(task_id)  # final sidecar flush BEFORE the lease is released
             try:
                 self.db.release_lease(task_id, self.nonce)
             except sqlite3.OperationalError as exc:
@@ -1097,19 +1243,91 @@ def resolve_state_paths(
     return layout
 
 
-def print_status_readonly(db_path: Path, out: Callable[[str], None] = print) -> int:
-    """`--status`: mode=ro inspection; exit 2 if the DB is missing/invalid (never creates it)."""
+MAX_STATUS_LOG_LINES = 500
+
+
+def _runtime_line(s: Any) -> str:
+    return (f"stage={s.stage}\tliveness={s.liveness}\tstate_age={fmt_age(s.state_age)}\t"
+            f"attempt={s.attempt}\thb_age={fmt_age(s.hb_age)}")
+
+
+def print_status_readonly(
+    db_path: Path,
+    out: Callable[[str], None] = print,
+    *,
+    artifacts_dir: str | os.PathLike | None = None,
+    task_id: str | None = None,
+    logs_task: str | None = None,
+    lines: int = 40,
+) -> int:
+    """`--status [--task T | --logs T [--lines N]]`: strictly mode=ro; exit 2 if the DB is
+    missing/invalid (never creates or migrates it) or the task id is invalid/unknown."""
     try:
         summary = read_db_summary_readonly(db_path)
     except (FileNotFoundError, ValueError, sqlite3.Error) as exc:
         out(f"[auto_factory] STATUS FAIL: {type(exc).__name__}: {exc}")
         return 2
+    for tid in (task_id, logs_task):
+        if tid is not None and not TASK_ID_RE.match(tid):
+            out("[auto_factory] STATUS FAIL: invalid task id")
+            return 2
+    now = time.time()
+    try:
+        snaps, _ = runtime_snapshots(db_path, artifacts_dir, now, task_id or logs_task)
+    except (FileNotFoundError, ValueError, sqlite3.Error) as exc:
+        out(f"[auto_factory] STATUS FAIL: {type(exc).__name__}: {exc}")
+        return 2
+    by_id = {s.task_id: s for s in snaps}
+    if logs_task is not None:
+        if logs_task not in by_id:
+            out(f"[auto_factory] STATUS FAIL: unknown task {logs_task}")
+            return 2
+        s = by_id[logs_task]
+        n = max(1, min(int(lines), MAX_STATUS_LOG_LINES))
+        out(f"[auto_factory] live log {logs_task} state={s.state} {_runtime_line(s)}")
+        tail = read_live_log_tail(artifacts_dir, logs_task, n)
+        if tail is None:
+            out("live log unavailable")
+        else:
+            for line in tail:
+                out(line)
+        return 0
+    if task_id is not None:
+        if task_id not in by_id:
+            out(f"[auto_factory] STATUS FAIL: unknown task {task_id}")
+            return 2
+        s = by_id[task_id]
+        row = next(t for t in summary["tasks"] if t["id"] == task_id)
+        out(f"{task_id}\t{row['risk_level']}\t{row['state']}\tv{row['state_version']}")
+        for k, v in (("stage", s.stage), ("liveness", s.liveness), ("state_age", fmt_age(s.state_age)),
+                     ("elapsed", fmt_age(s.elapsed)), ("attempt", s.attempt), ("hb_age", fmt_age(s.hb_age)),
+                     ("output_age", fmt_age(s.output_age)), ("step", s.step or "-"),
+                     ("provider", s.provider or "-"), ("role", s.role or "-"),
+                     ("redaction", s.redaction or "-"), ("generation", s.generation or "-")):
+            out(f"  {k}={v}")
+        return 0
     for t in summary["tasks"]:
-        out(f"{t['id']}\t{t['risk_level']}\t{t['state']}\tv{t['state_version']}")
+        s = by_id.get(t["id"])
+        extra = f"\t{_runtime_line(s)}" if s is not None else ""
+        out(f"{t['id']}\t{t['risk_level']}\t{t['state']}\tv{t['state_version']}{extra}")
     counts = " ".join(f"{k}={v}" for k, v in summary["outbox"].items())
     out(f"[auto_factory] tasks={len(summary['tasks'])} open_merge_intents={summary['open_merge_intents']} "
         f"outbox {counts}")
     return 0
+
+
+def add_status_args(parser: argparse.ArgumentParser) -> None:
+    """Shared `--status` sub-options for worker / dev_bot / supervisor CLIs."""
+    parser.add_argument("--task", dest="status_task", metavar="TID", help="--status: one task's runtime detail")
+    parser.add_argument("--logs", dest="status_logs", metavar="TID", help="--status: tail of the task's live.log")
+    parser.add_argument("--lines", dest="status_lines", type=int, default=40, help="--status --logs: lines (1..500)")
+
+
+def status_from_args(args: argparse.Namespace, layout: dict[str, Path]) -> int:
+    return print_status_readonly(
+        layout["db"], artifacts_dir=layout["artifacts"], task_id=getattr(args, "status_task", None),
+        logs_task=getattr(args, "status_logs", None), lines=getattr(args, "status_lines", 40),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1125,6 +1343,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-flag", help="STOP.flag path (default: <state>/STOP.flag)")
     parser.add_argument("--auto-audit-l2", action="store_true", help="automated L2 Phase 1 audit (codex/gemini)")
     parser.add_argument("--max-cycles", type=int, default=1)
+    add_status_args(parser)
     args = parser.parse_args(argv)
 
     if args.demo:
@@ -1134,7 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     if args.status:
-        return print_status_readonly(layout["db"])
+        return status_from_args(args, layout)
     os.environ["TELEGRAM_BOT_TOKEN"] = ""
     lock = _FileLock(layout["lock"], role="supervisor")  # before the DB is opened
     try:
