@@ -381,6 +381,34 @@ def test_web_report_no_broken_img_for_fallback_or_missing_assets(tmp_path, offli
     assert "<img" not in gen.generate_html_report(snapshot)
 
 
+def test_web_report_partial_asset_copy_failure_never_emits_broken_img(tmp_path, offline_snapshot):
+    engine, snapshot = offline_snapshot
+    gen = WebReportGenerator(engine=engine)
+    photos = [p for p in gen.resolve_top_photos(snapshot) if p is not None]
+    if len({p.filename for p in photos}) < 2:
+        pytest.skip("offline TOP 3 needs >= 2 distinct curated photos for a partial-copy scenario")
+    failing = photos[0].filename
+    real_copy = dp.shutil.copy2
+
+    def flaky_copy(src, dst, *a, **kw):
+        if Path(dst).name == failing:
+            raise OSError("simulated disk error")
+        return real_copy(src, dst, *a, **kw)
+
+    with patch.object(dp.shutil, "copy2", side_effect=flaky_copy):
+        _, latest = gen.save_reports(output_dir=tmp_path / "r" / "travel", snapshot=snapshot)
+    root_dir = tmp_path / "r"
+    assert not (root_dir / "assets" / "travel" / failing).exists()
+    nested_srcs = _img_srcs(latest.read_text(encoding="utf-8"))
+    root_srcs = _img_srcs((root_dir / "travel_latest.html").read_text(encoding="utf-8"))
+    assert nested_srcs and root_srcs
+    assert all(failing not in s for s in nested_srcs + root_srcs)
+    for s in root_srcs:
+        assert (root_dir / s).is_file()
+    for s in nested_srcs:
+        assert (root_dir / "travel" / s).resolve().is_file()
+
+
 # ----------------------------------------------------------------------
 # 5. interactive: fresh city search photo; refresh / ALL / fallback skip
 # ----------------------------------------------------------------------

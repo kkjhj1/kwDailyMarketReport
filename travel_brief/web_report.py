@@ -1461,13 +1461,18 @@ class WebReportGenerator:
         self,
         snapshot: Optional[TravelSnapshot] = None,
         asset_rel_prefix: Optional[str] = None,
+        available_filenames: Optional[set[str]] = None,
     ) -> str:
         """`asset_rel_prefix` (`assets/travel` / `../assets/travel`) enables TOP card photos and must point at
-        a folder the caller actually populated (`save_reports` does). `None` -> no `<img>` at all."""
+        a folder the caller actually populated (`save_reports` does). `None` -> no `<img>` at all.
+        `available_filenames` (if given) restricts `<img>` to files that really exist in that folder, so a
+        partially failed asset copy can never produce a broken image."""
         all_destinations = self.engine.destinations
         if snapshot is None:
             snapshot = build_travel_snapshot(self.engine, top_n=3)
         top_photos = self.resolve_top_photos(snapshot) if asset_rel_prefix else []
+        if available_filenames is not None:
+            top_photos = [p if p is not None and p.filename in available_filenames else None for p in top_photos]
 
         top_recs = snapshot.recommendations
         matrix = snapshot.monthly_matrix
@@ -1856,6 +1861,7 @@ class WebReportGenerator:
             snapshot = build_travel_snapshot(self.engine, top_n=3)
 
         copied = copy_photo_assets(assets_dir, self.resolve_top_photos(snapshot))
+        copied_names = {p.name for p in copied}
 
         def _prefix_for(html_dir: Path) -> Optional[str]:
             if not copied:
@@ -1866,13 +1872,17 @@ class WebReportGenerator:
         dated_file = out_path / f"travel_briefing_{now_tag}.html"
         latest_file = out_path / "latest.html"
 
-        content = self.generate_html_report(snapshot=snapshot, asset_rel_prefix=_prefix_for(out_path))
+        content = self.generate_html_report(
+            snapshot=snapshot, asset_rel_prefix=_prefix_for(out_path), available_filenames=copied_names
+        )
         dated_file.write_text(content, encoding="utf-8")
         latest_file.write_text(content, encoding="utf-8")
 
         # Root travel_latest.html (reports/travel_latest.html when output_dir is reports/travel)
         if root_dir != out_path:
-            root_content = self.generate_html_report(snapshot=snapshot, asset_rel_prefix=_prefix_for(root_dir))
+            root_content = self.generate_html_report(
+                snapshot=snapshot, asset_rel_prefix=_prefix_for(root_dir), available_filenames=copied_names
+            )
         else:
             root_content = content
         (root_dir / "travel_latest.html").write_text(root_content, encoding="utf-8")
