@@ -1815,3 +1815,190 @@ def test_onboarding_card_introduces_both_tracks(handler):
     assert "구독이 시작되었습니다" in card
     kb = handler.build_inline_keyboard("ALL")["inline_keyboard"]
     assert kb[0][0]["callback_data"].startswith("trv:r:") and kb[-2][0]["callback_data"] == "trv:c:guide"
+
+
+# ----------------------------------------------------------------------
+# Main menu hub (`trv:m:*`), slim 4-row result keyboard, delivery settings card, slash commands
+# ----------------------------------------------------------------------
+def test_slim_result_keyboard_four_rows_preserves_contract(handler, mem_db):
+    for scope, chat in (("ALL", None), ("ALL", "c1"), ("FUK", "c1"), ("CTS", "c1")):
+        rows = handler.build_inline_keyboard(scope, chat_id=chat)["inline_keyboard"]
+        assert len(rows) == 4
+        assert rows[0] == [{"text": "🔄 최신 특가 새로고침", "callback_data": f"trv:r:{scope}"}]
+        assert rows[-3][1] == {"text": "🏠 메뉴", "callback_data": "trv:m:home"}
+        assert rows[-2] == [{"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
+                            {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"}]
+        assert rows[-1] == [{"text": "📊 6개월 특가 웹 리포트 ↗", "url": handler.report_url}]
+    assert handler.build_inline_keyboard("ALL")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:l"
+    assert handler.build_inline_keyboard("FUK", chat_id="c1")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:m:FUK"
+    # no direct city shortcuts on the result keyboard anymore (moved to the popular submenu)
+    assert not any(cb.startswith("trv:q:") for cb in all_callbacks(handler.build_inline_keyboard("ALL")))
+
+
+def test_menu_cards_layout_and_callbacks_fit(handler, mem_db):
+    text, hub = handler.build_menu_hub_card("c1")
+    assert "메인 메뉴" in text and "정기발송(화·목 12:00)" in text
+    rows = hub["inline_keyboard"]
+    assert [b.get("callback_data") or b.get("url") for b in rows[0]] == ["trv:m:search", "trv:m:watch"]
+    assert rows[1][0]["callback_data"] == "trv:m:settings" and rows[1][1]["url"] == handler.report_url
+    assert [b["callback_data"] for b in rows[2]] == ["trv:m:popular", "trv:m:help"]
+    assert "정기발송(화·목 12:00)" not in handler.build_menu_hub_card()[0]  # no chat -> no personal status line
+
+    text, pop = handler.build_popular_cities_card()
+    assert "인기 도시" in text
+    assert all_callbacks(pop) == ["trv:q:NRT", "trv:q:KIX", "trv:q:FUK", "trv:q:TPE", "trv:q:DAD", "trv:q:BKK",
+                                  "trv:c:guide", "trv:m:home"]
+    assert not any(cb.startswith("trv:s:") for cb in all_callbacks(pop))  # trv:s:* stays onboarding-only
+
+    text, settings = handler.build_delivery_settings_card("c1")
+    assert "[발송 설정]" in text and "정기 여행정보(화·목 12:00): <b>켜짐</b>" in text
+    assert "맞춤 특가 알림: <b>켜짐</b>" in text
+    assert settings["inline_keyboard"] == [
+        [{"text": "📰 정기발송 끄기", "callback_data": "trv:w:wb:s"},
+         {"text": "🔔 맞춤발송 중지", "callback_data": "trv:w:wp:s"}],
+        [{"text": "🔔 내 알림", "callback_data": "trv:m:watch"}, {"text": "🏠 메뉴", "callback_data": "trv:m:home"}],
+    ]
+    for mk in (hub, pop, settings, handler.build_inline_keyboard("ALL", chat_id="c1")):
+        for cb in all_callbacks(mk):
+            assert cb.startswith("trv:") and len(cb.encode("utf-8")) <= 64, cb
+
+
+def test_menu_callbacks_route_ack_once_and_edit_menu_cards_in_place(handler, mem_db):
+    handler._launch_search = MagicMock()
+    # entry from a search result (unknown message) opens a fresh hub card, remembered as a navigation card
+    _cb(handler, "trv:m:home", mid=10)
+    assert "메인 메뉴" in handler.tg.send_text.call_args[0][1]
+    assert handler._is_watch_card("c1", 900)
+    assert handler.edits == []
+
+    _cb(handler, "trv:m:popular", mid=900)
+    assert "인기 도시" in handler.edits[-1][1] and "trv:q:FUK" in all_callbacks(handler.edits[-1][2])
+    _cb(handler, "trv:m:help", mid=900)
+    assert "도움말" in handler.edits[-1][1]
+    assert handler.edits[-1][2] == handler.build_inline_keyboard("ALL", chat_id="c1")
+    _cb(handler, "trv:m:watch", mid=900)
+    assert "내 특가 알림" in handler.edits[-1][1]
+    _cb(handler, "trv:m:settings", mid=900)
+    assert "[발송 설정]" in handler.edits[-1][1]
+    _cb(handler, "trv:m:home", mid=900)
+    assert "메인 메뉴" in handler.edits[-1][1]
+    assert handler._launch_search.call_count == 0
+
+    # search goes through the trv:q:ALL path: cooldown toast ack + in-place loading
+    _cb(handler, "trv:m:search", mid=900)
+    assert "조회 중" in handler.tg.answer_callback.call_args[1]["text"]
+    handler._launch_search.assert_called_once_with("c1", 900, "ALL", "u1", is_refresh=False, show_loading=True)
+    _assert_callbacks_fit(handler)
+
+
+@pytest.mark.parametrize("bad", ["trv:m:unknown", "trv:m", "trv:m:", "trv:m:home:x", "trv:m:HOME", "trv:m:NRT"])
+def test_unknown_menu_callback_rejected_never_searches(handler, mem_db, bad):
+    handler._launch_search = MagicMock()
+    handler._set_chat_state("c1", STATE_AWAITING_WATCH_PRICE, user_id="u1", dest_code="FUK")
+    _cb(handler, bad)
+    assert "지원하지 않는 메뉴" in handler.tg.answer_callback.call_args[1]["text"]
+    assert handler._launch_search.call_count == 0
+    assert handler.tg.send_text.call_count == 0 and handler.edits == []
+    assert handler.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_PRICE  # rejected -> state untouched
+
+
+def test_menu_watch_and_settings_unavailable_without_db():
+    h = TravelInteractiveHandler(bot_token="dummy")
+    h.tg = MagicMock()
+    h._submit_ui = lambda fn, *a: fn(*a)
+    try:
+        for data in ("trv:m:watch", "trv:m:settings"):
+            h.handle_callback_query("cq", "c1", 1, data, {"id": "u1"})
+            assert "사용할 수 없습니다" in h.tg.answer_callback.call_args[1]["text"]
+        assert h.tg.send_text.call_count == 0
+        for cmd in ("/watch", "/settings"):
+            assert h.handle_text_message("c1", 1, "u1", cmd) == (True, "travel_watch_unavailable")
+        h.handle_callback_query("cq", "c1", 1, "trv:m:home", {"id": "u1"})  # hub still works
+        assert "메인 메뉴" in h.tg.send_text.call_args[0][1]
+    finally:
+        h.shutdown()
+
+
+def test_settings_card_toggles_return_to_settings_and_reject_bad_suffix(handler, mem_db):
+    for bad in ("trv:w:wb:x", "trv:w:wp:S", "trv:w:wb:s:1", "trv:w:wbs", "trv:w:wp:l"):
+        _cb(handler, bad)
+        assert "지원하지 않는" in handler.tg.answer_callback.call_args[1]["text"]
+    assert mem_db.get_travel_user_prefs("c1")["updated_at"] is None  # nothing written
+
+    handler._remember_watch_card("c1", 900)
+    _cb(handler, "trv:w:wb:s", mid=900)
+    _mid, text, markup = handler.edits[-1]
+    assert "[발송 설정]" in text and "정기 여행정보 발송을 껐어요" in text
+    assert "정기 여행정보(화·목 12:00): <b>꺼짐</b>" in text
+    assert markup["inline_keyboard"][0][0] == {"text": "📰 정기발송 켜기", "callback_data": "trv:w:wb:s"}
+    _cb(handler, "trv:w:wp:s", mid=900)
+    _mid, text, markup = handler.edits[-1]
+    assert "[발송 설정]" in text and "맞춤 특가 알림: <b>일시중지</b>" in text
+    assert markup["inline_keyboard"][0][1] == {"text": "🔔 맞춤발송 재개", "callback_data": "trv:w:wp:s"}
+    prefs = mem_db.get_travel_user_prefs("c1")
+    assert prefs["weekly_brief_enabled"] is False and prefs["watches_paused"] is True
+    # the bare legacy toggles still return to the watch list card
+    _cb(handler, "trv:w:wb", mid=900)
+    assert "내 특가 알림" in handler.edits[-1][1] and "[발송 설정]" not in handler.edits[-1][1]
+    _assert_callbacks_fit(handler)
+
+
+def test_menu_query_refresh_callbacks_clear_only_that_users_state(handler, mem_db):
+    from travel_brief.interactive import UserCooldownManager
+
+    handler._launch_search = MagicMock()
+    handler._invalidate_scope = MagicMock()
+    for data in ("trv:m:home", "trv:m:popular", "trv:m:help", "trv:m:watch", "trv:m:settings",
+                 "trv:m:search", "trv:q:FUK", "trv:r:ALL"):
+        handler.cooldown = UserCooldownManager(cooldown_sec=0)
+        handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u2", dest_code="FUK")
+        handler._set_chat_state("g1", STATE_AWAITING_CITY, user_id="u1")
+        handler._get_draft("g1", "u2", "FUK")
+        _cb(handler, data, chat="g1", mid=900, user="u1")
+        assert handler.get_chat_state("g1", "u1") == STATE_IDLE, data
+        assert handler.get_chat_state("g1", "u2") == STATE_AWAITING_WATCH_PRICE, data
+        assert handler._peek_draft("g1", "u2", "FUK") is not None, data
+    assert handler._launch_search.call_count == 3  # m:search, q:FUK, r:ALL
+
+
+@pytest.mark.parametrize("cmd,reason,needle", [
+    ("/menu", "travel_menu", "메인 메뉴"),
+    ("/메뉴@KwTravelBot", "travel_menu", "메인 메뉴"),
+    ("/watch", "travel_watch_list", "내 특가 알림"),
+    ("/알림", "travel_watch_list", "내 특가 알림"),
+    ("/settings", "travel_settings", "[발송 설정]"),
+    ("/설정", "travel_settings", "[발송 설정]"),
+    ("/help", "travel_help", "도움말"),
+    ("/guide", "travel_guide", "직접 검색"),
+    ("/search", "travel_guide", "직접 검색"),
+])
+def test_menu_slash_commands_and_group_state_isolation(handler, mem_db, cmd, reason, needle):
+    handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u2", dest_code="FUK")
+    handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u1", dest_code="NRT")
+    assert handler.handle_text_message("g1", 1, "u1", cmd) == (True, reason)
+    assert needle in handler.tg.send_text.call_args[0][1]
+    expected = STATE_AWAITING_CITY if reason == "travel_guide" else STATE_IDLE
+    assert handler.get_chat_state("g1", "u1") == expected
+    assert handler.get_chat_state("g1", "u2") == STATE_AWAITING_WATCH_PRICE  # other member untouched
+    if reason in ("travel_menu", "travel_watch_list", "travel_settings"):
+        assert handler._is_watch_card("g1", 900)  # later navigation edits this card in place
+    _assert_callbacks_fit(handler)
+
+
+def test_all_slash_command_starts_top3_search_without_touching_other_members(handler, mem_db):
+    handler._launch_search = MagicMock()
+    handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u2", dest_code="FUK")
+    handler._set_chat_state("g1", STATE_AWAITING_CITY, user_id="u1")
+    assert handler.handle_text_message("g1", 1, "u1", "/all") == (True, "travel_search_started")
+    assert handler._launch_search.call_args[0][:4] == ("g1", 900, "ALL", "u1")
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    assert handler.get_chat_state("g1", "u2") == STATE_AWAITING_WATCH_PRICE
+
+
+def test_search_result_is_no_longer_an_in_place_navigation_card(handler, mem_db):
+    handler._remember_watch_card("c1", 900)
+    handler.watchdog_seconds = 0
+    with patch.object(handler.worker_pool, "submit") as submit:
+        handler._launch_search("c1", 900, "ALL", "u9", is_refresh=False, show_loading=False)
+    assert submit.call_count == 1
+    assert not handler._is_watch_card("c1", 900)

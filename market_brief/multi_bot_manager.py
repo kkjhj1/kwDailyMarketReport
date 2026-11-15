@@ -198,10 +198,12 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "help", "description": "❓ 이용 안내"},
     ],
     "travel_bot": [
-        {"command": "start", "description": "🏠 여행 특가 홈"},
-        {"command": "hotdeal", "description": "✈️ 주말 6개월 최저가 특가"},
-        {"command": "recommend", "description": "🎯 AI 맞춤 추천 여행지"},
-        {"command": "help", "description": "❓ 이용 가이드"},
+        {"command": "start", "description": "여행봇 시작·온보딩"},
+        {"command": "menu", "description": "메인 메뉴"},
+        {"command": "search", "description": "국가·도시 검색"},
+        {"command": "watch", "description": "내 알림 관리"},
+        {"command": "settings", "description": "발송 설정"},
+        {"command": "help", "description": "도움말"},
     ],
     "admission_bot": [
         {"command": "start", "description": "🏠 입시 나침반 홈"},

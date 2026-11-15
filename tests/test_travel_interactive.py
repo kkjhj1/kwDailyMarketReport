@@ -1339,5 +1339,36 @@ class TestTravelV23Integration(unittest.TestCase):
         self.assertNotIn("CTS", h.engine.destinations)
 
 
+class TestTravelMenuCommands(unittest.TestCase):
+    def test_official_travel_commands_match_handled_commands(self):
+        from market_brief.multi_bot_manager import OFFICIAL_BOT_COMMANDS
+
+        cmds = OFFICIAL_BOT_COMMANDS["travel_bot"]
+        self.assertEqual([c["command"] for c in cmds], ["start", "menu", "search", "watch", "settings", "help"])
+        self.assertEqual(
+            {c["command"]: c["description"] for c in cmds},
+            {"start": "여행봇 시작·온보딩", "menu": "메인 메뉴", "search": "국가·도시 검색",
+             "watch": "내 알림 관리", "settings": "발송 설정", "help": "도움말"},
+        )
+        for c in cmds:
+            self.assertRegex(c["command"], r"^[a-z0-9_]{1,32}$")
+            self.assertTrue(1 <= len(c["description"]) <= 256)
+
+        # every advertised command has a dedicated handler (never the unknown-command fallback)
+        with patch("travel_brief.interactive.TelegramChannel"):
+            h = TravelInteractiveHandler(bot_token="dummy_token")
+        h.tg = MagicMock()
+        h.tg.send_text.return_value = "77"
+        try:
+            expected = {
+                "start": "travel_start", "menu": "travel_menu", "search": "travel_guide",
+                "watch": "travel_watch_unavailable", "settings": "travel_watch_unavailable", "help": "travel_help",
+            }
+            for c in cmds:
+                self.assertEqual(h.handle_text_message("c1", 1, "u1", f"/{c['command']}"), (True, expected[c["command"]]))
+        finally:
+            h.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

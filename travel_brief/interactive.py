@@ -195,9 +195,15 @@ CITY_LABELS: dict[str, str] = {
 START_COMMANDS = {"/start", "/구독"}
 START_WORDS = {"안녕", "시작"}
 STOP_COMMANDS = {"/stop", "/unsubscribe", "/구독취소"}
-SEARCH_ALL_COMMANDS = {"/여행", "/today", "/특가"}
+SEARCH_ALL_COMMANDS = {"/여행", "/today", "/특가", "/all"}
 HELP_COMMANDS = {"/help", "/도움말"}
-GUIDE_COMMANDS = {"/검색", "/search"}
+GUIDE_COMMANDS = {"/검색", "/search", "/guide"}
+MENU_COMMANDS = {"/menu", "/메뉴"}
+WATCH_COMMANDS = {"/watch", "/알림"}
+SETTINGS_COMMANDS = {"/settings", "/설정"}
+# Main-menu navigation callbacks (`trv:m:<sub>`); anything else is rejected, never routed to search.
+MENU_SUBS = frozenset({"home", "search", "watch", "settings", "popular", "help"})
+POPULAR_CITY_ROWS = (("NRT", "KIX", "FUK"), ("TPE", "DAD", "BKK"))
 ALL_WORDS = {"전체", "all", "전체특가", "top3"}
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -463,7 +469,9 @@ class TravelInteractiveHandler:
         return res.display_name if res else code
 
     def build_inline_keyboard(self, current_filter: str = "ALL", chat_id: Optional[str] = None) -> dict[str, Any]:
-        """Constructs mobile-optimized slim keyboard within 64-byte callback_data limits.
+        """Constructs the slim 4-row result keyboard within 64-byte callback_data limits.
+        Contract: rows[0][0] = `trv:r:<scope>`, rows[-3][0] = watch entry, rows[-2][0] = `trv:c:guide`,
+        rows[-1][0] = web report URL. City shortcuts live in the `trv:m:popular` submenu.
         `chat_id` (optional) only personalises the watch button badge.
         """
         scope = self.normalize_filter(current_filter) or "ALL"
@@ -473,24 +481,127 @@ class TravelInteractiveHandler:
                     {"text": "🔄 최신 특가 새로고침", "callback_data": f"trv:r:{scope}"},
                 ],
                 [
-                    {"text": "🇯🇵 도쿄", "callback_data": "trv:q:NRT"},
-                    {"text": "🇯🇵 오사카", "callback_data": "trv:q:KIX"},
-                    {"text": "🇯🇵 후쿠오카", "callback_data": "trv:q:FUK"},
+                    self._watch_entry_button(scope, chat_id),
+                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
                 ],
                 [
-                    {"text": "🇹🇼 타이베이", "callback_data": "trv:q:TPE"},
-                    {"text": "🇻🇳 다낭", "callback_data": "trv:q:DAD"},
-                    {"text": "🇹🇭 방콕", "callback_data": "trv:q:BKK"},
-                ],
-                [self._watch_entry_button(scope, chat_id)],
-                [
-                    {"text": "🔍 기타 지역 직접 검색", "callback_data": "trv:c:guide"},
+                    {"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
+                    {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"},
                 ],
                 [
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
                 ],
             ]
         }
+
+    # ------------------------------------------------------------------
+    # Main menu hub & submenus (`trv:m:*`)
+    # ------------------------------------------------------------------
+    def build_menu_hub_card(self, chat_id: Optional[str] = None) -> tuple[str, dict[str, Any]]:
+        lines = ["🧭 <b>[트래블 패스파인더 메인 메뉴]</b>", "━━━━━━━━━━━━━━━━━━"]
+        if chat_id and self.db is not None:
+            prefs = self._get_prefs(str(chat_id))
+            weekly = "켜짐" if prefs.get("weekly_brief_enabled", True) else "꺼짐"
+            paused = "일시중지" if prefs.get("watches_paused", False) else "켜짐"
+            lines.append(f"📰 정기발송(화·목 12:00): <b>{weekly}</b> · 🔔 맞춤알림: <b>{paused}</b>")
+            lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.extend([
+            "✈️ <b>실시간 특가 조회</b>: 전체 주말 특가 TOP 3",
+            "🔔 <b>내 알림</b>: 도시·국가별 목표가 알림 관리",
+            "⚙️ <b>발송 설정</b>: 정기발송·맞춤알림 켜기/끄기",
+            "🏙️ <b>인기 도시</b>: 도쿄·오사카·후쿠오카·타이베이·다낭·방콕",
+            "💡 도시 이름을 채팅창에 바로 입력해도 검색돼요.",
+        ])
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✈️ 실시간 특가 조회", "callback_data": "trv:m:search"},
+                    {"text": "🔔 내 알림", "callback_data": "trv:m:watch"},
+                ],
+                [
+                    {"text": "⚙️ 발송 설정", "callback_data": "trv:m:settings"},
+                    {"text": "📊 웹 리포트", "url": self.report_url},
+                ],
+                [
+                    {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"},
+                    {"text": "❓ 도움말", "callback_data": "trv:m:help"},
+                ],
+            ]
+        }
+        return "\n".join(lines), markup
+
+    def build_popular_cities_card(self) -> tuple[str, dict[str, Any]]:
+        text = (
+            "🏙️ <b>[인기 도시 실시간 특가]</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "도시를 누르면 6개월 주말 최저가·예산을 바로 조회해요.\n"
+            "🔍 목록에 없는 곳은 [국가·도시 검색]으로 찾아보세요."
+        )
+        rows: list[list[dict[str, Any]]] = [
+            [{"text": self.label_for(code), "callback_data": f"trv:q:{code}"} for code in row]
+            for row in POPULAR_CITY_ROWS
+        ]
+        rows.append([
+            {"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
+            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+        ])
+        return text, {"inline_keyboard": rows}
+
+    def build_delivery_settings_card(self, chat_id: str, notice: str = "") -> tuple[str, dict[str, Any]]:
+        prefs = self._get_prefs(str(chat_id))
+        weekly_on = bool(prefs.get("weekly_brief_enabled", True))
+        paused = bool(prefs.get("watches_paused", False))
+        lines = [notice] if notice else []
+        lines += [
+            "⚙️ <b>[발송 설정]</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"📰 정기 여행정보(화·목 12:00): <b>{'켜짐' if weekly_on else '꺼짐'}</b>",
+            f"🔔 맞춤 특가 알림: <b>{'일시중지' if paused else '켜짐'}</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            "💡 맞춤 알림을 일시중지해도 설정한 도시·목표가는 그대로 보관돼요.",
+        ]
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📰 정기발송 끄기" if weekly_on else "📰 정기발송 켜기", "callback_data": "trv:w:wb:s"},
+                    {"text": "🔔 맞춤발송 재개" if paused else "🔔 맞춤발송 중지", "callback_data": "trv:w:wp:s"},
+                ],
+                [
+                    {"text": "🔔 내 알림", "callback_data": "trv:m:watch"},
+                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+                ],
+            ]
+        }
+        return "\n".join(lines), markup
+
+    def _handle_menu_callback(self, cq_id: str, chat_id: str, message_id: int, sub: str) -> None:
+        """Non-search `trv:m:*` navigation. Acks first (TG-04), then renders on the UI pool."""
+        if sub in ("watch", "settings") and self.db is None:
+            self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+            return
+        self._answer(cq_id, "")
+        self._submit_ui(self._run_menu_action, chat_id, message_id, sub)
+
+    def _run_menu_action(self, chat_id: str, message_id: int, sub: str) -> None:
+        in_place = self._is_watch_card(chat_id, message_id)
+        try:
+            if sub == "home":
+                text, markup = self.build_menu_hub_card(chat_id)
+            elif sub == "popular":
+                text, markup = self.build_popular_cities_card()
+            elif sub == "help":
+                text, markup = self.build_help_card(), self.build_inline_keyboard("ALL", chat_id=chat_id)
+            elif sub == "watch":
+                text, markup = self.build_watch_list_card(chat_id)
+            elif sub == "settings":
+                text, markup = self.build_delivery_settings_card(chat_id)
+            else:
+                return
+        except Exception as exc:
+            logger.error("Menu action %s failed for %s: %s", sub, chat_id, exc, exc_info=True)
+            text = "⚠️ 메뉴를 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            markup = {"inline_keyboard": [[{"text": "🏠 메뉴", "callback_data": "trv:m:home"}]]}
+        self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
 
     def _watch_entry_button(self, scope: str, chat_id: Optional[str] = None) -> dict[str, Any]:
         """ALL never registers a watch: it opens the per-city list. A city opens its own watch card."""
@@ -780,7 +891,7 @@ class TravelInteractiveHandler:
         lines.extend([
             "✍️ 도시 이름을 그대로 입력해 보세요. 예) <code>삿포로</code>, <code>세부</code>, <code>호치민</code>",
             f"🔎 추천 검색 도시: {html.escape(names)}",
-            "📌 /여행 전체 TOP 3 · /help 도움말 · /stop 구독 해지",
+            "📌 /menu 메인 메뉴 · /여행 전체 TOP 3 · /help 도움말 · /stop 구독 해지",
         ])
         return "\n".join(lines)
 
@@ -917,10 +1028,26 @@ class TravelInteractiveHandler:
             self._handle_watch_callback(cq_id, str(chat_id), int(message_id or 0), user_id, parts)
             return
 
+        # Main menu (`trv:m:<sub>`): strict allowlist; unknown subs are rejected (never fall into search).
+        if action == "m":
+            sub = parts[2] if len(parts) == 3 else ""
+            if sub not in MENU_SUBS:
+                self._answer(cq_id, "지원하지 않는 메뉴입니다. /menu 로 다시 열어 주세요.")
+                return
+            # Navigation abandons only this user's pending input (other group members untouched).
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            if sub != "search":
+                self._handle_menu_callback(cq_id, str(chat_id), int(message_id or 0), sub)
+                return
+            action, target = "q", "ALL"  # same path as `trv:q:ALL`
+
         target_norm = self.normalize_filter(target)
         if target_norm is None:
             self._answer(cq_id, "지원하지 않는 지역입니다. 도시 이름을 직접 입력해 주세요.")
             return
+
+        if action in ("q", "r"):
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
 
         # Target-selection step (`trv:s:<CITY>`): acknowledge immediately & show [📋 직전 발송 특가 정보 보기] button
         if action == "s":
@@ -1024,6 +1151,28 @@ class TravelInteractiveHandler:
                 self._set_chat_state(chat_id, STATE_AWAITING_CITY, user_id=user_id)
                 self._send_card(chat_id, self.build_city_guide_card())
                 return True, "travel_guide"
+            if cmd in MENU_COMMANDS:
+                text, markup = self.build_menu_hub_card(chat_id)
+                self._render_watch_card(chat_id, 0, text, markup, edit=False)
+                return True, "travel_menu"
+            if cmd in WATCH_COMMANDS or cmd in SETTINGS_COMMANDS:
+                if self.db is None:
+                    self._send_card(chat_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+                    return True, "travel_watch_unavailable"
+                is_watch = cmd in WATCH_COMMANDS
+                try:
+                    text, markup = (
+                        self.build_watch_list_card(chat_id) if is_watch else self.build_delivery_settings_card(chat_id)
+                    )
+                except Exception as exc:
+                    logger.error("Travel %s command failed for %s: %s", cmd, chat_id, exc, exc_info=True)
+                    self._send_card(chat_id, "⚠️ 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                    return True, "travel_command_failed"
+                self._render_watch_card(chat_id, 0, text, markup, edit=False)
+                return True, "travel_watch_list" if is_watch else "travel_settings"
+            if cmd in HELP_COMMANDS:
+                self._send_card(chat_id, self.build_help_card(), self.build_inline_keyboard("ALL", chat_id=chat_id))
+                return True, "travel_help"
             self._send_card(chat_id, self.build_help_card(), self.build_inline_keyboard("ALL"))
             return True, "travel_help"
 
@@ -1136,6 +1285,7 @@ class TravelInteractiveHandler:
     }
     # Sub-actions that take no city/country scope argument.
     _CHAT_LEVEL_WATCH_SUBS = frozenset({"l", "g", "wb", "wp", "z", "Z"})
+    _PREFS_WATCH_SUBS = frozenset({"wb", "wp"})
     _WATCH_ARGS = {
         "p": ("D", "F"),
         "t": ("day", "pk"),
@@ -1167,14 +1317,20 @@ class TravelInteractiveHandler:
             self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
             return
         code = ""
-        if sub not in self._CHAT_LEVEL_WATCH_SUBS:
+        arg = parts[4] if len(parts) > 4 else ""
+        if sub in self._PREFS_WATCH_SUBS:
+            # `trv:w:wb` / `trv:w:wp` -> list card; `:s` suffix -> delivery settings card. Nothing else.
+            arg = parts[3] if len(parts) > 3 else ""
+            if len(parts) > 4 or arg not in ("", "s"):
+                self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+                return
+        elif sub not in self._CHAT_LEVEL_WATCH_SUBS:
             raw = parts[3] if len(parts) > 3 else ""
             norm = self.normalize_watch_scope(raw)
             if not norm:
                 self._answer(cq_id, "지원하지 않는 지역입니다. 도시를 먼저 선택해 주세요.")
                 return
             code = norm
-        arg = parts[4] if len(parts) > 4 else ""
         allowed = self._WATCH_ARGS.get(sub)
         if allowed is not None and arg not in allowed:
             self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
@@ -1263,7 +1419,7 @@ class TravelInteractiveHandler:
                     if prefs["weekly_brief_enabled"] else
                     "📰 정기 여행정보 발송을 껐어요. 맞춤 특가 알림과 도시 조회는 그대로 이용할 수 있어요."
                 )
-                text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                text, markup = self._prefs_result_card(chat_id, arg, notice)
                 self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "wp":
                 prefs = self.db.set_watches_paused(chat_id)
@@ -1272,7 +1428,7 @@ class TravelInteractiveHandler:
                     if prefs["watches_paused"] else
                     "▶️ 맞춤 특가 알림을 다시 시작했어요."
                 )
-                text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                text, markup = self._prefs_result_card(chat_id, arg, notice)
                 self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "z":
                 text, markup = self.build_watch_reset_confirm_card(chat_id)
@@ -1291,6 +1447,12 @@ class TravelInteractiveHandler:
                 "⚠️ 알림 설정 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
                 {"inline_keyboard": [[{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}]]},
             )
+
+    def _prefs_result_card(self, chat_id: str, origin: str, notice: str) -> tuple[str, dict[str, Any]]:
+        """`trv:w:wb:s` / `trv:w:wp:s` return to the delivery settings card; bare toggles to the list."""
+        if origin == "s":
+            return self.build_delivery_settings_card(chat_id, notice=notice)
+        return self.build_watch_list_card(chat_id, notice=notice)
 
     def _save_preset_watch(
         self, chat_id: str, code: str, arg: str, user_id: Optional[str] = None
@@ -1925,6 +2087,10 @@ class TravelInteractiveHandler:
         show_loading: bool = True,
     ) -> None:
         key = (str(chat_id), int(message_id or 0))
+        # A menu/watch card turned into a search result is no longer a navigation card: later menu taps on it
+        # open a fresh card so the result stays readable.
+        with self._seq_lock:
+            self._watch_cards.pop(key, None)
         request_seq = self._next_request_seq(chat_id, message_id)
         markup = self.build_inline_keyboard(current_filter=target, chat_id=chat_id)
 
