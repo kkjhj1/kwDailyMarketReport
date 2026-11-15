@@ -1376,3 +1376,126 @@ def test_mobile_decision_card_contents_and_limits():
                                 scope_label="🇯🇵 일본 전체")
     assert t5.startswith("📰 <b>[일일 브리핑] [목표가 도달] 🇯🇵 일본 전체 · ")
     assert all(fits_tg01(t) for t in (t2, t3, t4, t5))
+
+
+# ======================================================================
+# Instant toggle UX: silent ack, edit dispatched before ack, keep-alive edit session
+# ======================================================================
+def test_fast_toggles_silent_ack_and_dispatch_before_ack(handler, mem_db):
+    _cb(handler, "trv:w:s:@JP", mid=900)
+    order: list[str] = []
+    real_run = handler._run_watch_action
+    handler._submit_ui = lambda fn, *a: (order.append("submit:" + a[2]), fn(*a))
+    handler.tg.answer_callback.side_effect = lambda *a, **kw: order.append("ack")
+    with patch.object(handler, "_run_watch_action", wraps=real_run) as run:
+        for data, sub in (("trv:w:h:@JP:6", "h"), ("trv:w:d:@JP:W", "d"), ("trv:w:n:@JP:Y", "n"),
+                          ("trv:w:m2:@JP:F", "m2")):
+            order.clear()
+            _cb(handler, data, mid=900)
+            assert order == [f"submit:{sub}", "ack"]  # editMessageText starts before answerCallbackQuery
+            assert handler.tg.answer_callback.call_args[1]["text"] == ""  # no toast banner per tap
+            assert run.call_args[0][2] == sub
+    assert run.call_count == 4
+    # non-toggle actions keep their toast and ack-first ordering
+    order.clear()
+    _cb(handler, "trv:w:l", mid=900)
+    assert order[0] == "ack" and handler.tg.answer_callback.call_args[1]["text"]
+
+
+def test_fast_toggle_clears_pending_input_state(handler, mem_db):
+    _cb(handler, "trv:w:i:@JP", mid=900)
+    assert handler.get_chat_context("c1", "u1").state == STATE_AWAITING_WATCH_PRICE
+    _cb(handler, "trv:w:h:@JP:1", mid=900)
+    st = handler.get_chat_context("c1", "u1")
+    assert st is None or st.state != STATE_AWAITING_WATCH_PRICE
+
+
+def test_rapid_sequential_toggles_final_draft_state(handler, mem_db):
+    _cb(handler, "trv:w:s:@JP", mid=900)
+    taps = ["trv:w:h:@JP:1", "trv:w:d:@JP:D", "trv:w:h:@JP:12", "trv:w:n:@JP:Y", "trv:w:d:@JP:W",
+            "trv:w:h:@JP:6", "trv:w:n:@JP:D", "trv:w:n:@JP:Y", "trv:w:d:@JP:A", "trv:w:h:@JP:3"]
+    for data in taps:
+        _cb(handler, data, mid=900)
+    d = handler._peek_draft("c1", "u1", "@JP")
+    assert (d.horizon_months, d.weekday_option, d.notify_mode) == (3, "ANY", "DAILY")
+    assert "앞으로 3개월" in handler.edits[-1][1] and "매일 아침 7:30" in handler.edits[-1][1]
+    assert mem_db.get_travel_watch("c1", "@JP") is None  # toggles never persist
+
+
+def test_rapid_toggles_through_real_ui_pool(mem_db):
+    h = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    h._safe_edit_message = lambda *a, **kw: True
+    try:
+        h.handle_callback_query("cq", "c1", 900, "trv:w:s:@JP", {"id": "u1"})
+        for data in ("trv:w:h:@JP:1", "trv:w:d:@JP:D", "trv:w:n:@JP:Y", "trv:w:h:@JP:6"):
+            h.handle_callback_query("cq", "c1", 900, data, {"id": "u1"})
+        assert h.ui_pool._max_workers == 4
+        h.ui_pool.shutdown(wait=True)  # drain queued edits
+        d = h._peek_draft("c1", "u1", "@JP")
+        assert d is not None and d.weekday_option == "WEEKDAY" and d.notify_mode == "DAILY"
+        assert d.horizon_months in (1, 6)  # pool may reorder same-key edits; both are valid choices
+        assert h.tg.answer_callback.call_count == 5
+    finally:
+        h.shutdown()
+
+
+class _FakeResp:
+    def __init__(self, status, payload):
+        self.status_code, self._payload, self.reason, self.headers = status, payload, "x", {}
+        import json as _json
+        self.content = _json.dumps(payload).encode()
+
+    def json(self):
+        return self._payload
+
+
+def test_edit_uses_keepalive_session_and_preserves_error_semantics(mem_db):
+    h = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    sess = MagicMock()
+    h._http_session = sess
+    try:
+        sess.post.return_value = _FakeResp(200, {"ok": True})
+        assert h._safe_edit_message("c1", 44, "<b>x</b>") is True
+        assert h._safe_edit_message("c1", 44, "<b>y</b>") is True
+        assert sess.post.call_count == 2  # same session reused, no per-tap handshake
+        assert sess.post.call_args[0][0].endswith("/editMessageText")
+        # not modified -> success without a send
+        sess.post.return_value = _FakeResp(400, {"description": "Bad Request: message is not modified"})
+        assert h._safe_edit_message("c1", 44, "x") is True
+        h.tg.send_text.assert_not_called()
+        # 429 -> one retry after sleeping
+        sess.post.reset_mock()
+        sess.post.side_effect = [_FakeResp(429, {"description": "Too Many Requests: retry after 1"}),
+                                 _FakeResp(200, {"ok": True})]
+        with patch("travel_brief.interactive.time.sleep") as slp:
+            assert h._safe_edit_message("c1", 44, "x") is True
+        assert sess.post.call_count == 2 and slp.call_args[0][0] == 1.5
+        # 400 -> HTML send fallback; loading-card edits never send
+        sess.post.side_effect = None
+        sess.post.return_value = _FakeResp(400, {"description": "Bad Request: can't parse entities"})
+        assert h._safe_edit_message("c1", 44, "<b>x</b>") is True
+        assert h.tg.send_text.call_args[1]["parse_mode"] == "HTML"
+        h.tg.send_text.reset_mock()
+        sess.post.side_effect = TimeoutError("t")
+        assert h._edit_in_place_only("c1", 44, "loading") is False
+        h.tg.send_text.assert_not_called()
+    finally:
+        h.shutdown()
+    sess.close.assert_called_once()
+    assert h._http_session is None
+
+
+def test_shutdown_closes_real_session_cleanly(mem_db):
+    pytest.importorskip("requests")
+    h = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    s1 = h._get_http_session()
+    assert s1 is not None and h._get_http_session() is s1  # lazily created once, then reused
+    h.shutdown()
+    assert h._http_session is None and h._get_http_session() is None  # no re-creation after shutdown
+    h.shutdown()  # idempotent, no error
+    h2 = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    h2.shutdown()  # never-created session: clean no-op

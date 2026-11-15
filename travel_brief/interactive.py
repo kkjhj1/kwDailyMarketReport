@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import html
+import io
 import json
 import logging
 import os
@@ -43,6 +44,8 @@ from travel_brief.models import TravelRecommendation
 from travel_brief.naver_live import NaverFlightLiveClient
 
 logger = logging.getLogger(__name__)
+
+_ORIGINAL_URLOPEN = urllib.request.urlopen  # identity check: patched urlopen -> legacy urllib transport
 
 USER_COOLDOWN_SECONDS = 3.0
 GLOBAL_REFRESH_COOLDOWN_SECONDS = 30.0  # fast on-demand refresh (~5s) -> short per-scope guard
@@ -405,8 +408,11 @@ class TravelInteractiveHandler:
         )
         # Separate tiny pool for lightweight UI edits (loading cards) so they never queue behind scrapes.
         self.ui_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="TravelUI"
+            max_workers=4, thread_name_prefix="TravelUI"
         )
+        # Lazily-created keep-alive HTTP session for editMessageText (reuses TLS to api.telegram.org).
+        self._http_session: Any = None
+        self._http_session_lock = threading.Lock()
         self.tg = TelegramChannel(bot_token=bot_token)
         self.dispatcher = SafeTelegramDispatcher()
         self._admin_ids = self._load_admin_ids()
@@ -1074,11 +1080,12 @@ class TravelInteractiveHandler:
         "g": "🌏 알림 대상을 골라 주세요.",
         "s": "🔔 알림 조건을 불러옵니다.",
         "e": "⚙️ 저장된 조건을 불러옵니다.",
-        "m2": "⚙️ 탐색 방식을 변경합니다.",
-        "h": "📅 탐색 기간을 변경합니다.",
-        "d": "🗓️ 요일 조건을 변경합니다.",
+        # Draft check toggles ack silently (no toast banner per checkmark tap).
+        "m2": "",
+        "h": "",
+        "d": "",
         "f": "🗓️ 여행 날짜를 채팅창에 입력해 주세요.",
-        "n": "🔔 알림 방식을 변경합니다.",
+        "n": "",
         "k": "✅ 알림을 저장하는 중입니다...",
     }
     _WATCH_ARGS = {
@@ -1090,6 +1097,8 @@ class TravelInteractiveHandler:
         "n": tuple(WATCH_NOTIFY_CODES),
         "k": ("1", "W"),
     }
+
+    _FAST_WATCH_TOGGLES = frozenset({"m2", "h", "d", "n"})
 
     def normalize_watch_scope(self, raw: Optional[str]) -> Optional[str]:
         """`@JP`-style country scopes or a catalog city code; ALL / unknown -> None."""
@@ -1121,6 +1130,16 @@ class TravelInteractiveHandler:
         allowed = self._WATCH_ARGS.get(sub)
         if allowed is not None and arg not in allowed:
             self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+            return
+
+        if sub in self._FAST_WATCH_TOGGLES:
+            # Latency path: clear stale input state, start the editMessageText on ui_pool first, then
+            # ack (silently) so answerCallbackQuery runs in parallel. Still acked before returning (TG-04).
+            st = self.get_chat_context(chat_id, user_id)
+            if st is not None and st.state in (STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES):
+                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg, user_id)
+            self._answer(cq_id, self._WATCH_TOASTS[sub])
             return
 
         self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
@@ -2013,6 +2032,43 @@ class TravelInteractiveHandler:
         """Edit-only variant for transient loading cards: never sends a new message on failure."""
         return self._edit_message_core(chat_id, message_id, text, reply_markup, allow_send_fallback=False)
 
+    def _get_http_session(self) -> Any:
+        """Thread-safe lazy keep-alive session; None when `requests` is unavailable or shut down."""
+        if self._closed:
+            return None
+        with self._http_session_lock:
+            if self._http_session is None:
+                try:
+                    import requests
+                    from requests.adapters import HTTPAdapter
+                except ImportError:
+                    return None
+                sess = requests.Session()
+                adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
+                sess.mount("https://", adapter)
+                sess.headers.update({"Content-Type": "application/json"})
+                self._http_session = sess
+            return self._http_session
+
+    def _post_edit(self, url: str, payload: bytes) -> dict[str, Any]:
+        """POST editMessageText; HTTP errors are raised as urllib.error.HTTPError for one error path."""
+        session = None
+        if urllib.request.urlopen is _ORIGINAL_URLOPEN:  # tests that patch urlopen keep the urllib path
+            session = self._get_http_session()
+        if session is None:
+            req = urllib.request.Request(
+                url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.load(resp)
+
+        resp = session.post(url, data=payload, timeout=10)
+        if resp.status_code >= 400:
+            raise urllib.error.HTTPError(
+                url, resp.status_code, resp.reason or "", resp.headers, io.BytesIO(resp.content or b"")
+            )
+        return resp.json()
+
     def _edit_message_core(
         self,
         chat_id: str,
@@ -2036,16 +2092,10 @@ class TravelInteractiveHandler:
         if message_id and message_id > 0:
             body["message_id"] = message_id
             edit_url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
+            payload = json.dumps(body).encode("utf-8")
             for attempt in range(2):
                 try:
-                    req = urllib.request.Request(
-                        edit_url,
-                        data=json.dumps(body).encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        data = json.load(resp)
+                    data = self._post_edit(edit_url, payload)
                     if data.get("ok"):
                         return True
                     logger.warning("editMessageText rejected: %s", data.get("description", ""))
@@ -2090,3 +2140,10 @@ class TravelInteractiveHandler:
                     st.watchdog = None
         self.worker_pool.shutdown(wait=False)
         self.ui_pool.shutdown(wait=False)
+        with self._http_session_lock:
+            sess, self._http_session = self._http_session, None
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception as exc:
+                logger.debug("HTTP session close failed: %s", exc)
