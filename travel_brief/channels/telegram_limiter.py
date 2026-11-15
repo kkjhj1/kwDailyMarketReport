@@ -139,15 +139,48 @@ class SafeTelegramDispatcher:
     ) -> tuple[str, str | None, str | None]:
         """Dispatches a text/HTML message to a single recipient with rate limit & error safety."""
         chat_id_clean = str(chat_id).strip()
+        return self._dispatch_safely(
+            chat_id_clean,
+            lambda: tg.send_text(
+                recipient=chat_id_clean,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            ),
+            db,
+        )
+
+    def send_photo_to_recipient(
+        self,
+        tg: TelegramChannel,
+        chat_id: str,
+        photo_path: Any,
+        caption: str = "",
+        parse_mode: str = "HTML",
+        db: Any = None,
+        reply_markup: dict | None = None,
+    ) -> tuple[str, str | None, str | None]:
+        """`sendPhoto` with the exact same limiter / 429 retry / ambiguous-network -> UNKNOWN semantics as
+        `send_text_to_recipient`. Callers treat photos as best-effort: an UNKNOWN photo is never resent and
+        its outcome is never merged into the main briefing delivery status."""
+        chat_id_clean = str(chat_id).strip()
+        return self._dispatch_safely(
+            chat_id_clean,
+            lambda: tg.send_photo(
+                recipient=chat_id_clean,
+                photo_path=photo_path,
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            ),
+            db,
+        )
+
+    def _dispatch_safely(self, chat_id_clean: str, send_fn, db: Any = None) -> tuple[str, str | None, str | None]:
         for attempt in range(1, self.max_429_retries + 1):
             self.limiter.wait_before_send(chat_id_clean)
             try:
-                msg_id = tg.send_text(
-                    recipient=chat_id_clean,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                )
+                msg_id = send_fn()
                 return "SENT", msg_id, None
             except (socket.timeout, TimeoutError) as net_err:
                 return "UNKNOWN", None, f"Network Timeout / Ambiguous Delivery: {net_err}"

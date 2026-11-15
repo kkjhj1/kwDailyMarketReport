@@ -11,6 +11,10 @@ from pathlib import Path
 Briefing = Any
 AssetSummary = Any
 
+# Telegram Bot API hard limit for photo/document captions (after entity parsing).
+TELEGRAM_CAPTION_LIMIT = 1024
+_IMAGE_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+
 
 def _is_public_button_url(url: str) -> bool:
     """Telegram inline_keyboard and clickable links require a public http/https host (not localhost or .invalid)."""
@@ -292,6 +296,82 @@ class TelegramChannel:
 
         if not res.get("ok"):
             raise RuntimeError("Telegram sendDocument failed")
+        return str(res["result"]["message_id"])
+
+    def send_photo(
+        self,
+        recipient: str,
+        photo_path: str | Path,
+        caption: str = "",
+        parse_mode: str = "HTML",
+        reply_markup: dict | None = None,
+    ) -> str:
+        """Uploads a local image via multipart `sendPhoto`.
+
+        Telegram caps captions at 1,024 chars. Over-limit captions are REJECTED (`ValueError`), never
+        sliced, so an HTML tag can never be cut mid-tag. The raw string length is checked, which is a
+        conservative upper bound of the visible (entity-parsed) length.
+        """
+        caption = caption or ""
+        if len(caption) > TELEGRAM_CAPTION_LIMIT:
+            raise ValueError(
+                f"Telegram photo caption too long: {len(caption)} > {TELEGRAM_CAPTION_LIMIT} chars"
+            )
+        path = Path(photo_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"photo not found: {path}")
+        file_bytes = path.read_bytes()
+        boundary = f"----TravelBriefBoundary{uuid.uuid4().hex}"
+        mime = _IMAGE_MIME.get(path.suffix.lower(), "application/octet-stream")
+
+        def _field(name: str, value: str) -> bytes:
+            return (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+
+        parts = [_field("chat_id", str(recipient).strip())]
+        if caption:
+            parts.append(_field("caption", caption))
+            if parse_mode:
+                parts.append(_field("parse_mode", parse_mode))
+        if reply_markup:
+            parts.append(_field("reply_markup", json.dumps(reply_markup, ensure_ascii=False)))
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="photo"; filename="{path.name}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n"
+            ).encode("utf-8")
+            + file_bytes
+            + b"\r\n"
+        )
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(parts)
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with self._opener(req, timeout=20) as response:
+                res = json.load(response)
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_json = json.loads(exc.read().decode("utf-8", errors="ignore"))
+                err_body = err_json.get("description", "")
+            except Exception:
+                err_body = str(exc)
+            raise RuntimeError(f"Telegram HTTP {exc.code} (sendPhoto): {err_body}") from exc
+
+        if not res.get("ok"):
+            desc = res.get("description", "Telegram API rejected request")
+            raise RuntimeError(f"Telegram API error (sendPhoto): {desc}")
         return str(res["result"]["message_id"])
 
     def answer_callback(

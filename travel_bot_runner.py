@@ -54,6 +54,8 @@ from travel_brief.web_report import WebReportGenerator, build_travel_snapshot
 from travel_brief.storage.db import TravelBriefDatabase
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
+from travel_brief.channels.telegram import TELEGRAM_CAPTION_LIMIT
+from travel_brief.destination_photos import DestinationPhoto, resolve_destination_photo
 from travel_brief.fx_client import FXQuote
 
 MIN_SAVING_DISPLAY_KRW = 30_000
@@ -480,6 +482,65 @@ def _pick_monthly_best(
     return all_months, monthly_picks
 
 
+def resolve_top1_photo(recommendations: list[TravelRecommendation]) -> Optional[DestinationPhoto]:
+    """Season-matched reference photo for the TOP 1 recommendation (curated cities only, else None)."""
+    if not recommendations:
+        return None
+    rec = recommendations[0]
+    try:
+        return resolve_destination_photo(
+            rec.destination.code,
+            season_status=rec.season_status,
+            dep_date=rec.best_deal.departure_date,
+            dest_name=rec.destination.name,
+        )
+    except Exception as exc:  # resolver must never break the briefing
+        logger.warning("TOP1 photo resolve failed: %s", exc)
+        return None
+
+
+def build_top1_photo_caption(rec: TravelRecommendation, photo: DestinationPhoto) -> str:
+    """Concise TOP 1 caption (city / price / dates / season tag). Every dynamic string is escaped and
+    clipped *before* escaping; the result is guaranteed <= Telegram's 1,024-char caption limit."""
+    deal = rec.best_deal
+    price = deal.exact_price_str if deal.is_live else deal.price_band_str
+    lines = [
+        f"🥇 <b>TOP 1 · {html.escape(_clip(rec.destination.name, 20))} ({html.escape(rec.destination.code)})</b>",
+        f"💰 <b>{html.escape(_clip(str(price), 40))}</b>",
+        f"🛫 {html.escape(str(deal.departure_date))}({html.escape(str(deal.departure_day_of_week))}) → "
+        f"{html.escape(str(deal.return_date))}({html.escape(str(deal.return_day_of_week))})",
+        f"{html.escape(photo.season_tag)} · <i>{html.escape(_clip(photo.caption, 60))}</i>",
+    ]
+    caption = "\n".join(lines)
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:  # defensive: fixed slim template, practically unreachable
+        caption = html.escape(_clip(photo.caption, 200))
+    return caption
+
+
+def _send_top1_photo_best_effort(
+    dispatcher: SafeTelegramDispatcher,
+    tg: TelegramChannel,
+    chat_id: str,
+    photo: Optional[DestinationPhoto],
+    caption: str,
+    db: TravelBriefDatabase,
+) -> Optional[str]:
+    """Best-effort photo: any error / FAILED / UNKNOWN is logged only. Never retried, never merged into the
+    main briefing delivery status, and never prevents the text briefing that follows."""
+    if photo is None:
+        return None
+    try:
+        status, _msg_id, err = dispatcher.send_photo_to_recipient(
+            tg=tg, chat_id=chat_id, photo_path=photo.path, caption=caption, parse_mode="HTML", db=db
+        )
+    except Exception as exc:
+        print(f"  ⚠️ TOP1 photo skipped for {chat_id}: {type(exc).__name__}: {exc}")
+        return "ERROR"
+    if status != "SENT":
+        print(f"  ⚠️ TOP1 photo {status} for {chat_id} (not retried): {err}")
+    return status
+
+
 def run_briefing(
     dest_code: Optional[str] = None,
     max_budget: Optional[int] = None,
@@ -521,11 +582,11 @@ def run_briefing(
     report_gen = WebReportGenerator(engine=engine)
     dated_file, latest_file = report_gen.save_reports(output_dir=travel_reports_dir, snapshot=snapshot)
 
-    # Also save a top-level travel_latest.html for easy GitHub Pages routing
+    # save_reports() already wrote the top-level travel_latest.html next to `travel/` with its own
+    # root-relative asset prefix (`assets/travel/...`); copying the nested `../assets` HTML over it would
+    # break the photo paths, so it is no longer overwritten here.
     if output_dir is None and not demo and not dry_run:
-        top_travel_latest = BASE_DIR / "reports" / "travel_latest.html"
-        top_travel_latest.write_text(latest_file.read_text(encoding="utf-8"), encoding="utf-8")
-        print(f"Web Reports generated: {dated_file.name}, {latest_file.name}, {top_travel_latest.name}")
+        print(f"Web Reports generated: {dated_file.name}, {latest_file.name}, travel_latest.html")
     else:
         print("Demo mode: Web Report generated in scratch without touching production reports.")
 
@@ -561,16 +622,20 @@ def run_briefing(
         print("=" * 79)
         return True
 
-    # Determine recipients
+    # Determine recipients. Explicit `recipients_override` (admin manual test) is sent as-is; the default
+    # subscriber dispatch honours the Track A opt-out (`travel_user_prefs.weekly_brief_enabled`).
     if recipients_override:
         target_recipients = recipients_override
     else:
         active_objs = db.get_active_recipients(topic="TRAVEL")
         if active_objs:
-            target_recipients = [r.chat_id for r in active_objs]
+            target_recipients = [r.chat_id for r in active_objs if db.is_weekly_brief_enabled(r.chat_id)]
+            opted_out = len(active_objs) - len(target_recipients)
+            if opted_out:
+                print(f"ℹ️ {opted_out} recipient(s) skipped: weekly brief opted out (정기발송 꺼짐).")
         else:
             default_chat_id = get_travel_chat_id()
-            if default_chat_id:
+            if default_chat_id and db.is_weekly_brief_enabled(default_chat_id):
                 target_recipients = [default_chat_id]
                 db.add_recipient(chat_id=default_chat_id, name="여행 구독자", topic="TRAVEL")
             else:
@@ -590,8 +655,13 @@ def run_briefing(
     interactive_handler = TravelInteractiveHandler(bot_token=token, engine=engine, report_url=report_link)
     keyboard = interactive_handler.build_inline_keyboard()
 
+    # Best-effort TOP 1 season-matched photo (live dispatch only; dry-run/demo returned above).
+    top1_photo = resolve_top1_photo(recommendations)
+    top1_caption = build_top1_photo_caption(recommendations[0], top1_photo) if top1_photo else ""
+
     success_count = 0
     for chat_id in target_recipients:
+        _send_top1_photo_best_effort(dispatcher, tg, chat_id, top1_photo, top1_caption, db)
         try:
             status, msg_id, err = dispatcher.send_text_to_recipient(
                 tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db, reply_markup=keyboard

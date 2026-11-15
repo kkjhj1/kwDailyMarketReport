@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,12 @@ from travel_brief.models import (
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
+from travel_brief.destination_photos import (
+    ASSET_SUBDIR,
+    DestinationPhoto,
+    copy_photo_assets,
+    resolve_destination_photo,
+)
 
 
 DEST_FLAGS: dict[str, str] = {
@@ -212,6 +219,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .top-card-header {
       margin-bottom: 0.85rem;
+    }
+    /* Season-matched destination reference photo (curated cities only; omitted otherwise) */
+    .top-card-photo-wrap {
+      margin: 0 0 0.9rem;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      overflow: hidden;
+      border-radius: 14px;
+    }
+    .top-card-photo {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      height: 180px;
+      object-fit: cover;
+      border-radius: 14px;
+    }
+    .top-card-photo-cap {
+      margin-top: 0.35rem;
+      font-size: 0.74rem;
+      color: var(--text-sub);
+      overflow-wrap: anywhere;
+    }
+    .top-card-ribbon {
+      z-index: 2;
     }
     .dest-region-tag {
       font-size: 0.85rem;
@@ -1006,6 +1039,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         font-size: 0.68rem;
         padding: 0.2rem 0.55rem;
       }
+      .top-card-photo {
+        width: 100%;
+        max-width: 100%;
+        height: 180px;
+        object-fit: cover;
+        border-radius: 10px;
+      }
       .dest-main-name {
         font-size: 1.35rem;
       }
@@ -1399,10 +1439,35 @@ class WebReportGenerator:
     def __init__(self, engine: Optional[FlightEngine] = None):
         self.engine = engine or FlightEngine()
 
-    def generate_html_report(self, snapshot: Optional[TravelSnapshot] = None) -> str:
+    @staticmethod
+    def resolve_top_photos(snapshot: TravelSnapshot) -> list[Optional[DestinationPhoto]]:
+        """Season-matched reference photo per TOP card (`None` for non-curated / missing assets)."""
+        photos: list[Optional[DestinationPhoto]] = []
+        for rec in snapshot.recommendations:
+            try:
+                photos.append(
+                    resolve_destination_photo(
+                        rec.destination.code,
+                        season_status=rec.season_status,
+                        dep_date=rec.best_deal.departure_date,
+                        dest_name=rec.destination.name,
+                    )
+                )
+            except Exception:
+                photos.append(None)
+        return photos
+
+    def generate_html_report(
+        self,
+        snapshot: Optional[TravelSnapshot] = None,
+        asset_rel_prefix: Optional[str] = None,
+    ) -> str:
+        """`asset_rel_prefix` (`assets/travel` / `../assets/travel`) enables TOP card photos and must point at
+        a folder the caller actually populated (`save_reports` does). `None` -> no `<img>` at all."""
         all_destinations = self.engine.destinations
         if snapshot is None:
             snapshot = build_travel_snapshot(self.engine, top_n=3)
+        top_photos = self.resolve_top_photos(snapshot) if asset_rel_prefix else []
 
         top_recs = snapshot.recommendations
         matrix = snapshot.monthly_matrix
@@ -1455,9 +1520,21 @@ class WebReportGenerator:
             hotel_grade = html.escape(dest.recommended_hotel_grade or "4성급")
             hotel_features = html.escape(dest.recommended_hotel_features or "가성비 우수")
 
+            photo = top_photos[rank - 1] if rank - 1 < len(top_photos) else None
+            photo_html = (
+                f'<figure class="top-card-photo-wrap">'
+                f'<img class="top-card-photo" src="{html.escape(photo.rel_src(asset_rel_prefix), quote=True)}" '
+                f'alt="{html.escape(photo.caption, quote=True)}" loading="lazy" decoding="async">'
+                f'<figcaption class="top-card-photo-cap">{html.escape(photo.season_tag)} · '
+                f'{html.escape(photo.caption)}</figcaption></figure>'
+                if photo is not None and asset_rel_prefix
+                else ""
+            )
+
             card = f"""
       <div class="top-card">
         <div class="top-card-ribbon">BEST #{rank}</div>
+        {photo_html}
         <div>
           <div class="top-card-header">
             <div class="dest-region-tag">{flag} {html.escape(dest.country)} · 직항 {dest.flight_time_hours}시간</div>
@@ -1759,24 +1836,45 @@ class WebReportGenerator:
         self,
         output_dir: Optional[str | Path] = None,
         snapshot: Optional[TravelSnapshot] = None,
+        asset_base_dir: Optional[str | Path] = None,
     ) -> tuple[Path, Path]:
+        """Writes dated + latest HTML into `output_dir` plus the root `travel_latest.html`.
+
+        Photos live in `<asset_base_dir>/assets/travel/` (default: the report root, i.e. the parent of a
+        `travel/` output dir, else `output_dir`). Each HTML gets a prefix relative to its own folder:
+        root `travel_latest.html` -> `assets/travel/...`, `travel/*.html` -> `../assets/travel/...`.
+        Assets are copied only into that report tree (demo/dry-run callers pass a scratch dir)."""
         if output_dir is None:
             output_dir = Path(__file__).resolve().parent.parent / "reports"
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
+        root_dir = out_path.parent if out_path.name == "travel" else out_path
+        base_dir = Path(asset_base_dir) if asset_base_dir is not None else root_dir
+        assets_dir = base_dir / ASSET_SUBDIR
+
+        if snapshot is None:
+            snapshot = build_travel_snapshot(self.engine, top_n=3)
+
+        copied = copy_photo_assets(assets_dir, self.resolve_top_photos(snapshot))
+
+        def _prefix_for(html_dir: Path) -> Optional[str]:
+            if not copied:
+                return None  # nothing available -> no <img> at all (never a broken image)
+            return Path(os.path.relpath(assets_dir, html_dir)).as_posix()
 
         now_tag = datetime.now().strftime("%Y%m%d_%H%M")
         dated_file = out_path / f"travel_briefing_{now_tag}.html"
         latest_file = out_path / "latest.html"
 
-        content = self.generate_html_report(snapshot=snapshot)
+        content = self.generate_html_report(snapshot=snapshot, asset_rel_prefix=_prefix_for(out_path))
         dated_file.write_text(content, encoding="utf-8")
         latest_file.write_text(content, encoding="utf-8")
 
-        # Also write travel_latest.html in root reports dir if output_dir is reports/travel
-        if out_path.name == "travel":
-            (out_path.parent / "travel_latest.html").write_text(content, encoding="utf-8")
+        # Root travel_latest.html (reports/travel_latest.html when output_dir is reports/travel)
+        if root_dir != out_path:
+            root_content = self.generate_html_report(snapshot=snapshot, asset_rel_prefix=_prefix_for(root_dir))
         else:
-            (out_path / "travel_latest.html").write_text(content, encoding="utf-8")
+            root_content = content
+        (root_dir / "travel_latest.html").write_text(root_content, encoding="utf-8")
 
         return dated_file, latest_file

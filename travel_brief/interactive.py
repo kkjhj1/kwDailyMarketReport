@@ -40,6 +40,7 @@ from travel_brief.city_catalog import (
 from travel_brief.flight_engine import FlightEngine, kst_today, validate_fixed_dates
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.fx_client import FXClient
+from travel_brief.destination_photos import DestinationPhoto, resolve_destination_photo
 from travel_brief.models import TravelRecommendation
 from travel_brief.naver_live import NaverFlightLiveClient
 
@@ -432,6 +433,9 @@ class TravelInteractiveHandler:
         # Watch wizard drafts: (chat_id, user_id, scope) -> WatchDraft (TTL, bounded LRU)
         self._watch_drafts: OrderedDict[tuple[str, str, str], WatchDraft] = OrderedDict()
         self.watch_draft_ttl = WATCH_DRAFT_TTL_SECONDS
+        # Best-effort city detail photo only with a real-looking bot token (`<id>:<secret>`), so dummy-token
+        # tests / offline tools never upload anything.
+        self._photo_enabled = bool(re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", str(bot_token or "").strip()))
         self._closed = False
 
     def _load_admin_ids(self) -> set[str]:
@@ -807,6 +811,10 @@ class TravelInteractiveHandler:
         return (
             "🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
+            "📰 <b>정기 여행정보</b>: 화·목 12:00 특가 브리핑 + 도시별 실시간 조회\n"
+            "🔔 <b>내 맞춤 특가 알림</b>: 원하는 도시·국가·날짜 목표가 도달 시 알림\n"
+            "⚙️ 발송 켜기/끄기는 [🔔 내 알림] 메뉴에서 언제든 바꿀 수 있어요.\n"
+            "━━━━━━━━━━━━━━━━━━\n"
             "🎯 <b>[1단계: 관심 여행지 선택]</b>\n"
             "아래 버튼에서 원하시는 여행지를 선택하신 후 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르면 "
             "최신 주말 항공·숙박 특가를 즉시 확인하실 수 있습니다 👇\n"
@@ -1120,7 +1128,14 @@ class TravelInteractiveHandler:
         "f": "🗓️ 여행 날짜를 채팅창에 입력해 주세요.",
         "n": "",
         "k": "✅ 알림을 저장하는 중입니다...",
+        # Chat-level delivery controls (Track A opt-out / Track B pause / 2-step reset)
+        "wb": "📰 정기발송 설정을 변경합니다.",
+        "wp": "🔔 맞춤발송 설정을 변경합니다.",
+        "z": "🧹 초기화 여부를 확인해 주세요.",
+        "Z": "🧹 알림을 초기화합니다...",
     }
+    # Sub-actions that take no city/country scope argument.
+    _CHAT_LEVEL_WATCH_SUBS = frozenset({"l", "g", "wb", "wp", "z", "Z"})
     _WATCH_ARGS = {
         "p": ("D", "F"),
         "t": ("day", "pk"),
@@ -1152,7 +1167,7 @@ class TravelInteractiveHandler:
             self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
             return
         code = ""
-        if sub not in ("l", "g"):
+        if sub not in self._CHAT_LEVEL_WATCH_SUBS:
             raw = parts[3] if len(parts) > 3 else ""
             norm = self.normalize_watch_scope(raw)
             if not norm:
@@ -1241,6 +1256,34 @@ class TravelInteractiveHandler:
             elif sub == "k":
                 text, markup = self._confirm_draft_watch(chat_id, uid, code, arg)
                 self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "wb":
+                prefs = self.db.set_weekly_brief_enabled(chat_id)
+                notice = (
+                    "📰 화·목 12:00 정기 여행정보 발송을 다시 켰어요."
+                    if prefs["weekly_brief_enabled"] else
+                    "📰 정기 여행정보 발송을 껐어요. 맞춤 특가 알림과 도시 조회는 그대로 이용할 수 있어요."
+                )
+                text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
+            elif sub == "wp":
+                prefs = self.db.set_watches_paused(chat_id)
+                notice = (
+                    "⏸️ 맞춤 특가 알림을 일시중지했어요. 설정은 그대로 보관돼요."
+                    if prefs["watches_paused"] else
+                    "▶️ 맞춤 특가 알림을 다시 시작했어요."
+                )
+                text, markup = self.build_watch_list_card(chat_id, notice=notice)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
+            elif sub == "z":
+                text, markup = self.build_watch_reset_confirm_card(chat_id)
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
+            elif sub == "Z":
+                removed = self.db.reset_travel_watches(chat_id)
+                self._clear_user_watch_state(chat_id, uid)
+                text, markup = self.build_watch_list_card(
+                    chat_id, notice=f"🧹 맞춤 특가 알림 {removed}개를 초기화했어요. (정기발송 설정은 유지)"
+                )
+                self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
         except Exception as exc:
             logger.error("Watch action %s/%s failed for %s: %s", sub, code, chat_id, exc, exc_info=True)
             self._render_watch_card(
@@ -1314,6 +1357,18 @@ class TravelInteractiveHandler:
     def _drop_draft(self, chat_id: str, user_id: Optional[str], scope: str) -> None:
         with self._seq_lock:
             self._watch_drafts.pop(self._draft_key(chat_id, user_id, scope), None)
+
+    def _clear_user_watch_state(self, chat_id: str, user_id: Optional[str]) -> int:
+        """Reset helper: drops every wizard draft and the pending input state of ONE `(chat_id, user_id)`.
+        Unlike `_set_chat_state(..., user_id=None)` other members of a group chat are left untouched."""
+        cid = str(chat_id)
+        uid = str(user_id or cid)
+        with self._seq_lock:
+            keys = [k for k in self._watch_drafts if k[0] == cid and k[1] == uid]
+            for k in keys:
+                self._watch_drafts.pop(k, None)
+            self._chat_states.pop((cid, uid), None)
+        return len(keys)
 
     def _get_draft(self, chat_id: str, user_id: Optional[str], scope: str, reset: bool = False) -> WatchDraft:
         """Live draft for (chat, user, scope); seeded from the stored watch (or defaults) when absent/reset."""
@@ -1582,6 +1637,12 @@ class TravelInteractiveHandler:
             f"📋 <b>[내 특가 알림]</b> ({len(watches)}/{WATCH_MAX_ACTIVE_PER_CHAT})",
             "━━━━━━━━━━━━━━━━━━",
         ]
+        prefs = self._get_prefs(chat_id)
+        weekly_on = bool(prefs["weekly_brief_enabled"])
+        paused = bool(prefs["watches_paused"])
+        lines.append(f"📰 정기발송(화·목 12:00): <b>{'켜짐' if weekly_on else '꺼짐'}</b>")
+        lines.append(f"🔔 맞춤발송: <b>{'일시중지' if paused else '켜짐'}</b>")
+        lines.append("━━━━━━━━━━━━━━━━━━")
         rows: list[list[dict[str, Any]]] = []
         if not watches:
             lines.append("아직 설정한 알림이 없어요. 아래 도시를 눌러 바로 시작해 보세요 👇")
@@ -1596,16 +1657,52 @@ class TravelInteractiveHandler:
             settings_sub = "s" if is_country_watch_code(w["dest_code"]) else "m"
             rows.append([
                 {"text": f"⚙️ {label}", "callback_data": f"trv:w:{settings_sub}:{w['dest_code']}"},
-                {"text": "🗑️ 삭제", "callback_data": f"trv:w:x:{w['dest_code']}"},
+                {"text": "🗑️", "callback_data": f"trv:w:x:{w['dest_code']}"},
             ])
         if len(watches) < 3:
             watched = {w["dest_code"] for w in watches}
             quick = [c for c in WATCH_QUICK_ADD_CODES if c not in watched and self.catalog.get(c)][:3]
             if quick:
                 rows.append([{"text": f"➕ {self.label_for(c)}", "callback_data": f"trv:w:m:{c}"} for c in quick])
-        rows.append([{"text": "🌏 국가 전체·날짜 고정 알림 추가", "callback_data": "trv:w:g"}])
-        rows.append([{"text": "🔍 다른 도시 검색", "callback_data": "trv:c:guide"}])
+        if len(watches) < WATCH_MAX_ACTIVE_PER_CHAT:
+            rows.append([{"text": "➕ 알림 추가 (도시·국가·날짜)", "callback_data": "trv:w:g"}])
+        rows.append([
+            {"text": "📰 정기발송 끄기" if weekly_on else "📰 정기발송 켜기", "callback_data": "trv:w:wb"},
+            {"text": "🔔 맞춤발송 재개" if paused else "🔔 맞춤발송 중지", "callback_data": "trv:w:wp"},
+        ])
+        rows.append([
+            {"text": "🧹 알림 초기화", "callback_data": "trv:w:z"},
+            {"text": "🔍 도시 검색", "callback_data": "trv:c:guide"},
+        ])
         return "\n".join(lines), {"inline_keyboard": rows}
+
+    def _get_prefs(self, chat_id: str) -> dict[str, Any]:
+        defaults = {"weekly_brief_enabled": True, "watches_paused": False}
+        getter = getattr(self.db, "get_travel_user_prefs", None)
+        if getter is None:
+            return defaults
+        try:
+            return getter(chat_id)
+        except Exception as exc:
+            logger.warning("Travel prefs lookup failed for %s: %s", chat_id, exc)
+            return defaults
+
+    def build_watch_reset_confirm_card(self, chat_id: str) -> tuple[str, dict[str, Any]]:
+        """[TG-04] In-place 2-step confirm for the destructive reset (`trv:w:z` -> `trv:w:Z`)."""
+        count = len(self.db.list_travel_watches(chat_id=chat_id, active_only=True))
+        text = (
+            "🧹 <b>[맞춤 특가 알림 초기화]</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"설정된 알림 <b>{count}개</b>를 모두 끄고 일시중지 상태도 풀어요.\n"
+            "📰 화·목 정기 여행정보 발송 설정은 그대로 유지돼요.\n"
+            "정말 초기화할까요?"
+        )
+        return text, {
+            "inline_keyboard": [[
+                {"text": "✅ 네, 초기화", "callback_data": "trv:w:Z"},
+                {"text": "↩️ 취소/목록", "callback_data": "trv:w:l"},
+            ]]
+        }
 
     def build_watch_target_picker_card(self) -> tuple[str, dict[str, Any]]:
         text = (
@@ -1698,15 +1795,20 @@ class TravelInteractiveHandler:
             {"text": mark(draft.notify_mode == "DROP", "🔔 하락 시 알림"), "callback_data": f"trv:w:n:{code}:D"},
             {"text": mark(draft.notify_mode == "DAILY", "📰 매일 아침"), "callback_data": f"trv:w:n:{code}:Y"},
         ])
+        # Compact 2-column save / input rows (mobile: fewer rows, same callbacks).
+        save_row: list[dict[str, Any]] = []
         if "DEAL" in refs:
-            rows.append([{"text": f"💾 실속 특가 {_man_label(refs['DEAL'])} 이하로 저장",
-                          "callback_data": f"trv:w:k:{code}:1"}])
+            save_row.append({"text": f"💾 실속 {_man_label(refs['DEAL'])} 이하",
+                             "callback_data": f"trv:w:k:{code}:1"})
         if "BASELINE" in refs:
-            rows.append([{"text": f"💾 평균가 {_man_label(refs['BASELINE'])} 이하로 저장",
-                          "callback_data": f"trv:w:k:{code}:W"}])
-        rows.append([{"text": "✍️ 목표가 직접 입력 후 저장", "callback_data": f"trv:w:i:{code}"}])
+            save_row.append({"text": f"💾 평균 {_man_label(refs['BASELINE'])} 이하",
+                             "callback_data": f"trv:w:k:{code}:W"})
+        if save_row:
+            rows.append(save_row)
+        input_row = [{"text": "✍️ 목표가 직접 입력", "callback_data": f"trv:w:i:{code}"}]
         if active:
-            rows.append([{"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"}])
+            input_row.append({"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"})
+        rows.append(input_row)
         rows.append([
             {"text": "📋 내 알림", "callback_data": "trv:w:l"},
             {"text": "🌏 대상 바꾸기", "callback_data": "trv:w:g"},
@@ -1852,6 +1954,7 @@ class TravelInteractiveHandler:
                 request_seq=request_seq,
                 loading_future=loading_future,
                 _tracked=True,
+                send_photo=(target != "ALL" and not is_refresh),
             )
         except Exception as exc:
             logger.error("Worker submission failed for %s: %s", user_id, exc)
@@ -1885,9 +1988,11 @@ class TravelInteractiveHandler:
         request_seq: Optional[int] = None,
         loading_future: Optional[concurrent.futures.Future] = None,
         _tracked: bool = False,
+        send_photo: bool = False,
     ) -> None:
         """Runs in background worker thread to collect deals and edit Telegram message in-place.
         Always ends with either the briefing or an error card (never a stuck loading card).
+        `send_photo` (fresh single-city search only) adds a best-effort reference photo AFTER the briefing.
         """
         key = (str(chat_id), int(message_id or 0))
         markup = self.build_inline_keyboard(current_filter=target_city, chat_id=chat_id)
@@ -1933,7 +2038,9 @@ class TravelInteractiveHandler:
             new_text = format_telegram_briefing(**format_kwargs)
 
             # Safe in-place edit (M-E), generation-guarded
-            self._finish_with_card(chat_id, message_id, request_seq, loading_future, new_text, markup)
+            edited = self._finish_with_card(chat_id, message_id, request_seq, loading_future, new_text, markup)
+            if send_photo and target_dest and edited is not False:
+                self._submit_city_photo(chat_id, target_dest, recs[0])
         except Exception as exc:
             logger.error("Background on-demand update failed for user %s: %s", user_id, exc, exc_info=True)
             try:
@@ -1963,13 +2070,59 @@ class TravelInteractiveHandler:
         # done-generation marker in `_edit_if_latest` guarantee it can never overwrite this result.
         if loading_future is not None:
             loading_future.cancel()
-        self._edit_if_latest(
+        return self._edit_if_latest(
             chat_id=chat_id,
             message_id=message_id,
             request_seq=request_seq,
             text=text,
             reply_markup=markup,
         )
+
+    # ------------------------------------------------------------------
+    # Best-effort city detail photo (never blocks / fails the text briefing)
+    # ------------------------------------------------------------------
+    def resolve_city_photo(self, target_code: str, rec: Optional[TravelRecommendation] = None) -> Optional[DestinationPhoto]:
+        """Curated season-matched reference photo for `target_code` (fallback cities -> None, never another
+        city's photo). Season/date come from the TOP recommendation only when it is the same city."""
+        same_city = rec is not None and getattr(rec.destination, "code", None) == target_code
+        try:
+            return resolve_destination_photo(
+                target_code,
+                season_status=rec.season_status if same_city else "NORMAL",
+                dep_date=rec.best_deal.departure_date if same_city else None,
+                dest_name=rec.destination.name if same_city else "",
+            )
+        except Exception as exc:
+            logger.info("City photo resolve skipped for %s: %s", target_code, exc)
+            return None
+
+    def _submit_city_photo(self, chat_id: str, target_code: str, rec: Optional[TravelRecommendation]) -> bool:
+        if not self._photo_enabled or self._closed:
+            return False
+        photo = self.resolve_city_photo(target_code, rec)
+        if photo is None:
+            return False
+        caption = f"{html.escape(photo.season_tag)} · <i>{html.escape(photo.caption)}</i>"
+        try:
+            # Separate UI task: no generation guard / watchdog / worker accounting is attached to it, and it
+            # is never run inline (a saturated/closed pool just skips the photo).
+            self.ui_pool.submit(self._send_city_photo, str(chat_id), photo, caption)
+            return True
+        except Exception as exc:
+            logger.info("City photo task skipped for %s: %s", target_code, exc)
+            return False
+
+    def _send_city_photo(self, chat_id: str, photo: DestinationPhoto, caption: str) -> Optional[str]:
+        try:
+            status, _msg_id, err = self.dispatcher.send_photo_to_recipient(
+                self.tg, chat_id, photo.path, caption=caption, parse_mode="HTML"
+            )
+        except Exception as exc:
+            logger.info("City photo send failed for %s (best-effort): %s", chat_id, exc)
+            return "ERROR"
+        if status != "SENT":
+            logger.info("City photo %s for %s (not retried): %s", status, chat_id, err)
+        return status
 
     def _verify_hero_with_rerank(
         self,

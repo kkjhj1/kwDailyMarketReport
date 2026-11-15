@@ -45,7 +45,7 @@ LIVE_OCI_CRONTAB = "\n".join(
         f"42 15 * * 1-5 {APP_DIR}/run_cron.sh market_auto",
         f"7,22,37,52 9-15 * * 1-5 {APP_DIR}/run_cron.sh market_check_urgent",
         "# [2. 여행봇]",
-        f"0 12 * * 4 {APP_DIR}/run_cron.sh travel_weekly",
+        f"0 12 * * 2,4 {APP_DIR}/run_cron.sh travel_weekly",
         f"30 7,12,18 * * * {APP_DIR}/run_cron.sh travel_watches",
         "# [3. 입시봇]",
         f"30 8 * * * {APP_DIR}/run_cron.sh admission_collect",
@@ -72,6 +72,14 @@ class CronCompilerTests(unittest.TestCase):
         thu = next_runs_kst(["0 12 * * 4"], FIXED_NOW, 2)
         self.assertEqual(thu[0], "2026-11-12 (Thu) 12:00 KST")
         self.assertEqual(thu[1], "2026-11-19 (Thu) 12:00 KST")
+
+    def test_travel_weekly_default_is_tue_thu(self):
+        spec = TASK_CATALOG["travel_weekly"]
+        self.assertEqual(spec.weekdays, (2, 4))
+        cfg = sm.default_config(spec, enabled=True)
+        self.assertEqual(sm.compile_cron_exprs(cfg), ["0 12 * * 2,4"])
+        runs = next_runs_kst(sm.compile_cron_exprs(cfg), FIXED_NOW, 2)
+        self.assertEqual(runs, ["2026-11-12 (Thu) 12:00 KST", "2026-11-17 (Tue) 12:00 KST"])
         sun = next_runs_kst(["0 20 * * 0"], FIXED_NOW, 1)
         self.assertEqual(sun[0], "2026-11-15 (Sun) 20:00 KST")
         wk = next_runs_kst(["53 7 * * 1-5"], datetime(2026, 11, 13, 8, 0, tzinfo=KST), 1)  # Fri after slot
@@ -199,9 +207,10 @@ class MigrationTests(_ManagerCase):
         self.assertEqual(tasks["market_auto"]["control_mode"], "READ_ONLY_DUAL_PATH")
         self.assertFalse(tasks["market_auto"]["mismatch"])
         self.assertEqual(tasks["market_check_urgent"]["cron_exprs"], ["7,22,37,52 9-15 * * 1-5"])
-        self.assertEqual(tasks["travel_weekly"]["cron_exprs"], ["0 12 * * 4"])
+        self.assertEqual(tasks["travel_weekly"]["cron_exprs"], ["0 12 * * 2,4"])
         self.assertEqual(tasks["admission_weekly"]["cron_exprs"], ["0 20 * * 0"])
         self.assertEqual(tasks["travel_weekly"]["next_runs_kst"][0], "2026-11-12 (Thu) 12:00 KST")
+        self.assertEqual(tasks["travel_weekly"]["next_runs_kst"][1], "2026-11-17 (Tue) 12:00 KST")
         joined = " ".join(ov["policy_warnings"])
         self.assertIn("15:37", joined)
         self.assertIn("15:52", joined)
@@ -236,7 +245,7 @@ class MigrationTests(_ManagerCase):
         self.assertIn(f"53 7 * * 1-5 {APP_DIR}/run_cron.sh market_auto", block)
         self.assertIn(f"42 15 * * 1-5 {APP_DIR}/run_cron.sh market_auto", block)
         self.assertIn(f"7,22,37,52 9-15 * * 1-5 {APP_DIR}/run_cron.sh market_check_urgent", block)
-        self.assertIn(f"0 12 * * 4 {APP_DIR}/run_cron.sh travel_weekly", block)
+        self.assertIn(f"0 12 * * 2,4 {APP_DIR}/run_cron.sh travel_weekly", block)
         self.assertIn(f"30 8 * * * {APP_DIR}/run_cron.sh admission_collect", block)
         self.assertIn(f"0 20 * * 0 {APP_DIR}/run_cron.sh admission_weekly", block)
         self.assertIn(f"0 8,13,19 * * * {APP_DIR}/run_cron.sh travel_watches", block)

@@ -436,6 +436,17 @@ class TravelBriefDatabase:
                 )"""
             )
 
+            # 11. Per-chat travel delivery preferences (Track A weekly opt-out / Track B pause).
+            #     No row == defaults (weekly ON, watches NOT paused) so legacy users keep both tracks.
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS travel_user_prefs (
+                    chat_id TEXT PRIMARY KEY,
+                    weekly_brief_enabled INTEGER NOT NULL DEFAULT 1,
+                    watches_paused INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+
     @staticmethod
     def _migrate_travel_watch_schema(conn: sqlite3.Connection) -> dict[str, list[str]]:
         """V2 watch columns + delivery cadence columns (additive, idempotent). Rows that existed before the
@@ -1076,6 +1087,81 @@ class TravelBriefDatabase:
             "subscription_cancelled": subscription_cancelled,
         }
 
+    # =========================================================================
+    # Travel delivery preferences (Track A weekly opt-out / Track B pause / reset)
+    # =========================================================================
+
+    @staticmethod
+    def _prefs_row_to_dict(chat_id: str, row: Optional[sqlite3.Row]) -> dict[str, Any]:
+        if row is None:
+            return {"chat_id": chat_id, "weekly_brief_enabled": True, "watches_paused": False, "updated_at": None}
+        return {
+            "chat_id": chat_id,
+            "weekly_brief_enabled": bool(row["weekly_brief_enabled"]),
+            "watches_paused": bool(row["watches_paused"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def get_travel_user_prefs(self, chat_id: str) -> dict[str, Any]:
+        cid = str(chat_id).strip()
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM travel_user_prefs WHERE chat_id = ?", (cid,)).fetchone()
+        return self._prefs_row_to_dict(cid, row)
+
+    def is_weekly_brief_enabled(self, chat_id: str) -> bool:
+        return bool(self.get_travel_user_prefs(chat_id)["weekly_brief_enabled"])
+
+    def _set_pref_flag(self, chat_id: str, column: str, value: Optional[bool]) -> dict[str, Any]:
+        """Atomic upsert of one pref flag. `value=None` toggles the current (or default) value
+        inside the same `BEGIN IMMEDIATE` transaction so concurrent taps never lose an update."""
+        if column not in ("weekly_brief_enabled", "watches_paused"):
+            raise ValueError(f"invalid travel pref: {column}")
+        cid = str(chat_id).strip()
+        if not cid:
+            raise ValueError("chat_id is required")
+        with self._immediate_tx() as db:
+            row = db.execute("SELECT * FROM travel_user_prefs WHERE chat_id = ?", (cid,)).fetchone()
+            current = self._prefs_row_to_dict(cid, row)
+            new_value = (not current[column]) if value is None else bool(value)
+            db.execute(
+                """INSERT INTO travel_user_prefs (chat_id, weekly_brief_enabled, watches_paused, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET """ + column + """ = excluded.""" + column + """,
+                       updated_at = excluded.updated_at""",
+                (
+                    cid,
+                    int(new_value if column == "weekly_brief_enabled" else current["weekly_brief_enabled"]),
+                    int(new_value if column == "watches_paused" else current["watches_paused"]),
+                    _utc_str(),
+                ),
+            )
+            row = db.execute("SELECT * FROM travel_user_prefs WHERE chat_id = ?", (cid,)).fetchone()
+        return self._prefs_row_to_dict(cid, row)
+
+    def set_weekly_brief_enabled(self, chat_id: str, enabled: Optional[bool] = None) -> dict[str, Any]:
+        """Track A (화·목 정기 브리핑) opt-in/out. `enabled=None` toggles."""
+        return self._set_pref_flag(chat_id, "weekly_brief_enabled", enabled)
+
+    def set_watches_paused(self, chat_id: str, paused: Optional[bool] = None) -> dict[str, Any]:
+        """Track B (맞춤 특가 알림) pause/resume without deleting watches. `paused=None` toggles."""
+        return self._set_pref_flag(chat_id, "watches_paused", paused)
+
+    def reset_travel_watches(self, chat_id: str) -> int:
+        """ONE `BEGIN IMMEDIATE` tx: deactivate every active watch for the chat AND clear the pause flag,
+        preserving `weekly_brief_enabled` (Track A choice is independent of a Track B reset)."""
+        cid = str(chat_id).strip()
+        if not cid:
+            raise ValueError("chat_id is required")
+        with self._immediate_tx() as db:
+            count = self._deactivate_watches_in_tx(db, cid)
+            db.execute(
+                """INSERT INTO travel_user_prefs (chat_id, weekly_brief_enabled, watches_paused, updated_at)
+                   VALUES (?, 1, 0, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET watches_paused = 0, updated_at = excluded.updated_at""",
+                (cid, _utc_str()),
+            )
+        return count
+
     def toggle_travel_watch_option(self, chat_id: str, dest_code: str, field: str) -> Optional[dict[str, Any]]:
         """`day_pattern`: ANY -> FRI_MON -> THU_SUN -> ANY; `include_peak`: 1 <-> 0. Active watches only."""
         key = {"day": "day_pattern", "pk": "include_peak"}.get(field, field)
@@ -1115,7 +1201,8 @@ class TravelBriefDatabase:
             )
 
     def list_deliverable_watches(self, bot_id: str = TRAVEL_BOT_ID) -> tuple[list[dict[str, Any]], bool]:
-        """Subscription SSOT filter: active watch AND active TRAVEL recipient AND (if the platform
+        """Subscription SSOT filter: active watch AND active TRAVEL recipient AND Track B not paused
+        (`travel_user_prefs.watches_paused`, missing row == not paused) AND (if the platform
         `subscriptions` table lives in this DB) an ACTIVE `travel_bot` subscription.
         Returns (watches, subscriptions_checked).
         """
@@ -1126,7 +1213,9 @@ class TravelBriefDatabase:
             sql = """SELECT w.*, r.subscribed_topics AS recipient_topics
                      FROM travel_price_watches w
                      JOIN recipients r ON r.chat_id = w.chat_id
-                     WHERE w.is_active = 1 AND r.is_active = 1"""
+                     LEFT JOIN travel_user_prefs p ON p.chat_id = w.chat_id
+                     WHERE w.is_active = 1 AND r.is_active = 1
+                       AND COALESCE(p.watches_paused, 0) = 0"""
             params: list[Any] = []
             if has_subs:
                 sql += """ AND EXISTS (

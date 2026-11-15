@@ -121,7 +121,7 @@ TASK_CATALOG: dict[str, TaskSpec] = {
         priority=2,
         default_times=("12:00",),
         days_mode="CUSTOM",
-        weekdays=(4,),
+        weekdays=(2, 4),
     ),
     "admission_collect": TaskSpec(
         task_id="admission_collect",

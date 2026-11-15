@@ -1584,3 +1584,234 @@ def test_typo_shows_did_you_mean_button_above_default_keyboard(handler):
     assert rows == handler.build_inline_keyboard("ALL")["inline_keyboard"]
     assert "찾으셨나요" not in handler.build_help_card("몰디브")  # legacy signature unchanged
     _assert_callbacks_fit(handler)
+
+
+# ----------------------------------------------------------------------
+# 2-Track delivery prefs: Track A weekly opt-out / Track B pause / 2-step reset
+# ----------------------------------------------------------------------
+def test_travel_user_prefs_defaults_and_deliverable_filter(mem_db):
+    for cid in ("p1", "p2"):
+        seed_recipient(mem_db, cid)
+        mem_db.upsert_travel_watch(cid, "FUK", 250_000)
+    assert mem_db.get_travel_user_prefs("p1") == {
+        "chat_id": "p1", "weekly_brief_enabled": True, "watches_paused": False, "updated_at": None,
+    }
+    assert mem_db.is_weekly_brief_enabled("nobody") is True  # no row -> legacy users keep Track A
+
+    def deliverable():
+        return sorted(w["chat_id"] for w in mem_db.list_deliverable_watches()[0])
+
+    assert deliverable() == ["p1", "p2"]
+    # Track A opt-out never touches Track B
+    prefs = mem_db.set_weekly_brief_enabled("p1", False)
+    assert prefs["weekly_brief_enabled"] is False and prefs["watches_paused"] is False and prefs["updated_at"]
+    assert mem_db.is_weekly_brief_enabled("p1") is False
+    assert deliverable() == ["p1", "p2"]
+    # Track B pause blocks delivery but keeps the watch row active
+    assert mem_db.set_watches_paused("p2", True)["watches_paused"] is True
+    assert deliverable() == ["p1"]
+    assert mem_db.get_travel_watch("p2", "FUK")["is_active"] == 1
+    assert mem_db.is_weekly_brief_enabled("p2") is True
+    # toggles (None) flip atomically
+    assert mem_db.set_watches_paused("p2")["watches_paused"] is False
+    assert deliverable() == ["p1", "p2"]
+    assert mem_db.set_weekly_brief_enabled("p1")["weekly_brief_enabled"] is True
+
+
+def test_reset_travel_watches_is_atomic_and_preserves_weekly_choice(mem_db):
+    seed_recipient(mem_db, "r1")
+    seed_recipient(mem_db, "r2")
+    for code in ("FUK", "NRT", "@JP"):
+        mem_db.upsert_travel_watch("r1", code, 250_000)
+    mem_db.upsert_travel_watch("r2", "FUK", 250_000)
+    mem_db.set_weekly_brief_enabled("r1", False)
+    mem_db.set_watches_paused("r1", True)
+    assert mem_db.reset_travel_watches("r1") == 3
+    prefs = mem_db.get_travel_user_prefs("r1")
+    assert prefs["weekly_brief_enabled"] is False and prefs["watches_paused"] is False
+    assert mem_db.list_travel_watches("r1") == []
+    assert len(mem_db.list_travel_watches("r2")) == 1  # other chats untouched
+    assert mem_db.reset_travel_watches("r1") == 0  # idempotent
+    # reset without a prefs row creates defaults (weekly stays ON)
+    assert mem_db.reset_travel_watches("r2") == 1
+    assert mem_db.get_travel_user_prefs("r2")["weekly_brief_enabled"] is True
+    # /stop full unsubscribe path still intact alongside prefs
+    seed_recipient(mem_db, "r3")
+    mem_db.upsert_travel_watch("r3", "FUK", 250_000)
+    mem_db.set_watches_paused("r3", True)
+    res = mem_db.deactivate_recipient_and_watches("r3")
+    assert res["recipient_deactivated"] is True and res["watches_deactivated"] == 1
+    assert mem_db.list_travel_watches("r3") == []
+
+
+def test_prefs_concurrent_toggles_and_reset_on_file_db(tmp_path):
+    db = TravelBriefDatabase(db_path=str(tmp_path / "prefs.sqlite3"))
+    seed_recipient(db, "cc")
+    for code in ("FUK", "NRT", "KIX"):
+        db.upsert_travel_watch("cc", code, 250_000)
+    errors: list[BaseException] = []
+
+    def run_threads(targets):
+        threads = [threading.Thread(target=t) for t in targets]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def toggler(kind):
+        def _run():
+            try:
+                for _ in range(5):
+                    if kind == "wb":
+                        db.set_weekly_brief_enabled("cc")
+                    else:
+                        db.set_watches_paused("cc")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+        return _run
+
+    run_threads([toggler("wb" if i % 2 else "wp") for i in range(8)])
+    assert errors == []
+    prefs = db.get_travel_user_prefs("cc")
+    # 4 threads x 5 toggles = 20 flips each; any lost update would leave an odd flip count
+    assert prefs["weekly_brief_enabled"] is True and prefs["watches_paused"] is False
+
+    db.set_watches_paused("cc", True)
+    results: list[int] = []
+
+    def resetter():
+        try:
+            results.append(db.reset_travel_watches("cc"))
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def weekly_off():
+        try:
+            db.set_weekly_brief_enabled("cc", False)
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    run_threads([resetter] * 4 + [weekly_off])
+    assert errors == []
+    assert sum(results) == 3  # each watch deactivated exactly once
+    prefs = db.get_travel_user_prefs("cc")
+    assert prefs["watches_paused"] is False and prefs["weekly_brief_enabled"] is False
+    assert db.list_travel_watches("cc") == []
+
+
+def test_watch_list_card_status_and_compact_two_column_rows(handler, mem_db):
+    mem_db.upsert_travel_watch("c1", "FUK", 250_000)
+    mem_db.upsert_travel_watch("c1", "@JP", 300_000)
+    text, markup = handler.build_watch_list_card("c1")
+    rows = markup["inline_keyboard"]
+    assert "정기발송(화·목 12:00): <b>켜짐</b>" in text and "맞춤발송: <b>켜짐</b>" in text
+    assert rows[0] == [{"text": "⚙️ " + handler.label_for("FUK"), "callback_data": "trv:w:m:FUK"},
+                       {"text": "🗑️", "callback_data": "trv:w:x:FUK"}]
+    assert [b["callback_data"] for b in rows[1]] == ["trv:w:s:@JP", "trv:w:x:@JP"]
+    assert {"text": "➕ 알림 추가 (도시·국가·날짜)", "callback_data": "trv:w:g"} in [b for r in rows for b in r]
+    assert rows[-2] == [{"text": "📰 정기발송 끄기", "callback_data": "trv:w:wb"},
+                        {"text": "🔔 맞춤발송 중지", "callback_data": "trv:w:wp"}]
+    assert rows[-1] == [{"text": "🧹 알림 초기화", "callback_data": "trv:w:z"},
+                        {"text": "🔍 도시 검색", "callback_data": "trv:c:guide"}]
+    mem_db.set_weekly_brief_enabled("c1", False)
+    mem_db.set_watches_paused("c1", True)
+    text, markup = handler.build_watch_list_card("c1")
+    assert "정기발송(화·목 12:00): <b>꺼짐</b>" in text and "맞춤발송: <b>일시중지</b>" in text
+    assert [b["text"] for b in markup["inline_keyboard"][-2]] == ["📰 정기발송 켜기", "🔔 맞춤발송 재개"]
+    # setup card: save / input rows are 2-column
+    _t, setup = handler.build_watch_setup_card("c1", "u1", "FUK")
+    by_cb = {b["callback_data"]: i for i, r in enumerate(setup["inline_keyboard"]) for b in r}
+    assert by_cb["trv:w:k:FUK:1"] == by_cb["trv:w:k:FUK:W"]
+    assert by_cb["trv:w:i:FUK"] == by_cb["trv:w:x:FUK"]
+    assert all(len(r) <= 4 for r in setup["inline_keyboard"])
+
+
+def test_prefs_callbacks_ack_first_and_toggle(handler, mem_db):
+    handler._remember_watch_card("c1", 900)
+    order: list[str] = []
+    handler.tg.answer_callback.side_effect = lambda *a, **kw: order.append("ack")
+    for name in ("set_weekly_brief_enabled", "set_watches_paused"):
+        real = getattr(mem_db, name)
+
+        def wrapped(*a, _real=real, _name=name, **kw):
+            order.append(_name)
+            return _real(*a, **kw)
+
+        setattr(mem_db, name, wrapped)
+
+    _cb(handler, "trv:w:wb", mid=900)
+    assert order[:2] == ["ack", "set_weekly_brief_enabled"]
+    assert mem_db.is_weekly_brief_enabled("c1") is False
+    assert "정기 여행정보 발송을 껐어요" in handler.edits[-1][1]
+    assert "정기발송(화·목 12:00): <b>꺼짐</b>" in handler.edits[-1][1]
+    order.clear()
+    _cb(handler, "trv:w:wp", mid=900)
+    assert order[:2] == ["ack", "set_watches_paused"]
+    assert mem_db.get_travel_user_prefs("c1")["watches_paused"] is True
+    assert "일시중지했어요" in handler.edits[-1][1]
+    _cb(handler, "trv:w:wb", mid=900)
+    _cb(handler, "trv:w:wp", mid=900)
+    prefs = mem_db.get_travel_user_prefs("c1")
+    assert prefs["weekly_brief_enabled"] is True and prefs["watches_paused"] is False
+    _assert_callbacks_fit(handler)
+
+
+def test_two_step_reset_clears_only_target_users_draft_and_input(handler, mem_db):
+    handler._remember_watch_card("g1", 900)
+    for code in ("FUK", "NRT"):
+        mem_db.upsert_travel_watch("g1", code, 250_000)
+    mem_db.set_weekly_brief_enabled("g1", False)
+    mem_db.set_watches_paused("g1", True)
+    handler._get_draft("g1", "u1", "FUK")
+    handler._get_draft("g1", "u1", "@JP")
+    handler._get_draft("g1", "u2", "FUK")
+    handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u2", dest_code="FUK")
+    handler._set_chat_state("g1", STATE_AWAITING_WATCH_PRICE, user_id="u1", dest_code="NRT")
+
+    # step 1: in-place confirmation only, nothing destroyed
+    _cb(handler, "trv:w:z", chat="g1", mid=900, user="u1")
+    _mid, text, markup = handler.edits[-1]
+    assert "정말 초기화할까요" in text and "2개" in text
+    assert all_callbacks(markup) == ["trv:w:Z", "trv:w:l"]
+    assert len(mem_db.list_travel_watches("g1")) == 2
+    assert handler._peek_draft("g1", "u2", "FUK") is not None
+
+    # step 2: confirmed reset (ack precedes the DB write)
+    order: list[str] = []
+    handler.tg.answer_callback.side_effect = lambda *a, **kw: order.append("ack")
+    real_reset = mem_db.reset_travel_watches
+    mem_db.reset_travel_watches = lambda cid: (order.append("reset"), real_reset(cid))[1]
+    _cb(handler, "trv:w:Z", chat="g1", mid=900, user="u1")
+    assert order == ["ack", "reset"]
+    assert mem_db.list_travel_watches("g1") == []
+    prefs = mem_db.get_travel_user_prefs("g1")
+    assert prefs["watches_paused"] is False and prefs["weekly_brief_enabled"] is False
+    assert handler._peek_draft("g1", "u1", "FUK") is None and handler._peek_draft("g1", "u1", "@JP") is None
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
+    # another member of the same group chat keeps their draft + pending input
+    assert handler._peek_draft("g1", "u2", "FUK") is not None
+    assert handler.get_chat_state("g1", "u2") == STATE_AWAITING_WATCH_PRICE
+    assert "2개를 초기화" in handler.edits[-1][1] and "정기발송 설정은 유지" in handler.edits[-1][1]
+    _assert_callbacks_fit(handler)
+
+
+def test_new_prefs_callbacks_fit_64_bytes_and_reject_garbage(handler, mem_db):
+    for cb in ("trv:w:wb", "trv:w:wp", "trv:w:z", "trv:w:Z"):
+        assert len(cb.encode("utf-8")) <= 64
+    for bad in ("trv:w:wbx", "trv:w:zZ", "trv:w:ZZ"):
+        _cb(handler, bad)
+        assert "지원하지 않는" in handler.tg.answer_callback.call_args[1]["text"]
+    assert mem_db.get_travel_user_prefs("c1")["updated_at"] is None  # nothing written
+    no_db = TravelInteractiveHandler(bot_token="dummy")
+    no_db.tg = MagicMock()
+    no_db.handle_callback_query("cq", "c1", 1, "trv:w:Z", {"id": "u1"})
+    assert "사용할 수 없습니다" in no_db.tg.answer_callback.call_args[1]["text"]
+    no_db.shutdown()
+
+
+def test_onboarding_card_introduces_both_tracks(handler):
+    card = handler.build_onboarding_card()
+    assert "화·목 12:00" in card and "도시별 실시간 조회" in card and "🔔 <b>내 맞춤 특가 알림</b>" in card
+    assert "구독이 시작되었습니다" in card
+    kb = handler.build_inline_keyboard("ALL")["inline_keyboard"]
+    assert kb[0][0]["callback_data"].startswith("trv:r:") and kb[-2][0]["callback_data"] == "trv:c:guide"
