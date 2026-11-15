@@ -764,18 +764,44 @@ class TravelInteractiveHandler:
             "💡 기본 6개 도시 외 지역은 보수적 기본 예산으로 안내되며, 실시간 항공권 링크를 함께 드립니다."
         )
 
-    def build_help_card(self, unknown_text: str = "") -> str:
+    def build_help_card(self, unknown_text: str = "", suggestions: Optional[list[Any]] = None) -> str:
         names = " · ".join(self.catalog.suggestion_names(12))
         lines = ["🧭 <b>[트래블 패스파인더 지역 검색 도움말]</b>", "━━━━━━━━━━━━━━━━━━"]
         if unknown_text:
             shown = unknown_text if len(unknown_text) <= 20 else unknown_text[:19] + "…"
             lines.append(f"❓ '<b>{html.escape(shown)}</b>'은(는) 아직 지원하지 않는 지역이에요.")
+        if suggestions:
+            picks = ", ".join(f"<b>{html.escape(s.display_name)}</b>" for s in suggestions)
+            lines.append(f"💡 혹시 아래 도시를 찾으셨나요? {picks}")
         lines.extend([
             "✍️ 도시 이름을 그대로 입력해 보세요. 예) <code>삿포로</code>, <code>세부</code>, <code>호치민</code>",
             f"🔎 추천 검색 도시: {html.escape(names)}",
             "📌 /여행 전체 TOP 3 · /help 도움말 · /stop 구독 해지",
         ])
         return "\n".join(lines)
+
+    def build_country_city_picker_card(self, country_code: str) -> tuple[str, dict[str, Any]]:
+        """Country text (`일본`) -> member-city picker: 1 tap = live search for that city."""
+        meta = get_watch_country_meta(country_code)
+        if meta is None:
+            return self.build_help_card(), self.build_inline_keyboard("ALL")
+        text = (
+            f"{meta['flag']} <b>[{html.escape(meta['name'])} 주요 도시 선택]</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "어느 도시의 실시간 항공권을 조회할까요? 도시를 누르면 바로 최저가·예산을 알려드려요."
+        )
+        city_buttons = [
+            {"text": self.label_for(code), "callback_data": f"trv:q:{code}"[:64]}
+            for code in self.catalog.watch_target_codes(meta["code"])
+        ]
+        rows: list[list[dict[str, str]]] = [city_buttons[i:i + 3] for i in range(0, len(city_buttons), 3)]
+        if self.db is not None:
+            rows.append([{
+                "text": f"🔔 {meta['name']} 전체 특가 알림 설정",
+                "callback_data": f"trv:w:s:{meta['code']}"[:64],
+            }])
+        rows.append([{"text": "🌏 전체 TOP 3 보기", "callback_data": "trv:q:ALL"}])
+        return text, {"inline_keyboard": rows}
 
     def build_onboarding_card(self) -> str:
         return (
@@ -1020,13 +1046,20 @@ class TravelInteractiveHandler:
         res = self.catalog.resolve(query)
         if res is None:
             country = self.catalog.resolve_country(query)
-            if country and self.db is not None:
-                # Countries have no briefing search; they open the country watch setup hub instead.
+            if country:
+                # Countries have no briefing search; they open a member-city picker (+ country watch entry).
                 self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
-                text, markup = self.build_watch_setup_card(chat_id, user_id, country)
-                self._render_watch_card(chat_id, 0, text, markup, edit=False)
-                return True, "travel_watch_country_hub"
-            self._send_card(chat_id, self.build_help_card(query), self.build_inline_keyboard("ALL"))
+                text, markup = self.build_country_city_picker_card(country)
+                self._send_card(chat_id, text, markup)
+                return True, "travel_country_city_picker"
+            suggestions = self.catalog.suggest_cities(query, limit=3)
+            markup = self.build_inline_keyboard("ALL")
+            if suggestions:
+                suggest_row = [
+                    {"text": s.display_name, "callback_data": f"trv:q:{s.code}"[:64]} for s in suggestions
+                ]
+                markup = {"inline_keyboard": [suggest_row] + markup["inline_keyboard"]}
+            self._send_card(chat_id, self.build_help_card(query, suggestions), markup)
             return True, "travel_help_unknown_city"
         self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
         return self._start_text_search(chat_id, user_id, res.code)

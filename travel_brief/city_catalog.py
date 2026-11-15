@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -170,6 +171,7 @@ _ZERO_WIDTH_RE = re.compile(r"[​-‏⁠﻿­]")
 _WS_RE = re.compile(r"\s+")
 _STRIP_PUNCT_RE = re.compile(r"[-()._·,/!?~]")
 _QUERY_SUFFIXES = ("여행지", "여행", "특가", "항공권", "비행기", "항공", "가고싶어요", "가고싶어", "가자")
+_SUGGEST_CUTOFF = 0.6  # difflib ratio floor for typo suggestions (tuned on 2~4 char Korean typos)
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,33 @@ class CityCatalog:
             # Arbitrary IATA-like codes never pass through: only catalog codes resolve.
             return None
         return self.get(code)
+
+    def suggest_cities(self, query: str, limit: int = 3) -> list[CityResolution]:
+        """Typo-tolerant "did you mean" candidates (e.g. `오시카` -> 오사카). Never auto-resolves:
+        callers only offer the results as 1-tap buttons. Unrelated text returns `[]`."""
+        key = _lookup_key(query)
+        for suffix in _QUERY_SUFFIXES:
+            if key.endswith(suffix) and len(key) > len(suffix):
+                key = key[: -len(suffix)]
+                break
+        if len(key) < 2 or limit <= 0:
+            return []
+        matches = difflib.get_close_matches(
+            key, list(self._index.keys()), n=max(limit * 4, 8), cutoff=_SUGGEST_CUTOFF
+        )
+        out: list[CityResolution] = []
+        seen: set[str] = set()
+        for alias in matches:
+            code = self._index[alias]
+            if code in seen:
+                continue
+            seen.add(code)
+            res = self.get(code)
+            if res is not None:
+                out.append(res)
+            if len(out) >= limit:
+                break
+        return out
 
     def resolve_country(self, query: str) -> Optional[str]:
         """Free text (`일본`, `베트남 전체`, `@JP`) -> country watch scope, or None. City aliases win:

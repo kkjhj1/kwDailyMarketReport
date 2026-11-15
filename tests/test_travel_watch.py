@@ -1154,8 +1154,10 @@ def test_v2_city_fixed_wizard_and_date_input_state(handler, mem_db):
     assert handler.handle_text_message("g1", 8, "u1", "삿포로") == (True, "travel_search_started")
     assert handler._launch_search.call_args[0][2] == "CTS" and handler.get_chat_state("g1", "u1") == STATE_IDLE
     _cb(handler, "trv:w:f:FUK", chat="g1", user="u1")
-    assert handler.handle_text_message("g1", 9, "u1", "베트남") == (True, "travel_watch_country_hub")
-    assert "베트남 전체" in handler.tg.send_text.call_args[0][1]
+    assert handler.handle_text_message("g1", 9, "u1", "베트남") == (True, "travel_country_city_picker")
+    assert "베트남 주요 도시 선택" in handler.tg.send_text.call_args[0][1]
+    assert "trv:w:s:@VN" in all_callbacks(handler.tg.send_text.call_args[1]["reply_markup"])
+    assert handler.get_chat_state("g1", "u1") == STATE_IDLE
     assert mem_db.get_travel_watch("g1", "FUK")["fixed_dep_date"] == dep.isoformat()  # untouched
     # TTL expiry releases the date prompt as well
     handler.chat_state_ttl = 0.05
@@ -1499,3 +1501,86 @@ def test_shutdown_closes_real_session_cleanly(mem_db):
     h.shutdown()  # idempotent, no error
     h2 = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
     h2.shutdown()  # never-created session: clean no-op
+
+
+# ----------------------------------------------------------------------
+# Country city-picker hub & typo suggestions
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("typo,code", [
+    ("오시카", "KIX"), ("후쿠오까", "FUK"), ("방콕크", "BKK"), ("다낭ㅇ", "DAD"), ("세부부", "CEB"),
+    ("후쿠오까 여행", "FUK"),
+])
+def test_suggest_cities_korean_typos(typo, code):
+    cat = CityCatalog(FlightEngine(live_naver=False).destinations)
+    assert cat.resolve(typo) is None  # typos never auto-resolve
+    picks = cat.suggest_cities(typo, limit=3)
+    assert picks and picks[0].code == code
+    assert len({p.code for p in picks}) == len(picks) <= 3
+
+
+@pytest.mark.parametrize("junk", ["zzzzzz", "우주여행", "몰디브", "XYZ", "25", "", "a", "파리바게트"])
+def test_suggest_cities_rejects_unrelated(junk):
+    cat = CityCatalog(FlightEngine(live_naver=False).destinations)
+    assert cat.suggest_cities(junk) == []
+
+
+def test_suggest_cities_exact_name_only_matches_itself():
+    cat = CityCatalog(FlightEngine(live_naver=False).destinations)
+    assert [r.code for r in cat.suggest_cities("런던")] == ["LHR"]
+    assert cat.suggest_cities("오시카", limit=0) == []
+
+
+def test_country_text_opens_city_picker_hub(handler):
+    handler._launch_search = MagicMock()
+    assert handler.handle_text_message("c1", 1, "u1", "일본") == (True, "travel_country_city_picker")
+    text = handler.tg.send_text.call_args[0][1]
+    markup = handler.tg.send_text.call_args[1]["reply_markup"]
+    assert "일본 주요 도시 선택" in text and "어느 도시의 실시간 항공권" in text
+    cbs = all_callbacks(markup)
+    assert cbs == ["trv:q:NRT", "trv:q:KIX", "trv:q:FUK", "trv:q:CTS", "trv:q:OKA", "trv:w:s:@JP", "trv:q:ALL"]
+    assert all(len(row) <= 3 for row in markup["inline_keyboard"])
+    assert handler._launch_search.call_count == 0  # a country never starts a search by itself
+    # tapping a fallback member city goes straight into a live search
+    _cb(handler, "trv:q:CTS", mid=900)
+    assert handler._launch_search.call_args[0][2] == "CTS"
+    for word, scope in (("베트남", "@VN"), ("태국", "@TH"), ("필리핀", "@PH"), ("대만전체", "@TW")):
+        assert handler.handle_text_message("c1", 2, "u1", word) == (True, "travel_country_city_picker")
+        assert f"trv:w:s:{scope}" in all_callbacks(handler.tg.send_text.call_args[1]["reply_markup"])
+    _assert_callbacks_fit(handler)
+
+
+def test_country_picker_without_db_hides_watch_button():
+    h = TravelInteractiveHandler(bot_token="dummy", db=None)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    try:
+        assert h.handle_text_message("c1", 1, "u1", "태국") == (True, "travel_country_city_picker")
+        cbs = all_callbacks(h.tg.send_text.call_args[1]["reply_markup"])
+        assert cbs == ["trv:q:BKK", "trv:q:CNX", "trv:q:HKT", "trv:q:ALL"]
+    finally:
+        h.shutdown()
+
+
+def test_taiwan_bare_word_still_searches_tpe(handler):
+    handler._launch_search = MagicMock()
+    assert handler.handle_text_message("c1", 1, "u1", "대만") == (True, "travel_search_started")
+    assert handler._launch_search.call_args[0][2] == "TPE"
+
+
+def test_typo_shows_did_you_mean_button_above_default_keyboard(handler):
+    handler._launch_search = MagicMock()
+    assert handler.handle_text_message("c1", 1, "u1", "후쿠오까") == (True, "travel_help_unknown_city")
+    text = handler.tg.send_text.call_args[0][1]
+    rows = handler.tg.send_text.call_args[1]["reply_markup"]["inline_keyboard"]
+    assert "혹시 아래 도시를 찾으셨나요?" in text and "후쿠오카" in text
+    assert rows[0][0]["callback_data"] == "trv:q:FUK"
+    assert rows[1:] == handler.build_inline_keyboard("ALL")["inline_keyboard"]
+    assert handler._launch_search.call_count == 0  # suggestion only, never auto-search
+    # unrelated / HTML input: no suggestion row, escaped echo
+    assert handler.handle_text_message("c1", 2, "u1", "<b>zzzzzz</b>") == (True, "travel_help_unknown_city")
+    text = handler.tg.send_text.call_args[0][1]
+    rows = handler.tg.send_text.call_args[1]["reply_markup"]["inline_keyboard"]
+    assert "찾으셨나요" not in text and "&lt;b&gt;" in text
+    assert rows == handler.build_inline_keyboard("ALL")["inline_keyboard"]
+    assert "찾으셨나요" not in handler.build_help_card("몰디브")  # legacy signature unchanged
+    _assert_callbacks_fit(handler)
