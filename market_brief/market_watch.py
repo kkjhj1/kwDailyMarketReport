@@ -49,7 +49,17 @@ WATCH_TICK_INTERVAL_SEC = 120.0
 MAX_VISIBLE_CHARS = 1800
 MAX_HTML_CHARS = 3500
 LEVEL_INPUT_TTL_SEC = 600.0
-QUICK_DEFAULT_SYMBOLS = ("KOSPI", "SP500")
+QUICK_DEFAULT_SYMBOLS = ("KOSPI", "KOSDAQ")
+# Assets offered in the `/watch` picker (KR daytime). ASSET_CATALOG stays complete so legacy watches/callbacks work.
+DAYTIME_ACTIVE_SYMBOLS = ("KOSPI", "KOSDAQ", "KOSPI200", "USDKRW")
+
+# Rich alert card bounds ([TG-01] graceful degradation; the renderer never raises on length)
+ALERT_MAX_WATCH_LINES = 5
+ALERT_MAX_CONTEXT = 3
+ALERT_MAX_NEWS = 2
+ALERT_NEWS_TITLE_MAX = 35
+ALERT_URL_MAX = 300
+DEFAULT_WATCH_REPORT_URL = "http://161.33.196.211:8002/reports/latest.html"
 
 _LIVE_SOURCE_PREFIXES = ("NAVER_", "NAVER:")
 _REJECTED_SOURCE_MARKERS = ("MOCK", "FIXTURE", "FALLBACK")
@@ -91,6 +101,22 @@ ASSET_CATALOG: dict[str, AssetSpec] = {
     "KR10Y": AssetSpec("KR10Y", "국고채10년", "🏦", "KR", "PERCENT_YIELD", "BOND"),
     "US10Y": AssetSpec("US10Y", "미국채10년", "🏛️", "GLOBAL", "PERCENT_YIELD", "BOND"),
     "US2Y": AssetSpec("US2Y", "미국채2년", "🏛️", "GLOBAL", "PERCENT_YIELD", "BOND"),
+}
+
+# Correlated indicators shown on an alert card (display only; NEVER used for watch evaluation).
+ASSET_CONTEXT_MAP: dict[str, tuple[str, ...]] = {
+    "KOSPI": ("USDKRW", "KOSDAQ", "SP500"),
+    "KOSDAQ": ("KOSPI", "USDKRW", "NASDAQ_COMPOSITE"),
+    "KOSPI200": ("KOSPI", "USDKRW", "SP500"),
+    "USDKRW": ("KOSPI", "US10Y", "KR3Y"),
+    "SP500": ("NASDAQ_COMPOSITE", "US10Y", "USDKRW"),
+    "NASDAQ_COMPOSITE": ("SP500", "US10Y", "USDKRW"),
+    "WTI": ("USDKRW", "GOLD", "SP500"),
+    "GOLD": ("USDKRW", "US10Y", "WTI"),
+    "KR3Y": ("KR10Y", "US2Y", "USDKRW"),
+    "KR10Y": ("KR3Y", "US10Y", "USDKRW"),
+    "US10Y": ("US2Y", "USDKRW", "SP500"),
+    "US2Y": ("US10Y", "USDKRW", "SP500"),
 }
 
 # Callback preset codes (ASCII) -> Decimal threshold
@@ -318,33 +344,185 @@ def visible_len(html_text: str) -> int:
     return len(html.unescape(re.sub(r"<[^>]+>", "", html_text)))
 
 
-def render_watch_alert_html(items: list[dict[str, Any]], now: datetime) -> str:
-    """Fixed slim template, one line per triggered watch. Max 20 watches/user keeps it < 1800 visible chars."""
-    lines = ["🔔 <b>[내 변동성 타겟 알림]</b>", "━━━━━━━━━━━━━━━━━━"]
-    for it in items:
-        w, q, side = it["watch"], it["quote"], it["side"]
-        spec = ASSET_CATALOG.get(w["symbol"])
-        emoji = spec.emoji if spec else "📊"
-        arrow = "📈" if side == "UP" else "📉"
-        unit = w.get("quote_unit") or (spec.quote_unit if spec else "INDEX")
-        if w["condition_type"] == CONDITION_CHANGE_BP and q.change_bp is not None:
-            chg = f"{q.change_bp.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP):+f}bp"
-        elif q.change_pct is not None:
-            chg = f"{q.change_pct.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):+f}%"
+def _esc(text: Any) -> str:
+    return html.escape(str(text), quote=True)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _fmt_change(quote: Quote, prefer_bp: bool) -> str:
+    try:
+        if prefer_bp and quote.change_bp is not None:
+            return f"{quote.change_bp.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP):+f}bp"
+        if quote.change_pct is not None:
+            return f"{quote.change_pct.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):+f}%"
+    except (InvalidOperation, AttributeError, TypeError):
+        pass
+    return "-"
+
+
+def _safe_value(value: Any, quote_unit: str) -> str:
+    try:
+        return _clip(_fmt_value(Decimal(str(value)), quote_unit), 24)
+    except (InvalidOperation, ValueError, TypeError):
+        return "-"
+
+
+def _within_limits(text: str) -> bool:
+    return visible_len(text) <= MAX_VISIBLE_CHARS and len(text) <= MAX_HTML_CHARS
+
+
+def _watch_lines(it: dict[str, Any]) -> list[str]:
+    w, q, side = it["watch"], it["quote"], it["side"]
+    spec = ASSET_CATALOG.get(w["symbol"])
+    emoji = spec.emoji if spec else "📊"
+    arrow = "📈" if side == "UP" else "📉"
+    unit = w.get("quote_unit") or (spec.quote_unit if spec else "INDEX")
+    chg = _fmt_change(q, w["condition_type"] == CONDITION_CHANGE_BP)
+    label = _clip(spec.label if spec else w["symbol"], 20)
+    try:
+        cond = _clip(describe_watch(w), 60)
+    except Exception:
+        cond = label
+    return [
+        f"{arrow}{emoji} <b>{_esc(label)}</b> {_esc(_safe_value(q.value, unit))} (<b>{_esc(chg)}</b>)",
+        f"   ↳ 조건: {_esc(cond)} · {_esc(DIRECTION_LABELS.get(side, side))} 도달",
+    ]
+
+
+def select_context_symbols(items: list[dict[str, Any]], limit: int = ALERT_MAX_CONTEXT) -> list[str]:
+    """Deduplicated correlated symbols for the triggered watches (excluding the triggered assets themselves)."""
+    triggered = [it["watch"]["symbol"] for it in items]
+    seen = set(triggered)
+    out: list[str] = []
+    for sym in triggered:
+        for ctx in ASSET_CONTEXT_MAP.get(sym, ()):
+            if ctx not in seen and ctx in ASSET_CATALOG:
+                seen.add(ctx)
+                out.append(ctx)
+    return out[:limit]
+
+
+def _context_lines(items: list[dict[str, Any]], context_quotes: dict[str, Quote] | None) -> list[str]:
+    if not context_quotes:
+        return []
+    rows: list[str] = []
+    for sym in select_context_symbols(items, limit=len(ASSET_CATALOG)):
+        q = context_quotes.get(sym)
+        if q is None:
+            continue
+        spec = ASSET_CATALOG[sym]
+        chg = _fmt_change(q, spec.quote_unit == "PERCENT_YIELD")
+        rows.append(f"• {spec.emoji} {_esc(spec.label)} {_esc(_safe_value(q.value, spec.quote_unit))} ({_esc(chg)})")
+        if len(rows) >= ALERT_MAX_CONTEXT:
+            break
+    return ["🔗 <b>연관 지표</b>", *rows] if rows else []
+
+
+def _news_lines(news: list[Any] | None) -> list[str]:
+    rows: list[str] = []
+    for item in list(news or [])[:ALERT_MAX_NEWS]:
+        title = _clip(getattr(item, "title", "") or "", ALERT_NEWS_TITLE_MAX)
+        if not title:
+            continue
+        url = str(getattr(item, "url", "") or "").strip()
+        if url.startswith(("http://", "https://")) and len(url) <= ALERT_URL_MAX:
+            rows.append(f'• <a href="{_esc(url)}">{_esc(title)}</a>')
         else:
-            chg = "-"
-        lines.append(
-            f"{arrow}{emoji} <b>{html.escape(spec.label if spec else w['symbol'])}</b> "
-            f"{html.escape(_fmt_value(q.value, unit))} (<b>{html.escape(chg)}</b>)"
-        )
-        lines.append(f"   ↳ 조건: {html.escape(describe_watch(w))} · {DIRECTION_LABELS.get(side, side)} 도달")
-    lines.append("")
-    lines.append(f"🕒 {html.escape(now.astimezone(KST).strftime('%Y-%m-%d %H:%M'))} KST 실시간 기준")
-    lines.append("⚙️ 조건 변경·삭제: /watch")
-    text = "\n".join(lines)
-    if visible_len(text) > MAX_VISIBLE_CHARS or len(text) > MAX_HTML_CHARS:
-        raise ValueError("watch alert exceeds [TG-01] limits")
-    return text
+            rows.append(f"• {_esc(title)}")
+    return ["📰 <b>관련 시황 뉴스</b>", *rows] if rows else []
+
+
+def render_watch_alert_html(
+    items: list[dict[str, Any]],
+    now: datetime,
+    context_quotes: dict[str, Quote] | None = None,
+    news: list[Any] | None = None,
+) -> str:
+    """Bounded rich alert body. NEVER raises on length ([TG-01]); degrades news -> context -> watch lines."""
+    try:
+        stamp = now.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        stamp = "-"
+    header = ["🔔 <b>[내 변동성 타겟 알림]</b>", "━━━━━━━━━━━━━━━━━━"]
+    footer = ["", f"🕒 {_esc(stamp)} KST 실시간 기준", "⚙️ 조건 변경·삭제: /watch"]
+    ctx = _context_lines(items, context_quotes)
+    nws = _news_lines(news)
+
+    def build(n_watch: int, with_ctx: bool, with_news: bool) -> str:
+        lines = list(header)
+        for it in items[:n_watch]:
+            lines += _watch_lines(it)
+        if len(items) > n_watch:
+            lines.append(f"↳ 외 {len(items) - n_watch}건 도달")
+        if with_ctx and ctx:
+            lines += ["", *ctx]
+        if with_news and nws:
+            lines += ["", *nws]
+        return "\n".join(lines + footer)
+
+    n_max = min(len(items), ALERT_MAX_WATCH_LINES)
+    for with_ctx, with_news in ((True, True), (True, False), (False, False)):
+        text = build(n_max, with_ctx, with_news)
+        if _within_limits(text):
+            return text
+    for n in range(n_max - 1, 0, -1):
+        text = build(n, False, False)
+        if _within_limits(text):
+            return text
+    return "\n".join(header + [f"🔔 타겟 {len(items)}건 도달"] + footer)
+
+
+def resolve_watch_report_url() -> str | None:
+    """Absolute public report URL for the alert button, or None (Telegram rejects non-public URL buttons)."""
+    from market_brief.channels.telegram import _is_public_button_url
+
+    base = (os.environ.get("REPORT_BASE_URL") or "").strip()
+    if not base:
+        url = DEFAULT_WATCH_REPORT_URL
+    elif base.lower().endswith(".html"):
+        url = base
+    elif base.rstrip("/").endswith("/reports"):
+        url = base.rstrip("/") + "/latest.html"
+    else:
+        url = base.rstrip("/") + "/reports/latest.html"
+    return url if len(url) <= ALERT_URL_MAX and _is_public_button_url(url) else None
+
+
+def build_watch_alert_keyboard(items: list[dict[str, Any]], report_url: str | None = None) -> list[list[dict[str, Any]]]:
+    kb: list[list[dict[str, Any]]] = []
+    if report_url:
+        kb.append([{"text": "📊 실시간 웹 리포트 보기", "url": report_url}])
+    symbols: list[str] = []
+    for it in items:
+        sym = it["watch"]["symbol"]
+        if sym in ASSET_CATALOG and sym not in symbols:
+            symbols.append(sym)
+    if 1 <= len(symbols) <= 2:
+        kb.append([
+            {"text": f"⚙️ {ASSET_CATALOG[s].label} 타겟 변경", "callback_data": _cb(f"mbw:s:{s}")} for s in symbols
+        ])
+    else:
+        kb.append([{"text": "⚙️ 타겟 설정 변경", "callback_data": _cb("mbw:m")}])
+    return kb
+
+
+def render_watch_alert_card(
+    items: list[dict[str, Any]],
+    now: datetime,
+    *,
+    context_quotes: dict[str, Quote] | None = None,
+    news: list[Any] | None = None,
+    report_url: str | None = None,
+) -> dict[str, Any]:
+    """Transport payload `{"html", "inline_keyboard"}` for one grouped alert message."""
+    return {
+        "html": render_watch_alert_html(items, now, context_quotes=context_quotes, news=news),
+        "inline_keyboard": build_watch_alert_keyboard(items, report_url),
+    }
 
 
 # =============================================================================
@@ -359,7 +537,16 @@ class _HtmlSendAdapter:
         self.transport = transport
 
     def send(self, chat_id: str, payload: Any) -> str:
-        res = self.transport.send_html(chat_id, str(payload))
+        if isinstance(payload, dict):
+            html_text = payload.get("html")
+            if not isinstance(html_text, str) or not html_text:
+                raise TypeError("payload['html'] must be a non-empty str")
+            kb = payload.get("inline_keyboard") or None
+            res = self.transport.send_html(chat_id, html_text, inline_keyboard=kb)
+        elif isinstance(payload, str):
+            res = self.transport.send_html(chat_id, payload)
+        else:
+            raise TypeError(f"Unsupported payload type: {type(payload)}")
         return str(((res or {}).get("result") or {}).get("message_id") or "")
 
 
@@ -373,11 +560,11 @@ class TelegramWatchSender:
             rate_limiter=TelegramRateLimiter(max_global_rate=25.0, min_chat_interval=1.0)
         )
 
-    def __call__(self, chat_id: str, html_text: str) -> tuple[str, str | None, str | None]:
+    def __call__(self, chat_id: str, payload: str | dict[str, Any]) -> tuple[str, str | None, str | None]:
         from market_brief.storage.models import Recipient
 
         recipient = Recipient(chat_id=str(chat_id), name="watch", subscribed_topics="FINANCE")
-        return self.dispatcher.send_to_recipient(self.adapter, recipient, html_text, db=None)
+        return self.dispatcher.send_to_recipient(self.adapter, recipient, payload, db=None)
 
 
 # =============================================================================
@@ -385,7 +572,25 @@ class TelegramWatchSender:
 # =============================================================================
 
 
-SendFn = Callable[[str, str], tuple[str, "str | None", "str | None"]]
+SendFn = Callable[[str, Any], tuple[str, "str | None", "str | None"]]
+NewsFetchFn = Callable[[], list[Any]]
+
+
+def _default_news_fetcher() -> list[Any]:
+    from market_brief.market_data.naver_provider import fetch_naver_market_news
+
+    return fetch_naver_market_news(limit=ALERT_MAX_NEWS)
+
+
+def _is_displayable_context_quote(quote: Quote) -> bool:
+    """Context rows are display-only, but still never show mock/fixture/fallback numbers."""
+    src = quote.source or ""
+    return (
+        quote.symbol in ASSET_CATALOG
+        and src.startswith(_LIVE_SOURCE_PREFIXES)
+        and not any(marker in src.upper() for marker in _REJECTED_SOURCE_MARKERS)
+        and quote.delayed_minutes <= 0
+    )
 
 
 @dataclass
@@ -413,6 +618,7 @@ class MarketWatchEvaluator:
         sender: SendFn | None = None,
         runner_id: str | None = None,
         shadow: bool = False,
+        news_fetcher: NewsFetchFn | None = None,
     ):
         self.db = db
         self.provider = provider
@@ -420,6 +626,8 @@ class MarketWatchEvaluator:
         self.sender = sender
         self.runner_id = runner_id or f"mw_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         self.shadow = shadow or sender is None
+        self.news_fetcher: NewsFetchFn = news_fetcher or _default_news_fetcher
+        self._tick_extras: dict[str, Any] = {}
 
     def _fetch(self, symbols: list[str]) -> list[Quote]:
         provider = self.provider
@@ -518,9 +726,48 @@ class MarketWatchEvaluator:
                     }
                 )
 
-        for chat_id, items in fired_by_chat.items():
-            self._deliver_group(chat_id, items, now, result)
+        # Context quotes / news are fetched lazily, at most once per tick, and shared across chats.
+        self._tick_extras = {"valid": valid, "fired": fired_by_chat}
+        try:
+            for chat_id, items in fired_by_chat.items():
+                self._deliver_group(chat_id, items, now, result)
+        finally:
+            self._tick_extras = {}
         return result
+
+    def _alert_extras(self) -> tuple[dict[str, Quote], list[Any], str | None]:
+        """(context_quotes, news, report_url) for this tick. Failures degrade to empty; never break the alert."""
+        ex = self._tick_extras
+        if "context" not in ex:
+            valid: dict[str, Quote] = dict(ex.get("valid") or {})
+            all_items = [it for items in (ex.get("fired") or {}).values() for it in items]
+            wanted: list[str] = []
+            for it in all_items:
+                for sym in ASSET_CONTEXT_MAP.get(it["watch"]["symbol"], ()):
+                    if sym not in wanted:
+                        wanted.append(sym)
+            missing = [s for s in wanted if s not in valid]
+            context = {s: q for s, q in valid.items() if s in wanted}
+            if missing:
+                try:
+                    for q in self._fetch(missing):
+                        if q.symbol in missing and _is_displayable_context_quote(q):
+                            context.setdefault(q.symbol, q)
+                except Exception as exc:
+                    logger.debug("[MarketWatch] context fetch failed: %s", exc)
+            ex["context"] = context
+        if "news" not in ex:
+            try:
+                ex["news"] = list(self.news_fetcher() or [])[:ALERT_MAX_NEWS]
+            except Exception as exc:
+                logger.debug("[MarketWatch] news fetch failed: %s", exc)
+                ex["news"] = []
+        if "report_url" not in ex:
+            try:
+                ex["report_url"] = resolve_watch_report_url()
+            except Exception:
+                ex["report_url"] = None
+        return ex["context"], ex["news"], ex["report_url"]
 
     def _deliver_group(self, chat_id: str, items: list[dict[str, Any]], now: datetime, result: WatchTickResult) -> None:
         if self.shadow:
@@ -551,9 +798,18 @@ class MarketWatchEvaluator:
         if not claimed:
             return
         result.claimed += len(claimed)
-        html_text = render_watch_alert_html([c[0] for c in claimed], now)
+        claimed_items = [c[0] for c in claimed]
         try:
-            status, msg_id, err = self.sender(chat_id, html_text)  # type: ignore[misc]
+            context_quotes, news, report_url = self._alert_extras()
+            payload = render_watch_alert_card(
+                claimed_items, now, context_quotes=context_quotes, news=news, report_url=report_url
+            )
+        except Exception as exc:  # claims are IN_FLIGHT: always fall back to the plain card, never abort
+            logger.warning("[MarketWatch] rich card failed, using plain card: %s", exc)
+            payload = {"html": render_watch_alert_html(claimed_items, now), "inline_keyboard": build_watch_alert_keyboard(claimed_items)}
+        html_text = payload["html"]
+        try:
+            status, msg_id, err = self.sender(chat_id, payload)  # type: ignore[misc]
         except Exception as exc:  # ambiguous -> never auto-resend
             status, msg_id, err = "UNKNOWN", None, f"SENDER_EXCEPTION: {exc}"
         status = status if status in {"SENT", "FAILED", "UNKNOWN"} else "UNKNOWN"
@@ -690,11 +946,13 @@ class MarketWatchService:
         return self._out("\n".join(lines), kb, "", "WATCH_HOME")
 
     def render_asset_picker(self) -> dict[str, Any]:
+        """2x2 KR daytime picker. Other ASSET_CATALOG symbols stay valid for legacy watches / direct callbacks."""
         kb: list[list[dict[str, Any]]] = []
         row: list[dict[str, Any]] = []
-        for spec in ASSET_CATALOG.values():
+        for sym in DAYTIME_ACTIVE_SYMBOLS:
+            spec = ASSET_CATALOG[sym]
             row.append({"text": f"{spec.emoji} {spec.label}", "callback_data": _cb(f"mbw:s:{spec.symbol}")})
-            if len(row) == 3:
+            if len(row) == 2:
                 kb.append(row)
                 row = []
         if row:

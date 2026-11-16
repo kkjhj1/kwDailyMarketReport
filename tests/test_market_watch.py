@@ -20,6 +20,9 @@ from market_brief.market_watch import (
     CONDITION_LEVEL,
     MAX_HTML_CHARS,
     MAX_VISIBLE_CHARS,
+    ASSET_CONTEXT_MAP,
+    DAYTIME_ACTIVE_SYMBOLS,
+    QUICK_DEFAULT_SYMBOLS,
     MarketWatchEvaluator,
     MarketWatchService,
     WatchState,
@@ -29,9 +32,14 @@ from market_brief.market_watch import (
     iter_callback_samples,
     legacy_urgent_broadcast_enabled,
     parse_level_input,
+    render_watch_alert_card,
     render_watch_alert_html,
+    resolve_watch_report_url,
+    select_context_symbols,
     visible_len,
+    _HtmlSendAdapter,
 )
+from market_brief.market_data.naver_provider import NewsItem
 from market_brief.multi_bot_manager import (
     OFFICIAL_BOT_COMMANDS,
     DynamicBotManager,
@@ -50,7 +58,12 @@ def make_quote(symbol: str, value, prev, at: datetime, source: str | None = None
     meta = {
         "KOSPI": ("KR_EQUITY", "KR", "REGULAR", "INDEX"),
         "KOSDAQ": ("KR_EQUITY", "KR", "REGULAR", "INDEX"),
+        "KOSPI200": ("KR_EQUITY", "KR", "REGULAR", "INDEX"),
         "SP500": ("US_EQUITY", "US", "REGULAR", "INDEX"),
+        "NASDAQ_COMPOSITE": ("US_EQUITY", "US", "REGULAR", "INDEX"),
+        "WTI": ("ALTERNATIVE", "GLOBAL", "REFERENCE", "PRICE"),
+        "KR3Y": ("KR_BOND", "KR", "REFERENCE", "PERCENT_YIELD"),
+        "US2Y": ("US_BOND", "US", "REFERENCE", "PERCENT_YIELD"),
         "USDKRW": ("ALTERNATIVE", "GLOBAL", "REFERENCE", "FX"),
         "GOLD": ("ALTERNATIVE", "GLOBAL", "REFERENCE", "PRICE"),
         "KR10Y": ("KR_BOND", "KR", "REFERENCE", "PERCENT_YIELD"),
@@ -76,8 +89,11 @@ class RecordingSender:
     def __init__(self, status="SENT"):
         self.status = status
         self.sent: list[tuple[str, str]] = []
+        self.payloads: list = []
 
-    def __call__(self, chat_id, html_text):
+    def __call__(self, chat_id, payload):
+        self.payloads.append(payload)
+        html_text = payload["html"] if isinstance(payload, dict) else payload
         self.sent.append((chat_id, html_text))
         return self.status, (f"m{len(self.sent)}" if self.status == "SENT" else None), (None if self.status == "SENT" else self.status)
 
@@ -332,7 +348,9 @@ class TestEvaluator(DbTestCase):
         self.sender = RecordingSender()
 
     def _evaluator(self, sender=None):
-        return MarketWatchEvaluator(self.db, provider=self.provider, sender=sender or self.sender, runner_id="t")
+        return MarketWatchEvaluator(
+            self.db, provider=self.provider, sender=sender or self.sender, runner_id="t", news_fetcher=lambda: []
+        )
 
     def _tick(self, minute, kospi_pct=None, fx=None, ev=None, source=None):
         at = T0 + timedelta(minutes=minute)
@@ -436,6 +454,253 @@ class TestEvaluator(DbTestCase):
 
 
 # =============================================================================
+# Rich alert card (bounded renderer / context / news / buttons / payload adapter)
+# =============================================================================
+
+
+def _item(symbol, side="UP", value=None, cond=CONDITION_CHANGE_PCT, threshold="3", direction="BOTH"):
+    spec = ASSET_CATALOG[symbol]
+    is_yield = spec.quote_unit == "PERCENT_YIELD"
+    value = value if value is not None else (Decimal("3.5") if is_yield else Decimal("2780"))
+    prev = Decimal("3.3") if is_yield else Decimal("2700")
+    q = make_quote(symbol, value, prev, T0)
+    w = {"watch_id": 1, "symbol": symbol, "condition_type": cond, "direction": direction,
+         "threshold_value": threshold, "quote_unit": spec.quote_unit}
+    return {"watch": w, "quote": q, "side": side}
+
+
+def _all_context_quotes():
+    out = {}
+    for sym, spec in ASSET_CATALOG.items():
+        if spec.quote_unit == "PERCENT_YIELD":
+            out[sym] = make_quote(sym, "3.512", "3.401", T0)
+        else:
+            out[sym] = make_quote(sym, "1401.5", "1385", T0)
+    return out
+
+
+def _evil_news(n=5):
+    title = '<script>alert("x")</script> 코스피 급락 & "외국인" 매도 폭탄에 시장 공포 확산 ' * 4
+    return [NewsItem(title, "s", "NAVER", 'https://n.news.naver.com/a?b=1&c="2"<x>', "2026-11-12") for _ in range(n)]
+
+
+class TestRichAlertCard(unittest.TestCase):
+    def test_bounded_with_long_news_and_twenty_watches(self):
+        items = [
+            _item(list(ASSET_CATALOG)[i % len(ASSET_CATALOG)], value=Decimal("123456789.987"),
+                  threshold="123456.789", cond=CONDITION_LEVEL)
+            for i in range(20)
+        ]
+        text = render_watch_alert_html(items, T0, context_quotes=_all_context_quotes(), news=_evil_news())
+        self.assertLessEqual(visible_len(text), MAX_VISIBLE_CHARS)
+        self.assertLessEqual(len(text), MAX_HTML_CHARS)
+        self.assertIn("↳ 외 15건 도달", text)
+        self.assertNotIn("<script>", text)
+        self.assertNotIn('"외국인"', text)
+        self.assertNotIn('c="2"', text)
+
+    def test_news_capped_truncated_and_escaped(self):
+        text = render_watch_alert_html([_item("KOSPI")], T0, news=_evil_news(5))
+        self.assertIn("관련 시황 뉴스", text)
+        self.assertEqual(text.count("<a href="), 2)  # max 2 headlines
+        self.assertIn("&lt;script&gt;", text)
+        self.assertIn("&amp;c=&quot;2&quot;&lt;x&gt;", text)
+        news_lines = [ln for ln in text.splitlines() if ln.startswith("• <a href=")]
+        self.assertEqual(len(news_lines), 2)
+        for ln in news_lines:
+            self.assertLessEqual(visible_len(ln), len("• ") + 35)
+
+    def test_never_raises_and_degrades_news_then_context_then_watches(self):
+        import market_brief.market_watch as mw
+
+        items = [_item("KOSPI"), _item("USDKRW")]
+        ctx, news = _all_context_quotes(), _evil_news(2)
+        full = render_watch_alert_html(items, T0, context_quotes=ctx, news=news)
+        no_news = render_watch_alert_html(items, T0, context_quotes=ctx)
+        bare = render_watch_alert_html(items, T0)
+        self.assertIn("관련 시황 뉴스", full)
+        with mock.patch.object(mw, "MAX_VISIBLE_CHARS", visible_len(no_news)):
+            out = render_watch_alert_html(items, T0, context_quotes=ctx, news=news)
+        self.assertEqual(out, no_news)  # news dropped first
+        self.assertIn("연관 지표", out)
+        with mock.patch.object(mw, "MAX_VISIBLE_CHARS", visible_len(bare)):
+            self.assertEqual(render_watch_alert_html(items, T0, context_quotes=ctx, news=news), bare)  # then context
+        with mock.patch.object(mw, "MAX_VISIBLE_CHARS", visible_len(bare) - 1):
+            out = render_watch_alert_html(items, T0, context_quotes=ctx, news=news)
+        self.assertIn("↳ 외 1건 도달", out)  # then watch lines
+        with mock.patch.object(mw, "MAX_VISIBLE_CHARS", 1), mock.patch.object(mw, "MAX_HTML_CHARS", 1):
+            self.assertIn("타겟 2건 도달", render_watch_alert_html(items, T0, context_quotes=ctx, news=news))
+
+    def test_context_matrix(self):
+        self.assertEqual(set(ASSET_CONTEXT_MAP), set(ASSET_CATALOG))
+        for sym, ctx in ASSET_CONTEXT_MAP.items():
+            self.assertNotIn(sym, ctx)
+            self.assertTrue(set(ctx) <= set(ASSET_CATALOG), sym)
+        self.assertEqual(select_context_symbols([_item("KOSPI")]), ["USDKRW", "KOSDAQ", "SP500"])
+        # dedup, triggered assets excluded, max 3
+        self.assertEqual(select_context_symbols([_item("KOSPI"), _item("USDKRW")]), ["KOSDAQ", "SP500", "US10Y"])
+        text = render_watch_alert_html([_item("KOSPI")], T0, context_quotes=_all_context_quotes())
+        self.assertIn("🔗 <b>연관 지표</b>", text)
+        self.assertIn("원/달러 1,401.50 (+1.19%)", text)
+        self.assertIn("S&amp;P500", text)
+        self.assertNotIn("연관 지표", render_watch_alert_html([_item("KOSPI")], T0, context_quotes={}))
+
+    def test_inline_buttons_and_callback_bytes(self):
+        url = "http://161.33.196.211:8002/reports/latest.html"
+        single = render_watch_alert_card([_item("KOSPI")], T0, report_url=url)["inline_keyboard"]
+        self.assertEqual(single[0], [{"text": "📊 실시간 웹 리포트 보기", "url": url}])
+        self.assertEqual([b["callback_data"] for b in single[1]], ["mbw:s:KOSPI"])
+        self.assertEqual(single[1][0]["text"], "⚙️ 코스피 타겟 변경")
+        two = render_watch_alert_card([_item("KOSPI"), _item("KOSPI"), _item("USDKRW")], T0)["inline_keyboard"]
+        self.assertEqual(len(two), 1)  # no report URL -> row omitted
+        self.assertEqual([b["callback_data"] for b in two[0]], ["mbw:s:KOSPI", "mbw:s:USDKRW"])
+        many = render_watch_alert_card([_item("KOSPI"), _item("KOSDAQ"), _item("USDKRW")], T0)["inline_keyboard"]
+        self.assertEqual(many, [[{"text": "⚙️ 타겟 설정 변경", "callback_data": "mbw:m"}]])
+        for sym in ASSET_CATALOG:
+            for row in render_watch_alert_card([_item(sym)], T0, report_url=url)["inline_keyboard"]:
+                for b in row:
+                    if "callback_data" in b:
+                        self.assertTrue(b["callback_data"].isascii())
+                        self.assertLessEqual(len(b["callback_data"].encode("utf-8")), 64)
+
+    def test_report_url_resolution_requires_public_absolute_url(self):
+        cases = {
+            "": "http://161.33.196.211:8002/reports/latest.html",
+            "http://161.33.196.211:8002/": "http://161.33.196.211:8002/reports/latest.html",
+            "https://reports.example.com/reports": "https://reports.example.com/reports/latest.html",
+            "https://reports.example.com/x/latest.html": "https://reports.example.com/x/latest.html",
+            "http://localhost:8080": None,
+            "http://127.0.0.1:8002/": None,
+            "/reports/latest.html": None,
+        }
+        for base, expected in cases.items():
+            with mock.patch.dict(os.environ, {"REPORT_BASE_URL": base}):
+                self.assertEqual(resolve_watch_report_url(), expected, base)
+
+
+class FakeSendTransport:
+    def __init__(self):
+        self.calls = []
+
+    def send_html(self, chat_id, html_text, inline_keyboard=None, reply_markup=None):
+        self.calls.append((chat_id, html_text, inline_keyboard))
+        return {"ok": True, "result": {"message_id": 77}}
+
+
+class TestHtmlSendAdapter(unittest.TestCase):
+    def test_dict_and_str_payloads(self):
+        t = FakeSendTransport()
+        ad = _HtmlSendAdapter(t)
+        kb = [[{"text": "x", "callback_data": "mbw:m"}]]
+        self.assertEqual(ad.send("1", {"html": "<b>a</b>", "inline_keyboard": kb}), "77")
+        self.assertEqual(ad.send("1", "<b>legacy</b>"), "77")
+        self.assertEqual(t.calls, [("1", "<b>a</b>", kb), ("1", "<b>legacy</b>", None)])
+
+    def test_rejects_unsupported_payloads(self):
+        t = FakeSendTransport()
+        ad = _HtmlSendAdapter(t)
+        for bad in (None, 123, b"bytes", {"text": "no html"}, {"html": 5}):
+            with self.assertRaises(TypeError, msg=repr(bad)):
+                ad.send("1", bad)
+        self.assertEqual(t.calls, [])
+
+    def test_telegram_watch_sender_forwards_dict(self):
+        from market_brief.market_watch import TelegramWatchSender
+
+        class _Dispatcher:
+            def send_to_recipient(self, tg, recipient, payload, db=None):
+                return "SENT", tg.send(recipient.chat_id, payload), None
+
+        t = FakeSendTransport()
+        sender = TelegramWatchSender("TOKEN", dispatcher=_Dispatcher(), transport=t)
+        kb = [[{"text": "a", "url": "https://a.example.com"}]]
+        self.assertEqual(sender("42", {"html": "hi", "inline_keyboard": kb}), ("SENT", "77", None))
+        self.assertEqual(t.calls, [("42", "hi", kb)])
+
+
+class TestEvaluatorRichCard(DbTestCase):
+    def setUp(self):
+        super().setUp()
+        self.provider = FakeProvider()
+        self.sender = RecordingSender()
+        self.news_calls = 0
+
+    def _news(self):
+        self.news_calls += 1
+        return [NewsItem("외국인 매도에 코스피 급락", "", "NAVER", "https://n.news.naver.com/1", "")]
+
+    def _ev(self, news_fetcher=None, sender="default"):
+        return MarketWatchEvaluator(
+            self.db, provider=self.provider, sender=self.sender if sender == "default" else sender,
+            runner_id="t", news_fetcher=news_fetcher or self._news,
+        )
+
+    def _set(self, minute, pct):
+        at = T0 + timedelta(minutes=minute)
+        self.provider.quotes["KOSPI"] = make_quote("KOSPI", Decimal("2700") * (1 + Decimal(str(pct)) / 100), 2700, at)
+        return at
+
+    def test_context_and_news_fetched_only_when_fired_and_shared_across_chats(self):
+        self._create(uid=UID, threshold="2", direction="DOWN")
+        self._create(uid=UID2, threshold="2", direction="DOWN")
+        self.provider.quotes["KOSDAQ"] = make_quote("KOSDAQ", 850, 860, T0)
+        self.provider.quotes["SP500"] = make_quote("SP500", 6000, 5950, T0)
+        self.provider.quotes["USDKRW"] = make_quote("USDKRW", 1401, 1385, T0, source="FIXTURE:FX")  # never shown
+        ev = self._ev()
+        ev.run_once(self._set(0, 0))
+        ev.run_once(self._set(1, -2.5))
+        self.assertEqual(self.provider.calls, [["KOSPI"], ["KOSPI"]])  # no context fetch without a trigger
+        self.assertEqual(self.news_calls, 0)
+        res = ev.run_once(self._set(2, -2.6))
+        self.assertEqual((res.fired, res.sent), (2, 2))
+        context_calls = self.provider.calls[3:]
+        self.assertEqual(sorted(c[0] for c in context_calls), ["KOSDAQ", "SP500", "USDKRW"])  # once per tick
+        self.assertEqual(self.news_calls, 1)  # shared by both chats
+        self.assertEqual(len(self.sender.payloads), 2)
+        for payload in self.sender.payloads:
+            self.assertIsInstance(payload, dict)
+            self.assertIn("연관 지표", payload["html"])
+            self.assertIn("코스닥", payload["html"])
+            self.assertNotIn("원/달러", payload["html"])  # fixture context quote rejected
+            self.assertIn("외국인 매도에 코스피 급락", payload["html"])
+            cbs = [b.get("callback_data") for row in payload["inline_keyboard"] for b in row]
+            self.assertIn("mbw:s:KOSPI", cbs)
+        self.assertEqual(res.messages[0][1], self.sender.payloads[0]["html"])
+
+    def test_news_and_context_failures_never_break_alert(self):
+        self._create(threshold="2", direction="DOWN")
+
+        def boom():
+            raise RuntimeError("news down")
+
+        class FlakyProvider(FakeProvider):
+            def fetch(self, symbols):
+                if symbols != ["KOSPI"]:
+                    raise OSError("ctx down")
+                return super().fetch(symbols)
+
+        self.provider = FlakyProvider()
+        ev = self._ev(news_fetcher=boom)
+        for minute, pct in ((0, 0), (1, -2.5), (2, -2.6)):
+            res = ev.run_once(self._set(minute, pct))
+        self.assertEqual(res.sent, 1)
+        html_text = self.sender.payloads[0]["html"]
+        self.assertNotIn("연관 지표", html_text)
+        self.assertNotIn("관련 시황 뉴스", html_text)
+        with self.db._connect() as conn:
+            statuses = [r["status"] for r in conn.execute("SELECT status FROM market_watch_deliveries")]
+        self.assertEqual(statuses, ["SENT"])
+
+    def test_shadow_mode_fetches_no_context_or_news(self):
+        self._create(threshold="2", direction="DOWN")
+        ev = self._ev(sender=None)
+        for minute, pct in ((0, 0), (1, -2.5), (2, -2.6)):
+            ev.run_once(self._set(minute, pct))
+        self.assertTrue(all(c == ["KOSPI"] for c in self.provider.calls))
+        self.assertEqual(self.news_calls, 0)
+
+
+# =============================================================================
 # Telegram UX / router / manager
 # =============================================================================
 
@@ -518,11 +783,27 @@ class TestRouterAndManager(DbTestCase):
         out = self._watch(cb="mbw:q3")
         self.assertEqual(out["result_code"], "WATCH_QUICK_DEFAULT")
         watches = self.db.list_market_watches(self.uid)
-        self.assertEqual({w["symbol"] for w in watches}, {"KOSPI", "SP500"})
+        self.assertEqual({w["symbol"] for w in watches}, {"KOSPI", "KOSDAQ"})
         wid = watches[0]["watch_id"]
         self.assertEqual(self._watch(cb=f"mbw:x:{wid}")["result_code"], "WATCH_DELETE_CONFIRM")
         self.assertEqual(self._watch(cb=f"mbw:xy:{wid}")["result_code"], "WATCH_DELETED")
         self.assertEqual(len(self.db.list_market_watches(self.uid)), 1)
+
+    def test_daytime_asset_picker_and_legacy_callbacks(self):
+        self.assertEqual(QUICK_DEFAULT_SYMBOLS, ("KOSPI", "KOSDAQ"))
+        self.assertEqual(DAYTIME_ACTIVE_SYMBOLS, ("KOSPI", "KOSDAQ", "KOSPI200", "USDKRW"))
+        out = self._watch(cb="mbw:a")
+        self.assertEqual(out["result_code"], "WATCH_PICK_ASSET")
+        kb = out["inline_keyboard"]
+        self.assertEqual([[b["callback_data"] for b in row] for row in kb], [
+            ["mbw:s:KOSPI", "mbw:s:KOSDAQ"], ["mbw:s:KOSPI200", "mbw:s:USDKRW"], ["mbw:m"],
+        ])
+        self.assertEqual(kb[0][0]["text"], "🇰🇷 코스피")
+        self.assertEqual(kb[1][1]["text"], "💱 원/달러")
+        self.assertEqual(kb[2][0]["text"], "⬅️ 내 타겟 목록")
+        # Legacy direct callbacks for assets no longer shown in the picker keep working.
+        self.assertEqual(self._watch(cb="mbw:s:SP500")["result_code"], "WATCH_PICK_THRESHOLD")
+        self.assertEqual(self._watch(cb="mbw:d:US10Y:10:B")["result_code"], "WATCH_CREATED")
 
     def test_cannot_touch_another_users_watch(self):
         other = self._create(uid=UID)["watch_id"]

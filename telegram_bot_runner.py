@@ -266,20 +266,30 @@ def run_watch_demo() -> int:
                         out.append(Quote("USDKRW", "ALTERNATIVE", "GLOBAL", "REFERENCE", now.date(), now, fx_path[self.step], Decimal("1385"), "FX", "NAVER:USDKRW"))
                 return out
 
-        sent: list[tuple[str, str]] = []
+        sent: list[tuple[str, str, list]] = []
 
-        def _console_sender(chat_id: str, html_text: str):
-            sent.append((chat_id, html_text))
+        def _console_sender(chat_id: str, payload):
+            if isinstance(payload, dict):
+                html_text, kb = str(payload.get("html") or ""), payload.get("inline_keyboard") or []
+            elif isinstance(payload, str):
+                html_text, kb = payload, []
+            else:
+                raise TypeError(f"Unsupported payload type: {type(payload)}")
+            sent.append((chat_id, html_text, kb))
             return "SENT", f"demo-{len(sent)}", None
 
         provider = _DemoProvider()
-        evaluator = MarketWatchEvaluator(db, provider=provider, sender=_console_sender, runner_id="demo")
+        evaluator = MarketWatchEvaluator(
+            db, provider=provider, sender=_console_sender, runner_id="demo", news_fetcher=lambda: []  # [TG-06] no network
+        )
         for step in range(4):
             provider.step = step
             res = evaluator.run_once(start + timedelta(minutes=2 * step))
             print(f"  • tick {step}: evaluated={res.evaluated} fired={res.fired} sent={res.sent}")
-        for chat_id, text in sent:
+        for chat_id, text, kb in sent:
             print(f"--- [DRY-RUN → chat {chat_id}] ---\n{text}")
+            for row in kb:
+                print("  " + " ".join(f"[ {b.get('text')} ]" for b in row))
         print(f"✅ [DEMO] 발송 시뮬레이션 {len(sent)}건 (중복 0건 기대) · 운영 DB/reports 미변경")
     return 0
 
