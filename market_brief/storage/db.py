@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -1398,3 +1399,381 @@ class MarketBriefDatabase:
         with self._connect() as db:
             row = db.execute("SELECT * FROM market_watch_deliveries WHERE delivery_key = ?", (delivery_key,)).fetchone()
             return dict(row) if row else None
+
+    # =========================================================================
+    # Admin Sync: Custom Watches / Custom Deliveries (read-mostly, cross-bot)
+    #   Travel tables live in the same SQLite file only when travel_bot shares it; Admin never instantiates
+    #   TravelBriefDatabase (that would CREATE the travel tables), so every travel query is `_table_exists`
+    #   guarded and degrades to empty results / zero counts on a market-only DB.
+    # =========================================================================
+
+    @staticmethod
+    def _table_exists(db: sqlite3.Connection, table_name: str) -> bool:
+        row = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (str(table_name),)
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _table_columns(db: sqlite3.Connection, table_name: str) -> set[str]:
+        # table_name is always an internal constant (never user input).
+        return {row[1] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+    @staticmethod
+    def _fmt_decimal_text(value: Any) -> str | None:
+        """Decimal-safe display text for TEXT numerics (never `float()`); invalid/NaN/Inf keep the raw text."""
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if raw == "":
+            return None
+        try:
+            dec = Decimal(raw)
+        except (InvalidOperation, ValueError):
+            return raw
+        if not dec.is_finite():
+            return raw
+        return format(dec, "f")
+
+    @staticmethod
+    def _fmt_krw(value: Any) -> str | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return f"{int(value):,}원"
+        except (TypeError, ValueError):
+            return str(value)
+
+    _NAME_SQL = "COALESCE(NULLIF(TRIM(u.full_name), ''), NULLIF(TRIM(r.name), ''), {chat})"
+
+    def list_custom_watch_deliveries(
+        self, bot_id: str = "all", status: str | None = None, limit: int = 50
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Newest-first custom watch deliveries across brief_bot + travel_bot. Returns (items, has_more)."""
+        limit = max(1, min(int(limit or 50), 100))
+        fetch_n = limit + 1
+        status_norm = str(status).strip().upper() if status and str(status).strip() else None
+        items: list[dict[str, Any]] = []
+        with self._connect() as db:
+            if bot_id in ("all", "brief_bot") and self._table_exists(db, "market_watch_deliveries"):
+                where = ["w.bot_id = 'brief_bot'"]
+                params: list[Any] = []
+                if status_norm:
+                    where.append("d.status = ?")
+                    params.append(status_norm)
+                rows = db.execute(
+                    f"""SELECT d.*, w.telegram_user_id, w.condition_type, w.direction, w.threshold_value,
+                               w.threshold_unit, {self._NAME_SQL.format(chat='d.chat_id')} AS display_name
+                        FROM market_watch_deliveries d
+                        JOIN market_volatility_watches w ON w.watch_id = d.watch_id
+                        LEFT JOIN users u ON u.telegram_user_id = w.telegram_user_id
+                        LEFT JOIN recipients r ON r.chat_id = d.chat_id
+                        WHERE {' AND '.join(where)}
+                        ORDER BY d.created_at DESC, d.delivery_key DESC
+                        LIMIT ?""",
+                    (*params, fetch_n),
+                ).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    observed = self._fmt_decimal_text(d.get("observed_value"))
+                    change = self._fmt_decimal_text(d.get("observed_change"))
+                    items.append(
+                        {
+                            "bot_id": "brief_bot",
+                            "delivery_type": "CUSTOM_WATCH",
+                            "delivery_kind": "VOLATILITY",
+                            "delivery_key": d["delivery_key"],
+                            "watch_id": d["watch_id"],
+                            "chat_id": d["chat_id"],
+                            "telegram_user_id": d.get("telegram_user_id"),
+                            "display_name": d.get("display_name") or d["chat_id"],
+                            "target": d["symbol"],
+                            "market": d.get("market"),
+                            "trigger_side": d.get("trigger_side"),
+                            "trade_date": d.get("trade_date"),
+                            "condition_type": d.get("condition_type"),
+                            "direction": d.get("direction"),
+                            "threshold_value": self._fmt_decimal_text(d.get("threshold_value")),
+                            "threshold_unit": d.get("threshold_unit"),
+                            "observed_value": observed,
+                            "observed_change": change,
+                            "quote_as_of": d.get("quote_as_of"),
+                            "value_text": " / ".join(x for x in (observed, change) if x) or None,
+                            "status": d["status"],
+                            "attempt_no": d.get("attempt_no"),
+                            "error_detail": d.get("error_detail"),
+                            "created_at": d.get("created_at"),
+                            "updated_at": d.get("updated_at"),
+                        }
+                    )
+
+            if bot_id in ("all", "travel_bot") and self._table_exists(db, "travel_watch_deliveries"):
+                cols = self._table_columns(db, "travel_watch_deliveries")
+                kind_sql = "COALESCE(d.delivery_kind, 'DROP')" if "delivery_kind" in cols else "'DROP'"
+                kst_sql = "d.kst_date" if "kst_date" in cols else "NULL"
+                has_watches = self._table_exists(db, "travel_price_watches")
+                target_sql = "w.target_price_krw" if has_watches else "NULL"
+                watch_join = (
+                    "LEFT JOIN travel_price_watches w ON w.watch_id = d.watch_id" if has_watches else ""
+                )
+                where = ["1 = 1"]
+                params = []
+                if status_norm:
+                    where.append("d.status = ?")
+                    params.append(status_norm)
+                rows = db.execute(
+                    f"""SELECT d.*, {kind_sql} AS delivery_kind_norm, {kst_sql} AS kst_date_norm,
+                               {target_sql} AS target_price_krw,
+                               {self._NAME_SQL.format(chat='d.chat_id')} AS display_name
+                        FROM travel_watch_deliveries d
+                        {watch_join}
+                        LEFT JOIN users u ON u.telegram_user_id = d.chat_id
+                        LEFT JOIN recipients r ON r.chat_id = d.chat_id
+                        WHERE {' AND '.join(where)}
+                        ORDER BY d.created_at DESC, d.delivery_key DESC
+                        LIMIT ?""",
+                    (*params, fetch_n),
+                ).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    price_text = self._fmt_krw(d.get("price_krw"))
+                    items.append(
+                        {
+                            "bot_id": "travel_bot",
+                            "delivery_type": "CUSTOM_WATCH",
+                            "delivery_kind": d.get("delivery_kind_norm") or "DROP",
+                            "delivery_key": d["delivery_key"],
+                            "watch_id": d["watch_id"],
+                            "chat_id": d["chat_id"],
+                            "telegram_user_id": None,
+                            "display_name": d.get("display_name") or d["chat_id"],
+                            "target": d["dest_code"],
+                            "dep_date": d.get("dep_date"),
+                            "ret_date": d.get("ret_date"),
+                            "kst_date": d.get("kst_date_norm"),
+                            "price_krw": d.get("price_krw"),
+                            "price_text": price_text,
+                            "target_price_krw": d.get("target_price_krw"),
+                            "target_price_text": self._fmt_krw(d.get("target_price_krw")),
+                            "value_text": price_text,
+                            "status": d["status"],
+                            "attempt_no": d.get("attempt_no"),
+                            "error_detail": d.get("error_detail"),
+                            "created_at": d.get("created_at"),
+                            "updated_at": d.get("updated_at"),
+                        }
+                    )
+
+        items.sort(key=lambda x: (str(x.get("created_at") or ""), str(x.get("delivery_key") or "")), reverse=True)
+        has_more = len(items) > limit
+        return items[:limit], has_more
+
+    def list_all_watches(self, bot_id: str = "all", active_only: bool = True) -> dict[str, Any]:
+        """Cross-bot custom watch listing + travel 2-track prefs (no row / no table == defaults)."""
+        items: list[dict[str, Any]] = []
+        user_prefs: list[dict[str, Any]] = []
+        with self._connect() as db:
+            if bot_id in ("all", "brief_bot") and self._table_exists(db, "market_volatility_watches"):
+                sql = f"""SELECT w.*, {self._NAME_SQL.format(chat='w.chat_id')} AS display_name
+                          FROM market_volatility_watches w
+                          LEFT JOIN users u ON u.telegram_user_id = w.telegram_user_id
+                          LEFT JOIN recipients r ON r.chat_id = w.chat_id
+                          WHERE w.bot_id = 'brief_bot'"""
+                if active_only:
+                    sql += " AND w.is_active = 1"
+                sql += " ORDER BY w.created_at DESC, w.watch_id DESC"
+                for r in db.execute(sql).fetchall():
+                    d = dict(r)
+                    items.append(
+                        {
+                            "bot_id": "brief_bot",
+                            "watch_id": d["watch_id"],
+                            "chat_id": d["chat_id"],
+                            "telegram_user_id": d.get("telegram_user_id"),
+                            "display_name": d.get("display_name") or d["chat_id"],
+                            "target": d["symbol"],
+                            "market": d.get("market"),
+                            "condition_type": d.get("condition_type"),
+                            "direction": d.get("direction"),
+                            "threshold_value": self._fmt_decimal_text(d.get("threshold_value")),
+                            "threshold_unit": d.get("threshold_unit"),
+                            "last_observed_value": self._fmt_decimal_text(d.get("last_observed_value")),
+                            "last_observed_change": self._fmt_decimal_text(d.get("last_observed_change")),
+                            "is_active": bool(d.get("is_active")),
+                            "is_armed": bool(d.get("is_armed")),
+                            "deactivated_reason": d.get("deactivated_reason"),
+                            "last_triggered_at": d.get("last_triggered_at"),
+                            "created_at": d.get("created_at"),
+                            "updated_at": d.get("updated_at"),
+                        }
+                    )
+
+            if bot_id in ("all", "travel_bot"):
+                has_prefs = self._table_exists(db, "travel_user_prefs")
+                travel_chat_ids: list[str] = []
+                if self._table_exists(db, "travel_price_watches"):
+                    cols = self._table_columns(db, "travel_price_watches")
+                    extra = ", ".join(
+                        f"w.{c}" if c in cols else f"NULL AS {c}"
+                        for c in ("watch_mode", "horizon_months", "weekday_option", "fixed_dep_date",
+                                  "fixed_ret_date", "notify_mode", "initial_price_krw")
+                    )
+                    sql = f"""SELECT w.watch_id, w.chat_id, w.dest_code, w.target_price_krw, w.is_active,
+                                     w.last_seen_price_krw, w.last_seen_at, w.created_at, w.updated_at, {extra},
+                                     {self._NAME_SQL.format(chat='w.chat_id')} AS display_name
+                              FROM travel_price_watches w
+                              LEFT JOIN users u ON u.telegram_user_id = w.chat_id
+                              LEFT JOIN recipients r ON r.chat_id = w.chat_id"""
+                    if active_only:
+                        sql += " WHERE w.is_active = 1"
+                    sql += " ORDER BY w.created_at DESC, w.watch_id DESC"
+                    for r in db.execute(sql).fetchall():
+                        d = dict(r)
+                        travel_chat_ids.append(str(d["chat_id"]))
+                        items.append(
+                            {
+                                "bot_id": "travel_bot",
+                                "watch_id": d["watch_id"],
+                                "chat_id": d["chat_id"],
+                                "telegram_user_id": None,
+                                "display_name": d.get("display_name") or d["chat_id"],
+                                "target": d["dest_code"],
+                                "target_price_krw": d.get("target_price_krw"),
+                                "target_price_text": self._fmt_krw(d.get("target_price_krw")),
+                                "last_seen_price_krw": d.get("last_seen_price_krw"),
+                                "last_seen_price_text": self._fmt_krw(d.get("last_seen_price_krw")),
+                                "watch_mode": d.get("watch_mode"),
+                                "horizon_months": d.get("horizon_months"),
+                                "weekday_option": d.get("weekday_option"),
+                                "fixed_dep_date": d.get("fixed_dep_date"),
+                                "fixed_ret_date": d.get("fixed_ret_date"),
+                                "notify_mode": d.get("notify_mode"),
+                                "is_active": bool(d.get("is_active")),
+                                "last_seen_at": d.get("last_seen_at"),
+                                "created_at": d.get("created_at"),
+                                "updated_at": d.get("updated_at"),
+                            }
+                        )
+
+                explicit: dict[str, dict[str, Any]] = {}
+                if has_prefs:
+                    for r in db.execute(
+                        f"""SELECT p.chat_id, p.weekly_brief_enabled, p.watches_paused, p.updated_at,
+                                   {self._NAME_SQL.format(chat='p.chat_id')} AS display_name
+                            FROM travel_user_prefs p
+                            LEFT JOIN users u ON u.telegram_user_id = p.chat_id
+                            LEFT JOIN recipients r ON r.chat_id = p.chat_id
+                            ORDER BY p.updated_at DESC, p.chat_id ASC"""
+                    ).fetchall():
+                        d = dict(r)
+                        explicit[str(d["chat_id"])] = {
+                            "chat_id": d["chat_id"],
+                            "display_name": d.get("display_name") or d["chat_id"],
+                            "weekly_brief_enabled": bool(d.get("weekly_brief_enabled")),
+                            "watches_paused": bool(d.get("watches_paused")),
+                            "is_default": False,
+                            "updated_at": d.get("updated_at"),
+                        }
+                user_prefs.extend(explicit.values())
+                seen = set(explicit)
+                for item in items:
+                    cid = str(item["chat_id"])
+                    if item["bot_id"] != "travel_bot" or cid in seen:
+                        continue
+                    seen.add(cid)
+                    user_prefs.append(
+                        {
+                            "chat_id": item["chat_id"],
+                            "display_name": item["display_name"],
+                            "weekly_brief_enabled": True,
+                            "watches_paused": False,
+                            "is_default": True,
+                            "updated_at": None,
+                        }
+                    )
+        return {"items": items, "user_prefs": user_prefs}
+
+    def get_custom_watch_stats_24h(self) -> dict[str, int]:
+        """UTC rolling-24h delivery counts + active counts (missing travel tables == 0)."""
+        stats = {
+            "active_market_watches_count": 0,
+            "recent_market_watch_deliveries_24h": 0,
+            "active_travel_watches_count": 0,
+            "recent_travel_watch_deliveries_24h": 0,
+            "paused_users_count": 0,
+            "weekly_disabled_count": 0,
+        }
+        since = "datetime(created_at) >= datetime('now', '-24 hours')"
+        with self._connect() as db:
+            if self._table_exists(db, "market_volatility_watches"):
+                stats["active_market_watches_count"] = int(
+                    db.execute("SELECT COUNT(*) FROM market_volatility_watches WHERE is_active = 1").fetchone()[0]
+                )
+            if self._table_exists(db, "market_watch_deliveries"):
+                stats["recent_market_watch_deliveries_24h"] = int(
+                    db.execute(f"SELECT COUNT(*) FROM market_watch_deliveries WHERE {since}").fetchone()[0]
+                )
+            if self._table_exists(db, "travel_price_watches"):
+                stats["active_travel_watches_count"] = int(
+                    db.execute("SELECT COUNT(*) FROM travel_price_watches WHERE is_active = 1").fetchone()[0]
+                )
+            if self._table_exists(db, "travel_watch_deliveries"):
+                stats["recent_travel_watch_deliveries_24h"] = int(
+                    db.execute(f"SELECT COUNT(*) FROM travel_watch_deliveries WHERE {since}").fetchone()[0]
+                )
+            if self._table_exists(db, "travel_user_prefs"):
+                row = db.execute(
+                    """SELECT COALESCE(SUM(CASE WHEN watches_paused = 1 THEN 1 ELSE 0 END), 0),
+                              COALESCE(SUM(CASE WHEN weekly_brief_enabled = 0 THEN 1 ELSE 0 END), 0)
+                       FROM travel_user_prefs"""
+                ).fetchone()
+                stats["paused_users_count"] = int(row[0])
+                stats["weekly_disabled_count"] = int(row[1])
+        return stats
+
+    def deactivate_watch_admin(
+        self, bot_id: str, watch_id: int, reason: str = "ADMIN_DISABLED"
+    ) -> dict[str, Any]:
+        """Admin-forced single watch deactivation (no owner guard). Idempotent.
+
+        Returns {"found", "deactivated", "bot_id", "watch_id", "owner_id", "target"}; `found=False` -> 404.
+        """
+        wid = int(watch_id)
+        result: dict[str, Any] = {
+            "found": False, "deactivated": False, "bot_id": bot_id, "watch_id": wid, "owner_id": None, "target": None
+        }
+        with self._immediate_tx() as db:
+            if bot_id == "brief_bot":
+                if not self._table_exists(db, "market_volatility_watches"):
+                    return result
+                row = db.execute(
+                    "SELECT telegram_user_id, chat_id, symbol, is_active FROM market_volatility_watches "
+                    "WHERE watch_id = ? AND bot_id = 'brief_bot'",
+                    (wid,),
+                ).fetchone()
+                if not row:
+                    return result
+                result.update(found=True, owner_id=row["telegram_user_id"] or row["chat_id"], target=row["symbol"])
+                cur = db.execute(
+                    """UPDATE market_volatility_watches
+                       SET is_active = 0, is_armed = 0, confirm_streak = 0, confirm_side = '',
+                           deactivated_reason = ?, updated_at = ?
+                       WHERE watch_id = ? AND is_active = 1""",
+                    (reason, self._utc_now_str(), wid),
+                )
+                result["deactivated"] = cur.rowcount == 1
+            elif bot_id == "travel_bot":
+                if not self._table_exists(db, "travel_price_watches"):
+                    return result
+                row = db.execute(
+                    "SELECT chat_id, dest_code, is_active FROM travel_price_watches WHERE watch_id = ?", (wid,)
+                ).fetchone()
+                if not row:
+                    return result
+                result.update(found=True, owner_id=row["chat_id"], target=row["dest_code"])
+                cur = db.execute(
+                    "UPDATE travel_price_watches SET is_active = 0, updated_at = ? WHERE watch_id = ? AND is_active = 1",
+                    (self._utc_now_str(), wid),
+                )
+                result["deactivated"] = cur.rowcount == 1
+        return result

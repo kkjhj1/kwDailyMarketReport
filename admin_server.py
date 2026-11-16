@@ -1030,6 +1030,7 @@ def create_admin_app(
         morning_sent = db.is_regular_briefing_sent("morning", now_kst.date())
         closing_sent = db.is_regular_briefing_sent("closing", now_kst.date())
         active_recipients = db.get_active_recipients("FINANCE")
+        watch_stats = db.get_custom_watch_stats_24h()
 
         return {
             "current_time_kst": now_kst.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1042,6 +1043,8 @@ def create_admin_app(
             "report_base_url": get_report_base_url(),
             "github_connected": bool(get_github_token()),
             "briefing_scheduler": briefing_scheduler.get_status() if enable_bot_workers else {"is_running": False},
+            "active_market_watches_count": watch_stats["active_market_watches_count"],
+            "recent_market_watch_deliveries_24h": watch_stats["recent_market_watch_deliveries_24h"],
         }
 
     @app.get("/api/recipients")
@@ -1465,6 +1468,59 @@ def create_admin_app(
         recipients = db.get_job_recipients(job_id)
         return {"job_id": job_id, "recipients": recipients}
 
+    # =========================================================================
+    # 🎯 Custom Watches & Custom Deliveries (Admin Sync; read-only except admin deactivate)
+    # =========================================================================
+
+    _WATCH_BOT_FILTERS = ("all", "brief_bot", "travel_bot")
+    _WATCH_BOT_IDS = ("brief_bot", "travel_bot")
+    _CUSTOM_DELIVERY_STATUSES = ("SENT", "FAILED", "UNKNOWN", "IN_FLIGHT")
+
+    @app.get("/api/platform/custom-deliveries")
+    def list_platform_custom_deliveries(request: Request, bot_id: str = "all", status: str = "", limit: int = 50):
+        verify_admin_token(request)
+        if bot_id not in _WATCH_BOT_FILTERS:
+            raise HTTPException(status_code=400, detail=f"bot_id는 {', '.join(_WATCH_BOT_FILTERS)} 중 하나여야 합니다.")
+        status_norm = (status or "").strip().upper()
+        if status_norm and status_norm not in _CUSTOM_DELIVERY_STATUSES:
+            raise HTTPException(
+                status_code=400, detail=f"status는 {', '.join(_CUSTOM_DELIVERY_STATUSES)} 중 하나여야 합니다."
+            )
+        limit = max(1, min(int(limit), 100))
+        items, has_more = db.list_custom_watch_deliveries(bot_id=bot_id, status=status_norm or None, limit=limit)
+        return {"items": items, "limit": limit, "has_more": has_more}
+
+    @app.get("/api/platform/watches")
+    def list_platform_watches(request: Request, bot_id: str = "all", active_only: bool = True):
+        verify_admin_token(request)
+        if bot_id not in _WATCH_BOT_FILTERS:
+            raise HTTPException(status_code=400, detail=f"bot_id는 {', '.join(_WATCH_BOT_FILTERS)} 중 하나여야 합니다.")
+        return db.list_all_watches(bot_id=bot_id, active_only=active_only)
+
+    @app.post("/api/platform/watches/{bot_id}/{watch_id}/deactivate")
+    def deactivate_platform_watch(bot_id: str, watch_id: int, request: Request):
+        verify_admin_token(request)
+        if bot_id not in _WATCH_BOT_IDS:
+            raise HTTPException(status_code=400, detail=f"bot_id는 {', '.join(_WATCH_BOT_IDS)} 중 하나여야 합니다.")
+        res = db.deactivate_watch_admin(bot_id, watch_id, reason="ADMIN_DISABLED")
+        if not res["found"]:
+            raise HTTPException(status_code=404, detail="해당 맞춤 감시를 찾을 수 없습니다.")
+        if res["deactivated"]:
+            sub_engine.log_audit(
+                user_id=str(res["owner_id"] or ""),
+                bot_id=bot_id,
+                action="WATCH_ADMIN_DEACTIVATED",
+                actor="ADMIN",
+                detail={"watch_id": res["watch_id"], "target": res["target"], "reason": "ADMIN_DISABLED"},
+            )
+        return {
+            "success": True,
+            "bot_id": bot_id,
+            "watch_id": res["watch_id"],
+            "deactivated": res["deactivated"],
+            "already_inactive": not res["deactivated"],
+        }
+
     @app.get("/api/settings")
     def get_settings():
         thresholds_raw = db.get_setting("thresholds")
@@ -1515,6 +1571,7 @@ def create_admin_app(
             f_engine = FlightEngine()
             recipients = db.get_active_recipients(topic="TRAVEL")
             travel_report_latest = reports_dir / "travel_latest.html"
+            watch_stats = db.get_custom_watch_stats_24h()
             return {
                 "status": "ONLINE",
                 "bot_topic": "TRAVEL",
@@ -1522,6 +1579,10 @@ def create_admin_app(
                 "subscribers_total": len(recipients),
                 "reports_available": travel_report_latest.exists(),
                 "report_url": f"{get_report_base_url()}/reports/travel_latest.html",
+                "active_watches_count": watch_stats["active_travel_watches_count"],
+                "paused_users_count": watch_stats["paused_users_count"],
+                "weekly_disabled_count": watch_stats["weekly_disabled_count"],
+                "recent_watch_deliveries_24h": watch_stats["recent_travel_watch_deliveries_24h"],
             }
 
         @app.get("/api/travel/destinations")

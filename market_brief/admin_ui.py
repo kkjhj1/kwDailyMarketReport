@@ -929,6 +929,40 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       margin-bottom: 4px;
     }
     .hist-meta { font-size: 11.5px; color: var(--text-muted); }
+    #pane-history .hist-subtabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    #pane-history .hist-subtab-btn { min-width: 0; min-height: 44px; }
+    #subpane-custom-dispatch .hist-filter-bar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+    .watch-panel {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      background: var(--surface-sub);
+      min-width: 0;
+    }
+    .watch-panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .watch-panel-title { font-size: 14px; font-weight: 800; margin: 0; }
+    .watch-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+    .watch-stat {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 6px 8px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .watch-stat b { display: block; font-size: 16px; }
+    .watch-stat span { font-size: 11px; color: var(--text-muted); }
+    .watch-section-label { font-size: 12px; font-weight: 800; color: var(--text-muted); margin: 10px 0 6px; }
+    .watch-card-actions { display: flex; justify-content: flex-end; margin-top: 6px; }
+    .watch-card-actions .btn { min-height: 44px; min-width: 44px; }
 
     /* Mobile Responsive Overrides */
     @media (max-width: 768px) {
@@ -1397,9 +1431,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
       /* History Center -> Mobile Card View (360px zero overflow) */
       .hist-filter-bar,
-      #subpane-dispatch .hist-filter-bar {
+      #subpane-dispatch .hist-filter-bar,
+      #subpane-custom-dispatch .hist-filter-bar {
         grid-template-columns: minmax(0, 1fr);
       }
+      #pane-history .hist-subtab-btn { font-size: 12px; padding: 6px 4px; }
+      .watch-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .hist-table,
       .hist-table thead,
       .hist-table tbody,
@@ -2085,6 +2122,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="hist-subtabs">
           <button class="hist-subtab-btn active" data-subpane="dispatch" onclick="switchHistorySubpane('dispatch')">📨 봇 발송 이력</button>
           <button class="hist-subtab-btn" data-subpane="audit" onclick="switchHistorySubpane('audit')">👥 플랫폼 감사 이력</button>
+          <button class="hist-subtab-btn" data-subpane="custom-dispatch" onclick="switchHistorySubpane('custom-dispatch')">🎯 맞춤 발송 이력</button>
         </div>
 
         <!-- Sub-pane: Dispatch History -->
@@ -2155,6 +2193,55 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             <span id="auditPageInfo" style="font-size:12px; color:var(--text-muted);"></span>
             <button class="btn btn-sm hist-touch" id="auditNextBtn" onclick="pageAuditLogs(1)">다음 ▶</button>
           </div>
+        </div>
+
+        <!-- Sub-pane: Custom Watch Deliveries + Watches & Travel 2-Track Prefs -->
+        <div id="subpane-custom-dispatch" class="hist-subpane">
+          <div class="watch-panel" id="watchPanel">
+            <div class="watch-panel-head">
+              <h3 class="watch-panel-title">🛰️ 맞춤 감시·선호 현황</h3>
+              <button class="btn btn-sm hist-touch" id="watchPanelRefreshBtn" type="button">🔃 새로고침</button>
+            </div>
+            <div class="watch-stats" id="watchStats"></div>
+            <div class="watch-section-label">📈 시황봇 · ✈️ 여행봇 활성 감시</div>
+            <div id="watchList" class="hist-card-list"><div class="hist-meta">불러오는 중...</div></div>
+            <div class="watch-section-label">✈️ 여행봇 2-Track 선호 (정기 / 특가)</div>
+            <div id="watchPrefsList" class="hist-card-list"><div class="hist-meta">불러오는 중...</div></div>
+          </div>
+
+          <div class="hist-filter-bar">
+            <select id="customDispatchBotSel" class="form-select hist-touch" aria-label="봇 필터">
+              <option value="all">전체 봇</option>
+              <option value="brief_bot">📈 시황 브리핑</option>
+              <option value="travel_bot">✈️ 여행 특가</option>
+            </select>
+            <select id="customDispatchStatusSel" class="form-select hist-touch" aria-label="상태 필터">
+              <option value="">전체 상태</option>
+              <option value="SENT">SENT (성공)</option>
+              <option value="FAILED">FAILED (실패)</option>
+              <option value="UNKNOWN">UNKNOWN (불명)</option>
+              <option value="IN_FLIGHT">IN_FLIGHT (진행 중)</option>
+            </select>
+            <button class="btn btn-sm hist-touch" id="customDispatchRefreshBtn" type="button">🔃 새로고침</button>
+          </div>
+          <div class="table-wrap">
+            <table class="hist-table">
+              <thead>
+                <tr>
+                  <th>발송 일시</th>
+                  <th>봇 / 유형</th>
+                  <th>수신자</th>
+                  <th>대상</th>
+                  <th>관측값</th>
+                  <th>상태</th>
+                </tr>
+              </thead>
+              <tbody id="customDispatchBody">
+                <tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px;">불러오는 중...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="hist-meta" id="customDispatchMore" style="margin-top:8px;"></div>
         </div>
       </div>
     </section>
@@ -3950,7 +4037,161 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.querySelectorAll('#pane-history .hist-subpane').forEach(p => p.classList.toggle('active', p.id === `subpane-${sp}`));
       if (sp === 'dispatch') loadDispatchHistory();
       if (sp === 'audit') loadAuditLogs();
+      if (sp === 'custom-dispatch') { loadWatchPanel(); loadCustomDispatchHistory(); }
     }
+
+    // ---------------------------------------------------------------------
+    // 🎯 Custom watch deliveries + watches & travel 2-track prefs
+    //   Numeric values are server-formatted strings (Decimal-safe) -> rendered as-is, never Number().
+    //   All dynamic values go through esc(); actions use data-* + addEventListener (no inline JS values).
+    // ---------------------------------------------------------------------
+    const WATCH_BOT_LABELS = { brief_bot: '📈 시황', travel_bot: '✈️ 여행' };
+
+    function customKindLabel(item) {
+      const k = String(item.delivery_kind || '').toUpperCase();
+      if (item.bot_id === 'travel_bot') {
+        if (k === 'DAILY') return '<span class="hist-badge info">일일 특가</span>';
+        return '<span class="hist-badge warn">특가 하락</span>';
+      }
+      return '<span class="hist-badge bad">변동성 감시</span>';
+    }
+
+    function customStatusBadge(status) {
+      const s = String(status || '').toUpperCase();
+      if (s === 'IN_FLIGHT') return '<span class="hist-badge info">🚚 진행 중</span>';
+      return deliveryStatusBadge(s);
+    }
+
+    async function loadCustomDispatchHistory() {
+      const tbody = document.getElementById('customDispatchBody');
+      const more = document.getElementById('customDispatchMore');
+      if (!tbody) return;
+      const p = new URLSearchParams();
+      p.set('bot_id', document.getElementById('customDispatchBotSel').value || 'all');
+      const st = document.getElementById('customDispatchStatusSel').value;
+      if (st) p.set('status', st);
+      p.set('limit', '50');
+      try {
+        const res = await req('/api/platform/custom-deliveries?' + p.toString());
+        const items = Array.isArray(res.items) ? res.items : [];
+        more.textContent = res.has_more ? `최근 ${items.length}건 표시 (이전 이력 더 있음)` : `총 ${items.length}건`;
+        if (items.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--text-muted);">맞춤 발송 이력이 없습니다.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(it => {
+          const name = it.display_name || it.chat_id || '-';
+          let target = esc(it.target || '-');
+          if (it.bot_id === 'travel_bot' && it.dep_date) target += ` <span class="hist-meta">${esc(it.dep_date)}~${esc(it.ret_date || '')}</span>`;
+          if (it.bot_id === 'brief_bot' && it.trigger_side) target += ` <span class="hist-meta">${esc(it.trigger_side)}</span>`;
+          return `
+            <tr>
+              <td data-label="발송 일시">${esc(utcToKst(it.created_at))}</td>
+              <td data-label="봇 / 유형"><b>${esc(WATCH_BOT_LABELS[it.bot_id] || it.bot_id)}</b> ${customKindLabel(it)}</td>
+              <td data-label="수신자"><b>${esc(name)}</b><div class="hist-meta"><code>${esc(it.chat_id)}</code></div></td>
+              <td data-label="대상">${target}</td>
+              <td data-label="관측값">${esc(it.value_text || '-')}</td>
+              <td data-label="상태">${customStatusBadge(it.status)}${it.error_detail ? `<div class="hist-meta" style="color:var(--danger);">${esc(it.error_detail)}</div>` : ''}</td>
+            </tr>`;
+        }).join('');
+      } catch (e) {
+        more.textContent = '';
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-cell" style="text-align:center; padding:28px; color:var(--danger);">맞춤 발송 이력 로드 실패: ${esc(e.message)}</td></tr>`;
+      }
+    }
+
+    function watchConditionText(w) {
+      if (w.bot_id === 'travel_bot') {
+        const parts = [`목표 ${w.target_price_text || '-'}`];
+        if (w.last_seen_price_text) parts.push(`최근 ${w.last_seen_price_text}`);
+        if (w.watch_mode) parts.push(w.watch_mode);
+        if (w.notify_mode) parts.push(w.notify_mode);
+        return parts.join(' · ');
+      }
+      const parts = [`${w.condition_type || '-'} ${w.direction || ''} ${w.threshold_value || '-'} ${w.threshold_unit || ''}`.trim()];
+      if (w.last_observed_value) parts.push(`최근 ${w.last_observed_value}`);
+      return parts.join(' · ');
+    }
+
+    async function loadWatchPanel() {
+      const listEl = document.getElementById('watchList');
+      const prefsEl = document.getElementById('watchPrefsList');
+      const statsEl = document.getElementById('watchStats');
+      if (!listEl) return;
+      try {
+        const res = await req('/api/platform/watches?bot_id=all&active_only=true');
+        const items = Array.isArray(res.items) ? res.items : [];
+        const prefs = Array.isArray(res.user_prefs) ? res.user_prefs : [];
+        const nMarket = items.filter(w => w.bot_id === 'brief_bot').length;
+        const nTravel = items.filter(w => w.bot_id === 'travel_bot').length;
+        const nPaused = prefs.filter(p => p.watches_paused).length;
+        const nWeeklyOff = prefs.filter(p => !p.weekly_brief_enabled).length;
+        statsEl.innerHTML = [
+          ['📈 시황 감시', nMarket], ['✈️ 여행 감시', nTravel], ['⏸️ 특가 일시중지', nPaused], ['📭 정기 OFF', nWeeklyOff],
+        ].map(([label, n]) => `<div class="watch-stat"><b>${esc(n)}</b><span>${esc(label)}</span></div>`).join('');
+
+        listEl.innerHTML = items.map(w => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><b>${esc(WATCH_BOT_LABELS[w.bot_id] || w.bot_id)}</b> · <b>${esc(w.target || '-')}</b></span>
+              <span class="hist-meta">#${esc(w.watch_id)}</span>
+            </div>
+            <div class="hist-diff-line">${esc(watchConditionText(w))}</div>
+            <div class="hist-meta">${esc(w.display_name || w.chat_id)} · <code>${esc(w.chat_id)}</code> · ${esc(utcToKst(w.created_at))}</div>
+            <div class="watch-card-actions">
+              <button type="button" class="btn btn-sm btn-danger watch-deactivate-btn" data-bot-id="${esc(w.bot_id)}" data-watch-id="${esc(w.watch_id)}" data-target="${esc(w.target || '')}">비활성화</button>
+            </div>
+          </div>`).join('') || '<div class="hist-meta">활성 맞춤 감시가 없습니다.</div>';
+
+        prefsEl.innerHTML = prefs.map(p => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><b>${esc(p.display_name || p.chat_id)}</b> <span class="hist-meta"><code>${esc(p.chat_id)}</code></span></span>
+              <span>
+                <span class="hist-badge ${p.weekly_brief_enabled ? 'ok' : 'bad'}">정기 ${p.weekly_brief_enabled ? 'ON' : 'OFF'}</span>
+                <span class="hist-badge ${p.watches_paused ? 'warn' : 'ok'}">특가 ${p.watches_paused ? '일시중지' : '수신'}</span>
+              </span>
+            </div>
+            <div class="hist-meta">${p.is_default ? '기본값 (설정 이력 없음)' : esc(utcToKst(p.updated_at))}</div>
+          </div>`).join('') || '<div class="hist-meta">여행봇 선호 설정 대상이 없습니다 (전원 기본값: 정기 ON · 특가 수신).</div>';
+      } catch (e) {
+        statsEl.innerHTML = '';
+        listEl.innerHTML = `<div style="color:var(--danger);">맞춤 감시 로드 실패: ${esc(e.message)}</div>`;
+        prefsEl.innerHTML = '';
+      }
+    }
+
+    async function deactivateWatchFromButton(btn) {
+      const botId = btn.dataset.botId;
+      const watchId = btn.dataset.watchId;
+      const target = btn.dataset.target || '';
+      if (!botId || !watchId) return;
+      if (!confirm(`${target} 맞춤 감시(#${watchId})를 비활성화할까요? 사용자에게 알림은 발송되지 않습니다.`)) return;
+      btn.disabled = true;
+      try {
+        const res = await req(`/api/platform/watches/${encodeURIComponent(botId)}/${encodeURIComponent(watchId)}/deactivate`, { method: 'POST' });
+        toast(res.deactivated ? '✅ 맞춤 감시를 비활성화했습니다.' : 'ℹ️ 이미 비활성화된 감시입니다.');
+        loadWatchPanel();
+      } catch (e) {
+        btn.disabled = false;
+        toast(`❌ 비활성화 실패: ${e.message}`);
+      }
+    }
+
+    (function bindCustomDispatchUi() {
+      const listEl = document.getElementById('watchList');
+      if (listEl) {
+        listEl.addEventListener('click', ev => {
+          const btn = ev.target.closest('.watch-deactivate-btn');
+          if (btn && listEl.contains(btn)) deactivateWatchFromButton(btn);
+        });
+      }
+      const bind = (id, evt, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); };
+      bind('watchPanelRefreshBtn', 'click', () => loadWatchPanel());
+      bind('customDispatchRefreshBtn', 'click', () => loadCustomDispatchHistory());
+      bind('customDispatchBotSel', 'change', () => loadCustomDispatchHistory());
+      bind('customDispatchStatusSel', 'change', () => loadCustomDispatchHistory());
+    })();
 
     async function loadDispatchHistory() {
       const tbody = document.getElementById('dispatchHistoryBody');
