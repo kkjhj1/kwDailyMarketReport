@@ -500,11 +500,11 @@ class TravelInteractiveHandler:
                 ],
                 [
                     self._watch_entry_button(scope, chat_id),
-                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+                    {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"},
                 ],
                 [
-                    {"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
-                    {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"},
+                    {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
+                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
                 ],
                 [
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
@@ -524,25 +524,26 @@ class TravelInteractiveHandler:
             lines.append(f"📰 정기발송: <b>{weekly}</b> · 🔔 맞춤알림: <b>{paused}</b>")
             lines.append("━━━━━━━━━━━━━━━━━━")
         lines.extend([
-            "✈️ <b>실시간 특가 조회</b>: 전체 주말 특가 TOP 3",
-            "🔔 <b>내 알림</b>: 도시·국가별 목표가 알림 관리",
-            "⚙️ <b>발송 설정</b>: 정기발송·맞춤알림 켜기/끄기",
+            "⚙️ <b>정기발송 설정</b>: 발송 주기·관심 권역·여행 스타일 변경",
+            "🔔 <b>맞춤알림 설정</b>: 인천 직항 116개 도시 · 8대 권역 목표가 알림 관리",
+            "✈️ <b>지금 특가 보기</b>: 전체 주말 특가 TOP 3",
+            "🔍 <b>권역·도시 찾기</b>: 8대 권역별 직항 도시 탐색",
             "🏙️ <b>인기 도시</b>: 도쿄·오사카·후쿠오카·타이베이·다낭·방콕",
             "💡 도시 이름을 채팅창에 바로 입력해도 검색돼요.",
         ])
         markup = {
             "inline_keyboard": [
                 [
-                    {"text": "✈️ 실시간 특가 조회", "callback_data": "trv:m:search"},
-                    {"text": "🔔 내 알림", "callback_data": "trv:m:watch"},
+                    {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"},
+                    {"text": "🔔 맞춤알림 설정", "callback_data": "trv:m:watch"},
                 ],
                 [
-                    {"text": "⚙️ 발송 설정", "callback_data": "trv:m:settings"},
-                    {"text": "📊 웹 리포트", "url": self.report_url},
+                    {"text": "✈️ 지금 특가 보기", "callback_data": "trv:m:search"},
+                    {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
                 ],
                 [
                     {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"},
-                    {"text": "❓ 도움말", "callback_data": "trv:m:help"},
+                    {"text": "📊 웹 리포트 ↗", "url": self.report_url},
                 ],
             ]
         }
@@ -553,14 +554,14 @@ class TravelInteractiveHandler:
             "🏙️ <b>[인기 도시 실시간 특가]</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "도시를 누르면 6개월 주말 최저가·예산을 바로 조회해요.\n"
-            "🔍 목록에 없는 곳은 [국가·도시 검색]으로 찾아보세요."
+            "🔍 목록에 없는 곳은 [권역·도시 찾기]로 찾아보세요."
         )
         rows: list[list[dict[str, Any]]] = [
             [{"text": self.label_for(code), "callback_data": f"trv:q:{code}"} for code in row]
             for row in POPULAR_CITY_ROWS
         ]
         rows.append([
-            {"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
+            {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
             {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
         ])
         return text, {"inline_keyboard": rows}
@@ -727,7 +728,7 @@ class TravelInteractiveHandler:
     def _watch_entry_button(self, scope: str, chat_id: Optional[str] = None) -> dict[str, Any]:
         """ALL never registers a watch: it opens the per-city list. A city opens its own watch card."""
         if scope == "ALL":
-            return {"text": "🔔 내 알림 / 도시별 설정", "callback_data": "trv:w:l"}
+            return {"text": "🔔 맞춤알림 설정", "callback_data": "trv:w:l"}
         watch = self._get_watch(chat_id, scope) if chat_id else None
         if watch and watch.get("is_active"):
             text = f"🔔 알림 설정중 ({_man_label(int(watch['target_price_krw']))})"
@@ -745,30 +746,22 @@ class TravelInteractiveHandler:
             return None
 
     def build_onboarding_keyboard(self) -> dict[str, Any]:
-        """Step 1 onboarding target-selection keyboard for new subscribers (64-byte safe `trv:s:<CITY>`)."""
+        """/start onboarding keyboard (3 rows / 6 buttons), aligned with the /menu hub.
+        Legacy `trv:s:<CITY>` callbacks from old onboarding messages are still handled in `handle_callback`.
+        """
         return {
             "inline_keyboard": [
                 [
-                    {"text": "🇯🇵 도쿄", "callback_data": "trv:s:NRT"},
-                    {"text": "🇯🇵 오사카", "callback_data": "trv:s:KIX"},
-                    {"text": "🇯🇵 후쿠오카", "callback_data": "trv:s:FUK"},
+                    {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"},
+                    {"text": "🔔 맞춤알림 설정", "callback_data": "trv:m:watch"},
                 ],
                 [
-                    {"text": "🇹🇼 타이베이", "callback_data": "trv:s:TPE"},
-                    {"text": "🇻🇳 다낭", "callback_data": "trv:s:DAD"},
-                    {"text": "🇹🇭 방콕", "callback_data": "trv:s:BKK"},
+                    {"text": "✈️ 지금 특가 보기", "callback_data": "trv:q:ALL"},
+                    {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
                 ],
                 [
-                    {"text": "✈️ 전체 주말 특가 TOP 3 선택", "callback_data": "trv:s:ALL"},
-                ],
-                [
-                    {"text": "🔍 기타 지역 직접 검색", "callback_data": "trv:c:guide"},
-                ],
-                [
-                    {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
-                ],
-                [
-                    {"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"},
+                    {"text": "📊 웹 리포트 ↗", "url": self.report_url},
+                    {"text": "🏠 통합 메뉴봇 ↗", "url": "https://t.me/KwMenu_bot?start=from_sub"},
                 ],
             ]
         }
@@ -1056,14 +1049,13 @@ class TravelInteractiveHandler:
         return (
             "🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "📰 <b>정기 여행정보</b>: 매주 목 12:00 특가 브리핑(주2회 화·목 선택 가능) + 도시별 실시간 조회\n"
-            "🔔 <b>내 맞춤 특가 알림</b>: 원하는 도시·날짜 목표가 도달 시 알림 (최대 4개)\n"
-            "⚙️ 발송 주기·관심권역·여행스타일은 /settings 에서 언제든 바꿀 수 있어요.\n"
+            "1️⃣ 📰 <b>정기발송 (매주 목 12:00 기본)</b>\n"
+            "관심 권역·여행 스타일(휴양/관광)에 맞춘 TOP 3 브리핑\n"
+            "2️⃣ 🔔 <b>맞춤발송 (목표가 도달 시)</b>\n"
+            "원하는 직항 도시·일정·가격 등록 시 하루 3회 체크 후 알림 (최대 4개)\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "🎯 <b>[1단계: 관심 여행지 선택]</b>\n"
-            "아래 버튼에서 원하시는 여행지를 선택하신 후 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르면 "
-            "최신 주말 항공·숙박 특가를 즉시 확인하실 수 있습니다 👇\n"
-            "🔍 목록에 없는 도시는 이름을 바로 입력하세요 (예: 삿포로, 세부)."
+            "💬 채팅창에 도시 이름(예: 오사카, 밴쿠버)을 바로 입력하면 실시간 특가를 즉시 조회할 수 있어요.\n"
+            "⚙️ 설정은 /settings 에서 언제든 바꿀 수 있어요 👇"
         )
 
     # ------------------------------------------------------------------

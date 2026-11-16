@@ -1873,7 +1873,7 @@ def test_new_prefs_callbacks_fit_64_bytes_and_reject_garbage(handler, mem_db):
 
 def test_onboarding_card_introduces_both_tracks(handler):
     card = handler.build_onboarding_card()
-    assert "목 12:00" in card and "도시별 실시간 조회" in card and "🔔 <b>내 맞춤 특가 알림</b>" in card
+    assert "목 12:00" in card and "정기발송" in card and "🔔 <b>맞춤발송" in card
     assert "/settings" in card
     assert "구독이 시작되었습니다" in card
     kb = handler.build_inline_keyboard("ALL")["inline_keyboard"]
@@ -1888,9 +1888,9 @@ def test_slim_result_keyboard_four_rows_preserves_contract(handler, mem_db):
         rows = handler.build_inline_keyboard(scope, chat_id=chat)["inline_keyboard"]
         assert len(rows) == 4
         assert rows[0] == [{"text": "🔄 최신 특가 새로고침", "callback_data": f"trv:r:{scope}"}]
-        assert rows[-3][1] == {"text": "🏠 메뉴", "callback_data": "trv:m:home"}
-        assert rows[-2] == [{"text": "🔍 국가·도시 검색", "callback_data": "trv:c:guide"},
-                            {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"}]
+        assert rows[-3][1] == {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"}
+        assert rows[-2] == [{"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
+                            {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
         assert rows[-1] == [{"text": "📊 6개월 특가 웹 리포트 ↗", "url": handler.report_url}]
     assert handler.build_inline_keyboard("ALL")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:l"
     assert handler.build_inline_keyboard("FUK", chat_id="c1")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:m:FUK"
@@ -1902,10 +1902,18 @@ def test_menu_cards_layout_and_callbacks_fit(handler, mem_db):
     text, hub = handler.build_menu_hub_card("c1")
     assert "메인 메뉴" in text and "정기발송: <b>주1회(목) 12:00</b>" in text
     rows = hub["inline_keyboard"]
-    assert [b.get("callback_data") or b.get("url") for b in rows[0]] == ["trv:m:search", "trv:m:watch"]
-    assert rows[1][0]["callback_data"] == "trv:m:settings" and rows[1][1]["url"] == handler.report_url
-    assert [b["callback_data"] for b in rows[2]] == ["trv:m:popular", "trv:m:help"]
+    assert [b["callback_data"] for b in rows[0]] == ["trv:m:settings", "trv:m:watch"]
+    assert [b["callback_data"] for b in rows[1]] == ["trv:m:search", "trv:c:guide"]
+    assert rows[2][0]["callback_data"] == "trv:m:popular" and rows[2][1]["url"] == handler.report_url
     assert "정기발송:" not in handler.build_menu_hub_card()[0]  # no chat -> no personal status line
+
+    ob_text = handler.build_onboarding_card()
+    assert "정기발송" in ob_text and "맞춤발송" in ob_text
+    ob_rows = handler.build_onboarding_keyboard()["inline_keyboard"]
+    assert len(ob_rows) == 3
+    assert [b["callback_data"] for b in ob_rows[0]] == ["trv:m:settings", "trv:m:watch"]
+    assert [b["callback_data"] for b in ob_rows[1]] == ["trv:q:ALL", "trv:c:guide"]
+    assert ob_rows[2][0]["url"] == handler.report_url
 
     text, pop = handler.build_popular_cities_card()
     assert "인기 도시" in text
