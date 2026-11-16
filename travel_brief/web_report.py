@@ -10,19 +10,30 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from travel_brief.models import (
     DestinationMeta,
     FlightDeal,
     TravelRecommendation,
     TravelSnapshot,
+    format_trip_length,
     reconcile_man_breakdown,
     round_man,
 )
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
+from travel_brief.city_catalog import (
+    REGION_CODES,
+    REGION_LABELS,
+    CityCatalog,
+    city_region_theme,
+    normalize_region,
+    normalize_theme,
+    region_label,
+    theme_matches,
+)
 from travel_brief.destination_photos import (
     ASSET_SUBDIR,
     DestinationPhoto,
@@ -30,7 +41,15 @@ from travel_brief.destination_photos import (
     resolve_destination_photo,
 )
 
+SPARSE_SEGMENT_NOTICE = "해당 권역은 관광/휴양 중심이라 권역 전체 기준으로 추천합니다"
+EMPTY_SEGMENT_NOTICE = "해당 권역의 이번 주 실시간 데이터가 부족해 전체 기준으로 추천합니다"
 
+
+def segment_key(region: Optional[str], theme: Optional[str]) -> str:
+    return f"{normalize_region(region)}:{normalize_theme(theme)}"
+
+
+# Legacy 10-city maps (kept for import compatibility only; rendering uses catalog metadata).
 DEST_FLAGS: dict[str, str] = {
     "FUK": "🇯🇵",
     "NRT": "🇯🇵",
@@ -442,7 +461,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 0.5rem;
     }
+    .region-empty-note {
+      margin: -0.6rem 0 1rem;
+      padding: 0.55rem 0.8rem;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.1);
+      border: 1px solid rgba(251, 191, 36, 0.28);
+      overflow-wrap: anywhere;
+    }
     .filter-btn {
+      min-height: 44px;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid rgba(255, 255, 255, 0.12);
       color: #cbd5e1;
@@ -1057,17 +1087,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       .filter-buttons {
         width: 100%;
-        flex-wrap: nowrap;
-        overflow-x: auto;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.4rem;
         padding-bottom: 0.4rem;
-        -webkit-overflow-scrolling: touch;
       }
       .filter-btn {
-        flex: 0 0 auto;
-        white-space: nowrap;
-        min-height: 42px;
-        font-size: 0.82rem;
-        padding: 0.4rem 0.8rem;
+        min-width: 0;
+        min-height: 44px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        font-size: 0.78rem;
+        line-height: 1.2;
+        padding: 0.35rem 0.4rem;
+        border-radius: 12px;
       }
       .view-mode-bar,
       .view-mode-group {
@@ -1166,10 +1199,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <header>
       <div class="badge badge-normal">Weekend Travel Intelligence Engine</div>
       <h1>✈️ 주말 해외여행 6개월 특가 & 예산 나침반</h1>
-      <p class="subtitle">인천(ICN) 출발 | 목~일 & 금~월 (3박 4일) 직장인 실속 주말 일정 · 네이버 실시간 관측형</p>
+      <p class="subtitle">인천(ICN) 출발 | 단거리 목~일 & 금~월 (3박 4일) · 장거리 5박 이상 권장 · 네이버 실시간 관측형</p>
       <div class="meta-bar">
         <div class="meta-item"><span>📅 기준 일시:</span> <strong><!-- GENERATED_AT --></strong></div>
-        <div class="meta-item"><span>🎯 분석 대상:</span> <strong>인기 10대 근거리 해외 여행지</strong></div>
+        <div class="meta-item"><span>🎯 분석 대상:</span> <strong><!-- DEST_SCOPE --></strong></div>
         <div class="meta-item"><span>🔍 실시간 연동:</span> <strong>네이버 항공권 & 네이버 호텔</strong></div>
         <div class="meta-item"><span>⚠️ 유의사항:</span> <strong>실시간 잔여석에 따라 결제 단계에서 변동 가능</strong></div>
       </div>
@@ -1194,15 +1227,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Region Filter Bar -->
     <div class="filter-bar">
-      <span class="filter-label">🏷️ 지역별 빠른 필터:</span>
+      <span class="filter-label">🏷️ 권역별 빠른 필터:</span>
       <div class="filter-buttons">
-        <button class="filter-btn active" data-filter="all" onclick="setRegionFilter('all')">전체 (10개 도시)</button>
-        <button class="filter-btn" data-filter="japan" onclick="setRegionFilter('japan')">🇯🇵 일본 (3)</button>
-        <button class="filter-btn" data-filter="vietnam" onclick="setRegionFilter('vietnam')">🇻🇳 베트남 (2)</button>
-        <button class="filter-btn" data-filter="asia_city" onclick="setRegionFilter('asia_city')">🏙️ 대만/태국/싱가포르 (3)</button>
-        <button class="filter-btn" data-filter="resort" onclick="setRegionFilter('resort')">🏝️ 괌/발리 휴양 (2)</button>
+        <!-- REGION_FILTER_BUTTONS -->
       </div>
     </div>
+    <div class="region-empty-note" id="regionEmptyNote" style="display: none;"></div>
 
     <!-- Heatmap Legend -->
     <div class="heatmap-legend">
@@ -1248,7 +1278,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <h2>🌍 10대 추천 여행지별 비자 규정 및 핵심 여행 팁</h2>
+    <h2>🌍 추천 여행지별 비자 규정 및 핵심 여행 팁</h2>
     <p class="section-desc">무비자 체류 가능 일수, 최적의 여행 시즌, 엄선된 추천 숙소 및 현지 실속 여행 팁 요약입니다.</p>
     <div class="all-dest-grid">
       <!-- DEST_CARDS_HTML -->
@@ -1270,7 +1300,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="modal-body">
         <p style="font-size: 0.88rem; color: var(--text-sub); margin-bottom: 0.6rem;">
-          복사하여 ChatGPT나 Gemini에 붙여넣으면 3박 4일 맞춤 일정과 로컬 맛집을 바로 짜줍니다:
+          복사하여 ChatGPT나 Gemini에 붙여넣으면 여행 기간에 맞춘 일정과 로컬 맛집을 바로 짜줍니다:
         </p>
         <textarea id="promptText" readonly></textarea>
       </div>
@@ -1354,8 +1384,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.classList.toggle('active', btn.getAttribute('data-filter') === region);
       });
+      const note = document.getElementById('regionEmptyNote');
+      if (note) { note.style.display = 'none'; }
       applyCombinedFilters();
     }
+
+    // Telegram deep link: `travel_latest.html?region=EU` pre-selects one of the 8 regions.
+    const regionLabels = /* REGION_LABELS_JSON */ {};
+    (function applyRegionQuery() {
+      let region = '';
+      try {
+        region = (new URLSearchParams(window.location.search).get('region') || '').toUpperCase();
+      } catch (e) { region = ''; }
+      if (!region || region === 'ALL' || !Object.prototype.hasOwnProperty.call(regionLabels, region)) { return; }
+      const btn = document.querySelector('.filter-btn[data-filter="' + region + '"]');
+      if (btn) {
+        setRegionFilter(region);
+      } else {
+        const note = document.getElementById('regionEmptyNote');
+        if (note) {
+          note.textContent = regionLabels[region] + ' 권역은 이번 리포트에 데이터가 없어 전체 도시를 보여드려요.';
+          note.style.display = 'block';
+        }
+      }
+    })();
 
     window.onclick = function(event) {
       const modal = document.getElementById('promptModal');
@@ -1374,8 +1426,11 @@ def build_travel_snapshot(
     dest_code: Optional[str] = None,
     max_budget: Optional[int] = None,
     top_n: int = 3,
+    segments: Optional[Iterable[tuple[str, str]]] = None,
 ) -> TravelSnapshot:
-    """Builds a single immutable TravelSnapshot shared by Telegram and Web reports."""
+    """Builds a single immutable TravelSnapshot shared by Telegram and Web reports.
+    `segments` = the (region, theme) pairs active subscribers need; non-ALL pairs are filled in memory from
+    one extra collection pass (`_attach_segments`). Without it the snapshot is the legacy curated one."""
     now_dt = datetime.now()
     generated_at = now_dt.strftime("%Y-%m-%d %H:%M")
     version_tag = now_dt.strftime("%Y%m%d%H%M")
@@ -1425,7 +1480,7 @@ def build_travel_snapshot(
             _, _, best_dc, best_deal = cands[0]
             monthly_picks[m] = (all_destinations[best_dc], best_deal)
 
-    return TravelSnapshot(
+    snapshot = TravelSnapshot(
         snapshot_id=snapshot_id,
         generated_at=generated_at,
         version_tag=version_tag,
@@ -1433,11 +1488,161 @@ def build_travel_snapshot(
         monthly_matrix=matrix,
         monthly_picks=monthly_picks,
     )
+    if segments and not dest_code:
+        _attach_segments(engine, snapshot, segments, max_budget=max_budget, top_n=top_n)
+    return snapshot
+
+
+def _pick_monthly(
+    dest_map: dict[str, DestinationMeta], matrix: dict[str, dict[str, FlightDeal]], codes: Iterable[str]
+) -> dict:
+    code_set = set(codes)
+    months = sorted({m for c, dm in matrix.items() if c in code_set for m in dm})
+    picks: dict = {}
+    for m in months[:6]:
+        cands = [
+            (BudgetCalculator.evaluate_deal(dest_map[dc], dm[m]).recommendation_score, -dm[m].price_krw, dc, dm[m])
+            for dc, dm in matrix.items() if dc in code_set and m in dm and dc in dest_map
+        ]
+        if cands:
+            cands.sort(reverse=True)
+            _, _, best_dc, best_deal = cands[0]
+            picks[m] = (dest_map[best_dc], best_deal)
+    return picks
+
+
+def _attach_segments(
+    engine: FlightEngine,
+    snapshot: TravelSnapshot,
+    segments: Iterable[tuple[str, str]],
+    max_budget: Optional[int] = None,
+    top_n: int = 3,
+    catalog: Optional[CityCatalog] = None,
+) -> None:
+    """Track A per-(region, theme) TOP lists from ONE extra collection pass (never re-scraped per segment).
+
+    - region `ALL`: curated cities (same universe as the main TOP 3), theme-filtered in memory.
+    - region `R`: every catalog city of R (curated + fallback). The non-curated ones are collected once with
+      `pg_only=True` (price graph fills the matrix); only the displayed TOP / monthly-winner deals are then
+      SSE-verified in a single `ensure_deals_sse_verified` batch.
+    - sparse (region, theme) with no city -> region ALL theme + `SPARSE_SEGMENT_NOTICE`; a segment with no
+      deals at all -> the main ALL TOP 3 + `EMPTY_SEGMENT_NOTICE`.
+    """
+    catalog = catalog or CityCatalog(engine.destinations)
+    wanted = {(normalize_region(r), normalize_theme(t)) for r, t in segments}
+    wanted.discard(("ALL", "ALL"))
+    if not wanted:
+        return
+    curated = dict(engine.destinations)
+    regions = sorted({r for r, _ in wanted if r != "ALL"})
+    extra_codes = [c for r in regions for c in catalog.cities_in_region(r) if c not in curated]
+    extra = catalog.destinations_for(extra_codes)
+
+    extra_deals: list[FlightDeal] = []
+    if extra:
+        try:
+            extra_deals = engine.search_deals(months_ahead=6, extra_destinations=extra, pg_only=True)
+        except Exception:
+            extra_deals = []
+    try:
+        # Full curated deal list (cache-warm: the main snapshot just collected it -> no network I/O).
+        base_deals = engine.search_deals(months_ahead=6)
+    except Exception:
+        base_deals = [d for dm in snapshot.monthly_matrix.values() for d in dm.values()]
+    dest_map: dict[str, DestinationMeta] = {**extra, **curated}
+
+    def _resolve(region: str, theme: str) -> tuple[list[str], str]:
+        if region == "ALL":
+            codes = [c for c in curated if theme_matches(catalog.theme_of(c), theme)]
+            return codes, ""
+        codes = catalog.cities_in_region(region, theme)
+        if not codes and theme != "ALL":
+            return catalog.cities_in_region(region, "ALL"), SPARSE_SEGMENT_NOTICE
+        return codes, ""
+
+    def _rank(all_deals: list[FlightDeal]) -> dict[str, tuple[list[TravelRecommendation], dict, str]]:
+        out: dict[str, tuple[list[TravelRecommendation], dict, str]] = {}
+        matrix = FlightEngine.build_month_matrix(all_deals)
+        for region, theme in sorted(wanted):
+            codes, notice = _resolve(region, theme)
+            code_set = set(codes)
+            seg_deals = [d for d in all_deals if d.destination_code in code_set]
+            recs = BudgetCalculator.rank_recommendations(
+                destinations=dest_map, deals=seg_deals, max_budget_per_person=max_budget, top_n=top_n
+            )
+            if not recs:
+                out[segment_key(region, theme)] = (
+                    list(snapshot.recommendations), dict(snapshot.monthly_picks), EMPTY_SEGMENT_NOTICE
+                )
+                continue
+            out[segment_key(region, theme)] = (recs, _pick_monthly(dest_map, matrix, code_set), notice)
+        return out
+
+    all_deals = list(base_deals) + list(extra_deals)
+    ranked = _rank(all_deals)
+
+    # Focused SSE: only displayed extra-city deals still on LIVE_PG (TOP cards + monthly winners).
+    if engine.live_naver and extra:
+        heroes: dict[tuple[str, str, str], FlightDeal] = {}
+        for recs, picks, _ in ranked.values():
+            for d in [r.best_deal for r in recs] + [p[1] for p in picks.values()]:
+                if d.destination_code in extra and d.data_source == "LIVE_PG":
+                    heroes[(d.destination_code, d.departure_date, d.return_date)] = d
+        if heroes:
+            try:
+                verified = engine.ensure_deals_sse_verified(list(heroes.values()), custom_destinations=extra)
+            except Exception:
+                verified = []
+            upgraded = {(d.destination_code, d.departure_date, d.return_date): d for d in verified or []}
+            if upgraded:
+                all_deals = [
+                    upgraded.get((d.destination_code, d.departure_date, d.return_date), d) for d in all_deals
+                ]
+                ranked = _rank(all_deals)
+
+    extra_matrix = FlightEngine.build_month_matrix(
+        [d for d in all_deals if d.destination_code in extra], codes=list(extra)
+    )
+    snapshot.destinations = extra
+    snapshot.monthly_matrix = {**snapshot.monthly_matrix, **extra_matrix}
+    for key, (recs, picks, notice) in ranked.items():
+        snapshot.segment_recs[key] = recs
+        snapshot.segment_monthly_picks[key] = picks
+        if notice:
+            snapshot.segment_notices[key] = notice
 
 
 class WebReportGenerator:
     def __init__(self, engine: Optional[FlightEngine] = None):
         self.engine = engine or FlightEngine()
+        self.catalog = CityCatalog(getattr(self.engine, "destinations", {}) or {})
+
+    def flag_for(self, dest: DestinationMeta) -> str:
+        """Dynamic catalog flag (no 10-city hardcode); legacy map only as a last resort."""
+        flag = self.catalog.flag_for(dest.code) if self.catalog.is_known_code(dest.code) else ""
+        return flag if flag and flag != "✈️" else DEST_FLAGS.get(dest.code, flag or "✈️")
+
+    @staticmethod
+    def region_for(dest: DestinationMeta) -> str:
+        return dest.region_code or city_region_theme(dest.code)[0] or "ETC"
+
+    @staticmethod
+    def build_region_filter_buttons(all_destinations: dict[str, DestinationMeta]) -> str:
+        counts: dict[str, int] = {}
+        for d in all_destinations.values():
+            r = WebReportGenerator.region_for(d)
+            counts[r] = counts.get(r, 0) + 1
+        buttons = [
+            f'<button class="filter-btn active" data-filter="all" onclick="setRegionFilter(\'all\')">'
+            f"🌏 전체 ({len(all_destinations)}개 도시)</button>"
+        ]
+        for code in REGION_CODES:
+            if counts.get(code):
+                buttons.append(
+                    f'<button class="filter-btn" data-filter="{code}" onclick="setRegionFilter(\'{code}\')">'
+                    f"{html.escape(REGION_LABELS[code])} ({counts[code]})</button>"
+                )
+        return "\n        ".join(buttons)
 
     @staticmethod
     def resolve_top_photos(snapshot: TravelSnapshot) -> list[Optional[DestinationPhoto]]:
@@ -1467,9 +1672,10 @@ class WebReportGenerator:
         a folder the caller actually populated (`save_reports` does). `None` -> no `<img>` at all.
         `available_filenames` (if given) restricts `<img>` to files that really exist in that folder, so a
         partially failed asset copy can never produce a broken image."""
-        all_destinations = self.engine.destinations
         if snapshot is None:
             snapshot = build_travel_snapshot(self.engine, top_n=3)
+        # Curated + any extra region-segment cities collected for this run (dynamic catalog metadata).
+        all_destinations = {**self.engine.destinations, **(getattr(snapshot, "destinations", None) or {})}
         top_photos = self.resolve_top_photos(snapshot) if asset_rel_prefix else []
         if available_filenames is not None:
             top_photos = [p if p is not None and p.filename in available_filenames else None for p in top_photos]
@@ -1497,7 +1703,8 @@ class WebReportGenerator:
                 "chatgpt_link": chatgpt_link,
             }
 
-            flag = DEST_FLAGS.get(dest.code, "✈️")
+            flag = self.flag_for(dest)
+            trip_len = format_trip_length(deal.nights, dest.is_long_haul)
             flight_man, hotel_total_man, meal_man, total_1p_man = reconcile_man_breakdown(
                 deal.price_min_krw, budget.hotel_total_krw, budget.meal_transit_total_krw
             )
@@ -1560,7 +1767,7 @@ class WebReportGenerator:
             </div>
             <div class="schedule-row">
               <span class="sched-label">🛬 귀국</span>
-              <span class="sched-val"><strong>{deal.return_date} ({deal.return_day_of_week})</strong> · {deal.return_time_slot} [3박 4일]</span>
+              <span class="sched-val"><strong>{deal.return_date} ({deal.return_day_of_week})</strong> · {deal.return_time_slot} [{trip_len}]</span>
             </div>
           </div>
           <div class="hotel-curation-box">
@@ -1569,7 +1776,7 @@ class WebReportGenerator:
               <strong>숙박 예산: {html.escape(dest.hotel_budget_segment)}</strong>
             </div>
             <div class="hotel-feature-line">
-              └ 3박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만)
+              └ {budget.nights}박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만)
             </div>
             <div class="hotel-ref-line" style="margin-top:0.35rem; font-size:0.83rem; color:#94a3b8;">
               📍 추천 참고 호텔: <strong style="color:#f8fafc;">{hotel_name}</strong> <span class="hotel-grade-badge">{hotel_grade}</span> · {hotel_features}
@@ -1625,8 +1832,9 @@ class WebReportGenerator:
         month_tabs_html = "\n        ".join(month_tabs_list)
 
         def _render_big_card(dest: DestinationMeta, deal: FlightDeal, month_bucket: str, hidden: bool) -> str:
-            flag = DEST_FLAGS.get(dest.code, "✈️")
-            region_tag = DEST_REGION_TAGS.get(dest.code, "asia_city")
+            flag = self.flag_for(dest)
+            region_tag = self.region_for(dest)
+            trip_len = format_trip_length(deal.nights, dest.is_long_haul)
             month_int = int(deal.departure_date.split("-")[1])
             bd = BudgetCalculator.calculate_breakdown(dest, deal, nights=deal.nights)
             _, _, _, total_1p_man = reconcile_man_breakdown(
@@ -1678,7 +1886,7 @@ class WebReportGenerator:
               {f'<div style="margin-top:0.35rem; font-size:0.8rem; color:#fbbf24;">💡 {html.escape(deal.popular_banner_note)}</div>' if deal.popular_banner_note else ''}
             </div>
             <div class="mbc-sched-list" style="margin-top: 0.9rem;">
-              <div>📅 <strong>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</strong> · 3박 4일</div>
+              <div>📅 <strong>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</strong> · {trip_len}</div>
               <div>⏰ <span class="muted">{deal.departure_time_slot}</span></div>
               <div>💼 1인 총예산 <strong>약 {total_1p_man}만 원</strong> <span class="muted">· 2인 총 {total_2p_man}만 (1인당 약 {share_1p_man}만)</span></div>
             </div>
@@ -1716,8 +1924,8 @@ class WebReportGenerator:
 
         for dest_code, dest in all_destinations.items():
             cells = []
-            flag = DEST_FLAGS.get(dest_code, "✈️")
-            region_tag = DEST_REGION_TAGS.get(dest_code, "asia_city")
+            flag = self.flag_for(dest)
+            region_tag = self.region_for(dest)
 
             for m in all_months:
                 deal = matrix.get(dest_code, {}).get(m)
@@ -1798,9 +2006,9 @@ class WebReportGenerator:
         # 3. DESTINATIONS CARDS HTML
         dest_cards = []
         for dest in all_destinations.values():
-            flag = DEST_FLAGS.get(dest.code, "✈️")
-            region_tag = DEST_REGION_TAGS.get(dest.code, "asia_city")
-            best_m_str = ", ".join(f"{m}월" for m in dest.best_months)
+            flag = self.flag_for(dest)
+            region_tag = self.region_for(dest)
+            best_m_str = ", ".join(f"{m}월" for m in dest.best_months) or "확인 필요"
             caution_m_str = (
                 ", ".join(f"{m}월" for m in dest.caution_months) if dest.caution_months else "없음"
             )
@@ -1825,8 +2033,16 @@ class WebReportGenerator:
             dest_cards.append(card)
 
         # Fill template with clean replace
+        n_long = sum(1 for d in all_destinations.values() if d.is_long_haul)
+        dest_scope = (
+            f"{len(all_destinations)}개 직항 도시 (장거리 {n_long}곳 · 5박 이상 권장)"
+            if n_long else f"{len(all_destinations)}개 근거리 직항 도시"
+        )
         rendered = (
             HTML_TEMPLATE.replace("<!-- GENERATED_AT -->", now_str)
+            .replace("<!-- DEST_SCOPE -->", html.escape(dest_scope))
+            .replace("<!-- REGION_FILTER_BUTTONS -->", self.build_region_filter_buttons(all_destinations))
+            .replace("/* REGION_LABELS_JSON */ {}", json.dumps(REGION_LABELS, ensure_ascii=False))
             .replace("<!-- TOP_CARDS_HTML -->", "\n".join(top_cards_html))
             .replace("<!-- MONTH_TABS_HTML -->", month_tabs_html)
             .replace("<!-- MONTHLY_BIG_CARDS_HTML -->", "\n".join(monthly_big_cards))

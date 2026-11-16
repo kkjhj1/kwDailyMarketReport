@@ -53,6 +53,12 @@ KST = timezone(timedelta(hours=9))
 # consumes their thinner SSE coverage; fast lookups still reuse a fresh full-batch entry first.
 FAST_CACHE_REF_SUFFIX = "#fast"
 FAST_MODE_MAX_SSE_TARGETS = 6
+# Full-matrix catalog runs (~115 cities): price graph only, own namespace; SSE is then spent only on the
+# displayed TOP / monthly-winner deals (`ensure_deals_sse_verified`). A fresh full entry still wins.
+PG_ONLY_CACHE_REF_SUFFIX = "#pg"
+# Naver safety caps (never raised by callers): price-graph GraphQL fan-out and SSE search fan-out.
+PG_MAX_WORKERS = 5
+SSE_MAX_WORKERS_CAP = 2
 # GraphQL alias payload guard: 12-month ANY horizons are 104~208 slots per airport -> chunked requests.
 MAX_PG_SLOTS_PER_QUERY = 32
 # Overall monotonic budget for one watch collection (PG chunks + SSE) so a cron tick never hangs.
@@ -439,7 +445,7 @@ class NaverFlightLiveClient:
         self.cache_path = cache_path or (Path(tempfile.gettempdir()) / "kw_travel_naver_live_v4.json")
         self.gql_timeout = gql_timeout
         self.sse_timeout = sse_timeout
-        self.max_sse_workers = max_sse_workers
+        self.max_sse_workers = max(1, min(int(max_sse_workers), SSE_MAX_WORKERS_CAP))
 
     def _fetch_session_cookie_header(self) -> str:
         cj = urllib.request.HTTPCookieProcessor()
@@ -748,6 +754,7 @@ class NaverFlightLiveClient:
         fast_mode: bool = False,
         slot_signature: Optional[str] = None,
         deadline: Optional[float] = None,
+        pg_only: bool = False,
     ) -> list[FlightDeal]:
         """Executes full 2-stage live Naver collection with thread-safe Future Single-Flight,
         narrowed cache locking, KST baseline date, and Post-SSE Re-Rank protection.
@@ -756,6 +763,7 @@ class NaverFlightLiveClient:
         into the ref component of the key, so weekend entries can never be served for other slot sets.
         Without a signature, non-weekend slot sets get an implicit digest namespace (`slot_signature_for`).
         `deadline` (monotonic) bounds the leader's network work (PG chunks + SSE).
+        `pg_only=True` stops after the price-graph stage (own `#pg` namespace; LIVE_PG deals only).
         """
         sig = normalize_slot_signature(slot_signature) if slot_signature is not None else slot_signature_for(slots)
         if ref_date is None:
@@ -763,9 +771,12 @@ class NaverFlightLiveClient:
         else:
             eff_ref = ref_date.isoformat() + sig
         full_key: _CacheKey = (eff_ref, months_ahead, _dests_tuple(destinations.keys()))
-        mem_key: _CacheKey = (
-            (eff_ref + FAST_CACHE_REF_SUFFIX, months_ahead, full_key[2]) if fast_mode else full_key
-        )
+        if pg_only:
+            mem_key: _CacheKey = (eff_ref + PG_ONLY_CACHE_REF_SUFFIX, months_ahead, full_key[2])
+        elif fast_mode:
+            mem_key = (eff_ref + FAST_CACHE_REF_SUFFIX, months_ahead, full_key[2])
+        else:
+            mem_key = full_key
         disk_key = _disk_key_for(mem_key)
 
         is_leader = False
@@ -773,8 +784,8 @@ class NaverFlightLiveClient:
 
         with _CACHE_LOCK:
             cached = _MEM_CACHE.get(mem_key)
-            # A fresh full-batch entry is a strict upgrade over a fast collection, so check it first.
-            lookup_keys = [full_key, mem_key] if fast_mode else [mem_key]
+            # A fresh full-batch entry is a strict upgrade over a fast / PG-only collection, so check it first.
+            lookup_keys = [full_key, mem_key] if (fast_mode or pg_only) else [mem_key]
             for key in lookup_keys:
                 fresh = self._fresh_lookup_locked(key)
                 if fresh:
@@ -818,7 +829,9 @@ class NaverFlightLiveClient:
         # Leader execution path: perform network I/O strictly outside the lock
         deals: list[FlightDeal] = []
         try:
-            collect_kwargs: dict = {"fast_mode": True} if fast_mode else {}
+            collect_kwargs: dict = {"fast_mode": True} if (fast_mode and not pg_only) else {}
+            if pg_only:
+                collect_kwargs["pg_only"] = True
             if deadline is not None:
                 collect_kwargs["deadline"] = deadline
             deals = self._collect_live_deals_uncached(destinations, slots, holiday_fn, **collect_kwargs)
@@ -929,6 +942,7 @@ class NaverFlightLiveClient:
         holiday_fn: Callable[[date, Optional[date]], tuple[bool, str, float]],
         fast_mode: bool = False,
         deadline: Optional[float] = None,
+        pg_only: bool = False,
     ) -> list[FlightDeal]:
         slot_meta_map: dict[tuple[str, str], tuple[date, date, str, str, int]] = {
             (dep.isoformat(), ret.isoformat()): (dep, ret, dep_dow, ret_dow, nights)
@@ -936,9 +950,9 @@ class NaverFlightLiveClient:
         }
         all_months = sorted({dep.isoformat()[:7] for dep, _, _, _, _ in slots})
 
-        # Stage 1: Parallel batched GET_PRICE_GRAPH across all destinations (~0.45s)
+        # Stage 1: Parallel batched GET_PRICE_GRAPH across all destinations (~0.45s), capped at 5 workers
         pg_by_city: dict[str, dict[tuple[str, str], tuple[int, int]]] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PG_MAX_WORKERS) as ex:
             pg_kwargs: dict = {} if deadline is None else {"deadline": deadline}
             future_map = {
                 ex.submit(self.fetch_city_batch_pg, code, slots, **pg_kwargs): code
@@ -995,7 +1009,7 @@ class NaverFlightLiveClient:
 
         if not deals_by_key:
             return []
-        if _deadline_passed(deadline):
+        if pg_only or _deadline_passed(deadline):
             # Budget exhausted: PG-only result (never pushable as a watch trigger, honestly LIVE_PG).
             return sorted(deals_by_key.values(), key=lambda d: d.price_krw)
 

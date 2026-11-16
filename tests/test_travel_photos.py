@@ -24,6 +24,12 @@ from travel_brief.storage.db import TravelBriefDatabase
 from travel_brief.web_report import WebReportGenerator, build_travel_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
+# Track A KST weekday gate fixtures (2026-11-17 = Tuesday, 2026-11-19 = Thursday)
+from datetime import datetime as _dt  # noqa: E402
+
+TUESDAY_KST = _dt(2026, 11, 17, 12, 0)
+THURSDAY_KST = _dt(2026, 11, 19, 12, 0)
+MONDAY_KST = _dt(2026, 11, 16, 12, 0)
 CURATED = ("NRT", "KIX", "FUK", "DAD", "CXR", "BKK", "TPE", "GUM", "DPS", "SIN")
 FORBIDDEN_WEATHER_WORDS = ("현재 날씨", "오늘 날씨", "실시간 기상")
 REAL_LOOKING_TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcd"
@@ -194,6 +200,7 @@ class _FakeDispatcher:
 
     def __init__(self, *a, **kw):
         self.calls: list[tuple[str, str]] = []
+        self.texts: dict[str, str] = {}
         _FakeDispatcher.instances.append(self)
 
     def send_photo_to_recipient(self, tg, chat_id, photo_path, caption="", parse_mode="HTML", db=None,
@@ -208,6 +215,7 @@ class _FakeDispatcher:
 
     def send_text_to_recipient(self, tg, chat_id, text, parse_mode="HTML", db=None, reply_markup=None):
         self.calls.append(("text", str(chat_id)))
+        self.texts[str(chat_id)] = text
         return "SENT", "t1", None
 
 
@@ -234,7 +242,7 @@ def runner_env(tmp_path, monkeypatch):
 def test_weekly_opt_out_excluded_from_default_dispatch_but_override_works(runner_env):
     tbr, db, db_path, tmp = runner_env
     reports_before = _tree_snapshot(ROOT / "reports")
-    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "out" / "travel") is True
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "out" / "travel", now_kst=THURSDAY_KST) is True
     calls = _FakeDispatcher.instances[-1].calls
     assert ("text", "202") not in calls and ("photo", "202") not in calls
     assert calls == [("photo", "101"), ("text", "101"), ("photo", "303"), ("text", "303")]
@@ -250,10 +258,64 @@ def test_weekly_opt_out_excluded_from_default_dispatch_but_override_works(runner
 def test_photo_failure_never_blocks_main_text_briefing(runner_env, behaviour):
     tbr, db, db_path, tmp = runner_env
     _FakeDispatcher.photo_behaviour = behaviour
-    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "out" / "travel") is True
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "out" / "travel", now_kst=THURSDAY_KST) is True
     calls = _FakeDispatcher.instances[-1].calls
     assert [c for c in calls if c[0] == "text"] == [("text", "101"), ("text", "303")]
     assert [c for c in calls if c[0] == "photo"] == [("photo", "101"), ("photo", "303")]  # never retried
+
+
+def test_track_a_kst_weekday_gate_and_daily_ledger(runner_env):
+    tbr, db, db_path, tmp = runner_env
+    # 101: default THU_1X · 202: OFF (opted out) · 303: TUE_THU_2X
+    db.set_weekly_brief_freq("303", "TUE_THU_2X")
+    assert db.get_travel_user_prefs("202")["weekly_brief_freq"] == "OFF"
+    # Tuesday: only 2x subscribers
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "tue" / "travel", now_kst=TUESDAY_KST) is True
+    assert [c for c in _FakeDispatcher.instances[-1].calls if c[0] == "text"] == [("text", "303")]
+    # Thursday: 1x and 2x
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "thu" / "travel", now_kst=THURSDAY_KST) is True
+    assert [c for c in _FakeDispatcher.instances[-1].calls if c[0] == "text"] == [("text", "101"), ("text", "303")]
+    # same KST day again: the ledger claim blocks any automatic re-send
+    n = len(_FakeDispatcher.instances)
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "thu2" / "travel", now_kst=THURSDAY_KST) is False
+    assert all(not inst.calls for inst in _FakeDispatcher.instances[n:])
+    # any other weekday: nobody (and never a compensatory send)
+    n = len(_FakeDispatcher.instances)
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "mon" / "travel", now_kst=MONDAY_KST) is False
+    assert all(not inst.calls for inst in _FakeDispatcher.instances[n:])
+    assert tbr.weekly_freqs_for_weekday(1) == ("TUE_THU_2X",)
+    assert tbr.weekly_freqs_for_weekday(3) == ("THU_1X", "TUE_THU_2X")
+    assert all(tbr.weekly_freqs_for_weekday(d) == () for d in (0, 2, 4, 5, 6))
+
+
+def test_track_a_region_theme_segments_single_collection_and_sparse_fallback(runner_env, monkeypatch):
+    tbr, db, db_path, tmp = runner_env
+    db.set_weekly_brief_region("101", "EU")
+    db.set_weekly_brief_theme("101", "RESORT")  # EU has no resort city -> sparse fallback to EU ALL
+    db.set_weekly_brief_region("303", "JP")
+    calls: list[dict] = []
+    real_search = FlightEngine.search_deals
+
+    def counting_search(self, *a, **kw):
+        calls.append(kw)
+        return real_search(self, *a, **kw)
+
+    monkeypatch.setattr(FlightEngine, "search_deals", counting_search)
+    assert tbr.run_briefing(db_path=db_path, output_dir=tmp / "seg" / "travel", now_kst=THURSDAY_KST) is True
+    extra_calls = [kw for kw in calls if kw.get("extra_destinations")]
+    assert len(extra_calls) == 1  # ONE collection pass for every needed region (never per region/theme)
+    assert extra_calls[0].get("pg_only") is True
+    regions = {m.region_code for m in extra_calls[0]["extra_destinations"].values()}
+    assert regions == {"EU", "JP"}
+    texts = _FakeDispatcher.instances[-1].texts
+    eu, jp = texts["101"], texts["303"]
+    assert "해당 권역은 관광/휴양 중심이라 권역 전체 기준으로 추천합니다" in eu
+    assert "region=EU" in eu and "유럽" in eu and "5박 이상 권장" in eu
+    assert "region=JP" in jp and "region=EU" not in jp
+    assert tbr.fits_tg01(eu) and tbr.fits_tg01(jp)
+    # the web report of the same run carries the extra regions for `?region=` deep links
+    root_html = (tmp / "seg" / "travel_latest.html").read_text(encoding="utf-8")
+    assert 'data-filter="EU"' in root_html and 'data-filter="JP"' in root_html
 
 
 def test_top1_caption_is_short_escaped_and_honest():

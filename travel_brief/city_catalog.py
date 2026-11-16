@@ -57,40 +57,216 @@ _REGION_PROFILES: dict[str, dict] = {
            "airlines": ["대한항공", "아시아나항공"]},
     "OCE": {"region": "오세아니아", "baseline": 1200000, "hotel": 210000, "meal": 100000,
             "airlines": ["대한항공", "제주항공"]},
+    "NA": {"region": "북미", "baseline": 1450000, "hotel": 260000, "meal": 130000,
+           "airlines": ["대한항공", "아시아나항공", "에어프레미아"]},
+}
+# NOTE: the profile key "SEA" above is the internal Southeast-Asia *budget profile* (legacy name kept intact).
+# It is never a region code nor a city code: the UI region is `SEASIA`, and `SEA` as a city is Seattle.
+
+# ----------------------------------------------------------------------
+# 8 UI regions (strictly disjoint from IATA codes) and travel themes
+# ----------------------------------------------------------------------
+REGION_LABELS: dict[str, str] = {
+    "JP": "🇯🇵 일본",
+    "TWHK": "🏮 대만·홍콩",
+    "CNMN": "🇨🇳 중국·몽골",
+    "SEASIA": "🌴 동남아",
+    "PAC": "🏝️ 괌·하와이",
+    "OCE": "🦘 대양주",
+    "NA": "🗽 북미",
+    "EU": "🏰 유럽",
+}
+REGION_CODES: tuple[str, ...] = tuple(REGION_LABELS)
+BRIEF_REGION_CHOICES: tuple[str, ...] = ("ALL",) + REGION_CODES
+THEME_CODES: tuple[str, ...] = ("ALL", "RESORT", "CITY")
+THEME_LABELS: dict[str, str] = {"ALL": "✨ 전체", "RESORT": "🏖️ 휴양", "CITY": "🏙️ 관광"}
+CITY_THEMES = ("resort", "city", "both")
+
+# code: (name, country, flag, profile, flight_hours, currency, aliases, region_code, theme)
+# ICN nonstop destinations only. FALLBACK metadata stays conservative (DATA-01, see module docstring).
+_FALLBACK_CITIES: dict[str, tuple[str, str, str, str, float, str, tuple[str, ...], str, str]] = {
+    # --- JP 일본 ---
+    "CTS": ("삿포로", "일본", "🇯🇵", "JP", 2.8, "JPY", ("신치토세", "홋카이도", "sapporo", "chitose"), "JP", "both"),
+    "OKA": ("오키나와", "일본", "🇯🇵", "JP", 2.3, "JPY", ("나하", "okinawa", "naha"), "JP", "resort"),
+    "NGO": ("나고야", "일본", "🇯🇵", "JP", 1.9, "JPY", ("주부", "nagoya"), "JP", "city"),
+    "MYJ": ("마쓰야마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("마츠야마", "matsuyama"), "JP", "city"),
+    "KMJ": ("구마모토", "일본", "🇯🇵", "JP", 1.4, "JPY", ("kumamoto",), "JP", "city"),
+    "KOJ": ("가고시마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("kagoshima",), "JP", "both"),
+    "OIT": ("오이타", "일본", "🇯🇵", "JP", 1.4, "JPY", ("벳푸", "oita", "beppu"), "JP", "both"),
+    "HIJ": ("히로시마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("hiroshima",), "JP", "city"),
+    "TAK": ("다카마쓰", "일본", "🇯🇵", "JP", 1.6, "JPY", ("타카마쓰", "takamatsu"), "JP", "city"),
+    "OKJ": ("오카야마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("okayama",), "JP", "city"),
+    "KMQ": ("고마쓰", "일본", "🇯🇵", "JP", 1.8, "JPY", ("가나자와", "komatsu", "kanazawa"), "JP", "city"),
+    "FSZ": ("시즈오카", "일본", "🇯🇵", "JP", 2.0, "JPY", ("shizuoka",), "JP", "city"),
+    "TOY": ("도야마", "일본", "🇯🇵", "JP", 1.9, "JPY", ("토야마", "toyama"), "JP", "city"),
+    "SDJ": ("센다이", "일본", "🇯🇵", "JP", 2.2, "JPY", ("sendai",), "JP", "city"),
+    "AOJ": ("아오모리", "일본", "🇯🇵", "JP", 2.4, "JPY", ("aomori",), "JP", "both"),
+    "NGS": ("나가사키", "일본", "🇯🇵", "JP", 1.3, "JPY", ("nagasaki",), "JP", "city"),
+    "KKJ": ("기타큐슈", "일본", "🇯🇵", "JP", 1.3, "JPY", ("키타큐슈", "kitakyushu"), "JP", "city"),
+    "KIJ": ("니가타", "일본", "🇯🇵", "JP", 2.0, "JPY", ("niigata",), "JP", "city"),
+    "ISG": ("이시가키", "일본", "🇯🇵", "JP", 2.8, "JPY", ("ishigaki",), "JP", "resort"),
+    # --- TWHK 대만·홍콩 ---
+    "HKG": ("홍콩", "홍콩", "🇭🇰", "HKMO", 3.8, "HKD", ("hongkong",), "TWHK", "city"),
+    "MFM": ("마카오", "마카오", "🇲🇴", "HKMO", 3.7, "MOP", ("macau", "macao"), "TWHK", "city"),
+    "KHH": ("가오슝", "대만", "🇹🇼", "TW", 2.8, "TWD", ("까오슝", "kaohsiung"), "TWHK", "city"),
+    "RMQ": ("타이중", "대만", "🇹🇼", "TW", 2.6, "TWD", ("taichung",), "TWHK", "city"),
+    # --- CNMN 중국·몽골 ---
+    "TAO": ("칭다오", "중국", "🇨🇳", "CN", 1.6, "CNY", ("청도", "qingdao"), "CNMN", "city"),
+    "PVG": ("상하이", "중국", "🇨🇳", "CN", 2.0, "CNY", ("상해", "푸둥", "shanghai"), "CNMN", "city"),
+    "PEK": ("베이징", "중국", "🇨🇳", "CN", 2.3, "CNY", ("북경", "beijing"), "CNMN", "city"),
+    "ULN": ("울란바토르", "몽골", "🇲🇳", "MN", 3.5, "MNT", ("몽골", "ulaanbaatar"), "CNMN", "both"),
+    "SHE": ("선양", "중국", "🇨🇳", "CN", 1.8, "CNY", ("심양", "shenyang"), "CNMN", "city"),
+    "DLC": ("다롄", "중국", "🇨🇳", "CN", 1.4, "CNY", ("대련", "dalian"), "CNMN", "city"),
+    "YNJ": ("옌지", "중국", "🇨🇳", "CN", 2.0, "CNY", ("연길", "백두산", "yanji"), "CNMN", "both"),
+    "CAN": ("광저우", "중국", "🇨🇳", "CN", 3.8, "CNY", ("guangzhou",), "CNMN", "city"),
+    "SZX": ("선전", "중국", "🇨🇳", "CN", 3.8, "CNY", ("심천", "shenzhen"), "CNMN", "city"),
+    "TFU": ("청두", "중국", "🇨🇳", "CN", 4.2, "CNY", ("성도", "chengdu"), "CNMN", "city"),
+    "CKG": ("충칭", "중국", "🇨🇳", "CN", 3.9, "CNY", ("중경", "chongqing"), "CNMN", "city"),
+    "XIY": ("시안", "중국", "🇨🇳", "CN", 3.1, "CNY", ("서안", "xian"), "CNMN", "city"),
+    "HGH": ("항저우", "중국", "🇨🇳", "CN", 2.2, "CNY", ("항주", "hangzhou"), "CNMN", "city"),
+    "SYX": ("싼야", "중국", "🇨🇳", "CN", 5.0, "CNY", ("하이난", "산야", "sanya", "hainan"), "CNMN", "resort"),
+    "KMG": ("쿤밍", "중국", "🇨🇳", "CN", 4.8, "CNY", ("곤명", "kunming"), "CNMN", "both"),
+    "HRB": ("하얼빈", "중국", "🇨🇳", "CN", 2.5, "CNY", ("harbin",), "CNMN", "city"),
+    "WEH": ("웨이하이", "중국", "🇨🇳", "CN", 1.2, "CNY", ("위해", "weihai"), "CNMN", "city"),
+    "XMN": ("샤먼", "중국", "🇨🇳", "CN", 3.2, "CNY", ("하문", "xiamen"), "CNMN", "city"),
+    # --- SEASIA 동남아 (budget profile key "SEA" = Southeast Asia; NOT Seattle) ---
+    "CEB": ("세부", "필리핀", "🇵🇭", "SEA", 4.5, "PHP", ("막탄", "cebu"), "SEASIA", "resort"),
+    "KLO": ("보라카이", "필리핀", "🇵🇭", "SEA", 4.3, "PHP", ("칼리보", "boracay", "kalibo"), "SEASIA", "resort"),
+    "MNL": ("마닐라", "필리핀", "🇵🇭", "SEA", 4.0, "PHP", ("manila",), "SEASIA", "city"),
+    "CRK": ("클락", "필리핀", "🇵🇭", "SEA", 4.0, "PHP", ("클라크", "clark"), "SEASIA", "both"),
+    "TAG": ("보홀", "필리핀", "🇵🇭", "SEA", 4.5, "PHP", ("팡라오", "bohol", "panglao"), "SEASIA", "resort"),
+    "HAN": ("하노이", "베트남", "🇻🇳", "SEA", 4.5, "VND", ("hanoi",), "SEASIA", "city"),
+    "SGN": ("호치민", "베트남", "🇻🇳", "SEA", 5.3, "VND", ("호찌민", "사이공", "hochiminh", "saigon"), "SEASIA", "city"),
+    "PQC": ("푸꾸옥", "베트남", "🇻🇳", "SEA", 5.5, "VND", ("푸쿠옥", "phuquoc"), "SEASIA", "resort"),
+    "HPH": ("하이퐁", "베트남", "🇻🇳", "SEA", 4.3, "VND", ("하롱베이", "haiphong", "halong"), "SEASIA", "both"),
+    "DLI": ("달랏", "베트남", "🇻🇳", "SEA", 5.0, "VND", ("dalat",), "SEASIA", "both"),
+    "BKI": ("코타키나발루", "말레이시아", "🇲🇾", "SEA", 5.0, "MYR", ("코타", "kotakinabalu"), "SEASIA", "resort"),
+    "KUL": ("쿠알라룸푸르", "말레이시아", "🇲🇾", "SEA", 6.5, "MYR", ("kualalumpur",), "SEASIA", "city"),
+    "CNX": ("치앙마이", "태국", "🇹🇭", "SEA", 5.8, "THB", ("chiangmai",), "SEASIA", "both"),
+    "HKT": ("푸껫", "태국", "🇹🇭", "SEA", 6.3, "THB", ("푸켓", "phuket"), "SEASIA", "resort"),
+    "VTE": ("비엔티안", "라오스", "🇱🇦", "SEA", 5.0, "LAK", ("라오스", "vientiane"), "SEASIA", "both"),
+    "PNH": ("프놈펜", "캄보디아", "🇰🇭", "SEA", 5.5, "KHR", ("phnompenh",), "SEASIA", "city"),
+    "SAI": ("시엠립", "캄보디아", "🇰🇭", "SEA", 5.5, "KHR", ("씨엠립", "앙코르와트", "siemreap", "angkor"), "SEASIA", "city"),
+    "RGN": ("양곤", "미얀마", "🇲🇲", "SEA", 6.0, "MMK", ("yangon",), "SEASIA", "city"),
+    "CGK": ("자카르타", "인도네시아", "🇮🇩", "SEA", 7.0, "IDR", ("jakarta",), "SEASIA", "city"),
+    "BWN": ("반다르스리브가완", "브루나이", "🇧🇳", "SEA", 5.2, "BND", ("브루나이", "brunei"), "SEASIA", "city"),
+    # --- PAC 괌·하와이 ---
+    "SPN": ("사이판", "미국", "🇺🇸", "PAC", 4.3, "USD", ("saipan",), "PAC", "resort"),
+    "ROR": ("팔라우", "팔라우", "🇵🇼", "PAC", 4.8, "USD", ("코로르", "palau", "koror"), "PAC", "resort"),
+    "HNL": ("하와이", "미국", "🇺🇸", "HAWAII", 8.5, "USD", ("호놀룰루", "오아후", "hawaii", "honolulu"), "PAC", "both"),
+    # --- OCE 대양주 ---
+    "SYD": ("시드니", "호주", "🇦🇺", "OCE", 10.5, "AUD", ("sydney",), "OCE", "both"),
+    "MEL": ("멜버른", "호주", "🇦🇺", "OCE", 10.5, "AUD", ("멜번", "melbourne"), "OCE", "city"),
+    "BNE": ("브리즈번", "호주", "🇦🇺", "OCE", 9.8, "AUD", ("골드코스트", "brisbane"), "OCE", "both"),
+    "AKL": ("오클랜드", "뉴질랜드", "🇳🇿", "OCE", 11.0, "NZD", ("뉴질랜드", "auckland"), "OCE", "both"),
+    # --- NA 북미 (Seattle `SEA` lives here as a city) ---
+    "YVR": ("밴쿠버", "캐나다", "🇨🇦", "NA", 10.0, "CAD", ("벤쿠버", "vancouver"), "NA", "city"),
+    "SEA": ("시애틀", "미국", "🇺🇸", "NA", 10.0, "USD", ("seattle",), "NA", "city"),
+    "LAX": ("로스앤젤레스", "미국", "🇺🇸", "NA", 11.0, "USD", ("엘에이", "로스엔젤레스", "losangeles"), "NA", "city"),
+    "SFO": ("샌프란시스코", "미국", "🇺🇸", "NA", 10.5, "USD", ("sanfrancisco",), "NA", "city"),
+    "LAS": ("라스베이거스", "미국", "🇺🇸", "NA", 11.0, "USD", ("라스베가스", "lasvegas"), "NA", "city"),
+    "JFK": ("뉴욕", "미국", "🇺🇸", "NA", 14.0, "USD", ("newyork", "nyc"), "NA", "city"),
+    "EWR": ("뉴어크", "미국", "🇺🇸", "NA", 14.0, "USD", ("뉴왁", "newark"), "NA", "city"),
+    "BOS": ("보스턴", "미국", "🇺🇸", "NA", 13.5, "USD", ("boston",), "NA", "city"),
+    "IAD": ("워싱턴DC", "미국", "🇺🇸", "NA", 13.5, "USD", ("워싱턴", "washington"), "NA", "city"),
+    "ORD": ("시카고", "미국", "🇺🇸", "NA", 13.0, "USD", ("chicago",), "NA", "city"),
+    "ATL": ("애틀랜타", "미국", "🇺🇸", "NA", 14.0, "USD", ("아틀란타", "atlanta"), "NA", "city"),
+    "DFW": ("댈러스", "미국", "🇺🇸", "NA", 13.0, "USD", ("달라스", "dallas"), "NA", "city"),
+    "IAH": ("휴스턴", "미국", "🇺🇸", "NA", 13.5, "USD", ("houston",), "NA", "city"),
+    "DTW": ("디트로이트", "미국", "🇺🇸", "NA", 12.5, "USD", ("detroit",), "NA", "city"),
+    "MSP": ("미니애폴리스", "미국", "🇺🇸", "NA", 12.0, "USD", ("minneapolis",), "NA", "city"),
+    "DEN": ("덴버", "미국", "🇺🇸", "NA", 12.0, "USD", ("denver",), "NA", "city"),
+    "SLC": ("솔트레이크시티", "미국", "🇺🇸", "NA", 11.5, "USD", ("솔트레이크", "saltlakecity"), "NA", "city"),
+    "YYZ": ("토론토", "캐나다", "🇨🇦", "NA", 13.0, "CAD", ("toronto",), "NA", "city"),
+    "MEX": ("멕시코시티", "멕시코", "🇲🇽", "NA", 14.0, "MXN", ("멕시코", "mexicocity"), "NA", "city"),
+    # --- EU 유럽 ---
+    "CDG": ("파리", "프랑스", "🇫🇷", "EU", 14.0, "EUR", ("paris",), "EU", "city"),
+    "LHR": ("런던", "영국", "🇬🇧", "EU", 14.5, "GBP", ("london",), "EU", "city"),
+    "FCO": ("로마", "이탈리아", "🇮🇹", "EU", 13.5, "EUR", ("rome", "roma"), "EU", "city"),
+    "PRG": ("프라하", "체코", "🇨🇿", "EU", 12.5, "CZK", ("prague",), "EU", "city"),
+    "ZAG": ("자그레브", "크로아티아", "🇭🇷", "EU", 13.0, "EUR", ("크로아티아", "zagreb"), "EU", "city"),
+    "FRA": ("프랑크푸르트", "독일", "🇩🇪", "EU", 13.0, "EUR", ("frankfurt",), "EU", "city"),
+    "MUC": ("뮌헨", "독일", "🇩🇪", "EU", 13.0, "EUR", ("munich",), "EU", "city"),
+    "AMS": ("암스테르담", "네덜란드", "🇳🇱", "EU", 13.0, "EUR", ("amsterdam",), "EU", "city"),
+    "MAD": ("마드리드", "스페인", "🇪🇸", "EU", 14.5, "EUR", ("madrid",), "EU", "city"),
+    "BCN": ("바르셀로나", "스페인", "🇪🇸", "EU", 14.0, "EUR", ("barcelona",), "EU", "city"),
+    "MXP": ("밀라노", "이탈리아", "🇮🇹", "EU", 13.5, "EUR", ("milan", "milano"), "EU", "city"),
+    "VCE": ("베네치아", "이탈리아", "🇮🇹", "EU", 13.5, "EUR", ("베니스", "venice"), "EU", "city"),
+    "IST": ("이스탄불", "튀르키예", "🇹🇷", "EU", 12.0, "TRY", ("터키", "istanbul"), "EU", "city"),
+    "VIE": ("비엔나", "오스트리아", "🇦🇹", "EU", 12.5, "EUR", ("vienna", "wien"), "EU", "city"),
+    "ZRH": ("취리히", "스위스", "🇨🇭", "EU", 13.0, "CHF", ("스위스", "zurich"), "EU", "city"),
+    "HEL": ("헬싱키", "핀란드", "🇫🇮", "EU", 13.0, "EUR", ("helsinki",), "EU", "city"),
+    "WAW": ("바르샤바", "폴란드", "🇵🇱", "EU", 12.5, "PLN", ("warsaw",), "EU", "city"),
+    "BUD": ("부다페스트", "헝가리", "🇭🇺", "EU", 12.5, "HUF", ("budapest",), "EU", "city"),
+    "LIS": ("리스본", "포르투갈", "🇵🇹", "EU", 15.0, "EUR", ("lisbon",), "EU", "city"),
 }
 
-# code: (name, country, flag, profile, flight_hours, currency, aliases)
-_FALLBACK_CITIES: dict[str, tuple[str, str, str, str, float, str, tuple[str, ...]]] = {
-    "CTS": ("삿포로", "일본", "🇯🇵", "JP", 2.8, "JPY", ("신치토세", "홋카이도", "sapporo", "chitose")),
-    "OKA": ("오키나와", "일본", "🇯🇵", "JP", 2.3, "JPY", ("나하", "okinawa", "naha")),
-    "NGO": ("나고야", "일본", "🇯🇵", "JP", 1.9, "JPY", ("주부", "nagoya")),
-    "MYJ": ("마쓰야마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("마츠야마", "matsuyama")),
-    "KMJ": ("구마모토", "일본", "🇯🇵", "JP", 1.4, "JPY", ("kumamoto",)),
-    "KOJ": ("가고시마", "일본", "🇯🇵", "JP", 1.6, "JPY", ("kagoshima",)),
-    "CEB": ("세부", "필리핀", "🇵🇭", "SEA", 4.5, "PHP", ("막탄", "cebu")),
-    "KLO": ("보라카이", "필리핀", "🇵🇭", "SEA", 4.3, "PHP", ("칼리보", "boracay", "kalibo")),
-    "MNL": ("마닐라", "필리핀", "🇵🇭", "SEA", 4.0, "PHP", ("manila",)),
-    "HAN": ("하노이", "베트남", "🇻🇳", "SEA", 4.5, "VND", ("hanoi",)),
-    "SGN": ("호치민", "베트남", "🇻🇳", "SEA", 5.3, "VND", ("호찌민", "사이공", "hochiminh", "saigon")),
-    "PQC": ("푸꾸옥", "베트남", "🇻🇳", "SEA", 5.5, "VND", ("푸쿠옥", "phuquoc")),
-    "BKI": ("코타키나발루", "말레이시아", "🇲🇾", "SEA", 5.0, "MYR", ("코타", "kotakinabalu")),
-    "KUL": ("쿠알라룸푸르", "말레이시아", "🇲🇾", "SEA", 6.5, "MYR", ("kualalumpur",)),
-    "CNX": ("치앙마이", "태국", "🇹🇭", "SEA", 5.8, "THB", ("chiangmai",)),
-    "HKT": ("푸껫", "태국", "🇹🇭", "SEA", 6.3, "THB", ("푸켓", "phuket")),
-    "HNL": ("하와이", "미국", "🇺🇸", "HAWAII", 8.5, "USD", ("호놀룰루", "오아후", "hawaii", "honolulu")),
-    "SPN": ("사이판", "미국", "🇺🇸", "PAC", 4.3, "USD", ("saipan",)),
-    "HKG": ("홍콩", "홍콩", "🇭🇰", "HKMO", 3.8, "HKD", ("hongkong",)),
-    "MFM": ("마카오", "마카오", "🇲🇴", "HKMO", 3.7, "MOP", ("macau", "macao")),
-    "KHH": ("가오슝", "대만", "🇹🇼", "TW", 2.8, "TWD", ("까오슝", "kaohsiung")),
-    "TAO": ("칭다오", "중국", "🇨🇳", "CN", 1.6, "CNY", ("청도", "qingdao")),
-    "PVG": ("상하이", "중국", "🇨🇳", "CN", 2.0, "CNY", ("상해", "푸둥", "shanghai")),
-    "PEK": ("베이징", "중국", "🇨🇳", "CN", 2.3, "CNY", ("북경", "beijing")),
-    "ULN": ("울란바토르", "몽골", "🇲🇳", "MN", 3.5, "MNT", ("몽골", "ulaanbaatar")),
-    "CDG": ("파리", "프랑스", "🇫🇷", "EU", 14.0, "EUR", ("paris",)),
-    "LHR": ("런던", "영국", "🇬🇧", "EU", 14.5, "GBP", ("london",)),
-    "FCO": ("로마", "이탈리아", "🇮🇹", "EU", 13.5, "EUR", ("rome", "roma")),
-    "SYD": ("시드니", "호주", "🇦🇺", "OCE", 10.5, "AUD", ("sydney",)),
+# Region/theme tags for the CURATED JSON cities (their metadata comes from `data/destinations_meta.json`).
+_CURATED_TAGS: dict[str, tuple[str, str]] = {
+    "NRT": ("JP", "city"),
+    "KIX": ("JP", "city"),
+    "FUK": ("JP", "city"),
+    "TPE": ("TWHK", "city"),
+    "DAD": ("SEASIA", "both"),
+    "CXR": ("SEASIA", "resort"),
+    "BKK": ("SEASIA", "city"),
+    "DPS": ("SEASIA", "resort"),
+    "SIN": ("SEASIA", "city"),
+    "GUM": ("PAC", "resort"),
 }
+
+# City picker order: Korean-traveller popularity first, then Korean alphabetical (가나다) for the rest.
+_POPULARITY_ORDER: tuple[str, ...] = (
+    "NRT", "KIX", "FUK", "CTS", "OKA", "NGO",
+    "TPE", "HKG", "KHH", "MFM",
+    "PVG", "TAO", "PEK", "ULN", "YNJ", "DLC",
+    "DAD", "BKK", "CXR", "CEB", "DPS", "SGN", "HAN", "PQC", "SIN", "BKI", "HKT", "KLO", "CNX",
+    "GUM", "SPN", "HNL", "ROR",
+    "SYD", "MEL", "BNE", "AKL",
+    "LAX", "JFK", "YVR", "SFO", "SEA", "LAS",
+    "CDG", "LHR", "FCO", "PRG", "BCN", "IST", "FRA", "ZAG",
+)
+_POPULARITY_RANK: dict[str, int] = {}
+for _i, _c in enumerate(_POPULARITY_ORDER):
+    _POPULARITY_RANK.setdefault(_c, _i)
+
+
+def is_region_code(code: Optional[str]) -> bool:
+    """UI region codes only (`SEASIA`, never the Seattle IATA code `SEA`)."""
+    return (code or "").strip().upper() in REGION_LABELS
+
+
+def normalize_region(code: Optional[str]) -> str:
+    c = (code or "").strip().upper()
+    return c if c in BRIEF_REGION_CHOICES else "ALL"
+
+
+def normalize_theme(code: Optional[str]) -> str:
+    c = (code or "").strip().upper()
+    return c if c in THEME_CODES else "ALL"
+
+
+def region_label(code: Optional[str]) -> str:
+    c = (code or "").strip().upper()
+    return "🌏 전체" if c == "ALL" else REGION_LABELS.get(c, c)
+
+
+def theme_matches(city_theme: Optional[str], theme_filter: Optional[str]) -> bool:
+    """ALL matches everything; RESORT/CITY also match `both` cities."""
+    f = normalize_theme(theme_filter)
+    if f == "ALL":
+        return True
+    t = (city_theme or "").strip().lower()
+    return t == "both" or t == f.lower()
+
+
+def city_region_theme(code: Optional[str]) -> tuple[str, str]:
+    """(region_code, theme) for any catalog city (curated or fallback); ("", "") when unknown."""
+    c = (code or "").strip().upper()
+    spec = _FALLBACK_CITIES.get(c)
+    if spec is not None:
+        return spec[7], spec[8]
+    return _CURATED_TAGS.get(c, ("", ""))
 
 # Extra aliases for CURATED cities (names from the JSON are indexed automatically).
 _CURATED_ALIASES: dict[str, tuple[str, ...]] = {
@@ -200,7 +376,7 @@ def build_fallback_meta(code: str) -> Optional[DestinationMeta]:
     spec = _FALLBACK_CITIES.get(code)
     if spec is None:
         return None
-    name, country, _flag, profile_key, hours, currency, _aliases = spec
+    name, country, _flag, profile_key, hours, currency, _aliases, region_code, theme = spec
     profile = _REGION_PROFILES[profile_key]
     baseline = int(profile["baseline"])
     return DestinationMeta(
@@ -226,6 +402,9 @@ def build_fallback_meta(code: str) -> Optional[DestinationMeta]:
         airlines=list(profile["airlines"]),
         metadata_quality="FALLBACK",
         experience_hook="",
+        region_code=region_code,
+        theme=theme,
+        profile_key=profile_key,
     )
 
 
@@ -322,6 +501,12 @@ class CityCatalog:
                 break
         if len(key) < 2 or limit <= 0:
             return []
+        if len(key) == 3 and key.isascii() and key.isalpha():
+            # IATA-like 3-letter ASCII tokens are never fuzzy-matched (`XYZ` must not suggest `YYZ`):
+            # only an exact code / alias hit counts.
+            exact = self._index.get(key)
+            res = self.get(exact) if exact else None
+            return [res] if res is not None else []
         matches = difflib.get_close_matches(
             key, list(self._index.keys()), n=max(limit * 4, 8), cutoff=_SUGGEST_CUTOFF
         )
@@ -366,3 +551,64 @@ class CityCatalog:
     def suggestion_names(self, limit: int = 12) -> list[str]:
         picks = ["CTS", "OKA", "NGO", "CEB", "HAN", "SGN", "BKI", "PQC", "HKG", "SPN", "HNL", "PVG"]
         return [self._fallback[c].name for c in picks if c in self._fallback][:limit]
+
+    # ------------------------------------------------------------------
+    # 8-region / theme views (shared by search & watch pickers and Track A segments)
+    # ------------------------------------------------------------------
+    def all_codes(self) -> list[str]:
+        return list(self._curated) + [c for c in self._fallback if c not in self._curated]
+
+    def region_of(self, code: str) -> str:
+        c = (code or "").strip().upper()
+        region, _ = city_region_theme(c)
+        if region:
+            return region
+        res = self.get(c)
+        return res.meta.region_code if res else ""
+
+    def theme_of(self, code: str) -> str:
+        c = (code or "").strip().upper()
+        _, theme = city_region_theme(c)
+        if theme:
+            return theme
+        res = self.get(c)
+        return res.meta.theme if res else ""
+
+    def popularity_key(self, code: str) -> tuple[int, str]:
+        res = self.get(code)
+        return _POPULARITY_RANK.get(code, len(_POPULARITY_ORDER)), (res.meta.name if res else code)
+
+    def cities_in_region(self, region: str, theme: str = "ALL") -> list[str]:
+        """Catalog cities of one UI region (theme-filtered), popularity first then Korean alphabetical.
+        `region="ALL"` means every region."""
+        reg = normalize_region(region)
+        out = [
+            c for c in self.all_codes()
+            if (reg == "ALL" or self.region_of(c) == reg) and theme_matches(self.theme_of(c), theme)
+        ]
+        return sorted(out, key=self.popularity_key)
+
+    def region_city_counts(self) -> dict[str, int]:
+        counts = {r: 0 for r in REGION_CODES}
+        for c in self.all_codes():
+            r = self.region_of(c)
+            if r in counts:
+                counts[r] += 1
+        return counts
+
+    def destinations_for(self, codes) -> dict[str, DestinationMeta]:
+        """`{code: meta}` for known codes, with region/theme tags guaranteed on the returned metas."""
+        out: dict[str, DestinationMeta] = {}
+        for c in codes:
+            res = self.get(c)
+            if res is None:
+                continue
+            meta = res.meta
+            if not meta.region_code or not meta.theme:
+                region, theme = city_region_theme(res.code)
+                if region and not meta.region_code:
+                    meta.region_code = region
+                if theme and not meta.theme:
+                    meta.theme = theme
+            out[res.code] = meta
+        return out

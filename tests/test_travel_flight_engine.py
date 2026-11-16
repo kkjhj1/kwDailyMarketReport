@@ -113,3 +113,70 @@ def test_statutory_tax_fuel_floor_and_carrier_mapping():
         assert "만원대" in d.price_band_str
         # Carrier mapping must never fall back to broken generic placeholders
         assert d.airline not in ("국적항공사", "LCC특가")
+
+
+# ----------------------------------------------------------------------
+# 8 regions / ~115 ICN direct cities / long-haul trip profile
+# ----------------------------------------------------------------------
+def test_catalog_8_regions_115_cities_and_sea_seattle_disjoint():
+    from travel_brief.city_catalog import (
+        CITY_THEMES,
+        REGION_CODES,
+        REGION_LABELS,
+        CityCatalog,
+        city_region_theme,
+        is_region_code,
+    )
+
+    engine = FlightEngine()
+    cat = CityCatalog(engine.destinations)
+    codes = cat.all_codes()
+    assert 110 <= len(codes) <= 120 and len(codes) == len(set(codes))
+    assert REGION_CODES == ("JP", "TWHK", "CNMN", "SEASIA", "PAC", "OCE", "NA", "EU")
+    assert REGION_LABELS["SEASIA"] == "🌴 동남아" and REGION_LABELS["NA"] == "🗽 북미"
+    assert not set(REGION_CODES) & set(codes)  # region codes never collide with city codes
+    assert not is_region_code("SEA") and is_region_code("SEASIA") and not is_region_code("ALL")
+    assert cat.region_of("SEA") == "NA" and cat.resolve("시애틀").code == "SEA"
+    assert all(n >= 1 for n in cat.region_city_counts().values())
+    for code in codes:
+        region, theme = city_region_theme(code)
+        assert region in REGION_CODES and theme in CITY_THEMES, code
+    required = {"YVR", "SEA", "LAX", "SFO", "LAS", "JFK", "EWR", "BOS", "IAD", "ORD", "ATL", "DFW", "IAH",
+                "DTW", "MSP", "DEN", "YYZ", "MEX", "PRG", "ZAG", "MEL", "BNE", "AKL", "ROR", "RMQ"}
+    assert required <= set(codes)
+    assert set(engine.destinations) <= set(codes)
+    assert all(m.region_code in REGION_CODES and m.theme for m in engine.destinations.values())
+    # sparse (region, theme) has no city -> Track A falls back to the region ALL theme
+    assert cat.cities_in_region("EU", "RESORT") == [] and cat.cities_in_region("EU")
+    assert set(cat.cities_in_region("SEASIA", "RESORT")) >= {"CXR", "DPS", "CEB"}
+    assert "DAD" in cat.cities_in_region("SEASIA", "RESORT") and "DAD" in cat.cities_in_region("SEASIA", "CITY")
+    assert cat.cities_in_region("JP")[:3] == ["NRT", "KIX", "FUK"]
+
+
+def test_long_haul_profile_slots_and_copy():
+    from travel_brief import city_catalog as cc
+    from travel_brief.city_catalog import CityCatalog, build_fallback_meta
+    from travel_brief.models import format_trip_length
+
+    for code in ("CDG", "JFK", "SYD", "HNL", "CGK", "YVR"):
+        meta = build_fallback_meta(code)
+        assert meta.is_long_haul and meta.trip_profile == "LONG", code
+    for code in ("CTS", "CEB", "HKG", "SPN", "ULN"):
+        assert not build_fallback_meta(code).is_long_haul, code
+    engine = FlightEngine()
+    assert engine.destinations["DPS"].is_long_haul  # 7.0h curated -> long-haul copy
+    assert not engine.destinations["FUK"].is_long_haul
+    ref = date(2026, 11, 16)
+    extra = CityCatalog(engine.destinations).destinations_for(["CDG", "CTS"])
+    nights: dict = {}
+    for d in engine.search_deals(extra_destinations=extra, ref_date=ref):
+        nights.setdefault(d.destination_code, set()).add(d.nights)
+    assert nights == {"CDG": {5}, "CTS": {3}}  # extra_destinations replace the curated set
+    # curated JSON cities keep the legacy 3N weekend contract (incl. the 7.0h DPS)
+    assert {d.nights for d in engine.search_deals(ref_date=ref)} == {3}
+    long_slots = engine.generate_long_haul_slots(ref_date=ref, months_ahead=2)
+    assert long_slots and all(n == 5 and dow in ("목", "금") for _d, _r, dow, _rd, n in long_slots)
+    assert format_trip_length(3) == "3박 4일"
+    assert format_trip_length(5, True) == "5박 6일 · 장거리 5박 이상 권장"
+    # legacy budget profile keys stay intact; NA is added
+    assert {"HAWAII", "PAC", "OCE", "EU", "NA", "SEA", "JP", "CN", "HKMO", "TW", "MN"} <= set(cc._REGION_PROFILES)

@@ -69,6 +69,44 @@ class TravelWebReportTests(unittest.TestCase):
             self.assertIn(dest.name, html)
             self.assertIn(dest.code, html)
 
+    def test_dynamic_region_filter_and_region_query_param(self):
+        from travel_brief.web_report import build_travel_snapshot
+
+        snap = build_travel_snapshot(self.engine, top_n=3, segments={("ALL", "ALL"), ("EU", "ALL"), ("NA", "CITY")})
+        html = self.generator.generate_html_report(snapshot=snap)
+        # no 10-city hardcoded filter: buttons come from catalog region metadata of this run's cities
+        self.assertNotIn('data-filter="japan"', html)
+        self.assertNotIn("전체 (10개 도시)", html)
+        for region in ("JP", "TWHK", "SEASIA", "PAC", "EU", "NA"):
+            self.assertIn(f'data-filter="{region}"', html)
+        self.assertIn('data-dest-region="EU"', html)
+        self.assertIn("파리", html)  # FALLBACK EU city rendered from catalog metadata
+        self.assertIn("5박 이상 권장", html)
+        # `?region=` deep link support + 360px / 44px rules
+        self.assertIn("URLSearchParams", html)
+        self.assertIn("get('region')", html)
+        self.assertIn('"SEASIA": "🌴 동남아"', html)
+        self.assertIn("min-height: 44px", html)
+        self.assertIn("repeat(3, minmax(0, 1fr))", html)
+        # segments are filled in memory from one extra pass, with the sparse fallback notice
+        self.assertIn("EU:ALL", snap.segment_recs)
+        self.assertTrue(snap.segment_recs["EU:ALL"])
+        self.assertTrue(all(r.destination.region_code == "EU" for r in snap.segment_recs["EU:ALL"]))
+        self.assertTrue(all(r.destination.region_code == "NA" for r in snap.segment_recs["NA:CITY"]))
+        self.assertTrue(all(r.best_deal.nights == 5 for r in snap.segment_recs["NA:CITY"]))
+
+    def test_sparse_region_theme_falls_back_with_notice(self):
+        from travel_brief.web_report import SPARSE_SEGMENT_NOTICE, build_travel_snapshot
+
+        snap = build_travel_snapshot(self.engine, top_n=3, segments={("EU", "RESORT"), ("ALL", "RESORT")})
+        self.assertEqual(snap.segment_notices.get("EU:RESORT"), SPARSE_SEGMENT_NOTICE)
+        self.assertTrue(snap.segment_recs["EU:RESORT"])
+        self.assertTrue(all(r.destination.region_code == "EU" for r in snap.segment_recs["EU:RESORT"]))
+        # ALL region + theme filters the curated universe in memory (no notice needed)
+        self.assertNotIn("ALL:RESORT", snap.segment_notices)
+        self.assertTrue(all(r.destination.theme in ("resort", "both") for r in snap.segment_recs["ALL:RESORT"]))
+        self.assertTrue(all(r.destination.code in self.engine.destinations for r in snap.segment_recs["ALL:RESORT"]))
+
     def test_save_reports(self):
         import tempfile
         from pathlib import Path

@@ -362,6 +362,82 @@ class TravelNaverLiveTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(sent_ids, ["7820975792"])
 
+    def test_worker_caps_are_never_raised(self):
+        from travel_brief import naver_live as nl
+
+        self.assertEqual(nl.PG_MAX_WORKERS, 5)
+        self.assertEqual(NaverFlightLiveClient(max_sse_workers=9).max_sse_workers, 2)
+        self.assertEqual(NaverFlightLiveClient(max_sse_workers=0).max_sse_workers, 1)
+        self.assertEqual(NaverFlightLiveClient().max_sse_workers, 2)
+
+    def test_pg_only_collection_skips_sse_and_uses_its_own_namespace(self):
+        import time as _time
+
+        ref = date(2031, 1, 6)
+        dests = {"FUK": self.engine.destinations["FUK"]}
+        slots = self.engine.generate_weekend_slots(ref_date=ref, months_ahead=1)
+        holiday_fn = self.engine.get_peak_holiday_info
+        dep_iso, ret_iso = slots[0][0].isoformat(), slots[0][1].isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            client = NaverFlightLiveClient(cache_path=Path(tmp) / "c.json")
+            # 1. stage-1 only: no cookie preflight, no SSE call, LIVE_PG deals
+            with patch.object(client, "fetch_city_batch_pg", return_value={(dep_iso, ret_iso): (150_000, 160_000)}), \
+                    patch.object(client, "fetch_live_sse_slot", side_effect=AssertionError("no SSE in pg_only")), \
+                    patch.object(client, "_fetch_session_cookie_header", side_effect=AssertionError("no preflight")):
+                deals = client._collect_live_deals_uncached(dests, slots, holiday_fn, pg_only=True)
+            self.assertEqual([d.data_source for d in deals], ["LIVE_PG"])
+
+            # 2. pg_only lives under `#pg` and never overwrites the full entry
+            seen: list[dict] = []
+
+            def fake_collect(destinations, slots_, holiday_fn_, **kw):
+                seen.append(kw)
+                return list(deals)
+
+            with patch.object(client, "_collect_live_deals_uncached", side_effect=fake_collect):
+                out = client.fetch_all_weekend_deals(dests, slots, holiday_fn, ref_date=ref, pg_only=True)
+            self.assertTrue(out)
+            self.assertEqual(seen, [{"pg_only": True}])
+            self.assertIn(("2031-01-06#pg", 6, ("FUK",)), _MEM_CACHE)
+            self.assertNotIn(("2031-01-06", 6, ("FUK",)), _MEM_CACHE)
+
+            # 3. a fresh full (SSE) entry is a strict upgrade: pg_only lookups reuse it without network I/O
+            full = FlightDeal(
+                destination_code="FUK", destination_name="후쿠오카", origin_code="ICN",
+                departure_date=dep_iso, return_date=ret_iso, departure_day_of_week="목", return_day_of_week="일",
+                nights=3, airline="진에어", price_krw=140_000, baseline_krw=220_000, data_source="LIVE_SSE",
+            )
+            _MEM_CACHE[("2031-01-06", 6, ("FUK",))] = (_time.time(), [full])
+            with patch.object(client, "_collect_live_deals_uncached", side_effect=AssertionError("must hit cache")):
+                reused = client.fetch_all_weekend_deals(dests, slots, holiday_fn, ref_date=ref, pg_only=True)
+            self.assertEqual([d.data_source for d in reused], ["LIVE_SSE"])
+
+    def test_trip_profile_namespaces_long_haul_slots_in_cache_keys(self):
+        from travel_brief.city_catalog import CityCatalog
+
+        class _FakeLive:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_all_weekend_deals(self, destinations, slots, holiday_fn, ref_date=None, months_ahead=6,
+                                        fast_mode=False, slot_signature=None, deadline=None, pg_only=False):
+                self.calls.append((sorted(destinations), slot_signature, {s[4] for s in slots}, pg_only))
+                return []
+
+        engine = FlightEngine(live_naver=False)
+        engine.live_naver = True
+        engine._live_client = _FakeLive()
+        extra = CityCatalog(engine.destinations).destinations_for(["CDG", "CTS"])
+        engine.search_deals(extra_destinations=extra, ref_date=date(2026, 11, 16), pg_only=True)
+        calls = engine._live_client.calls
+        self.assertIn((["CTS"], None, {3}, True), calls)       # short-haul: legacy key namespace
+        self.assertIn((["CDG"], "#L5", {5}, True), calls)      # long-haul: own `#L5` namespace, 5N slots
+        self.assertEqual(len(calls), 2)
+        # the legacy curated ALL search stays a single short-haul call
+        engine._live_client.calls.clear()
+        engine.search_deals(ref_date=date(2026, 11, 16))
+        self.assertEqual(engine._live_client.calls, [(sorted(engine.destinations), None, {3}, False)])
+
 
 if __name__ == "__main__":
     unittest.main()

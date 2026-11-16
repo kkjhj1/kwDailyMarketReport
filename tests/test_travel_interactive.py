@@ -823,8 +823,10 @@ class TestTravelV23Integration(unittest.TestCase):
     # 3. Unregistered 3-letter codes are rejected
     def test_03_unknown_iata_rejected(self):
         cat = self._catalog()
-        for q in ("XYZ", "abc", "QQQ", "LAX"):
+        # LAX is a catalog city since the 8-region expansion; LGA / ORY stay unregistered
+        for q in ("XYZ", "abc", "QQQ", "LGA", "ORY"):
             self.assertIsNone(cat.resolve(q), q)
+        self.assertEqual(cat.resolve("LAX").code, "LAX")
         h = self._handler()
         self.assertIsNone(h.normalize_filter("XYZ"))
         h.worker_pool.submit = MagicMock()

@@ -3,6 +3,22 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
+# Long-haul trip profile (NA / EU / OCE regions, the HAWAII budget profile, or >= 7h nonstop flights).
+# Long-haul copy recommends 5+ nights instead of the short-haul 3박 4일 weekend default.
+LONG_HAUL_REGION_CODES = frozenset({"NA", "EU", "OCE"})
+LONG_HAUL_PROFILE_KEYS = frozenset({"NA", "EU", "OCE", "HAWAII"})
+LONG_HAUL_MIN_HOURS = 7.0
+LONG_HAUL_MIN_NIGHTS = 5
+LONG_HAUL_STAY_NOTE = "5박 이상 권장"
+
+
+def format_trip_length(nights: int, long_haul: bool = False) -> str:
+    """`3박 4일` for short-haul; long-haul always carries the `5박 이상 권장` guidance."""
+    n = max(1, int(nights or 0))
+    base = f"{n}박 {n + 1}일"
+    return f"{base} · 장거리 {LONG_HAUL_STAY_NOTE}" if long_haul else base
+
+
 @dataclass
 class DestinationMeta:
     code: str
@@ -28,10 +44,27 @@ class DestinationMeta:
     hotel_budget_segment: str = "3성급 가성비 비즈니스 호텔"
     metadata_quality: str = "CURATED"  # "CURATED" (검증 JSON) | "FALLBACK" (카탈로그 보수적 기본값)
     experience_hook: str = ""  # CURATED 전용 한 줄 체험 포인트 (FALLBACK은 과장 금지로 비움)
+    # 8 UI regions (JP/TWHK/CNMN/SEASIA/PAC/OCE/NA/EU) — never an IATA code (Seattle `SEA` != `SEASIA`).
+    region_code: str = ""
+    theme: str = ""  # "resort" | "city" | "both"
+    profile_key: str = ""  # catalog budget profile (JP/CN/.../HAWAII/EU/OCE/NA); "" for curated JSON
 
     @property
     def is_curated(self) -> bool:
         return self.metadata_quality == "CURATED"
+
+    @property
+    def is_long_haul(self) -> bool:
+        return (
+            self.region_code in LONG_HAUL_REGION_CODES
+            or self.profile_key in LONG_HAUL_PROFILE_KEYS
+            or float(self.flight_time_hours or 0) >= LONG_HAUL_MIN_HOURS
+        )
+
+    @property
+    def trip_profile(self) -> str:
+        """`LONG` / `SHORT` — part of live cache keys so the two slot sets never collide."""
+        return "LONG" if self.is_long_haul else "SHORT"
 
     def is_best_month(self, month: int) -> bool:
         return month in self.best_months
@@ -382,3 +415,8 @@ class TravelSnapshot:
     recommendations: list[TravelRecommendation]
     monthly_matrix: dict  # {dest_code: {"YYYY-MM": FlightDeal}}
     monthly_picks: dict   # {"YYYY-MM": (DestinationMeta, FlightDeal)}
+    # Track A personalisation (filled only when subscribers need a non-ALL region/theme):
+    destinations: dict = field(default_factory=dict)          # extra (non-curated) {code: DestinationMeta}
+    segment_recs: dict = field(default_factory=dict)          # {"REG:THEME": [TravelRecommendation]}
+    segment_monthly_picks: dict = field(default_factory=dict) # {"REG:THEME": {"YYYY-MM": (meta, deal)}}
+    segment_notices: dict = field(default_factory=dict)       # {"REG:THEME": "sparse fallback notice"}

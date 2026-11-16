@@ -9,8 +9,17 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from travel_brief.city_catalog import CURATED_EXPERIENCE_HOOKS
-from travel_brief.models import DestinationMeta, FlightDeal, format_departure_time_slot
+from travel_brief.city_catalog import CURATED_EXPERIENCE_HOOKS, city_region_theme
+from travel_brief.models import (
+    LONG_HAUL_MIN_NIGHTS,
+    DestinationMeta,
+    FlightDeal,
+    format_departure_time_slot,
+)
+
+# Long-haul (catalog) cities search 5-night slots (Thu->Tue / Fri->Wed) in their own live cache namespace,
+# so short-haul 3N entries and long-haul 5N entries can never be served for each other.
+LONG_HAUL_SLOT_SIGNATURE = "#L5"
 
 
 AIRLINES_BY_REGION = {
@@ -154,6 +163,9 @@ class FlightEngine:
                 metadata_quality=item.get("metadata_quality", "CURATED"),
                 experience_hook=item.get("experience_hook") or CURATED_EXPERIENCE_HOOKS.get(item["code"], ""),
             )
+            region_code, theme = city_region_theme(meta.code)
+            meta.region_code = item.get("region_code") or region_code
+            meta.theme = item.get("theme") or theme
             self.destinations[meta.code] = meta
 
     def get_destination(self, code: str) -> Optional[DestinationMeta]:
@@ -361,6 +373,27 @@ class FlightEngine:
 
         return slots
 
+    def generate_long_haul_slots(
+        self, ref_date: Optional[date] = None, months_ahead: int = 6
+    ) -> list[tuple[date, date, str, str, int]]:
+        """Long-haul (NA/EU/OCE/HAWAII, >= 7h) slots: Thu->Tue and Fri->Wed (5박, `5박 이상 권장`)."""
+        if ref_date is None:
+            ref_date = date.today()
+        nights = LONG_HAUL_MIN_NIGHTS
+        slots = []
+        curr = ref_date + timedelta(days=1)
+        end_date = ref_date + timedelta(days=months_ahead * 30)
+        while curr <= end_date:
+            if curr.weekday() in (3, 4):
+                slots.append(make_slot(curr, curr + timedelta(days=nights)))
+            curr += timedelta(days=1)
+        return slots
+
+    def uses_long_haul_slots(self, dest: DestinationMeta) -> bool:
+        """Catalog (non-curated) long-haul cities search 5-night slots. Curated JSON cities keep the legacy
+        3N weekend slot contract (their live cache namespace / heatmap stays byte-compatible)."""
+        return bool(dest.is_long_haul) and dest.code not in self.destinations
+
     def search_deals(
         self,
         dest_code: Optional[str] = None,
@@ -373,14 +406,22 @@ class FlightEngine:
         slots: Optional[list[tuple[date, date, str, str, int]]] = None,
         slot_signature: Optional[str] = None,
         live_deadline: Optional[float] = None,
+        extra_destinations: Optional[dict[str, DestinationMeta]] = None,
+        pg_only: bool = False,
     ) -> list[FlightDeal]:
         """Search flight deals across destinations and weekend dates.
         `fast_live=True` limits live SSE verification to the cheapest slot per destination (on-demand UX).
         `custom_destinations` is a request-scoped mapping (e.g. CityCatalog FALLBACK city) used only when
         `dest_code` targets it; it never mutates `self.destinations` and never joins the ALL search.
+        `extra_destinations` (Track A region segments) are searched INSTEAD of the curated set when
+        `dest_code` is None — one collection pass over exactly those cities (never mutates the engine).
+        `pg_only=True` (full-matrix catalog runs) fills the matrix from the price graph only; the caller then
+        SSE-verifies just the displayed TOP / monthly-winner deals via `ensure_deals_sse_verified`.
         `slots` / `slot_signature` (watch horizons & weekday options) replace the default weekend slots and
         isolate the live cache namespace so a WEEKEND entry is never served for WEEKDAY/ANY requests.
+        Without explicit `slots`, catalog long-haul cities use 5N slots under `LONG_HAUL_SLOT_SIGNATURE`.
         """
+        explicit_slots = slots is not None
         if slots is None:
             slots = self.generate_weekend_slots(ref_date=ref_date, months_ahead=months_ahead)
         if dest_code:
@@ -389,28 +430,51 @@ class FlightEngine:
                 targets = [self.destinations[code]]
             elif custom_destinations and code in custom_destinations:
                 targets = [custom_destinations[code]]
+            elif extra_destinations and code in extra_destinations:
+                targets = [extra_destinations[code]]
             else:
                 # Explicitly handle invalid destination code instead of silent fallback to all
                 return []
+        elif extra_destinations:
+            targets = list(extra_destinations.values())
         else:
             targets = list(self.destinations.values())
 
+        # (targets, slots, slot_signature) groups: one group unless catalog long-haul cities are present.
+        groups: list[tuple[list[DestinationMeta], list, Optional[str]]] = []
+        if explicit_slots:
+            groups.append((targets, slots, slot_signature))
+        else:
+            short = [t for t in targets if not self.uses_long_haul_slots(t)]
+            long = [t for t in targets if self.uses_long_haul_slots(t)]
+            if short:
+                groups.append((short, slots, slot_signature))
+            if long:
+                long_slots = self.generate_long_haul_slots(ref_date=ref_date, months_ahead=months_ahead)
+                groups.append((long, long_slots, (slot_signature or "") + LONG_HAUL_SLOT_SIGNATURE))
+
         if self.live_naver and self._live_client is not None:
-            target_dest_map = {t.code: t for t in targets}
-            live_kwargs: dict = {}
-            if slot_signature is not None:
-                live_kwargs["slot_signature"] = slot_signature
-            if live_deadline is not None:
-                live_kwargs["deadline"] = live_deadline
-            live_all = self._live_client.fetch_all_weekend_deals(
-                destinations=target_dest_map,
-                slots=slots,
-                holiday_fn=self.get_peak_holiday_info,
-                ref_date=ref_date,
-                months_ahead=months_ahead,
-                fast_mode=fast_live,
-                **live_kwargs,
-            )
+            live_all: list[FlightDeal] = []
+            for g_targets, g_slots, g_sig in groups:
+                target_dest_map = {t.code: t for t in g_targets}
+                live_kwargs: dict = {}
+                if g_sig is not None:
+                    live_kwargs["slot_signature"] = g_sig
+                if live_deadline is not None:
+                    live_kwargs["deadline"] = live_deadline
+                if pg_only:
+                    live_kwargs["pg_only"] = True
+                g_deals = self._live_client.fetch_all_weekend_deals(
+                    destinations=target_dest_map,
+                    slots=g_slots,
+                    holiday_fn=self.get_peak_holiday_info,
+                    ref_date=ref_date,
+                    months_ahead=months_ahead,
+                    fast_mode=fast_live,
+                    **live_kwargs,
+                )
+                g_codes = set(target_dest_map)
+                live_all.extend(d for d in (g_deals or []) if d.destination_code in g_codes)
             if live_all:
                 target_codes = {t.code for t in targets}
                 filtered = [
@@ -424,8 +488,13 @@ class FlightEngine:
 
         deals: list[FlightDeal] = []
 
+        slots_for: dict[str, list] = {}
+        for g_targets, g_slots, _sig in groups:
+            for t in g_targets:
+                slots_for[t.code] = g_slots
+
         for dest in targets:
-            for dep, ret, dep_dow, ret_dow, nights in slots:
+            for dep, ret, dep_dow, ret_dow, nights in slots_for.get(dest.code, slots):
                 seed = f"{dest.code}-{dep.isoformat()}"
                 time_cat = self._pick_time_category(dep_dow, seed, dest_code=dest.code)
                 is_peak, holiday_name, _ = self.get_peak_holiday_info(dep, ret)
@@ -640,4 +709,17 @@ class FlightEngine:
             if month_key not in matrix[dest_code] or deal.price_krw < matrix[dest_code][month_key].price_krw:
                 matrix[dest_code][month_key] = deal
 
+        return matrix
+
+    @staticmethod
+    def build_month_matrix(
+        deals: list[FlightDeal], codes: Optional[list[str] | set[str]] = None
+    ) -> dict[str, dict[str, FlightDeal]]:
+        """In-memory [code][YYYY-MM] -> cheapest deal over an already collected deal list (no network I/O)."""
+        matrix: dict[str, dict[str, FlightDeal]] = {c: {} for c in (codes or [])}
+        for deal in deals:
+            d_map = matrix.setdefault(deal.destination_code, {})
+            month_key = deal.departure_date[:7]
+            if month_key not in d_map or deal.price_krw < d_map[month_key].price_krw:
+                d_map[month_key] = deal
         return matrix

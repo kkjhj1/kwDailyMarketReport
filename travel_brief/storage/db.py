@@ -37,7 +37,9 @@ DEFAULT_THRESHOLDS = {
 
 logger = logging.getLogger(__name__)
 
-WATCH_MAX_ACTIVE_PER_CHAT = 10
+# Track B cap for NEW watches. Chats that already hold more (pre-cap users) are grandfathered: their existing
+# watches stay active and editable; only new / re-activated watches are blocked while active >= 4.
+WATCH_MAX_ACTIVE_PER_CHAT = 4
 WATCH_PRESET_KINDS = ("DEAL", "FLOOR", "CUSTOM", "BASELINE")
 WATCH_DAY_PATTERNS = ("ANY", "FRI_MON", "THU_SUN")
 WATCH_DELIVERY_STATUSES = ("IN_FLIGHT", "SENT", "UNKNOWN", "FAILED")
@@ -68,6 +70,36 @@ _DELIVERY_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("delivery_kind", "TEXT NOT NULL DEFAULT 'DROP'"),
     ("kst_date", "TEXT DEFAULT NULL"),
 )
+# Track A personalisation (travel_user_prefs V2). Invariant: freq == 'OFF' <-> weekly_brief_enabled = 0.
+WEEKLY_BRIEF_FREQS = ("THU_1X", "TUE_THU_2X", "OFF")
+WEEKLY_BRIEF_REGIONS = ("ALL", "JP", "TWHK", "CNMN", "SEASIA", "PAC", "OCE", "NA", "EU")
+WEEKLY_BRIEF_THEMES = ("ALL", "RESORT", "CITY")
+WEEKLY_BRIEF_DEFAULT_ON_FREQ = "THU_1X"
+_PREFS_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("weekly_brief_region", "TEXT NOT NULL DEFAULT 'ALL'"),
+    ("weekly_brief_theme", "TEXT NOT NULL DEFAULT 'ALL'"),
+    ("weekly_brief_freq", "TEXT NOT NULL DEFAULT 'THU_1X'"),
+)
+_PREFS_DEFAULTS: dict[str, Any] = {
+    "weekly_brief_enabled": True,
+    "watches_paused": False,
+    "weekly_brief_freq": WEEKLY_BRIEF_DEFAULT_ON_FREQ,
+    "weekly_brief_region": "ALL",
+    "weekly_brief_theme": "ALL",
+}
+
+
+def _sync_weekly_freq(enabled: bool, freq: Optional[str]) -> tuple[bool, str]:
+    """Normalises (enabled, freq) so `freq == OFF <-> enabled == 0` always holds. `weekly_brief_enabled`
+    is authoritative for on/off (legacy writers only know that column); an invalid freq maps to the default."""
+    f = (freq or "").strip().upper()
+    if f not in WEEKLY_BRIEF_FREQS:
+        f = WEEKLY_BRIEF_DEFAULT_ON_FREQ
+    if not enabled:
+        return False, "OFF"
+    if f == "OFF":
+        f = WEEKLY_BRIEF_DEFAULT_ON_FREQ
+    return True, f
 
 
 class WatchLimitError(Exception):
@@ -446,6 +478,39 @@ class TravelBriefDatabase:
                     updated_at TEXT NOT NULL
                 )"""
             )
+        # Prefs V2 migration runs in its own BEGIN IMMEDIATE so the ALTERs and the freq backfill are atomic.
+        with self._immediate_tx() as tx:
+            self._migrate_travel_prefs_schema(tx)
+
+    @staticmethod
+    def _migrate_travel_prefs_schema(conn: sqlite3.Connection) -> list[str]:
+        """Idempotent `PRAGMA table_info` migration adding region/theme/freq to `travel_user_prefs`.
+        Existing rows are backfilled `weekly_brief_enabled = 1 -> 'THU_1X'`, `0 -> 'OFF'`; afterwards any row
+        whose freq disagrees with `weekly_brief_enabled` (e.g. a legacy writer's raw INSERT that picked up the
+        column default) is repaired with `weekly_brief_enabled` as the on/off authority."""
+        added = _add_missing_columns(conn, "travel_user_prefs", _PREFS_V2_COLUMNS)
+        if "weekly_brief_freq" in added:
+            conn.execute(
+                "UPDATE travel_user_prefs SET weekly_brief_freq = "
+                "CASE WHEN weekly_brief_enabled = 1 THEN 'THU_1X' ELSE 'OFF' END"
+            )
+        conn.execute(
+            "UPDATE travel_user_prefs SET weekly_brief_freq = 'OFF' "
+            "WHERE weekly_brief_enabled = 0 AND weekly_brief_freq != 'OFF'"
+        )
+        conn.execute(
+            "UPDATE travel_user_prefs SET weekly_brief_freq = 'THU_1X' "
+            "WHERE weekly_brief_enabled != 0 AND weekly_brief_freq NOT IN ('THU_1X', 'TUE_THU_2X')"
+        )
+        conn.execute(
+            "UPDATE travel_user_prefs SET weekly_brief_region = 'ALL' WHERE weekly_brief_region NOT IN ("
+            + ",".join(f"'{r}'" for r in WEEKLY_BRIEF_REGIONS) + ")"
+        )
+        conn.execute(
+            "UPDATE travel_user_prefs SET weekly_brief_theme = 'ALL' WHERE weekly_brief_theme NOT IN ("
+            + ",".join(f"'{t}'" for t in WEEKLY_BRIEF_THEMES) + ")"
+        )
+        return added
 
     @staticmethod
     def _migrate_travel_watch_schema(conn: sqlite3.Connection) -> dict[str, list[str]]:
@@ -1093,12 +1158,24 @@ class TravelBriefDatabase:
 
     @staticmethod
     def _prefs_row_to_dict(chat_id: str, row: Optional[sqlite3.Row]) -> dict[str, Any]:
+        """All 5 Track A/B fields. Read-side normalisation keeps the freq/enabled invariant even for rows a
+        legacy writer inserted after start-up (the stored row is repaired on the next write / restart)."""
         if row is None:
-            return {"chat_id": chat_id, "weekly_brief_enabled": True, "watches_paused": False, "updated_at": None}
+            return {"chat_id": chat_id, **_PREFS_DEFAULTS, "updated_at": None}
+        keys = set(row.keys())
+        enabled, freq = _sync_weekly_freq(
+            bool(row["weekly_brief_enabled"]),
+            row["weekly_brief_freq"] if "weekly_brief_freq" in keys else None,
+        )
+        region = str(row["weekly_brief_region"] if "weekly_brief_region" in keys else "ALL").upper()
+        theme = str(row["weekly_brief_theme"] if "weekly_brief_theme" in keys else "ALL").upper()
         return {
             "chat_id": chat_id,
-            "weekly_brief_enabled": bool(row["weekly_brief_enabled"]),
+            "weekly_brief_enabled": enabled,
             "watches_paused": bool(row["watches_paused"]),
+            "weekly_brief_freq": freq,
+            "weekly_brief_region": region if region in WEEKLY_BRIEF_REGIONS else "ALL",
+            "weekly_brief_theme": theme if theme in WEEKLY_BRIEF_THEMES else "ALL",
             "updated_at": row["updated_at"],
         }
 
@@ -1111,40 +1188,114 @@ class TravelBriefDatabase:
     def is_weekly_brief_enabled(self, chat_id: str) -> bool:
         return bool(self.get_travel_user_prefs(chat_id)["weekly_brief_enabled"])
 
-    def _set_pref_flag(self, chat_id: str, column: str, value: Optional[bool]) -> dict[str, Any]:
-        """Atomic upsert of one pref flag. `value=None` toggles the current (or default) value
-        inside the same `BEGIN IMMEDIATE` transaction so concurrent taps never lose an update."""
-        if column not in ("weekly_brief_enabled", "watches_paused"):
-            raise ValueError(f"invalid travel pref: {column}")
+    def _update_prefs(self, chat_id: str, mutate: Any) -> dict[str, Any]:
+        """ONE `BEGIN IMMEDIATE` read-modify-write of the whole prefs row: `mutate(current) -> changes`.
+        `weekly_brief_freq` and `weekly_brief_enabled` are always written together (synced), so concurrent
+        taps never lose an update and the two columns can never disagree."""
         cid = str(chat_id).strip()
         if not cid:
             raise ValueError("chat_id is required")
         with self._immediate_tx() as db:
             row = db.execute("SELECT * FROM travel_user_prefs WHERE chat_id = ?", (cid,)).fetchone()
             current = self._prefs_row_to_dict(cid, row)
-            new_value = (not current[column]) if value is None else bool(value)
+            new = {**current, **(mutate(current) or {})}
+            enabled, freq = _sync_weekly_freq(bool(new["weekly_brief_enabled"]), new["weekly_brief_freq"])
             db.execute(
-                """INSERT INTO travel_user_prefs (chat_id, weekly_brief_enabled, watches_paused, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(chat_id) DO UPDATE SET """ + column + """ = excluded.""" + column + """,
+                """INSERT INTO travel_user_prefs
+                       (chat_id, weekly_brief_enabled, watches_paused, weekly_brief_freq,
+                        weekly_brief_region, weekly_brief_theme, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       weekly_brief_enabled = excluded.weekly_brief_enabled,
+                       watches_paused = excluded.watches_paused,
+                       weekly_brief_freq = excluded.weekly_brief_freq,
+                       weekly_brief_region = excluded.weekly_brief_region,
+                       weekly_brief_theme = excluded.weekly_brief_theme,
                        updated_at = excluded.updated_at""",
                 (
                     cid,
-                    int(new_value if column == "weekly_brief_enabled" else current["weekly_brief_enabled"]),
-                    int(new_value if column == "watches_paused" else current["watches_paused"]),
+                    int(enabled),
+                    int(bool(new["watches_paused"])),
+                    freq,
+                    new["weekly_brief_region"],
+                    new["weekly_brief_theme"],
                     _utc_str(),
                 ),
             )
             row = db.execute("SELECT * FROM travel_user_prefs WHERE chat_id = ?", (cid,)).fetchone()
         return self._prefs_row_to_dict(cid, row)
 
+    def _set_pref_flag(self, chat_id: str, column: str, value: Optional[bool]) -> dict[str, Any]:
+        """Atomic upsert of one pref flag. `value=None` toggles the current (or default) value
+        inside the same `BEGIN IMMEDIATE` transaction so concurrent taps never lose an update."""
+        if column not in ("weekly_brief_enabled", "watches_paused"):
+            raise ValueError(f"invalid travel pref: {column}")
+
+        def _mutate(cur: dict[str, Any]) -> dict[str, Any]:
+            new_value = (not cur[column]) if value is None else bool(value)
+            changes: dict[str, Any] = {column: new_value}
+            if column == "weekly_brief_enabled":
+                # Legacy on/off maps onto freq: OFF <-> 0; turning on restores the default THU_1X cadence
+                # (an already-on TUE_THU_2X subscriber keeps 2x when "enabled=True" is re-sent).
+                if not new_value:
+                    changes["weekly_brief_freq"] = "OFF"
+                elif cur["weekly_brief_freq"] == "OFF":
+                    changes["weekly_brief_freq"] = WEEKLY_BRIEF_DEFAULT_ON_FREQ
+            return changes
+
+        return self._update_prefs(chat_id, _mutate)
+
     def set_weekly_brief_enabled(self, chat_id: str, enabled: Optional[bool] = None) -> dict[str, Any]:
-        """Track A (화·목 정기 브리핑) opt-in/out. `enabled=None` toggles."""
+        """Track A (정기 브리핑) legacy opt-in/out. `enabled=None` toggles. Keeps `weekly_brief_freq` synced
+        (off -> `OFF`, on -> `THU_1X` unless already `TUE_THU_2X`)."""
         return self._set_pref_flag(chat_id, "weekly_brief_enabled", enabled)
+
+    def set_weekly_brief_freq(self, chat_id: str, freq: str) -> dict[str, Any]:
+        """Track A cadence: `THU_1X` (목 1회) | `TUE_THU_2X` (화·목 2회) | `OFF`. Syncs `weekly_brief_enabled`."""
+        f = (freq or "").strip().upper()
+        if f not in WEEKLY_BRIEF_FREQS:
+            raise ValueError(f"invalid weekly_brief_freq: {freq}")
+        return self._update_prefs(
+            chat_id, lambda cur: {"weekly_brief_freq": f, "weekly_brief_enabled": f != "OFF"}
+        )
+
+    def set_weekly_brief_region(self, chat_id: str, region: str) -> dict[str, Any]:
+        """Track A interest region (`ALL` or one of the 8 UI regions; never an IATA code like `SEA`)."""
+        r = (region or "").strip().upper()
+        if r not in WEEKLY_BRIEF_REGIONS:
+            raise ValueError(f"invalid weekly_brief_region: {region}")
+        return self._update_prefs(chat_id, lambda cur: {"weekly_brief_region": r})
+
+    def set_weekly_brief_theme(self, chat_id: str, theme: str) -> dict[str, Any]:
+        """Track A travel style: `ALL` | `RESORT` (휴양) | `CITY` (관광)."""
+        t = (theme or "").strip().upper()
+        if t not in WEEKLY_BRIEF_THEMES:
+            raise ValueError(f"invalid weekly_brief_theme: {theme}")
+        return self._update_prefs(chat_id, lambda cur: {"weekly_brief_theme": t})
 
     def set_watches_paused(self, chat_id: str, paused: Optional[bool] = None) -> dict[str, Any]:
         """Track B (맞춤 특가 알림) pause/resume without deleting watches. `paused=None` toggles."""
         return self._set_pref_flag(chat_id, "watches_paused", paused)
+
+    def count_active_watches(self, chat_id: str) -> int:
+        with self._connect() as db:
+            return int(db.execute(
+                "SELECT COUNT(*) FROM travel_price_watches WHERE chat_id = ? AND is_active = 1",
+                (str(chat_id).strip(),),
+            ).fetchone()[0])
+
+    def reserve_travel_weekly_delivery(self, chat_id: str, kst_date: str) -> bool:
+        """Per-(KST date, chat) Track A ledger claim in `alert_reservations` (INSERT OR IGNORE). False means the
+        slot was already claimed (SENT / UNKNOWN / in-flight) -> never re-sent automatically ([PROD-LIVE])."""
+        date.fromisoformat(kst_date)
+        key = f"TRAVEL_WEEKLY:{kst_date}:{str(chat_id).strip()}"
+        with self._immediate_tx() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO alert_reservations (key, status, change_pct, symbol) "
+                "VALUES (?, 'sent', 0.0, 'TRAVEL_WEEKLY')",
+                (key,),
+            )
+            return cur.rowcount == 1
 
     def reset_travel_watches(self, chat_id: str) -> int:
         """ONE `BEGIN IMMEDIATE` tx: deactivate every active watch for the chat AND clear the pause flag,

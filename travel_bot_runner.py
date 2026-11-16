@@ -6,12 +6,13 @@ Designed for Multi-Bot Monorepo Architecture with Zero-Breaking guarantees for M
 from __future__ import annotations
 import re
 import argparse
+import dataclasses
 import html
 import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -40,17 +41,25 @@ if env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
 from travel_brief.models import (
+    LONG_HAUL_STAY_NOTE,
     DestinationMeta,
     FlightDeal,
     TravelRecommendation,
     TravelSnapshot,
+    format_trip_length,
     reconcile_man_breakdown,
     round_man,
 )
 from travel_brief.flight_engine import FlightEngine
 from travel_brief.budget_calculator import BudgetCalculator
 from travel_brief.ai_prompts import AIPromptGenerator
-from travel_brief.web_report import WebReportGenerator, build_travel_snapshot
+from travel_brief.web_report import (
+    EMPTY_SEGMENT_NOTICE,
+    WebReportGenerator,
+    build_travel_snapshot,
+    segment_key,
+)
+from travel_brief.city_catalog import THEME_LABELS, normalize_region, normalize_theme, region_label
 from travel_brief.storage.db import TravelBriefDatabase
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
@@ -184,8 +193,12 @@ def format_telegram_briefing(
     snapshot: Optional[TravelSnapshot] = None,
     target_city: Optional[str] = None,
     fx_map: Optional[dict[str, FXQuote]] = None,
+    segment_label: str = "",
+    header_note: str = "",
 ) -> str:
     """Format mobile-optimized Telegram message under the strict TG-01 caps (HTML<=3500, visible<=1800).
+    `segment_label` / `header_note` (Track A personalisation): region·style tag in the TOP title and an
+    escaped one-line notice (e.g. the sparse-region fallback notice) under the basis line.
 
     `target_city`:
       - None  : scheduled/legacy briefing (full 6-month monthly summary incl. SSE verification).
@@ -195,6 +208,8 @@ def format_telegram_briefing(
     """
     now_str = snapshot.generated_at if snapshot else datetime.now().strftime("%Y-%m-%d %H:%M")
     is_live_mode = any(r.best_deal.is_live for r in recommendations[:3])
+    has_long_haul = any(r.destination.is_long_haul for r in recommendations[:3])
+    trip_basis = f"단거리 3박 4일 · 장거리 {LONG_HAUL_STAY_NOTE}" if has_long_haul else "3박 4일"
     target_norm = (target_city or "").strip().upper()
     single_city_meta: Optional[DestinationMeta] = None
     if target_norm and target_norm != "ALL":
@@ -220,21 +235,27 @@ def format_telegram_briefing(
             source_tag = ""
             fare_note = "💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>"
         title_line = f"✈️ <b>[{city_name} 주말 특가 나침반{source_tag}]</b>"
-        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)"
+        city_trip = f"장거리 {LONG_HAUL_STAY_NOTE}" if single_city_meta.is_long_haul else "3박 4일"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 {city_trip} (유류·제세 포함)"
         notes = [fare_note, hotel_note]
         if not single_city_meta.is_curated:
             notes.append("ℹ️ <i>기본 메타 기준: 계절·입국 조건·숙소는 링크에서 확인 필요</i>")
         top_title = f"🔥 <b>{city_name} ({city_code}) 추천 최저가 일정 TOP {min(len(recommendations), 3)}</b>"
     elif is_live_mode:
         title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>"
-        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 (유류·제세 포함)"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 {trip_basis} (유류·제세 포함)"
         notes = ["💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>", hotel_note]
         top_title = "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>"
     else:
         title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반]</b>"
-        basis_line = f"📅 기준: {now_str} KST · 인천 직항 3박 4일 주말 예상 밴드"
+        basis_line = f"📅 기준: {now_str} KST · 인천 직항 {trip_basis} 주말 예상 밴드"
         notes = ["💡 <i>항공권: 시장 예상가 (실시간 잔여석 링크 확인)</i>", hotel_note]
         top_title = "🔥 <b>이번 주 가성비 BEST TOP 3</b>"
+
+    if segment_label and single_city_meta is None:
+        top_title = top_title.replace("BEST TOP 3", f"{html.escape(_clip(segment_label, 24))} BEST TOP 3")
+    if header_note:
+        basis_line = f"{basis_line}\nℹ️ <i>{html.escape(_clip(header_note, 60))}</i>"
 
     fx_map = fx_map or {}
 
@@ -315,7 +336,7 @@ def format_telegram_briefing(
 
             sched_lines = [
                 f"\n<b>{i}. {html.escape(_clip(dest.name, 24))} ({html.escape(dest.code)})</b> {season_icon}{deal_tag}",
-                f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> (3박 4일)",
+                f"  • 일정: <b>{deal.departure_date}({deal.departure_day_of_week}) ~ {deal.return_date}({deal.return_day_of_week})</b> ({format_trip_length(budget.nights, dest.is_long_haul)})",
             ]
             if deal.data_source == "LIVE_SSE" and (deal.exact_ret_time or deal.next_day_arrival):
                 sched_lines.append(f"  • 운항: 🛫 {html.escape(deal.departure_time_slot)} / 🛬 {html.escape(deal.return_time_slot)}")
@@ -331,7 +352,7 @@ def format_telegram_briefing(
                     sched_lines.append(f"  • 포인트: {' · '.join(motive)}")
 
             sched_lines.extend([
-                f"  • 숙소 예산: <b>{html.escape(dest.hotel_budget_segment)}</b> 3박 약 {h_man}만 원",
+                f"  • 숙소 예산: <b>{html.escape(dest.hotel_budget_segment)}</b> {budget.nights}박 약 {h_man}만 원",
                 f"    └ 추천 호텔: {hotel_name_str}{hotel_grade_str}{hotel_feat_str} (실제 요금 링크 확인)",
                 f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
             ])
@@ -399,6 +420,9 @@ def format_telegram_briefing(
     if snapshot and snapshot.monthly_picks:
         monthly_picks = [(m, d_meta, deal) for m, (d_meta, deal) in snapshot.monthly_picks.items()]
         all_months = [m for m, _, _ in monthly_picks]
+    elif snapshot is not None and (segment_label or header_note):
+        # Personalised segment without monthly winners: never fall back to the curated matrix / SSE below.
+        pass
     elif single_city_meta is not None:
         # On-demand single-city query: skip the 6-destination matrix and its SSE calls entirely.
         pass
@@ -541,6 +565,60 @@ def _send_top1_photo_best_effort(
     return status
 
 
+# Track A KST weekday gate: Tuesday -> 2x subscribers only; Thursday -> 1x and 2x; any other day -> nobody.
+WEEKLY_FREQS_BY_KST_WEEKDAY: dict[int, tuple[str, ...]] = {
+    1: ("TUE_THU_2X",),
+    3: ("THU_1X", "TUE_THU_2X"),
+}
+
+
+def kst_now() -> datetime:
+    """Naive KST wall-clock datetime (`weekday()` / `date()` are KST-based)."""
+    return (datetime.now(timezone.utc) + timedelta(hours=9)).replace(tzinfo=None)
+
+
+def weekly_freqs_for_weekday(kst_weekday: int) -> tuple[str, ...]:
+    return WEEKLY_FREQS_BY_KST_WEEKDAY.get(int(kst_weekday), ())
+
+
+def select_weekly_brief_recipients(
+    db: TravelBriefDatabase, chat_ids: list[str], kst_weekday: int
+) -> list[tuple[str, dict]]:
+    """(chat_id, prefs) of subscribers due on this KST weekday (`OFF` never; Tue: TUE_THU_2X; Thu: both)."""
+    allowed = weekly_freqs_for_weekday(kst_weekday)
+    out: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for raw in chat_ids:
+        cid = str(raw).strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        prefs = db.get_travel_user_prefs(cid)
+        if prefs.get("weekly_brief_enabled") and prefs.get("weekly_brief_freq") in allowed:
+            out.append((cid, prefs))
+    return out
+
+
+def _plan_weekly_recipients(db: TravelBriefDatabase, now_kst: datetime) -> list[tuple[str, dict]]:
+    active_objs = db.get_active_recipients(topic="TRAVEL")
+    using_default = not active_objs
+    if active_objs:
+        chat_ids = [r.chat_id for r in active_objs]
+    else:
+        default_chat_id = get_travel_chat_id()
+        chat_ids = [default_chat_id] if default_chat_id else []
+    weekday = now_kst.weekday()
+    selected = select_weekly_brief_recipients(db, chat_ids, weekday)
+    skipped = len({str(c).strip() for c in chat_ids if str(c).strip()}) - len(selected)
+    if not weekly_freqs_for_weekday(weekday):
+        print(f"ℹ️ KST {now_kst:%Y-%m-%d (%a)}: not a Track A delivery day (Tue=2x / Thu=1x·2x); no subscriber sends.")
+    elif skipped:
+        print(f"ℹ️ {skipped} recipient(s) skipped: 정기발송 꺼짐 또는 오늘(KST {now_kst:%a})은 발송 주기 아님.")
+    if using_default and selected:
+        db.add_recipient(chat_id=selected[0][0], name="여행 구독자", topic="TRAVEL")
+    return selected
+
+
 def run_briefing(
     dest_code: Optional[str] = None,
     max_budget: Optional[int] = None,
@@ -551,7 +629,11 @@ def run_briefing(
     db_path: str = "alerts.sqlite3",
     live_naver: bool = False,
     output_dir: Optional[Path | str] = None,
+    now_kst: Optional[datetime] = None,
 ) -> bool:
+    """Track A briefing. Default subscriber dispatch is gated by the KST weekday + `weekly_brief_freq` and
+    claims a per-(KST date, chat) ledger slot before each send (no automatic re-send of SENT/UNKNOWN).
+    Explicit `recipients_override` (admin manual test) is sent as-is with the ALL briefing."""
     effective_live = bool(live_naver or os.environ.get("TRAVEL_LIVE_NAVER", "").strip() == "1")
     if demo:
         dry_run = True
@@ -567,8 +649,24 @@ def run_briefing(
     engine = FlightEngine(live_naver=effective_live)
     print(f"Loaded {len(engine.destinations)} destinations metadata.")
 
-    # 1. Warm cache & build Single Snapshot (Single Source of Truth)
-    snapshot = build_travel_snapshot(engine, dest_code=dest_code, max_budget=max_budget, top_n=5)
+    # 0. Plan Track A recipients first (live dispatch only) so the snapshot collects only the segments needed.
+    now_k = now_kst or kst_now()
+    plan: list[tuple[str, dict]] = []
+    if not dry_run and not recipients_override and get_travel_bot_token():
+        plan = _plan_weekly_recipients(db, now_k)
+    segments = {("ALL", "ALL")}
+    if not dest_code:
+        segments |= {
+            (normalize_region(p.get("weekly_brief_region")), normalize_theme(p.get("weekly_brief_theme")))
+            for _, p in plan
+        }
+
+    # 1. Warm cache & build Single Snapshot (Single Source of Truth) — ONE collection pass; per-segment
+    #    TOP lists are filtered in memory (never re-scraped per region/theme).
+    snapshot_kwargs: dict = {"dest_code": dest_code, "max_budget": max_budget, "top_n": 5}
+    if len(segments) > 1:
+        snapshot_kwargs["segments"] = segments
+    snapshot = build_travel_snapshot(engine, **snapshot_kwargs)
     recommendations = snapshot.recommendations
 
     # 2. Generate Web Reports (from the exact same snapshot!)
@@ -622,31 +720,23 @@ def run_briefing(
         print("=" * 79)
         return True
 
-    # Determine recipients. Explicit `recipients_override` (admin manual test) is sent as-is; the default
-    # subscriber dispatch honours the Track A opt-out (`travel_user_prefs.weekly_brief_enabled`).
+    # Determine recipients. Explicit `recipients_override` (admin manual test) is sent as-is (ALL briefing,
+    # no weekday gate / ledger); the default subscriber dispatch was planned above (KST weekday + freq gate).
+    use_ledger = not recipients_override
     if recipients_override:
-        target_recipients = recipients_override
+        targets: list[tuple[str, str, str]] = [(str(r).strip(), "ALL", "ALL") for r in recipients_override]
     else:
-        active_objs = db.get_active_recipients(topic="TRAVEL")
-        if active_objs:
-            target_recipients = [r.chat_id for r in active_objs if db.is_weekly_brief_enabled(r.chat_id)]
-            opted_out = len(active_objs) - len(target_recipients)
-            if opted_out:
-                print(f"ℹ️ {opted_out} recipient(s) skipped: weekly brief opted out (정기발송 꺼짐).")
-        else:
-            default_chat_id = get_travel_chat_id()
-            if default_chat_id and db.is_weekly_brief_enabled(default_chat_id):
-                target_recipients = [default_chat_id]
-                db.add_recipient(chat_id=default_chat_id, name="여행 구독자", topic="TRAVEL")
-            else:
-                target_recipients = []
-
-    target_recipients = list(dict.fromkeys(str(r).strip() for r in target_recipients if str(r).strip()))
-    if not target_recipients:
+        targets = [
+            (cid, normalize_region(p.get("weekly_brief_region")), normalize_theme(p.get("weekly_brief_theme")))
+            for cid, p in plan
+        ]
+    seen_targets: set[str] = set()
+    targets = [t for t in targets if t[0] and not (t[0] in seen_targets or seen_targets.add(t[0]))]
+    if not targets:
         print("⚠️ No recipients found to dispatch. Run with --dry-run or configure TRAVEL_CHAT_ID.")
         return False
 
-    print(f"📡 Dispatching to {len(target_recipients)} recipients using SafeTelegramDispatcher...")
+    print(f"📡 Dispatching to {len(targets)} recipients using SafeTelegramDispatcher...")
     tg = TelegramChannel(bot_token=token)
     dispatcher = SafeTelegramDispatcher()
 
@@ -655,21 +745,55 @@ def run_briefing(
     interactive_handler = TravelInteractiveHandler(bot_token=token, engine=engine, report_url=report_link)
     keyboard = interactive_handler.build_inline_keyboard()
 
-    # Best-effort TOP 1 season-matched photo (live dispatch only; dry-run/demo returned above).
-    top1_photo = resolve_top1_photo(recommendations)
-    top1_caption = build_top1_photo_caption(recommendations[0], top1_photo) if top1_photo else ""
+    # Per-segment message cache: (text, photo, caption) built once per (region, theme), in memory only.
+    segment_cache: dict[str, tuple[str, object, str]] = {}
 
+    def _segment_payload(region: str, theme: str) -> tuple[str, object, str]:
+        key = segment_key(region, theme)
+        if key in segment_cache:
+            return segment_cache[key]
+        if key == "ALL:ALL" or key not in snapshot.segment_recs:
+            seg_recs, text = recommendations, msg_text
+        else:
+            seg_recs = snapshot.segment_recs[key] or recommendations
+            seg_notice = snapshot.segment_notices.get(key, "")
+            label = " · ".join(
+                x for x in (
+                    region_label(region) if region != "ALL" else "",
+                    # a sparse/empty fallback no longer reflects the chosen style -> label the region only
+                    THEME_LABELS.get(theme, "") if (theme != "ALL" and not seg_notice) else "",
+                ) if x
+            ) if seg_notice != EMPTY_SEGMENT_NOTICE else ""
+            seg_link = versioned_report_link + (f"&region={region}" if region != "ALL" else "")
+            seg_snapshot = dataclasses.replace(
+                snapshot, recommendations=seg_recs, monthly_picks=snapshot.segment_monthly_picks.get(key, {})
+            )
+            text = format_telegram_briefing(
+                seg_recs, web_report_url=seg_link, engine=engine, snapshot=seg_snapshot,
+                segment_label=label, header_note=seg_notice,
+            )
+        photo = resolve_top1_photo(seg_recs)
+        caption = build_top1_photo_caption(seg_recs[0], photo) if (photo and seg_recs) else ""
+        segment_cache[key] = (text, photo, caption)
+        return segment_cache[key]
+
+    kst_date = now_k.date().isoformat()
     success_count = 0
-    for chat_id in target_recipients:
+    for chat_id, region, theme in targets:
+        if use_ledger and not db.reserve_travel_weekly_delivery(chat_id, kst_date):
+            print(f"  ⏭️ {chat_id}: Track A slot {kst_date} already claimed (SENT/UNKNOWN) — not re-sent.")
+            continue
+        text, top1_photo, top1_caption = _segment_payload(region, theme)
+        # Best-effort TOP 1 season-matched photo (live dispatch only; dry-run/demo returned above).
         _send_top1_photo_best_effort(dispatcher, tg, chat_id, top1_photo, top1_caption, db)
         try:
             status, msg_id, err = dispatcher.send_text_to_recipient(
-                tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db, reply_markup=keyboard
+                tg=tg, chat_id=chat_id, text=text, parse_mode="HTML", db=db, reply_markup=keyboard
             )
         except TypeError as type_err:
             if "reply_markup" in str(type_err):
                 status, msg_id, err = dispatcher.send_text_to_recipient(
-                    tg=tg, chat_id=chat_id, text=msg_text, parse_mode="HTML", db=db
+                    tg=tg, chat_id=chat_id, text=text, parse_mode="HTML", db=db
                 )
             else:
                 raise
@@ -679,7 +803,7 @@ def run_briefing(
         else:
             print(f"  ❌ Failed to send to {chat_id}: {err}")
 
-    print(f"Dispatch finished: {success_count}/{len(target_recipients)} succeeded.")
+    print(f"Dispatch finished: {success_count}/{len(targets)} succeeded.")
     return success_count > 0
 
 
