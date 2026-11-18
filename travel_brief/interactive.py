@@ -98,9 +98,14 @@ COUNTRY_WATCH_RETIRED_NOTICE = "ℹ️ 국가 전체 알림은 신규 등록이 
 DORMANT_BANNER = "💤 모든 자동 발송 꺼짐 (검색 전용 모드)"
 DORMANT_NOTICE = "💤 이제 자동 발송이 모두 꺼졌어요. 도시 검색은 언제든 가능하고, ⚙️ /settings 에서 다시 켤 수 있어요."
 WEEKLY_FREQ_CODES = {"T": "THU_1X", "B": "TUE_THU_2X", "O": "OFF"}
-WEEKLY_FREQ_BUTTONS = {"THU_1X": "주1회(목)", "TUE_THU_2X": "주2회(화·목)", "OFF": "끄기"}
+WEEKLY_FREQ_BUTTONS = {"THU_1X": "목 주1회", "TUE_THU_2X": "화·목 주2회", "OFF": "끄기"}
 WEEKLY_FREQ_STATUS = {"THU_1X": "주1회(목) 12:00", "TUE_THU_2X": "주2회(화·목) 12:00", "OFF": "꺼짐"}
 THEME_CB_CODES = {"A": "ALL", "R": "RESORT", "C": "CITY"}
+UI_SHUTDOWN_GRACE_SECONDS = 1.5  # shutdown waits this long for in-flight UI edits before closing HTTP sessions
+WATCH_CHECK_SCHEDULE = "07:30·12:30·18:30"
+WATCH_STEP1_HEADER = "🔔 <b>[맞춤발송 등록 · 1/2단계: 도시 선택]</b>"
+WATCH_STEP1_GUIDE = "권역 → 도시를 누르거나, 채팅창에 도시 이름(예: 오사카)을 바로 입력하세요."
+WATCH_STEP2_GUIDE = "원하는 목표가를 누르거나 [✍️ 목표가 직접 입력] 후 채팅창에 숫자를 입력하면 저장돼요."
 
 _DATE_TOKEN_RE = re.compile(
     r"(?P<y>\d{4})\s*[-./년]\s*(?P<m>\d{1,2})\s*[-./월]\s*(?P<d>\d{1,2})\s*일?"
@@ -515,17 +520,48 @@ class TravelInteractiveHandler:
     # ------------------------------------------------------------------
     # Main menu hub & submenus (`trv:m:*`)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _norm_region_theme(prefs: dict[str, Any]) -> tuple[str, str]:
+        region = str(prefs.get("weekly_brief_region") or "ALL").upper()
+        theme = str(prefs.get("weekly_brief_theme") or "ALL").upper()
+        return (region if region in REGION_LABELS else "ALL"), (theme if theme in THEME_LABELS else "ALL")
+
+    def _format_status_badge(self, chat_id: Optional[str]) -> list[str]:
+        """2-line live status (📰 정기발송 / 🔔 맞춤발송) for /start and /menu; [] without a chat or DB.
+        0 active watches always reads `미등록` (never `일시중지`/`받는 중`), even when the paused flag is set."""
+        if not chat_id or self.db is None:
+            return []
+        from travel_brief.storage.db import WATCH_MAX_ACTIVE_PER_CHAT
+
+        cid = str(chat_id)
+        prefs = self._get_prefs(cid)
+        freq = self._freq_of(prefs)
+        if freq != "OFF":
+            region, theme = self._norm_region_theme(prefs)
+            weekly = (
+                f"🟢 받는 중 ({WEEKLY_FREQ_STATUS[freq]} · {html.escape(region_label(region))} · "
+                f"{THEME_LABELS[theme]})"
+            )
+        else:
+            weekly = "🔴 꺼짐"
+        n_watch = self._active_watch_count(cid)
+        if n_watch == 0:
+            watch = f"⚪ 미등록 (도시 0/{WATCH_MAX_ACTIVE_PER_CHAT})"
+        elif prefs.get("watches_paused", False):
+            watch = f"⏸️ 일시중지 ({n_watch}/{WATCH_MAX_ACTIVE_PER_CHAT})"
+        else:
+            watch = f"🟢 받는 중 ({n_watch}/{WATCH_MAX_ACTIVE_PER_CHAT})"
+        return [f"📰 정기발송: <b>{weekly}</b>", f"🔔 맞춤발송: <b>{watch}</b>"]
+
     def build_menu_hub_card(self, chat_id: Optional[str] = None) -> tuple[str, dict[str, Any]]:
         lines = ["🧭 <b>[트래블 패스파인더 메인 메뉴]</b>", "━━━━━━━━━━━━━━━━━━"]
-        if chat_id and self.db is not None:
-            prefs = self._get_prefs(str(chat_id))
-            weekly = WEEKLY_FREQ_STATUS[self._freq_of(prefs)]
-            paused = "일시중지" if prefs.get("watches_paused", False) else "켜짐"
-            lines.append(f"📰 정기발송: <b>{weekly}</b> · 🔔 맞춤알림: <b>{paused}</b>")
+        badge = self._format_status_badge(chat_id)
+        if badge:
+            lines.extend(badge)
             lines.append("━━━━━━━━━━━━━━━━━━")
         lines.extend([
             "⚙️ <b>정기발송 설정</b>: 발송 주기·관심 권역·여행 스타일 변경",
-            "🔔 <b>맞춤알림 설정</b>: 인천 직항 116개 도시 · 8대 권역 목표가 알림 관리",
+            "🔔 <b>맞춤발송 설정</b>: 인천 직항 116개 도시 · 8대 권역 목표가 알림 관리",
             "✈️ <b>지금 특가 보기</b>: 전체 주말 특가 TOP 3",
             "🔍 <b>권역·도시 찾기</b>: 8대 권역별 직항 도시 탐색",
             "🏙️ <b>인기 도시</b>: 도쿄·오사카·후쿠오카·타이베이·다낭·방콕",
@@ -535,7 +571,7 @@ class TravelInteractiveHandler:
             "inline_keyboard": [
                 [
                     {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"},
-                    {"text": "🔔 맞춤알림 설정", "callback_data": "trv:m:watch"},
+                    {"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
                 ],
                 [
                     {"text": "✈️ 지금 특가 보기", "callback_data": "trv:m:search"},
@@ -567,36 +603,28 @@ class TravelInteractiveHandler:
         return text, {"inline_keyboard": rows}
 
     def build_delivery_settings_card(self, chat_id: str, notice: str = "") -> tuple[str, dict[str, Any]]:
-        """Simplified 4-line /settings: 📰 정기발송 / 🧭 관심권역 / 🎯 여행스타일 / 🔔 맞춤발송 (one button row each)."""
-        from travel_brief.storage.db import WATCH_MAX_ACTIVE_PER_CHAT
-
+        """Track A only (1:1 with 🔔 맞춤발송 설정): 📰 주기 / 🧭 관심권역 / 🎯 여행스타일, one button row each."""
         cid = str(chat_id)
         prefs = self._get_prefs(cid)
         freq = self._freq_of(prefs)
-        region = str(prefs.get("weekly_brief_region") or "ALL").upper()
-        region = region if region in REGION_LABELS else "ALL"
-        theme = str(prefs.get("weekly_brief_theme") or "ALL").upper()
-        theme = theme if theme in THEME_LABELS else "ALL"
-        paused = bool(prefs.get("watches_paused", False))
-        n_watch = self._active_watch_count(cid)
-        lines = [DORMANT_BANNER] if self._is_dormant(cid, prefs, n_watch) else []
+        region, theme = self._norm_region_theme(prefs)
+        lines = [DORMANT_BANNER] if self._is_dormant(cid, prefs) else []
         if notice:
             lines.append(notice)
+        status = "🟢 받는 중" if freq != "OFF" else "🔴"
         lines += [
-            "⚙️ <b>[발송 설정]</b>",
+            "📰 <b>[정기발송 설정]</b>",
             "━━━━━━━━━━━━━━━━━━",
-            f"📰 정기발송: <b>{WEEKLY_FREQ_STATUS[freq]}</b>",
+            "원하는 주기·권역·스타일을 누르면 바로 저장돼요.",
+            f"📰 정기발송: <b>{WEEKLY_FREQ_STATUS[freq]}</b> {status}",
             f"🧭 관심권역: <b>{html.escape(region_label(region))}</b>",
             f"🎯 여행스타일: <b>{THEME_LABELS[theme]}</b>",
-            f"🔔 맞춤발송: <b>{'일시중지' if paused else '켜짐'}</b> · 내 알림 {n_watch}/{WATCH_MAX_ACTIVE_PER_CHAT}",
-            "━━━━━━━━━━━━━━━━━━",
-            "💡 맞춤 알림을 일시중지해도 설정한 도시·목표가는 그대로 보관돼요.",
         ]
 
         def mark(selected: bool, text: str) -> str:
             return f"✅ {text}" if selected else text
 
-        region_btn = "🧭 권역 변경" if region == "ALL" else f"🧭 {REGION_LABELS[region]} (변경)"
+        region_btn = "🧭 권역 고르기" if region == "ALL" else f"✅ {REGION_LABELS[region]} (변경)"
         markup = {
             "inline_keyboard": [
                 [
@@ -612,8 +640,8 @@ class TravelInteractiveHandler:
                     for c, t in THEME_CB_CODES.items()
                 ],
                 [
-                    {"text": "⏸️ 맞춤발송: 일시중지" if paused else "🔔 맞춤발송: 켜짐", "callback_data": "trv:w:wp:s"},
-                    {"text": f"📋 내 알림 ({n_watch}/{WATCH_MAX_ACTIVE_PER_CHAT})", "callback_data": "trv:m:watch"},
+                    {"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
+                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
                 ],
             ]
         }
@@ -632,7 +660,7 @@ class TravelInteractiveHandler:
         rows = self.build_region_grid("p")
         rows.append([
             {"text": "🌏 전체", "callback_data": "trv:w:rgn:ALL"},
-            {"text": "↩️ 발송 설정", "callback_data": "trv:m:settings"},
+            {"text": "↩️ 정기발송 설정", "callback_data": "trv:m:settings"},
         ])
         return text, {"inline_keyboard": rows}
 
@@ -688,21 +716,28 @@ class TravelInteractiveHandler:
         if nav:
             rows.append(nav)
         rows.append([{"text": "↩️ 돌아가기", "callback_data": "trv:srg" if mode == "s" else "trv:w:rg"}])
-        action = "실시간 특가를 바로 조회해요" if mode == "s" else "특가 알림 조건을 설정해요"
-        text = (
-            f"🗺️ <b>[{html.escape(REGION_LABELS.get(region, region))} 도시 선택]</b> ({page + 1}/{pages})\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"도시를 누르면 {action}. (인기순 · 가나다순)"
-        )
+        region_name = html.escape(REGION_LABELS.get(region, region))
+        if mode == "s":
+            text = (
+                f"🗺️ <b>[{region_name} 도시 선택]</b> ({page + 1}/{pages})\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "도시를 누르면 실시간 특가를 바로 조회해요. (인기순 · 가나다순)"
+            )
+        else:
+            text = (
+                f"{WATCH_STEP1_HEADER}\n"
+                f"🗺️ {region_name} 도시 선택 ({page + 1}/{pages})\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "알림 받을 도시를 누르면 다음 단계에서 목표가를 정해요. (인기순 · 가나다순)"
+            )
         return text, {"inline_keyboard": rows}
 
     def _handle_menu_callback(self, cq_id: str, chat_id: str, message_id: int, sub: str) -> None:
-        """Non-search `trv:m:*` navigation. Acks first (TG-04), then renders on the UI pool."""
+        """Non-search `trv:m:*` navigation (read-only): UI edit submitted first, ack in parallel (TG-04)."""
         if sub in ("watch", "settings") and self.db is None:
             self._answer(cq_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
             return
-        self._answer(cq_id, "")
-        self._submit_ui(self._run_menu_action, chat_id, message_id, sub)
+        self._submit_nav_then_ack(cq_id, "", self._run_menu_action, chat_id, message_id, sub)
 
     def _run_menu_action(self, chat_id: str, message_id: int, sub: str) -> None:
         in_place = self._is_watch_card(chat_id, message_id)
@@ -728,7 +763,7 @@ class TravelInteractiveHandler:
     def _watch_entry_button(self, scope: str, chat_id: Optional[str] = None) -> dict[str, Any]:
         """ALL never registers a watch: it opens the per-city list. A city opens its own watch card."""
         if scope == "ALL":
-            return {"text": "🔔 맞춤알림 설정", "callback_data": "trv:w:l"}
+            return {"text": "🔔 맞춤발송 설정", "callback_data": "trv:w:l"}
         watch = self._get_watch(chat_id, scope) if chat_id else None
         if watch and watch.get("is_active"):
             text = f"🔔 알림 설정중 ({_man_label(int(watch['target_price_krw']))})"
@@ -753,7 +788,7 @@ class TravelInteractiveHandler:
             "inline_keyboard": [
                 [
                     {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"},
-                    {"text": "🔔 맞춤알림 설정", "callback_data": "trv:m:watch"},
+                    {"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
                 ],
                 [
                     {"text": "✈️ 지금 특가 보기", "callback_data": "trv:q:ALL"},
@@ -1004,8 +1039,16 @@ class TravelInteractiveHandler:
         return {"inline_keyboard": rows}
 
     def _send_guide_card(self, chat_id: str) -> None:
-        """`trv:c:guide` / `/search`: fresh guide card (remembered so region/page taps edit it in place)."""
+        """`/search`: fresh guide card (remembered so region/page taps edit it in place)."""
         self._remember_watch_card(chat_id, self._send_card(chat_id, self.build_city_guide_card(), self.build_city_guide_markup()))
+
+    def _run_guide_action(self, chat_id: str, message_id: int) -> None:
+        """`trv:c:guide`: edits a tracked navigation (menu/watch/guide) card in place; any other message
+        (search result, alert, onboarding) keeps its content and gets a fresh guide card."""
+        in_place = self._is_watch_card(chat_id, message_id)
+        self._render_watch_card(
+            chat_id, message_id, self.build_city_guide_card(), self.build_city_guide_markup(), edit=in_place
+        )
 
     def build_help_card(self, unknown_text: str = "", suggestions: Optional[list[Any]] = None) -> str:
         names = " · ".join(self.catalog.suggestion_names(12))
@@ -1045,10 +1088,13 @@ class TravelInteractiveHandler:
         ])
         return text, {"inline_keyboard": rows}
 
-    def build_onboarding_card(self) -> str:
+    def build_onboarding_card(self, chat_id: Optional[str] = None) -> str:
+        badge = self._format_status_badge(chat_id)
+        status = ("\n".join(["📍 <b>내 발송 상태</b>", *badge]) + "\n━━━━━━━━━━━━━━━━━━\n") if badge else ""
         return (
             "🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
+            f"{status}"
             "1️⃣ 📰 <b>정기발송 (매주 목 12:00 기본)</b>\n"
             "관심 권역·여행 스타일(휴양/관광)에 맞춘 TOP 3 브리핑\n"
             "2️⃣ 🔔 <b>맞춤발송 (목표가 도달 시)</b>\n"
@@ -1144,9 +1190,11 @@ class TravelInteractiveHandler:
         target = parts[2] if len(parts) > 2 else "ALL"
 
         if action == "c":
-            self._answer(cq_id, "🔍 가고 싶은 도시 이름을 입력해 주세요!")
             self._set_chat_state(chat_id, STATE_AWAITING_CITY, user_id=user_id)
-            self._submit_ui(self._send_guide_card, chat_id)
+            self._submit_nav_then_ack(
+                cq_id, "🔍 가고 싶은 도시 이름을 입력해 주세요!",
+                self._run_guide_action, str(chat_id), int(message_id or 0),
+            )
             return
 
         # Search drilldown: `trv:srg` (4x2 regions) / `trv:srg:<REG>:<PAGE>` (3x3 city page). Never a search.
@@ -1159,8 +1207,9 @@ class TravelInteractiveHandler:
                     self._answer(cq_id, "지원하지 않는 메뉴입니다. /search 로 다시 열어 주세요.")
                     return
                 region, page = parts[2].upper(), int(page_raw)
-            self._answer(cq_id, "")
-            self._submit_ui(self._run_search_region_action, str(chat_id), int(message_id or 0), region, page)
+            self._submit_nav_then_ack(
+                cq_id, "", self._run_search_region_action, str(chat_id), int(message_id or 0), region, page
+            )
             return
 
         # Price watch flows (`trv:w:*`) never fall into the search/stale path; answered immediately.
@@ -1387,7 +1436,7 @@ class TravelInteractiveHandler:
         if on_subscribe is not None:
             self._call_subscribe(on_subscribe, chat_id, sender_name)
         self._set_chat_state(chat_id, STATE_IDLE)
-        self._send_card(chat_id, self.build_onboarding_card(), self.build_onboarding_keyboard())
+        self._send_card(chat_id, self.build_onboarding_card(chat_id=chat_id), self.build_onboarding_keyboard())
         return True, "travel_start"
 
     @staticmethod
@@ -1467,6 +1516,10 @@ class TravelInteractiveHandler:
     }
 
     _FAST_WATCH_TOGGLES = frozenset({"m2", "h", "d", "n"})
+    # Pure read/navigation subs (no DB write): UI edit submitted first, ack in parallel. Every DB-mutating
+    # sub (wb / wp / Z / k / p / t / X / fq / rgn / th ...) keeps the ack-before-work ordering.
+    _READ_NAV_WATCH_SUBS = frozenset({"rg", "rgp", "ki"})
+    _READ_WATCH_SUBS = frozenset({"l", "g", "s", "e", "m"})
 
     def normalize_watch_scope(self, raw: Optional[str]) -> Optional[str]:
         """`@JP`-style country scopes or a catalog city code; ALL / unknown -> None."""
@@ -1491,7 +1544,9 @@ class TravelInteractiveHandler:
             if parsed is None:
                 self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
                 return
-            self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
+            read_only = sub in self._READ_NAV_WATCH_SUBS
+            if not read_only:
+                self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
             if sub in ("ki", "rg"):
                 self._set_chat_state(chat_id, STATE_AWAITING_WATCH_CITY, user_id=user_id)
             else:
@@ -1500,12 +1555,19 @@ class TravelInteractiveHandler:
                     STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY
                 ):
                     self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
-            self._submit_ui(self._run_watch_nav_action, chat_id, message_id, sub, parsed, user_id)
+            if read_only:
+                # Pure navigation: start the edit first, ack in parallel (still exactly one ack).
+                self._submit_nav_then_ack(
+                    cq_id, self._WATCH_TOASTS[sub], self._run_watch_nav_action, chat_id, message_id, sub, parsed, user_id
+                )
+            else:
+                self._submit_ui(self._run_watch_nav_action, chat_id, message_id, sub, parsed, user_id)
             return
         code = ""
         arg = parts[4] if len(parts) > 4 else ""
         if sub in self._PREFS_WATCH_SUBS:
-            # `trv:w:wb` / `trv:w:wp` -> list card; `:s` suffix -> delivery settings card. Nothing else.
+            # Legacy `trv:w:wb[:s]` / `trv:w:wp[:s]` (older messages) stay valid; nothing else is accepted.
+            # Result card follows the track: wb -> 📰 정기발송 설정, wp -> 🔔 맞춤발송 설정.
             arg = parts[3] if len(parts) > 3 else ""
             if len(parts) > 4 or arg not in ("", "s"):
                 self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
@@ -1534,23 +1596,28 @@ class TravelInteractiveHandler:
             self._answer(cq_id, self._WATCH_TOASTS[sub])
             return
 
-        self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
+        read_only = sub in self._READ_WATCH_SUBS
+        if not read_only:
+            self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
         if sub == "i":
             self._set_chat_state(chat_id, STATE_AWAITING_WATCH_PRICE, user_id=user_id, dest_code=code)
         elif sub == "f":
             self._set_chat_state(chat_id, STATE_AWAITING_WATCH_DATES, user_id=user_id, dest_code=code)
         elif sub == "g":
-            if self._at_watch_limit(chat_id):
-                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
-            else:
-                self._set_chat_state(chat_id, STATE_AWAITING_WATCH_CITY, user_id=user_id)
+            # No DB read before the ack: the worker drops this back to IDLE when the chat is at the cap.
+            self._set_chat_state(chat_id, STATE_AWAITING_WATCH_CITY, user_id=user_id)
         else:
             st = self.get_chat_context(chat_id, user_id)
             if st is not None and st.state in (
                 STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY
             ):
                 self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
-        self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg, user_id)
+        if read_only:
+            self._submit_nav_then_ack(
+                cq_id, self._WATCH_TOASTS[sub], self._run_watch_action, chat_id, message_id, sub, code, arg, user_id
+            )
+        else:
+            self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg, user_id)
 
     def _parse_nav_watch(self, sub: str, parts: list[str]) -> Optional[dict[str, Any]]:
         """Strict allowlist parsing for the region/city/settings watch callbacks (anything else -> None)."""
@@ -1589,6 +1656,7 @@ class TravelInteractiveHandler:
         try:
             if sub == "rg":
                 if self._at_watch_limit(chat_id):
+                    self._set_chat_state(chat_id, STATE_IDLE, user_id=uid)
                     text, markup = self.build_watch_list_card(chat_id, notice=f"⚠️ {WATCH_LIMIT_NOTICE}")
                 elif p["region"] is None:
                     text, markup = self.build_watch_target_picker_card()
@@ -1689,9 +1757,9 @@ class TravelInteractiveHandler:
         names = " · ".join(self.catalog.suggestion_names(6))
         lines = [notice] if notice else []
         lines += [
-            "⌨️ <b>[알림 받을 도시 직접 입력]</b>",
+            WATCH_STEP1_HEADER,
             "━━━━━━━━━━━━━━━━━━",
-            f"도시 이름을 채팅창에 입력해 주세요 ({minutes}분 안에).",
+            f"⌨️ 알림 받을 도시 이름을 채팅창에 입력해 주세요 ({minutes}분 안에).",
             f"예) {html.escape(names)}",
             "• 국가 전체 알림은 지원하지 않아요 · 취소: /cancel",
         ]
@@ -1790,6 +1858,7 @@ class TravelInteractiveHandler:
                 self._render_watch_card(chat_id, message_id, text, markup)
             elif sub == "g":
                 if self._at_watch_limit(chat_id):
+                    self._set_chat_state(chat_id, STATE_IDLE, user_id=uid)
                     text, markup = self.build_watch_list_card(chat_id, notice=f"⚠️ {WATCH_LIMIT_NOTICE}")
                 else:
                     text, markup = self.build_watch_target_picker_card()
@@ -1816,7 +1885,7 @@ class TravelInteractiveHandler:
                     "📰 정기 여행정보 발송을 껐어요. 맞춤 특가 알림과 도시 조회는 그대로 이용할 수 있어요."
                 )
                 notice = self._with_dormant_notice(chat_id, before, notice)
-                text, markup = self._prefs_result_card(chat_id, arg, notice)
+                text, markup = self._prefs_result_card(chat_id, "wb", notice)
                 self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "wp":
                 before = self._is_dormant(chat_id)
@@ -1827,7 +1896,7 @@ class TravelInteractiveHandler:
                     "▶️ 맞춤 특가 알림을 다시 시작했어요."
                 )
                 notice = self._with_dormant_notice(chat_id, before, notice)
-                text, markup = self._prefs_result_card(chat_id, arg, notice)
+                text, markup = self._prefs_result_card(chat_id, "wp", notice)
                 self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
             elif sub == "z":
                 text, markup = self.build_watch_reset_confirm_card(chat_id)
@@ -1849,9 +1918,10 @@ class TravelInteractiveHandler:
                 {"inline_keyboard": [[{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}]]},
             )
 
-    def _prefs_result_card(self, chat_id: str, origin: str, notice: str) -> tuple[str, dict[str, Any]]:
-        """`trv:w:wb:s` / `trv:w:wp:s` return to the delivery settings card; bare toggles to the list."""
-        if origin == "s":
+    def _prefs_result_card(self, chat_id: str, track: str, notice: str) -> tuple[str, dict[str, Any]]:
+        """Legacy toggles (`trv:w:wb[:s]` / `trv:w:wp[:s]` from older messages) land on the card that owns the
+        track (1:1 split): Track A `wb` -> 📰 정기발송 설정, Track B `wp` -> 🔔 맞춤발송 설정."""
+        if track == "wb":
             return self.build_delivery_settings_card(chat_id, notice=notice)
         return self.build_watch_list_card(chat_id, notice=notice)
 
@@ -2202,21 +2272,24 @@ class TravelInteractiveHandler:
         # Grandfathering: never sliced — chats holding more than the cap still see (and can edit/delete) all.
         watches = self.db.list_travel_watches(chat_id=chat_id, active_only=True)
         prefs = self._get_prefs(chat_id)
-        weekly_on = bool(prefs["weekly_brief_enabled"])
-        paused = bool(prefs["watches_paused"])
+        paused = bool(prefs.get("watches_paused", False))
         lines = [DORMANT_BANNER] if self._is_dormant(chat_id, prefs, len(watches)) else []
         if notice:
             lines.append(notice)
         lines += [
-            f"📋 <b>[내 특가 알림]</b> ({len(watches)}/{WATCH_MAX_ACTIVE_PER_CHAT})",
+            f"🔔 <b>[맞춤발송 설정]</b> ({len(watches)}/{WATCH_MAX_ACTIVE_PER_CHAT})",
             "━━━━━━━━━━━━━━━━━━",
         ]
-        lines.append(f"📰 정기발송: <b>{WEEKLY_FREQ_STATUS[self._freq_of(prefs)]}</b>")
-        lines.append(f"🔔 맞춤발송: <b>{'일시중지' if paused else '켜짐'}</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        rows: list[list[dict[str, Any]]] = []
         if not watches:
-            lines.append("아직 설정한 알림이 없어요. 아래 도시를 눌러 바로 시작해 보세요 👇")
+            # Never "일시중지"/"켜짐" with 0 watches, even if the paused flag is still set.
+            lines.append("⚪ 등록된 도시가 없어 맞춤발송이 나가지 않아요. 아래 [➕ 도시 추가하기]로 등록해 보세요!")
+        elif paused:
+            lines.append("⏸️ 맞춤발송이 일시중지 중이에요. [▶️ 다시 받기]를 누르면 재개돼요.")
+        else:
+            lines.append(f"🟢 아래 도시의 목표가 도달 시 매일 3회({WATCH_CHECK_SCHEDULE}) 체크해 알려드려요.")
+        if watches:
+            lines.append("━━━━━━━━━━━━━━━━━━")
+        rows: list[list[dict[str, Any]]] = []
         for i, w in enumerate(watches, 1):
             label = self.label_for(w["dest_code"])
             seen = w.get("last_seen_price_krw")
@@ -2238,14 +2311,15 @@ class TravelInteractiveHandler:
             if quick:
                 rows.append([{"text": f"➕ {self.label_for(c)}", "callback_data": f"trv:w:m:{c}"} for c in quick])
         if len(watches) < WATCH_MAX_ACTIVE_PER_CHAT:
-            rows.append([{"text": "➕ 알림 추가 (권역·도시·날짜)", "callback_data": "trv:w:g"}])
+            rows.append([{"text": "➕ 도시 추가하기", "callback_data": "trv:w:g"}])
+        if watches:  # pause / reset only make sense with >= 1 watch (grandfathered > cap included)
+            rows.append([
+                {"text": "▶️ 다시 받기" if paused else "⏸️ 일시중지", "callback_data": "trv:w:wp"},
+                {"text": "🧹 초기화", "callback_data": "trv:w:z"},
+            ])
         rows.append([
-            {"text": "📰 정기발송 끄기" if weekly_on else "📰 정기발송 켜기", "callback_data": "trv:w:wb"},
-            {"text": "🔔 맞춤발송 재개" if paused else "🔔 맞춤발송 중지", "callback_data": "trv:w:wp"},
-        ])
-        rows.append([
-            {"text": "🧹 알림 초기화", "callback_data": "trv:w:z"},
-            {"text": "🔍 도시 검색", "callback_data": "trv:c:guide"},
+            {"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
+            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
         ])
         return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -2285,10 +2359,10 @@ class TravelInteractiveHandler:
         Legacy `@JP`-style country scopes are intentionally NOT offered for new registration."""
         lines = [notice] if notice else []
         lines += [
-            "🌏 <b>[특가 알림 대상 선택]</b>",
+            WATCH_STEP1_HEADER,
             "━━━━━━━━━━━━━━━━━━",
+            WATCH_STEP1_GUIDE,
             "🗺️ 권역을 고르면 인천 직항 도시 목록이 나와요.",
-            "💬 권역·도시 화면에서 <b>채팅창에 도시 이름(예: 오사카, 밴쿠버)을 바로 입력</b>해도 알림을 설정할 수 있어요.",
         ]
         rows = self.build_region_grid("w")
         rows.append([
@@ -2308,7 +2382,14 @@ class TravelInteractiveHandler:
         active = bool(watch and watch.get("is_active"))
         country = is_country_watch_code(code)
         lines = [notice] if notice else []
-        lines += [f"🔔 <b>[{html.escape(label)} 특가 알림 설정]</b>", "━━━━━━━━━━━━━━━━━━"]
+        if active:
+            lines += [f"🔔 <b>[맞춤발송 수정 · {html.escape(label)}]</b>", "━━━━━━━━━━━━━━━━━━"]
+        else:
+            lines += [
+                f"🔔 <b>[맞춤발송 등록 · 2/2단계: {html.escape(label)} 목표가 입력]</b>",
+                "━━━━━━━━━━━━━━━━━━",
+                WATCH_STEP2_GUIDE,
+            ]
         if country:
             names = [self.label_for(c).split(" ", 1)[-1] for c in self.catalog.watch_target_codes(code)]
             lines.append(f"📍 대상: {html.escape(' · '.join(names))} ({len(names)}곳 중 최저가)")
@@ -2761,6 +2842,32 @@ class TravelInteractiveHandler:
             logger.warning("UI task submission failed, running inline: %s", exc)
             fn(*args)
 
+    def _submit_nav_then_ack(self, cq_id: str, toast: str, fn: Callable[..., Any], *args: Any) -> None:
+        """Read/navigation callbacks: submit the UI edit FIRST, then answerCallbackQuery so both HTTP calls
+        run in parallel. If the task ends up running inline on this thread (pool closed/full -> `_submit_ui`
+        fallback), the ack is sent BEFORE the inline work, so the spinner is never held by the edit.
+        Exactly one ack either way."""
+        caller = threading.get_ident()
+        ack_lock = threading.Lock()
+        acked = [False]
+
+        def ack_once() -> None:
+            with ack_lock:
+                if acked[0]:
+                    return
+                acked[0] = True
+            self._answer(cq_id, toast)
+
+        def task(*a: Any) -> None:
+            if threading.get_ident() == caller:
+                ack_once()  # inline fallback: ack first (TG-04)
+            fn(*a)
+
+        try:
+            self._submit_ui(task, *args)
+        finally:
+            ack_once()
+
     def _send_card(
         self, chat_id: str, text: str, reply_markup: Optional[dict[str, Any]] = None
     ) -> Optional[str]:
@@ -2902,7 +3009,11 @@ class TravelInteractiveHandler:
                     st.watchdog.cancel()
                     st.watchdog = None
         self.worker_pool.shutdown(wait=False)
-        self.ui_pool.shutdown(wait=False)
+        try:
+            self.ui_pool.shutdown(wait=False, cancel_futures=True)  # queued (not started) UI edits are dropped
+        except TypeError:  # Python < 3.9
+            self.ui_pool.shutdown(wait=False)
+        self._drain_ui_pool(UI_SHUTDOWN_GRACE_SECONDS)
         with self._http_session_lock:
             sess, self._http_session = self._http_session, None
         if sess is not None:
@@ -2910,3 +3021,21 @@ class TravelInteractiveHandler:
                 sess.close()
             except Exception as exc:
                 logger.debug("HTTP session close failed: %s", exc)
+        close_tg = getattr(self.tg, "close", None)
+        if callable(close_tg):
+            try:
+                close_tg()
+            except Exception as exc:
+                logger.debug("Telegram channel close failed: %s", exc)
+
+    def _drain_ui_pool(self, grace: float) -> None:
+        """Bounded wait for in-flight UI edits so their HTTP session is not closed under them."""
+        deadline = time.monotonic() + max(0.0, grace)
+        current = threading.current_thread()
+        for t in list(getattr(self.ui_pool, "_threads", ()) or ()):
+            if t is current:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            t.join(remaining)

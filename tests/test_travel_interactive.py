@@ -1372,5 +1372,118 @@ class TestTravelMenuCommands(unittest.TestCase):
             h.shutdown()
 
 
+class _FakeSessionResp:
+    def __init__(self, status: int, payload: dict, reason: str = "Bad Request"):
+        import json as _json
+
+        self.status_code, self.reason, self._payload = status, reason, payload
+        self.content = _json.dumps(payload).encode("utf-8")
+
+    def json(self):
+        return self._payload
+
+
+class TestTravelTelegramChannelKeepAlive(unittest.TestCase):
+    """`TelegramChannel`: injected opener untouched (tests), thread-local keep-alive Session in production."""
+
+    def test_injected_opener_is_used_untouched_and_never_opens_a_session(self):
+        import io
+        import json as _json
+        from travel_brief.channels.telegram import TelegramChannel
+
+        calls: list = []
+
+        def opener(req, timeout=10):
+            calls.append((req.full_url.rsplit("/", 1)[1], _json.loads(req.data.decode("utf-8"))))
+            return io.BytesIO(_json.dumps({"ok": True, "result": {"message_id": 7}}).encode("utf-8"))
+
+        tg = TelegramChannel("123:abc", opener=opener)
+        self.assertIs(tg._opener, opener)
+        with patch.object(TelegramChannel, "_new_session", side_effect=AssertionError("no session with an opener")):
+            self.assertEqual(tg.send_text("c1", "hi"), "7")
+            self.assertTrue(tg.answer_callback("cq1", text="ok"))
+        self.assertEqual([m for m, _ in calls], ["sendMessage", "answerCallbackQuery"])
+        self.assertEqual(calls[1][1]["callback_query_id"], "cq1")
+        self.assertIs(tg._opener, opener)  # never replaced
+
+    def test_default_transport_reuses_thread_local_sessions_and_keeps_error_contract(self):
+        import json as _json
+        import threading
+        from travel_brief.channels.telegram import TelegramChannel
+
+        created: list = []
+
+        def factory(_self):
+            sess = MagicMock()
+            sess.post.return_value = _FakeSessionResp(200, {"ok": True, "result": {"message_id": 11}})
+            created.append(sess)
+            return sess
+
+        tg = TelegramChannel("123:abc")
+        with patch.object(TelegramChannel, "_new_session", autospec=True, side_effect=factory):
+            self.assertEqual(tg.send_text("c1", "a"), "11")
+            self.assertEqual(tg.send_text("c1", "b"), "11")
+            self.assertEqual(len(created), 1)  # same thread -> one session, TLS connection reused
+            self.assertEqual(created[0].post.call_count, 2)
+            args, kwargs = created[0].post.call_args
+            self.assertTrue(args[0].endswith("/bot123:abc/sendMessage"))
+            self.assertEqual(_json.loads(kwargs["data"].decode("utf-8"))["text"], "b")
+            self.assertEqual(kwargs["headers"], {"Content-Type": "application/json"})
+            self.assertEqual(kwargs["timeout"], 10)
+
+            # another thread never shares the mutable Session: it gets its own
+            out: list = []
+            t = threading.Thread(target=lambda: out.append(tg.answer_callback("cq9", text="x")))
+            t.start()
+            t.join(5)
+            self.assertEqual(out, [True])
+            self.assertEqual(len(created), 2)
+            self.assertIsNot(created[0], created[1])
+            self.assertTrue(created[1].post.call_args[0][0].endswith("/answerCallbackQuery"))
+
+            # exact error contract (same strings as the urllib path)
+            cases = [
+                (_FakeSessionResp(400, {"ok": False, "description": "Bad Request: can't parse entities"}),
+                 "Telegram HTTP 400 (sendMessage): Bad Request: can't parse entities"),
+                (_FakeSessionResp(429, {"ok": False, "description": "Too Many Requests: retry after 3"}),
+                 "Telegram HTTP 429 (sendMessage): Too Many Requests: retry after 3"),
+                (_FakeSessionResp(200, {"ok": False, "description": "nope"}), "Telegram API error (sendMessage): nope"),
+            ]
+            bad_gateway = _FakeSessionResp(502, {}, reason="Bad Gateway")
+            bad_gateway.content = b"<html>gateway</html>"
+            cases.append((bad_gateway, "Telegram HTTP 502 (sendMessage): HTTP Error 502: Bad Gateway"))
+            for resp, msg in cases:
+                created[0].post.return_value = resp
+                with self.assertRaises(RuntimeError) as cm:
+                    tg.send_text("c1", "<b>x</b>")
+                self.assertEqual(str(cm.exception), msg)
+            # answer_callback keeps swallowing errors
+            created[0].post.return_value = _FakeSessionResp(400, {"ok": False, "description": "query is too old"})
+            self.assertFalse(tg.answer_callback("cq-old"))
+            # network errors propagate unchanged (dispatcher classifies "timed out" as UNKNOWN)
+            created[0].post.side_effect = RuntimeError("HTTPSConnectionPool: Read timed out. (read timeout=10)")
+            with self.assertRaises(RuntimeError) as cm:
+                tg.send_text("c1", "x")
+            self.assertIn("timed out", str(cm.exception))
+            self.assertEqual(len(created), 2)  # no extra session per call
+
+        tg.close()
+        created[0].close.assert_called_once()
+        created[1].close.assert_called_once()
+        self.assertIsNone(tg._get_session())  # closed channel never re-creates a session
+
+    def test_patched_urlopen_keeps_urllib_transport_and_offline_guards(self):
+        from travel_brief.channels.telegram import TelegramChannel
+
+        late = TelegramChannel("123:abc")  # created BEFORE the guard is installed
+        with patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")) as guard, \
+             patch.object(TelegramChannel, "_new_session", side_effect=AssertionError("session must not be used")):
+            early = TelegramChannel("123:abc")
+            self.assertFalse(early.answer_callback("cq"))  # guard raised (swallowed by answer_callback)
+            with self.assertRaises(AssertionError):
+                late.send_text("c1", "x")  # a later patch is honoured too: never bypassed by a session
+        self.assertEqual(guard.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

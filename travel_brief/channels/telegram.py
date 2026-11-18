@@ -2,14 +2,22 @@ from typing import Any
 """Telegram transport; supports rich HTML formatting, clickable hyperlinks, inline buttons, and file attachment."""
 import html
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import weakref
 from pathlib import Path
 # from travel_brief.core import Briefing
 Briefing = Any
 AssetSummary = Any
+
+# Identity check: when `urllib.request.urlopen` is patched (tests / offline demo guards) the urllib transport is
+# kept, so a patched network guard can never be bypassed by the keep-alive session.
+_ORIGINAL_URLOPEN = urllib.request.urlopen
+SESSION_POOL_CONNECTIONS = 8
+SESSION_POOL_MAXSIZE = 8
 
 # Telegram Bot API hard limit for photo/document captions (after entity parsing).
 TELEGRAM_CAPTION_LIMIT = 1024
@@ -141,10 +149,94 @@ class TelegramChannel:
         self.bot_token = bot_token.strip()
         self.include_inline_button = include_inline_button
         self.use_html = use_html
+        # An injected opener (tests) is always used as-is; the keep-alive session is production-only.
+        self._custom_opener = opener is not None
         self._opener = opener or urllib.request.urlopen
+        # One requests.Session per thread (never shared across threads); a WeakSet lets `close()` release
+        # live sessions while sessions of finished threads (e.g. watchdog timers) are simply garbage collected.
+        self._local = threading.local()
+        self._sessions: "weakref.WeakSet[Any]" = weakref.WeakSet()
+        self._sessions_lock = threading.Lock()
+        self._closed = False
+
+    def _session_enabled(self) -> bool:
+        return (
+            not self._custom_opener
+            and not self._closed
+            and self._opener is _ORIGINAL_URLOPEN
+            and urllib.request.urlopen is _ORIGINAL_URLOPEN
+        )
+
+    def _new_session(self) -> Any:
+        """Keep-alive session factory; None when `requests` is unavailable (urllib fallback)."""
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+        except ImportError:
+            return None
+        sess = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=SESSION_POOL_CONNECTIONS, pool_maxsize=SESSION_POOL_MAXSIZE, max_retries=0
+        )
+        sess.mount("https://", adapter)
+        return sess
+
+    def _get_session(self) -> Any:
+        """Thread-local keep-alive session (TLS reuse for answerCallbackQuery / sendMessage) or None."""
+        if not self._session_enabled():
+            return None
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = self._new_session()
+            if sess is None:
+                return None
+            self._local.session = sess
+            with self._sessions_lock:
+                self._sessions.add(sess)
+        return sess
+
+    def close(self) -> None:
+        """Closes every live keep-alive session; later calls fall back to the urllib transport."""
+        self._closed = True
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions = weakref.WeakSet()
+        for sess in sessions:
+            try:
+                sess.close()
+            except Exception:
+                pass
+
+    def _api_call_session(self, sess: Any, method: str, url: str, payload: dict | None, timeout: int) -> dict:
+        if payload is None:
+            resp = sess.get(url, timeout=timeout)
+        else:
+            resp = sess.post(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+        code = int(resp.status_code)
+        if code >= 400:
+            err_body = ""
+            try:
+                err_json = json.loads((resp.content or b"").decode("utf-8", errors="ignore"))
+                err_body = err_json.get("description", "")
+            except Exception:
+                err_body = f"HTTP Error {code}: {getattr(resp, 'reason', '') or ''}"
+            raise RuntimeError(f"Telegram HTTP {code} ({method}): {err_body}")
+        res = resp.json()
+        if not res.get("ok"):
+            desc = res.get("description", "Telegram API rejected request")
+            raise RuntimeError(f"Telegram API error ({method}): {desc}")
+        return res
 
     def _api_call(self, method: str, payload: dict | None = None, timeout: int = 10) -> dict:
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
+        sess = self._get_session()
+        if sess is not None:
+            return self._api_call_session(sess, method, url, payload, timeout)
         if payload is None:
             req = urllib.request.Request(url, method="GET")
         else:
@@ -152,8 +244,10 @@ class TelegramChannel:
             req = urllib.request.Request(
                 url, data=data, headers={"Content-Type": "application/json"}, method="POST"
             )
+        # Non-injected channels resolve urlopen at call time so a later patch (offline guard) is honoured.
+        opener = self._opener if (self._custom_opener or self._opener is not _ORIGINAL_URLOPEN) else urllib.request.urlopen
         try:
-            with self._opener(req, timeout=timeout) as response:
+            with opener(req, timeout=timeout) as response:
                 res = json.load(response)
         except urllib.error.HTTPError as exc:
             err_body = ""

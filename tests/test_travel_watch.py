@@ -473,7 +473,7 @@ def test_watch_callback_flow_preset_toggle_delete(handler, mem_db):
     assert mem_db.get_travel_watch("c1", "FUK")["is_active"] == 1  # step 1 never deletes
     _cb(handler, "trv:w:X:FUK", mid=900)
     assert mem_db.get_travel_watch("c1", "FUK")["is_active"] == 0
-    assert "내 특가 알림" in handler.edits[-1][1]
+    assert "[맞춤발송 설정]" in handler.edits[-1][1]
     for _mid, _t, mk in handler.edits:
         assert all(len(cb.encode("utf-8")) <= 64 and cb.startswith("trv:") for cb in all_callbacks(mk))
 
@@ -1089,7 +1089,7 @@ def _assert_callbacks_fit(h):
 def test_v2_country_flex_wizard_callbacks(handler, mem_db):
     _cb(handler, "trv:w:g")
     text, markup = handler.tg.send_text.call_args[0][1], handler.tg.send_text.call_args[1]["reply_markup"]
-    assert "알림 대상 선택" in text
+    assert "[맞춤발송 등록 · 1/2단계: 도시 선택]" in text
     cbs = set(all_callbacks(markup))
     assert {f"trv:w:rg:{r}:0" for r in ("JP", "TWHK", "CNMN", "SEASIA", "PAC", "OCE", "NA", "EU")} <= cbs
     assert {"trv:w:l", "trv:m:home"} <= cbs and "trv:w:ki" not in cbs
@@ -1456,10 +1456,14 @@ def test_fast_toggles_silent_ack_and_dispatch_before_ack(handler, mem_db):
             assert handler.tg.answer_callback.call_args[1]["text"] == ""  # no toast banner per tap
             assert run.call_args[0][2] == sub
     assert run.call_count == 4
-    # non-toggle actions keep their toast and ack-first ordering
+    # read-only navigation (list card): edit submitted first, toast ack right after (parallel in production)
     order.clear()
     _cb(handler, "trv:w:l", mid=900)
-    assert order[0] == "ack" and handler.tg.answer_callback.call_args[1]["text"]
+    assert order[:2] == ["submit:l", "ack"] and handler.tg.answer_callback.call_args[1]["text"]
+    # DB-mutating actions keep their toast and ack-before-work ordering
+    order.clear()
+    _cb(handler, "trv:w:wp", mid=900)
+    assert order[:2] == ["ack", "submit:wp"] and handler.tg.answer_callback.call_args[1]["text"]
 
 
 def test_fast_toggle_clears_pending_input_state(handler, mem_db):
@@ -1764,22 +1768,25 @@ def test_watch_list_card_status_and_compact_two_column_rows(handler, mem_db):
     mem_db.upsert_travel_watch("c1", "@JP", 300_000)
     text, markup = handler.build_watch_list_card("c1")
     rows = markup["inline_keyboard"]
-    assert "정기발송: <b>주1회(목) 12:00</b>" in text and "맞춤발송: <b>켜짐</b>" in text
-    assert "(2/4)" in text and DORMANT_BANNER not in text
+    assert "🔔 <b>[맞춤발송 설정]</b> (2/4)" in text and DORMANT_BANNER not in text
+    assert "🟢 아래 도시의 목표가 도달 시 매일 3회(07:30·12:30·18:30) 체크해 알려드려요." in text
+    assert "정기발송:" not in text  # 1:1 split: Track A status lives only on the 📰 정기발송 card
     assert rows[0] == [{"text": "⚙️ " + handler.label_for("FUK"), "callback_data": "trv:w:m:FUK"},
                        {"text": "🗑️", "callback_data": "trv:w:x:FUK"}]
     assert [b["callback_data"] for b in rows[1]] == ["trv:w:s:@JP", "trv:w:x:@JP"]
-    assert {"text": "➕ 알림 추가 (권역·도시·날짜)", "callback_data": "trv:w:g"} in [b for r in rows for b in r]
-    assert rows[-2] == [{"text": "📰 정기발송 끄기", "callback_data": "trv:w:wb"},
-                        {"text": "🔔 맞춤발송 중지", "callback_data": "trv:w:wp"}]
-    assert rows[-1] == [{"text": "🧹 알림 초기화", "callback_data": "trv:w:z"},
-                        {"text": "🔍 도시 검색", "callback_data": "trv:c:guide"}]
+    assert {"text": "➕ 도시 추가하기", "callback_data": "trv:w:g"} in [b for r in rows for b in r]
+    assert rows[-2] == [{"text": "⏸️ 일시중지", "callback_data": "trv:w:wp"},
+                        {"text": "🧹 초기화", "callback_data": "trv:w:z"}]
+    assert rows[-1] == [{"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
+                        {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
+    assert not {"trv:w:wb", "trv:w:wb:s", "trv:w:wp:s", "trv:c:guide"} & set(all_callbacks(markup))
     mem_db.set_weekly_brief_enabled("c1", False)
     mem_db.set_watches_paused("c1", True)
     text, markup = handler.build_watch_list_card("c1")
-    assert "정기발송: <b>꺼짐</b>" in text and "맞춤발송: <b>일시중지</b>" in text
+    assert "⏸️ 맞춤발송이 일시중지 중이에요. [▶️ 다시 받기]를 누르면 재개돼요." in text
     assert text.startswith(DORMANT_BANNER)  # freq OFF + Track B paused -> search-only mode banner
-    assert [b["text"] for b in markup["inline_keyboard"][-2]] == ["📰 정기발송 켜기", "🔔 맞춤발송 재개"]
+    assert markup["inline_keyboard"][-2] == [{"text": "▶️ 다시 받기", "callback_data": "trv:w:wp"},
+                                             {"text": "🧹 초기화", "callback_data": "trv:w:z"}]
     # setup card: save / input rows are 2-column
     _t, setup = handler.build_watch_setup_card("c1", "u1", "FUK")
     by_cb = {b["callback_data"]: i for i, r in enumerate(setup["inline_keyboard"]) for b in r}
@@ -1805,14 +1812,15 @@ def test_prefs_callbacks_ack_first_and_toggle(handler, mem_db):
     assert order[:2] == ["ack", "set_weekly_brief_enabled"]
     assert mem_db.is_weekly_brief_enabled("c1") is False
     assert "정기 여행정보 발송을 껐어요" in handler.edits[-1][1]
-    assert "정기발송: <b>꺼짐</b>" in handler.edits[-1][1]
+    # legacy Track A toggle lands on the card that owns Track A
+    assert "[정기발송 설정]" in handler.edits[-1][1] and "정기발송: <b>꺼짐</b>" in handler.edits[-1][1]
     # weekly OFF + no active watch -> one-time dormant notice on this transition
     assert DORMANT_NOTICE in handler.edits[-1][1] and DORMANT_BANNER in handler.edits[-1][1]
     order.clear()
     _cb(handler, "trv:w:wp", mid=900)
     assert order[:2] == ["ack", "set_watches_paused"]
     assert mem_db.get_travel_user_prefs("c1")["watches_paused"] is True
-    assert "일시중지했어요" in handler.edits[-1][1]
+    assert "일시중지했어요" in handler.edits[-1][1] and "[맞춤발송 설정]" in handler.edits[-1][1]
     _cb(handler, "trv:w:wb", mid=900)
     _cb(handler, "trv:w:wp", mid=900)
     prefs = mem_db.get_travel_user_prefs("c1")
@@ -1878,6 +1886,13 @@ def test_onboarding_card_introduces_both_tracks(handler):
     assert "목 12:00" in card and "정기발송" in card and "🔔 <b>맞춤발송" in card
     assert "/settings" in card
     assert "구독이 시작되었습니다" in card
+    assert "내 발송 상태" not in card  # no chat_id -> no personal badge (backward compatible)
+    personal = handler.build_onboarding_card(chat_id="c1")
+    assert "📰 정기발송: <b>🟢 받는 중 (주1회(목) 12:00 · 🌏 전체 · ✨ 전체)</b>" in personal
+    assert "🔔 맞춤발송: <b>⚪ 미등록 (도시 0/4)</b>" in personal
+    # /start passes the chat id through to the badge
+    assert handler.handle_text_message("c1", 1, "u1", "/start") == (True, "travel_start")
+    assert "⚪ 미등록 (도시 0/4)" in handler.tg.send_text.call_args[0][1]
     kb = handler.build_inline_keyboard("ALL")["inline_keyboard"]
     assert kb[0][0]["callback_data"].startswith("trv:r:") and kb[-2][0]["callback_data"] == "trv:c:guide"
 
@@ -1902,7 +1917,9 @@ def test_slim_result_keyboard_four_rows_preserves_contract(handler, mem_db):
 
 def test_menu_cards_layout_and_callbacks_fit(handler, mem_db):
     text, hub = handler.build_menu_hub_card("c1")
-    assert "메인 메뉴" in text and "정기발송: <b>주1회(목) 12:00</b>" in text
+    assert "메인 메뉴" in text
+    assert "📰 정기발송: <b>🟢 받는 중 (주1회(목) 12:00 · 🌏 전체 · ✨ 전체)</b>" in text
+    assert "🔔 맞춤발송: <b>⚪ 미등록 (도시 0/4)</b>" in text
     rows = hub["inline_keyboard"]
     assert [b["callback_data"] for b in rows[0]] == ["trv:m:settings", "trv:m:watch"]
     assert [b["callback_data"] for b in rows[1]] == ["trv:m:search", "trv:c:guide"]
@@ -1924,19 +1941,20 @@ def test_menu_cards_layout_and_callbacks_fit(handler, mem_db):
     assert not any(cb.startswith("trv:s:") for cb in all_callbacks(pop))  # trv:s:* stays onboarding-only
 
     text, settings = handler.build_delivery_settings_card("c1")
-    assert "[발송 설정]" in text and "정기발송: <b>주1회(목) 12:00</b>" in text
+    assert "📰 <b>[정기발송 설정]</b>" in text and "원하는 주기·권역·스타일을 누르면 바로 저장돼요." in text
+    assert "정기발송: <b>주1회(목) 12:00</b> 🟢 받는 중" in text
     assert "관심권역: <b>🌏 전체</b>" in text and "여행스타일: <b>✨ 전체</b>" in text
-    assert "맞춤발송: <b>켜짐</b> · 내 알림 0/4" in text
+    assert "맞춤발송:" not in text  # 1:1 split: Track B status lives only on the 🔔 맞춤발송 card
     assert DORMANT_BANNER not in text
     assert settings["inline_keyboard"] == [
-        [{"text": "✅ 주1회(목)", "callback_data": "trv:w:fq:T"},
-         {"text": "주2회(화·목)", "callback_data": "trv:w:fq:B"},
+        [{"text": "✅ 목 주1회", "callback_data": "trv:w:fq:T"},
+         {"text": "화·목 주2회", "callback_data": "trv:w:fq:B"},
          {"text": "끄기", "callback_data": "trv:w:fq:O"}],
-        [{"text": "✅ 🌏 전체", "callback_data": "trv:w:rgn:ALL"}, {"text": "🧭 권역 변경", "callback_data": "trv:w:rgp"}],
+        [{"text": "✅ 🌏 전체", "callback_data": "trv:w:rgn:ALL"}, {"text": "🧭 권역 고르기", "callback_data": "trv:w:rgp"}],
         [{"text": "✅ ✨ 전체", "callback_data": "trv:w:th:A"}, {"text": "🏖️ 휴양", "callback_data": "trv:w:th:R"},
          {"text": "🏙️ 관광", "callback_data": "trv:w:th:C"}],
-        [{"text": "🔔 맞춤발송: 켜짐", "callback_data": "trv:w:wp:s"},
-         {"text": "📋 내 알림 (0/4)", "callback_data": "trv:m:watch"}],
+        [{"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
+         {"text": "🏠 메뉴", "callback_data": "trv:m:home"}],
     ]
     for mk in (hub, pop, settings, handler.build_inline_keyboard("ALL", chat_id="c1")):
         for cb in all_callbacks(mk):
@@ -1957,9 +1975,9 @@ def test_menu_callbacks_route_ack_once_and_edit_menu_cards_in_place(handler, mem
     assert "도움말" in handler.edits[-1][1]
     assert handler.edits[-1][2] == handler.build_inline_keyboard("ALL", chat_id="c1")
     _cb(handler, "trv:m:watch", mid=900)
-    assert "내 특가 알림" in handler.edits[-1][1]
+    assert "[맞춤발송 설정]" in handler.edits[-1][1]
     _cb(handler, "trv:m:settings", mid=900)
-    assert "[발송 설정]" in handler.edits[-1][1]
+    assert "[정기발송 설정]" in handler.edits[-1][1]
     _cb(handler, "trv:m:home", mid=900)
     assert "메인 메뉴" in handler.edits[-1][1]
     assert handler._launch_search.call_count == 0
@@ -2006,20 +2024,28 @@ def test_settings_card_toggles_return_to_settings_and_reject_bad_suffix(handler,
     assert mem_db.get_travel_user_prefs("c1")["updated_at"] is None  # nothing written
 
     handler._remember_watch_card("c1", 900)
+    # legacy `:s` toggles from older settings messages are still handled (backward compatibility)
     _cb(handler, "trv:w:wb:s", mid=900)
     _mid, text, markup = handler.edits[-1]
-    assert "[발송 설정]" in text and "정기 여행정보 발송을 껐어요" in text
+    assert "[정기발송 설정]" in text and "정기 여행정보 발송을 껐어요" in text
     assert "정기발송: <b>꺼짐</b>" in text
     assert markup["inline_keyboard"][0][2] == {"text": "✅ 끄기", "callback_data": "trv:w:fq:O"}
-    _cb(handler, "trv:w:wp:s", mid=900)
+    assert not {"trv:w:wp:s", "trv:w:wb:s", "trv:w:wp", "trv:w:wb"} & set(all_callbacks(markup))
+    _cb(handler, "trv:w:wp:s", mid=900)  # Track B toggle lands on the 🔔 맞춤발송 card that owns it
     _mid, text, markup = handler.edits[-1]
-    assert "[발송 설정]" in text and "맞춤발송: <b>일시중지</b>" in text
-    assert markup["inline_keyboard"][3][0] == {"text": "⏸️ 맞춤발송: 일시중지", "callback_data": "trv:w:wp:s"}
+    assert "[맞춤발송 설정]" in text and "일시중지했어요" in text and "[정기발송 설정]" not in text
+    # 0 watches: never "일시중지" status wording, and no pause/reset buttons
+    assert "등록된 도시가 없어 맞춤발송이 나가지 않아요" in text
+    assert "trv:w:wp" not in all_callbacks(markup) and "trv:w:z" not in all_callbacks(markup)
     prefs = mem_db.get_travel_user_prefs("c1")
     assert prefs["weekly_brief_enabled"] is False and prefs["watches_paused"] is True
-    # the bare legacy toggles still return to the watch list card
+    # bare legacy toggles keep working too
     _cb(handler, "trv:w:wb", mid=900)
-    assert "내 특가 알림" in handler.edits[-1][1] and "[발송 설정]" not in handler.edits[-1][1]
+    assert "[정기발송 설정]" in handler.edits[-1][1] and "[맞춤발송 설정]" not in handler.edits[-1][1]
+    _cb(handler, "trv:w:wp", mid=900)
+    assert "[맞춤발송 설정]" in handler.edits[-1][1] and "다시 시작했어요" in handler.edits[-1][1]
+    prefs = mem_db.get_travel_user_prefs("c1")
+    assert prefs["weekly_brief_enabled"] is True and prefs["watches_paused"] is False
     _assert_callbacks_fit(handler)
 
 
@@ -2044,10 +2070,10 @@ def test_menu_query_refresh_callbacks_clear_only_that_users_state(handler, mem_d
 @pytest.mark.parametrize("cmd,reason,needle", [
     ("/menu", "travel_menu", "메인 메뉴"),
     ("/메뉴@KwTravelBot", "travel_menu", "메인 메뉴"),
-    ("/watch", "travel_watch_list", "내 특가 알림"),
-    ("/알림", "travel_watch_list", "내 특가 알림"),
-    ("/settings", "travel_settings", "[발송 설정]"),
-    ("/설정", "travel_settings", "[발송 설정]"),
+    ("/watch", "travel_watch_list", "[맞춤발송 설정]"),
+    ("/알림", "travel_watch_list", "[맞춤발송 설정]"),
+    ("/settings", "travel_settings", "[정기발송 설정]"),
+    ("/설정", "travel_settings", "[정기발송 설정]"),
     ("/help", "travel_help", "도움말"),
     ("/guide", "travel_guide", "직접 검색"),
     ("/search", "travel_guide", "직접 검색"),
@@ -2165,7 +2191,7 @@ def test_settings_four_line_controls_region_theme_freq_and_dormant(handler, mem_
     prefs = mem_db.get_travel_user_prefs("c1")
     assert (prefs["weekly_brief_freq"], prefs["weekly_brief_enabled"]) == ("TUE_THU_2X", True)
     assert "정기발송: <b>주2회(화·목) 12:00</b>" in handler.edits[-1][1]
-    assert handler.edits[-1][2]["inline_keyboard"][0][1]["text"] == "✅ 주2회(화·목)"
+    assert handler.edits[-1][2]["inline_keyboard"][0][1]["text"] == "✅ 화·목 주2회"
     _cb(handler, "trv:w:rgp", mid=900)
     _mid, text, markup = handler.edits[-1]
     assert "관심권역 선택" in text
@@ -2237,11 +2263,13 @@ def test_watch_add_region_pages_seattle_city_and_direct_key_in(handler, mem_db):
     _cb(handler, "trv:w:g", mid=10)
     _cb(handler, "trv:w:rg:NA:0", mid=900)
     _mid, text, markup = handler.edits[-1]
-    assert "북미 도시 선택" in text
+    assert "북미 도시 선택" in text and "[맞춤발송 등록 · 1/2단계: 도시 선택]" in text
     cbs = all_callbacks(markup)
     assert "trv:w:ct:NA:0:LAX" in cbs and "trv:w:rg:NA:1" in cbs and cbs[-1] == "trv:w:rg"
     _cb(handler, "trv:w:ct:NA:0:SEA", mid=900)  # Seattle (IATA SEA) is a city, never the SEASIA region
-    assert "시애틀 특가 알림 설정" in handler.edits[-1][1]
+    setup = handler.edits[-1][1]
+    assert "[맞춤발송 등록 · 2/2단계: " in setup and "시애틀 목표가 입력]" in setup
+    assert "원하는 목표가를 누르거나" in setup
     _cb(handler, "trv:w:k:SEA:1", mid=900)
     assert mem_db.get_travel_watch("c1", "SEA")["is_active"] == 1
     _cb(handler, "trv:w:rg:NA:0", mid=900)
@@ -2271,3 +2299,141 @@ def test_watch_add_region_pages_seattle_city_and_direct_key_in(handler, mem_db):
     assert handler.handle_text_message("c1", 5, "u1", "/cancel") == (True, "travel_cancel")
     assert handler.get_chat_state("c1", "u1") == STATE_IDLE
     _assert_callbacks_fit(handler)
+
+
+# ----------------------------------------------------------------------
+# UX clarity: live status badge, 1:1 Track A/B cards, breadcrumbs, in-place guide, parallel nav ack
+# ----------------------------------------------------------------------
+def test_zero_watches_with_paused_flag_reads_unregistered_never_paused(handler, mem_db):
+    mem_db.set_watches_paused("c1", True)
+    assert mem_db.get_travel_user_prefs("c1")["watches_paused"] is True
+    assert handler._format_status_badge(None) == []  # no chat -> no badge
+    badge = handler._format_status_badge("c1")
+    assert badge == ["📰 정기발송: <b>🟢 받는 중 (주1회(목) 12:00 · 🌏 전체 · ✨ 전체)</b>",
+                     "🔔 맞춤발송: <b>⚪ 미등록 (도시 0/4)</b>"]
+    hub, _ = handler.build_menu_hub_card("c1")
+    onboarding = handler.build_onboarding_card(chat_id="c1")
+    text, markup = handler.build_watch_list_card("c1")
+    for card in (hub, onboarding, text):
+        assert "일시중지" not in card and "켜짐" not in card
+    assert "미등록 (도시 0/4)" in hub and "미등록 (도시 0/4)" in onboarding
+    assert "⚪ 등록된 도시가 없어 맞춤발송이 나가지 않아요. 아래 [➕ 도시 추가하기]로 등록해 보세요!" in text
+    cbs = all_callbacks(markup)
+    assert "trv:w:wp" not in cbs and "trv:w:z" not in cbs  # pause / reset hidden with 0 watches
+    assert "trv:w:g" in cbs and markup["inline_keyboard"][-1] == [
+        {"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
+        {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
+
+    # one watch while the flag is still set -> paused wording + resume button
+    mem_db.upsert_travel_watch("c1", "FUK", 250_000)
+    assert handler._format_status_badge("c1")[1] == "🔔 맞춤발송: <b>⏸️ 일시중지 (1/4)</b>"
+    _t, markup = handler.build_watch_list_card("c1")
+    assert markup["inline_keyboard"][-2] == [{"text": "▶️ 다시 받기", "callback_data": "trv:w:wp"},
+                                             {"text": "🧹 초기화", "callback_data": "trv:w:z"}]
+    mem_db.set_watches_paused("c1", False)
+    assert handler._format_status_badge("c1")[1] == "🔔 맞춤발송: <b>🟢 받는 중 (1/4)</b>"
+    mem_db.set_weekly_brief_freq("c1", "OFF")
+    assert handler._format_status_badge("c1")[0] == "📰 정기발송: <b>🔴 꺼짐</b>"
+    mem_db.set_weekly_brief_freq("c1", "TUE_THU_2X")
+    mem_db.set_weekly_brief_region("c1", "SEASIA")
+    mem_db.set_weekly_brief_theme("c1", "RESORT")
+    assert handler._format_status_badge("c1")[0] == \
+        "📰 정기발송: <b>🟢 받는 중 (주2회(화·목) 12:00 · 🌴 동남아 · 🏖️ 휴양)</b>"
+
+
+def test_watch_setup_breadcrumbs_new_vs_edit_and_step1_cards(handler, mem_db):
+    text, _ = handler.build_watch_target_picker_card()
+    assert text.startswith("🔔 <b>[맞춤발송 등록 · 1/2단계: 도시 선택]</b>")
+    text, _ = handler.build_watch_city_prompt_card()
+    assert text.startswith("🔔 <b>[맞춤발송 등록 · 1/2단계: 도시 선택]</b>")
+    text, _ = handler.build_city_page_card("w", "JP", 0, chat_id="c1")
+    assert text.startswith("🔔 <b>[맞춤발송 등록 · 1/2단계: 도시 선택]</b>") and "일본 도시 선택 (1/" in text
+    search_page, _ = handler.build_city_page_card("s", "JP", 0)
+    assert "1/2단계" not in search_page  # search drilldown keeps its own header
+    label = handler.label_for("FUK")
+    new, _ = handler.build_watch_setup_card("c1", "u1", "FUK")
+    assert f"🔔 <b>[맞춤발송 등록 · 2/2단계: {label} 목표가 입력]</b>" in new
+    assert "원하는 목표가를 누르거나" in new
+    mem_db.upsert_travel_watch("c1", "FUK", 250_000)
+    edit, _ = handler.build_watch_setup_card("c1", "u1", "FUK")
+    assert f"🔔 <b>[맞춤발송 수정 · {label}]</b>" in edit and "2/2단계" not in edit
+
+
+def test_guide_callback_edits_tracked_cards_in_place_and_sends_for_untracked(handler, mem_db):
+    _cb(handler, "trv:m:home", mid=10)  # hub opened from a result -> fresh, tracked navigation card (900)
+    assert handler._is_watch_card("c1", 900)
+    sends = handler.tg.send_text.call_count
+    _cb(handler, "trv:c:guide", mid=900)
+    mid, text, markup = handler.edits[-1]
+    assert mid == 900 and "기타 지역 직접 검색" in text and "trv:srg:JP:0" in all_callbacks(markup)
+    assert handler.tg.send_text.call_count == sends  # edited in place, no new message
+    assert handler.get_chat_state("c1", "u1") == STATE_AWAITING_CITY
+    assert "가고 싶은 도시" in handler.tg.answer_callback.call_args[1]["text"]
+    # an untracked message (search result / alert) keeps its content -> a fresh guide card is sent
+    n_edits = len(handler.edits)
+    _cb(handler, "trv:c:guide", mid=555)
+    assert len(handler.edits) == n_edits
+    assert handler.tg.send_text.call_count == sends + 1
+    assert "기타 지역 직접 검색" in handler.tg.send_text.call_args[0][1]
+
+
+def test_navigation_ack_not_blocked_by_slow_ui_edit(mem_db):
+    h = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    started, release = threading.Event(), threading.Event()
+    done: list[str] = []
+
+    def slow_edit(chat_id, message_id, text, reply_markup=None):
+        started.set()
+        release.wait(5)
+        done.append(text)
+        return True
+
+    h._safe_edit_message = slow_edit
+    h._remember_watch_card("c1", 900)
+    try:
+        navs = ("trv:m:home", "trv:m:settings", "trv:m:watch", "trv:w:l", "trv:w:g", "trv:c:guide",
+                "trv:srg:JP:0", "trv:w:rg:JP:0", "trv:w:rgp", "trv:w:s:FUK")
+        for i, data in enumerate(navs):
+            started.clear()
+            release.clear()
+            n = h.tg.answer_callback.call_count
+            t0 = time.monotonic()
+            h.handle_callback_query("cq", "c1", 900, data, {"id": "u1"})
+            assert h.tg.answer_callback.call_count == n + 1, data  # exactly one ack, sent while the edit blocks
+            assert time.monotonic() - t0 < 1.0, data
+            assert started.wait(2), data  # the edit was already running on the UI pool
+            assert len(done) == i, data  # ...and is still blocked behind the barrier
+            release.set()
+            end = time.monotonic() + 3
+            while len(done) < i + 1 and time.monotonic() < end:
+                time.sleep(0.01)
+            assert len(done) == i + 1, data
+    finally:
+        release.set()
+        h.shutdown()
+
+
+def test_nav_ack_sent_before_inline_fallback_when_ui_pool_is_closed(mem_db):
+    h = TravelInteractiveHandler(bot_token="dummy", db=mem_db)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    order: list[str] = []
+    h.tg.answer_callback.side_effect = lambda *a, **kw: order.append("ack")
+
+    def edit(chat_id, message_id, text, reply_markup=None):
+        order.append("edit")
+        return True
+
+    h._safe_edit_message = edit
+    h._remember_watch_card("c1", 900)
+    h.ui_pool.shutdown(wait=True)  # submit now raises -> inline fallback on the caller thread
+    try:
+        h.handle_callback_query("cq", "c1", 900, "trv:m:home", {"id": "u1"})
+        assert order == ["ack", "edit"]
+        order.clear()
+        h.handle_callback_query("cq", "c1", 900, "trv:w:wb", {"id": "u1"})  # DB write: ack-first as before
+        assert order == ["ack", "edit"]
+    finally:
+        h.shutdown()
