@@ -76,6 +76,56 @@ def _deadline_passed(deadline: Optional[float]) -> bool:
     return rem is not None and rem <= 0
 
 
+# Under a live deadline: no SSE retry / cookie preflight when this little time is left.
+SSE_RETRY_MIN_REMAINING_SECONDS = 2.0
+
+
+def _run_bounded_jobs(
+    max_workers: int,
+    jobs: dict,
+    deadline: Optional[float],
+    label: str = "SSE",
+) -> dict:
+    """Runs `{key: zero-arg callable}` on a manually managed pool and returns `{key: result}` for the jobs
+    finished in time.
+
+    - `deadline is None`: legacy semantics (waits for every job; a job exception propagates).
+    - `deadline` set: `as_completed(..., timeout=remaining)`; on expiry the pool is shut down with
+      `wait=False, cancel_futures=True` so a slow socket never holds the caller past the budget (a `with`
+      block would block in `__exit__`). A failing job is logged and simply missing from the result.
+    """
+    if not jobs:
+        return {}
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, int(max_workers)), thread_name_prefix=f"Naver{label}")
+    results: dict = {}
+    abandon = False
+    try:
+        fut_map = {ex.submit(fn): key for key, fn in jobs.items()}
+        rem = _remaining(deadline)
+        try:
+            for fut in concurrent.futures.as_completed(fut_map, timeout=None if rem is None else max(0.0, rem)):
+                key = fut_map[fut]
+                if deadline is None:
+                    results[key] = fut.result()
+                    continue
+                try:
+                    results[key] = fut.result()
+                except Exception as exc:
+                    logger.debug("%s job %s failed under deadline: %s", label, key, exc)
+        except concurrent.futures.TimeoutError:
+            abandon = True
+            logger.info("%s batch hit the live deadline (%d/%d done); returning collected data.", label, len(results), len(fut_map))
+    except BaseException:
+        abandon = deadline is not None
+        raise
+    finally:
+        if abandon:
+            ex.shutdown(wait=False, cancel_futures=True)
+        else:
+            ex.shutdown(wait=True)
+    return results
+
+
 def normalize_slot_signature(signature: Optional[str]) -> str:
     """Strips anything that would break `ref:months:dests` disk keys (`:` / `,` / spaces)."""
     sig = "".join(ch for ch in (signature or "") if ch in _SIG_SAFE_CHARS)
@@ -447,18 +497,37 @@ class NaverFlightLiveClient:
         self.sse_timeout = sse_timeout
         self.max_sse_workers = max(1, min(int(max_sse_workers), SSE_MAX_WORKERS_CAP))
 
-    def _fetch_session_cookie_header(self) -> str:
+    def _fetch_session_cookie_header(self, deadline: Optional[float] = None) -> str:
+        timeout = 4.0
+        rem = _remaining(deadline)
+        if rem is not None:
+            if rem <= SSE_RETRY_MIN_REMAINING_SECONDS:
+                return ""  # budget nearly spent: SSE goes without the optional preflight cookie
+            timeout = min(timeout, max(0.5, rem / 3.0))
         cj = urllib.request.HTTPCookieProcessor()
         opener = urllib.request.build_opener(cj)
         opener.addheaders = [("User-Agent", MOBILE_UA)]
         try:
-            with opener.open(NAVER_PREFLIGHT_URL, timeout=4.0) as resp:
+            with opener.open(NAVER_PREFLIGHT_URL, timeout=timeout) as resp:
                 resp.read(512)
             cookies = [f"{c.name}={c.value}" for c in cj.cookiejar]
             return "; ".join(cookies)
         except Exception as exc:
             logger.debug("Naver preflight cookie fetch skipped: %s", exc)
             return ""
+
+    def _cookie_header_for(self, deadline: Optional[float]) -> str:
+        # `deadline` is forwarded only when set (keeps legacy zero-arg call shape for mocks/patches).
+        if deadline is None:
+            return self._fetch_session_cookie_header()
+        return self._fetch_session_cookie_header(deadline=deadline)
+
+    def _sse_job(
+        self, code: str, dep_iso: str, ret_iso: str, cookie_hdr: str, deadline: Optional[float]
+    ) -> Callable[[], Optional[dict]]:
+        if deadline is None:
+            return lambda: self.fetch_live_sse_slot(code, dep_iso, ret_iso, cookie_hdr)
+        return lambda: self.fetch_live_sse_slot(code, dep_iso, ret_iso, cookie_hdr, deadline=deadline)
 
     def fetch_city_batch_pg(
         self,
@@ -543,8 +612,11 @@ class NaverFlightLiveClient:
         dep_iso: str,
         ret_iso: str,
         cookie_header: str = "",
+        deadline: Optional[float] = None,
     ) -> Optional[dict]:
-        """Stage 2: Queries exact real-time seat inventory via Naver `searchFlights` SSE."""
+        """Stage 2: Queries exact real-time seat inventory via Naver `searchFlights` SSE.
+        `deadline` (monotonic) clamps the socket timeout to the remaining budget and skips the retry when
+        `SSE_RETRY_MIN_REMAINING_SECONDS` or less is left."""
         dep_c = dep_iso.replace("-", "")
         ret_c = ret_iso.replace("-", "")
         body = {
@@ -610,10 +682,19 @@ class NaverFlightLiveClient:
             headers["Cookie"] = cookie_header
 
         for attempt in range(2):
-            if attempt > 0:
-                time.sleep(0.8)
-            else:
-                time.sleep(0.12)
+            pause = 0.8 if attempt > 0 else 0.12
+            rem = _remaining(deadline)
+            if rem is not None:
+                if rem <= 0 or (attempt > 0 and rem <= SSE_RETRY_MIN_REMAINING_SECONDS):
+                    break
+                pause = min(pause, rem / 4.0)
+            time.sleep(pause)
+            timeout = self.sse_timeout
+            rem = _remaining(deadline)
+            if rem is not None:
+                if rem <= 0:
+                    break
+                timeout = max(0.1, min(self.sse_timeout, rem))
             req = urllib.request.Request(
                 NAVER_SSE_URL,
                 data=json.dumps(body).encode("utf-8"),
@@ -621,7 +702,7 @@ class NaverFlightLiveClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=self.sse_timeout) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     parsed = parse_sse_stream_lines(resp, ret_compact=ret_c)
                     if parsed is not None:
                         return parsed
@@ -1013,7 +1094,7 @@ class NaverFlightLiveClient:
             # Budget exhausted: PG-only result (never pushable as a watch trigger, honestly LIVE_PG).
             return sorted(deals_by_key.values(), key=lambda d: d.price_krw)
 
-        cookie_hdr = self._fetch_session_cookie_header()
+        cookie_hdr = self._cookie_header_for(deadline)
 
         if fast_mode:
             # On-demand: Telegram shows only TOP 3, so SSE-verify just the cheapest slot per destination
@@ -1026,21 +1107,18 @@ class NaverFlightLiveClient:
             fast_targets = sorted(city_best.values(), key=lambda d: d.price_krw)[:FAST_MODE_MAX_SSE_TARGETS]
             if _deadline_passed(deadline):
                 fast_targets = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
-                fut_map = {
-                    ex.submit(
-                        self.fetch_live_sse_slot, d.destination_code, d.departure_date, d.return_date, cookie_hdr
-                    ): d
-                    for d in fast_targets
-                }
-                for fut in concurrent.futures.as_completed(fut_map):
-                    base_deal = fut_map[fut]
-                    sse_res = fut.result()
-                    if sse_res:
-                        key = (base_deal.destination_code, base_deal.departure_date, base_deal.return_date)
-                        deals_by_key[key] = self.apply_sse_to_deal(
-                            base_deal, destinations[base_deal.destination_code], sse_res
-                        )
+            fast_map = {(d.destination_code, d.departure_date, d.return_date): d for d in fast_targets}
+            fast_results = _run_bounded_jobs(
+                self.max_sse_workers,
+                {k: self._sse_job(k[0], k[1], k[2], cookie_hdr, deadline) for k in fast_map},
+                deadline,
+            )
+            for key, base_deal in fast_map.items():
+                sse_res = fast_results.get(key)
+                if sse_res:
+                    deals_by_key[key] = self.apply_sse_to_deal(
+                        base_deal, destinations[base_deal.destination_code], sse_res
+                    )
             fast_deals = list(deals_by_key.values())
             fast_deals.sort(key=lambda d: d.price_krw)
             return fast_deals
@@ -1111,18 +1189,17 @@ class NaverFlightLiveClient:
             if not pending or _deadline_passed(deadline):
                 return
             attempted_sse.update(pending)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
-                fut_map = {
-                    ex.submit(self.fetch_live_sse_slot, c, dep_i, ret_i, cookie_hdr): (c, dep_i, ret_i)
-                    for c, dep_i, ret_i in pending
-                }
-                for fut in concurrent.futures.as_completed(fut_map):
-                    key = fut_map[fut]
-                    c, _, _ = key
-                    sse_res = fut.result()
-                    base_deal = deals_by_key.get(key) or placeholder_slots.get(key)
-                    if sse_res and base_deal:
-                        deals_by_key[key] = self.apply_sse_to_deal(base_deal, destinations[c], sse_res)
+            batch_results = _run_bounded_jobs(
+                self.max_sse_workers,
+                {key: self._sse_job(key[0], key[1], key[2], cookie_hdr, deadline) for key in pending},
+                deadline,
+            )
+            for key in pending:
+                sse_res = batch_results.get(key)
+                c = key[0]
+                base_deal = deals_by_key.get(key) or placeholder_slots.get(key)
+                if sse_res and base_deal:
+                    deals_by_key[key] = self.apply_sse_to_deal(base_deal, destinations[c], sse_res)
 
         # Round A SSE verification
         _run_sse_batch(sse_targets)
@@ -1160,9 +1237,12 @@ class NaverFlightLiveClient:
         self,
         deals: list[FlightDeal],
         destinations: dict[str, DestinationMeta],
+        deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
         """Upgrades any remaining LIVE_PG deals in a selected display list (e.g. filtered Top 3 or monthly summary)
         to LIVE_SSE so displayed hero deals are 100% live-verified.
+        `deadline` (monotonic): SSE calls are clamped to it and abandoned (non-blocking) at expiry; deals not
+        verified in time are returned unchanged as LIVE_PG (never an error).
         """
         need_sse = [
             d for d in deals
@@ -1170,22 +1250,23 @@ class NaverFlightLiveClient:
         ]
         if not need_sse:
             return deals
+        if _deadline_passed(deadline):
+            return deals
 
-        cookie_hdr = self._fetch_session_cookie_header()
+        cookie_hdr = self._cookie_header_for(deadline)
         upgraded_map: dict[tuple[str, str, str], FlightDeal] = {}
         unique_targets = {
             (d.destination_code, d.departure_date, d.return_date): d for d in need_sse
         }
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_sse_workers) as ex:
-            fut_map = {
-                ex.submit(self.fetch_live_sse_slot, k[0], k[1], k[2], cookie_hdr): (k, base_d)
-                for k, base_d in unique_targets.items()
-            }
-            for fut in concurrent.futures.as_completed(fut_map):
-                k, base_d = fut_map[fut]
-                sse_res = fut.result()
-                if sse_res:
-                    upgraded_map[k] = self.apply_sse_to_deal(base_d, destinations[k[0]], sse_res)
+        sse_results = _run_bounded_jobs(
+            self.max_sse_workers,
+            {k: self._sse_job(k[0], k[1], k[2], cookie_hdr, deadline) for k in unique_targets},
+            deadline,
+        )
+        for k, base_d in unique_targets.items():
+            sse_res = sse_results.get(k)
+            if sse_res:
+                upgraded_map[k] = self.apply_sse_to_deal(base_d, destinations[k[0]], sse_res)
 
         if not upgraded_map:
             return deals

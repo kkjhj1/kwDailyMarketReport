@@ -438,6 +438,125 @@ class TravelNaverLiveTests(unittest.TestCase):
         engine.search_deals(ref_date=date(2026, 11, 16))
         self.assertEqual(engine._live_client.calls, [(sorted(engine.destinations), None, {3}, False)])
 
+    # ------------------------------------------------------------------
+    # 15s live budget: deadline-bounded, non-blocking SSE
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _pg_deal(code: str = "FUK", dep: str = "2031-01-09", ret: str = "2031-01-12", price: int = 150_000) -> FlightDeal:
+        return FlightDeal(
+            destination_code=code, destination_name=code, origin_code="ICN", departure_date=dep, return_date=ret,
+            departure_day_of_week="금", return_day_of_week="월", nights=3, airline="네이버 직항 최저가",
+            price_krw=price, baseline_krw=220_000, data_source="LIVE_PG",
+        )
+
+    def test_ensure_sse_deadline_abandons_slow_future_without_blocking(self):
+        import threading
+        import time as _time
+
+        release = threading.Event()
+        seen: list = []
+
+        def slow_sse(code, dep_i, ret_i, cookie_header="", deadline=None):
+            seen.append(deadline)
+            release.wait(5)  # a hung SSE socket
+            return None
+
+        target = self._pg_deal()
+        with tempfile.TemporaryDirectory() as tmp:
+            client = NaverFlightLiveClient(cache_path=Path(tmp) / "c.json")
+            deadline = _time.monotonic() + 0.3
+            try:
+                with patch.object(client, "fetch_live_sse_slot", side_effect=slow_sse), \
+                     patch.object(client, "_fetch_session_cookie_header", return_value="") as cookie:
+                    t0 = _time.monotonic()
+                    out = client.ensure_deals_sse_verified([target], self.engine.destinations, deadline=deadline)
+                    elapsed = _time.monotonic() - t0
+            finally:
+                release.set()
+        self.assertLess(elapsed, 1.5)  # never blocked by the executor's __exit__ on the slow future
+        self.assertEqual(out, [target])  # PG deal returned as-is (never an error)
+        self.assertEqual(seen, [deadline])  # deadline propagated into the SSE slot call
+        self.assertEqual(cookie.call_args.kwargs, {"deadline": deadline})
+        # an already-spent deadline makes no SSE call at all
+        with patch.object(client, "fetch_live_sse_slot", side_effect=AssertionError("no SSE")):
+            self.assertEqual(client.ensure_deals_sse_verified([target], self.engine.destinations,
+                                                              deadline=_time.monotonic() - 1), [target])
+
+    def test_fast_collection_returns_pg_deals_when_sse_hits_deadline(self):
+        import threading
+        import time as _time
+
+        release = threading.Event()
+        ref = date(2031, 1, 6)
+        dests = {"FUK": self.engine.destinations["FUK"], "KIX": self.engine.destinations["KIX"]}
+        slots = self.engine.generate_weekend_slots(ref_date=ref, months_ahead=1)
+
+        def fake_pg(code, slots_, deadline=None):
+            base = 150_000 if code == "FUK" else 170_000
+            return {(s[0].isoformat(), s[1].isoformat()): (base + i * 1000, base + 20_000) for i, s in enumerate(slots_)}
+
+        def slow_sse(code, dep_i, ret_i, cookie_header="", deadline=None):
+            release.wait(5)
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = NaverFlightLiveClient(cache_path=Path(tmp) / "c.json")
+            try:
+                with patch.object(client, "fetch_city_batch_pg", side_effect=fake_pg), \
+                     patch.object(client, "fetch_live_sse_slot", side_effect=slow_sse), \
+                     patch.object(client, "_fetch_session_cookie_header", return_value=""):
+                    t0 = _time.monotonic()
+                    deals = client._collect_live_deals_uncached(
+                        dests, slots, self.engine.get_peak_holiday_info, fast_mode=True, deadline=_time.monotonic() + 0.4
+                    )
+                    elapsed = _time.monotonic() - t0
+            finally:
+                release.set()
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(len(deals), len(dests) * len(slots))  # full PG matrix kept
+        self.assertTrue(all(d.data_source == "LIVE_PG" for d in deals))
+        self.assertEqual(deals[0].destination_code, "FUK")
+
+    def test_sse_slot_timeout_clamped_and_retry_skipped_near_deadline(self):
+        import time as _time
+
+        client = NaverFlightLiveClient(sse_timeout=10.0)
+        timeouts: list = []
+
+        def failing_urlopen(req, timeout=None):
+            timeouts.append(timeout)
+            raise OSError("offline")
+
+        with patch("urllib.request.urlopen", side_effect=failing_urlopen):
+            # 1.5s left: one attempt, socket timeout clamped below the remaining budget, no retry (<= 2.0s left)
+            self.assertIsNone(client.fetch_live_sse_slot("FUK", "2031-01-09", "2031-01-12", deadline=_time.monotonic() + 1.5))
+            self.assertEqual(len(timeouts), 1)
+            self.assertLessEqual(timeouts[0], 1.5)
+            # spent deadline: no request at all
+            timeouts.clear()
+            self.assertIsNone(client.fetch_live_sse_slot("FUK", "2031-01-09", "2031-01-12", deadline=_time.monotonic() - 1))
+            self.assertEqual(timeouts, [])
+            # no deadline: legacy 2 attempts with the full socket timeout
+            self.assertIsNone(client.fetch_live_sse_slot("FUK", "2031-01-09", "2031-01-12"))
+            self.assertEqual(timeouts, [10.0, 10.0])
+
+    def test_engine_forwards_live_deadline_to_sse_verification(self):
+        class _FakeLive:
+            def __init__(self):
+                self.calls: list = []
+
+            def ensure_deals_sse_verified(self, deals, destinations, deadline=None):
+                self.calls.append(deadline)
+                return deals
+
+        engine = FlightEngine(live_naver=False)
+        engine.live_naver = True
+        engine._live_client = _FakeLive()
+        deal = self._pg_deal()
+        engine.ensure_deals_sse_verified([deal], live_deadline=123.0)
+        engine.ensure_deals_sse_verified([deal])
+        self.assertEqual(engine._live_client.calls, [123.0, None])
+
 
 if __name__ == "__main__":
     unittest.main()

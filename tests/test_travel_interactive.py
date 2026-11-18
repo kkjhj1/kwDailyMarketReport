@@ -420,16 +420,23 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
         engine.destinations = self.engine.destinations
         engine.live_naver = True
         engine.search_deals = MagicMock(return_value=[_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")])
-        engine.ensure_deals_sse_verified = MagicMock(side_effect=lambda deals: list(deals))
+        engine.ensure_deals_sse_verified = MagicMock(side_effect=lambda deals, **kw: list(deals))
         handler = TravelInteractiveHandler(bot_token="test", engine=engine)
         handler._finish_with_card = MagicMock()
         handler.fx_client = MagicMock()
         handler.fx_client.get_many.return_value = {}
         try:
+            t0 = time.monotonic()
             with patch("travel_bot_runner.format_telegram_briefing", return_value="ok"):
                 handler._async_execute_and_update("c1", 1, "ALL", "u1", request_seq=1)
-            engine.search_deals.assert_called_once_with(dest_code=None, months_ahead=6, fast_live=True)
+            engine.search_deals.assert_called_once()
+            kw = engine.search_deals.call_args.kwargs
+            deadline = kw.pop("live_deadline")
+            self.assertEqual(kw, {"dest_code": None, "months_ahead": 6, "fast_live": True})
+            self.assertAlmostEqual(deadline - t0, 15.0, delta=1.0)  # LIVE_SEARCH_BUDGET_SECONDS
             engine.ensure_deals_sse_verified.assert_called()  # ALL hero is SSE-verified too
+            # the SAME deadline is shared with the hero SSE re-rank
+            self.assertEqual(engine.ensure_deals_sse_verified.call_args.kwargs.get("live_deadline"), deadline)
             handler._finish_with_card.assert_called_once()
         finally:
             handler.shutdown()
@@ -1483,6 +1490,213 @@ class TestTravelTelegramChannelKeepAlive(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 late.send_text("c1", "x")  # a later patch is honoured too: never bypassed by a session
         self.assertEqual(guard.call_count, 2)
+
+
+class TestTravelLiveBudgetCacheAndTerminalGuard(unittest.TestCase):
+    """15s shared live budget, freshness-safe handler cache, and the watchdog terminal-state guard."""
+
+    def setUp(self):
+        self.handlers: list = []
+        self.edits: list = []
+        self.loading_edits: list = []
+        self.dests = FlightEngine(live_naver=False).destinations
+
+    def tearDown(self):
+        for h in self.handlers:
+            h.shutdown()
+
+    def _live_engine(self, deals):
+        engine = MagicMock()
+        engine.destinations = self.dests
+        engine.live_naver = True
+        engine.search_deals = MagicMock(return_value=list(deals))
+        engine.ensure_deals_sse_verified = MagicMock(side_effect=lambda deals, **kw: list(deals))
+        return engine
+
+    def _handler(self, engine):
+        h = TravelInteractiveHandler(bot_token="dummy_token", engine=engine)
+        h.tg = MagicMock()
+        h.fx_enabled = False  # never touch the FX network in tests
+        h._safe_edit_message = lambda chat_id, message_id, text, reply_markup=None: self.edits.append((message_id, text))
+        h._edit_in_place_only = (
+            lambda chat_id, message_id, text, reply_markup=None: self.loading_edits.append((message_id, text))
+        )
+        self.handlers.append(h)
+        return h
+
+    @staticmethod
+    def _wait_for(cond, timeout=5.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if cond():
+                return True
+            time.sleep(0.01)
+        return cond()
+
+    # --- 15s shared budget -------------------------------------------------
+    def test_exhausted_budget_skips_hero_rerank_and_delivers_pg_deals(self):
+        from travel_brief.interactive import HERO_RERANK_MIN_REMAINING_SECONDS, LIVE_SEARCH_BUDGET_SECONDS
+
+        self.assertEqual((LIVE_SEARCH_BUDGET_SECONDS, HERO_RERANK_MIN_REMAINING_SECONDS), (15.0, 1.0))
+        engine = self._live_engine([_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")])
+        seen: list = []
+
+        def slow_search(**kw):
+            seen.append(kw["live_deadline"])
+            time.sleep(0.3)  # collection eats the budget: ~0.9s left <= 1.0s threshold
+            return [_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")]
+
+        engine.search_deals.side_effect = slow_search
+        h = self._handler(engine)
+        h.live_search_budget_seconds = 1.2
+        h.watchdog_seconds = 0.5  # would fire if the worker overran; it must not
+        seq = h._next_request_seq("c1", 1)
+        h._arm_watchdog("c1", 1, seq, "NRT", "u1")
+        with patch("travel_bot_runner.format_telegram_briefing", return_value="PG-BRIEF"):
+            h._async_execute_and_update("c1", 1, "NRT", "u1", request_seq=seq)
+        engine.ensure_deals_sse_verified.assert_not_called()  # hero SSE skipped, no error card
+        self.assertEqual([t for _, t in self.edits], ["PG-BRIEF"])
+        self.assertEqual(h._msg_states[("c1", 1)].phase, "DONE")
+        time.sleep(0.6)
+        self.assertFalse(any("조회 시간 초과" in t for _, t in self.edits))  # watchdog never fired
+        self.assertEqual(len(seen), 1)
+
+    def test_rerank_receives_shared_deadline_and_stops_when_spent(self):
+        a = _mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")
+        engine = self._live_engine([a])
+        h = self._handler(engine)
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        recs = BudgetCalculator.rank_recommendations(self.dests, [a], top_n=3)
+        spent = time.monotonic() - 0.01
+        out = h._verify_hero_with_rerank([a], recs, live_deadline=spent)
+        engine.ensure_deals_sse_verified.assert_not_called()
+        self.assertEqual(out[0].best_deal.data_source, "LIVE_PG")
+
+        ok_deadline = time.monotonic() + 10
+        h._verify_hero_with_rerank([a], recs, live_deadline=ok_deadline)
+        self.assertEqual(engine.ensure_deals_sse_verified.call_args.kwargs, {"live_deadline": ok_deadline})
+        engine.ensure_deals_sse_verified.reset_mock()
+        h._verify_hero_with_rerank([a], recs)  # legacy call shape: no deadline kwarg forwarded
+        self.assertEqual(engine.ensure_deals_sse_verified.call_args.kwargs, {})
+
+    # --- freshness-safe cache ---------------------------------------------
+    def test_fresh_result_cached_and_hit_skips_loading_watchdog_and_photo(self):
+        engine = self._live_engine([_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")])
+        h = self._handler(engine)
+        h._submit_city_photo = MagicMock(return_value=True)
+        n = [0]
+
+        def fmt(**kw):
+            n[0] += 1
+            return f"BRIEF-{n[0]}"
+
+        with patch("travel_bot_runner.format_telegram_briefing", side_effect=fmt):
+            h._launch_search("c1", 10, "NRT", "u1", show_loading=True)
+            self.assertTrue(self._wait_for(
+                lambda: "NRT" in h._search_cache and h._submit_city_photo.call_count == 1  # photo follows the edit
+            ))
+            self.assertIn("BRIEF-1", [t for _, t in self.edits])
+            self.assertEqual(h._submit_city_photo.call_count, 1)  # live miss keeps send_photo=True
+            loading_before = len(self.loading_edits)
+
+            h._arm_watchdog = MagicMock(side_effect=AssertionError("cache hit must not arm the watchdog"))
+            h._launch_search("c1", 11, "NRT", "u2", show_loading=True)
+            self.assertTrue(self._wait_for(lambda: any(mid == 11 for mid, _ in self.edits)))
+            hit = [t for mid, t in self.edits if mid == 11][0]
+            self.assertIn("BRIEF-1", hit)
+            self.assertIn("조회 시각:", hit)
+            self.assertIn("캐시 제공", hit)
+            self.assertEqual(engine.search_deals.call_count, 1)  # no second live collection
+            self.assertEqual(len(self.loading_edits), loading_before)  # no loading card on a hit
+            self.assertEqual(h._submit_city_photo.call_count, 1)  # no photo on a hit
+            st = h._msg_states[("c1", 11)]
+            self.assertEqual((st.generation, st.phase, st.watchdog), (1, "DONE", None))
+            self.assertNotIn("u2", h.cooldown._in_progress_users)
+
+            # refresh: epoch bump + invalidate -> live again (no photo on refresh), new entry stored
+            del h._arm_watchdog
+            h._launch_search("c1", 11, "NRT", "u3", is_refresh=True, show_loading=True)
+            self.assertTrue(self._wait_for(lambda: any(t == "BRIEF-2" for _, t in self.edits)))
+            self.assertEqual(engine.search_deals.call_count, 2)
+            self.assertEqual(h._search_cache_epoch["NRT"], 1)
+            self.assertEqual(h._submit_city_photo.call_count, 1)
+            self.assertTrue(self._wait_for(lambda: "NRT" in h._search_cache and h._search_cache["NRT"].text == "BRIEF-2"))
+
+    def test_stale_empty_and_error_results_are_never_cached(self):
+        from dataclasses import replace
+
+        stale = replace(_mk_deal("FUK", "2026-12-03", "2026-12-06", 210000), freshness="STALE")
+        engine = self._live_engine([stale])
+        h = self._handler(engine)
+        with patch("travel_bot_runner.format_telegram_briefing", return_value="STALE-BRIEF"):
+            h._async_execute_and_update("c1", 30, "FUK", "u1", request_seq=h._next_request_seq("c1", 30),
+                                        cache_epoch=h._search_cache_current_epoch("FUK"))
+            self.assertIn("STALE-BRIEF", [t for _, t in self.edits])
+            self.assertNotIn("FUK", h._search_cache)
+
+            engine.search_deals.return_value = []
+            h._async_execute_and_update("c1", 31, "FUK", "u1", request_seq=h._next_request_seq("c1", 31), cache_epoch=0)
+            engine.search_deals.side_effect = RuntimeError("boom")
+            h._async_execute_and_update("c1", 32, "FUK", "u1", request_seq=h._next_request_seq("c1", 32), cache_epoch=0)
+        self.assertEqual(h._search_cache, {})
+        self.assertIsNone(h._search_cache_lookup("FUK"))
+
+    def test_refresh_epoch_blocks_older_inflight_store_and_all_clears_curated(self):
+        engine = self._live_engine([_mk_deal("NRT", "2026-12-03", "2026-12-06", 250000, name="도쿄")])
+        h = self._handler(engine)
+        old_all = h._search_cache_current_epoch("ALL")
+        h._search_cache["NRT"] = MagicMock()
+        h._invalidate_search_cache("ALL")
+        self.assertNotIn("NRT", h._search_cache)  # ALL refresh clears curated single-city entries too
+        self.assertEqual((h._search_cache_epoch["ALL"], h._search_cache_epoch["NRT"]), (1, 1))
+        with patch("travel_bot_runner.format_telegram_briefing", return_value="OLD-WORKER"):
+            h._async_execute_and_update("c1", 40, "ALL", "u1", request_seq=h._next_request_seq("c1", 40),
+                                        cache_epoch=old_all)
+        self.assertIn("OLD-WORKER", [t for _, t in self.edits])  # still delivered to its own message
+        self.assertNotIn("ALL", h._search_cache)  # but never stored after the epoch bump
+
+        h._invalidate_search_cache("KIX")  # single-city refresh only touches that city
+        self.assertEqual(h._search_cache_epoch["ALL"], 1)
+
+    def test_expired_entry_and_offline_engine_bypass_cache(self):
+        from travel_brief.interactive import SEARCH_CACHE_TTL_ALL_SECONDS, SEARCH_CACHE_TTL_CITY_SECONDS, SearchCacheEntry
+        from datetime import datetime
+
+        self.assertEqual((SEARCH_CACHE_TTL_ALL_SECONDS, SEARCH_CACHE_TTL_CITY_SECONDS), (900.0, 600.0))
+        engine = self._live_engine([])
+        h = self._handler(engine)
+        h._search_cache["NRT"] = SearchCacheEntry("X", datetime(2026, 11, 18, 9, 5), time.monotonic() - 601, 600.0)
+        self.assertIsNone(h._search_cache_lookup("NRT"))
+        self.assertNotIn("NRT", h._search_cache)
+        h._search_cache["NRT"] = SearchCacheEntry("X", datetime(2026, 11, 18, 9, 5), time.monotonic(), 600.0)
+        self.assertTrue(h._search_cache_lookup("NRT").startswith("🗂 <i>조회 시각: 09:05 · 캐시 제공"))
+
+        offline = self._handler(FlightEngine(live_naver=False))
+        seq = offline._next_request_seq("c9", 1)
+        offline._async_execute_and_update("c9", 1, "FUK", "u1", request_seq=seq, cache_epoch=0)
+        self.assertEqual(offline._search_cache, {})
+        offline._search_cache["FUK"] = SearchCacheEntry("X", datetime(2026, 11, 18, 9, 5), time.monotonic(), 600.0)
+        self.assertIsNone(offline._search_cache_lookup("FUK"))  # live_naver=False never serves the cache
+
+    # --- terminal-state guard ---------------------------------------------
+    def test_late_worker_cannot_overwrite_timeout_card(self):
+        h = self._handler(FlightEngine(live_naver=False))
+        seq = h._next_request_seq("c1", 80)
+        h._watchdog_fire("c1", 80, seq, "FUK", "u1")
+        self.assertEqual(len(self.edits), 1)
+        self.assertIn("조회 시간 초과", self.edits[0][1])
+        st = h._msg_states[("c1", 80)]
+        self.assertEqual((st.phase, st.timed_out_generation), ("TIMEOUT", seq))
+
+        h._async_execute_and_update("c1", 80, "FUK", "u1", request_seq=seq)  # late worker, same generation
+        self.assertEqual(len(self.edits), 1)
+        self.assertEqual(h._msg_states[("c1", 80)].phase, "TIMEOUT")
+        self.assertFalse(h._edit_if_latest("c1", 80, seq, "loading", None, is_loading=True))
+
+        newer = h._next_request_seq("c1", 80)  # a new request on the same message still works
+        self.assertTrue(h._edit_if_latest("c1", 80, newer, "NEW"))
+        self.assertEqual(self.edits[-1][1], "NEW")
 
 
 if __name__ == "__main__":

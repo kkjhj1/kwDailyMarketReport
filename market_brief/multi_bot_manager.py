@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import html
+import io
 import json
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
 from typing import Any
@@ -46,15 +48,116 @@ def format_slot_usage(used: int, max_slots: int | None, is_unlimited: bool = Fal
     return f"{used} / {max_slots}개 사용 중"
 
 
+_ORIG_URLOPEN = urllib.request.urlopen  # identity check: a patched urlopen keeps the legacy urllib path
+
+
+def _import_requests():
+    try:
+        import requests  # noqa: WPS433 (optional dependency; urllib fallback below)
+        from requests.adapters import HTTPAdapter
+    except ImportError:
+        return None, None
+    return requests, HTTPAdapter
+
+
 class TelegramBotTransport:
-    """Lightweight Telegram Bot API helper supporting inline keyboards and callback queries."""
+    """Lightweight Telegram Bot API helper supporting inline keyboards and callback queries.
+
+    Production default path (no injected `opener`, `urllib.request.urlopen` unpatched, `requests` importable):
+    each thread reuses its own keep-alive `requests.Session` (TLS to api.telegram.org survives across poll
+    iterations). HTTP >= 400 is re-raised as `urllib.error.HTTPError`, so 409/502 handling and callers'
+    contracts are identical to the urllib path. Injected openers / patched urlopen keep the urllib path.
+    """
 
     def __init__(self, token: str, opener=None):
         self.token = token.strip()
+        self._has_custom_opener = opener is not None
         self._opener = opener or urllib.request.urlopen
+        self._local = threading.local()
+        self._sessions_lock = threading.Lock()
+        self._sessions: list[Any] = []
+        self._closed = False
+
+    def _use_session_path(self) -> bool:
+        return (not self._has_custom_opener) and (urllib.request.urlopen is _ORIG_URLOPEN) and not self._closed
+
+    def _new_session(self) -> Any:
+        """Session factory (patch point for tests); None when `requests` is unavailable."""
+        requests_mod, adapter_cls = _import_requests()
+        if requests_mod is None:
+            return None
+        sess = requests_mod.Session()
+        sess.mount("https://", adapter_cls(pool_connections=1, pool_maxsize=2, max_retries=0))
+        sess.headers.update({"User-Agent": "MultiBotPlatform/2.0"})
+        return sess
+
+    def _get_session(self) -> Any:
+        """Thread-local keep-alive session (None when `requests` is unavailable or the transport is closed)."""
+        if self._closed:
+            return None
+        sess = getattr(self._local, "session", None)
+        if sess is not None:
+            return sess
+        with self._sessions_lock:
+            if self._closed:
+                return None
+            sess = self._new_session()
+            if sess is None:
+                return None
+            self._sessions.append(sess)
+        self._local.session = sess
+        return sess
+
+    def close(self) -> None:
+        """Closes every keep-alive session created by this transport (idempotent)."""
+        with self._sessions_lock:
+            self._closed = True
+            sessions, self._sessions = self._sessions, []
+        for sess in sessions:
+            try:
+                sess.close()
+            except Exception as exc:
+                logger.debug("Telegram transport session close skipped: %s", exc)
+        self._local = threading.local()
+
+    def _session_call(self, sess: Any, url: str, payload: dict[str, Any] | None, timeout: int) -> dict[str, Any]:
+        requests_mod, _ = _import_requests()
+        try:
+            if payload is None:
+                resp = sess.get(url, timeout=timeout)
+            else:
+                resp = sess.post(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout,
+                )
+        except Exception as exc:
+            # Keep the urllib error taxonomy: a timeout stays an ambiguous delivery (`TimeoutError` ->
+            # dispatcher UNKNOWN, never a duplicate resend); connection failures surface as `URLError`.
+            if requests_mod is not None and isinstance(exc, requests_mod.exceptions.Timeout):
+                raise TimeoutError(f"timed out: {exc}") from exc
+            if requests_mod is not None and isinstance(exc, requests_mod.exceptions.ConnectionError):
+                raise urllib.error.URLError(exc) from exc
+            raise
+        if resp.status_code >= 400:
+            raise urllib.error.HTTPError(
+                url,
+                resp.status_code,
+                getattr(resp, "reason", "") or "",
+                getattr(resp, "headers", None) or {},
+                io.BytesIO(resp.content or b""),
+            )
+        return json.loads((resp.content or b"").decode("utf-8"))
 
     def api_call(self, method: str, payload: dict[str, Any] | None = None, timeout: int = 10) -> dict[str, Any]:
         url = f"https://api.telegram.org/bot{self.token}/{method}"
+        sess = self._get_session() if self._use_session_path() else None
+        if sess is not None:
+            data = self._session_call(sess, url, payload, timeout)
+            if not data.get("ok"):
+                raise RuntimeError(f"Telegram API error ({method}): {data.get('description', 'unknown')}")
+            return data
         if payload is None:
             req = urllib.request.Request(url, method="GET", headers={"User-Agent": "MultiBotPlatform/2.0"})
         else:
@@ -65,7 +168,9 @@ class TelegramBotTransport:
                 headers={"Content-Type": "application/json", "User-Agent": "MultiBotPlatform/2.0"},
                 method="POST",
             )
-        with self._opener(req, timeout=timeout) as resp:
+        # Resolve urlopen at call time: a long-lived (reused) transport still honours a later monkeypatch.
+        opener = self._opener if self._has_custom_opener else urllib.request.urlopen
+        with opener(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API error ({method}): {data.get('description', 'unknown')}")
@@ -1629,6 +1734,40 @@ class DynamicBotManager:
         self.router = router or MultiBotInteractionRouter(engine)
         self._tasks: dict[str, tuple[str, asyncio.Task]] = {}  # bot_id -> (token, task)
         self._running = False
+        # bot_id -> (token, transport): one keep-alive transport per (bot_id, token) across poll iterations.
+        self._transports: dict[str, tuple[str, TelegramBotTransport]] = {}
+        self._transports_lock = threading.Lock()
+
+    def _transport_for(self, bot_id: str, token: str, opener=None) -> TelegramBotTransport:
+        """Reused per-(bot_id, token) transport; an injected `opener` (tests/tools) gets a fresh one-off
+        transport so the injected path is never cached. A token change closes the previous transport."""
+        if opener is not None:
+            return TelegramBotTransport(token, opener=opener)
+        tok = (token or "").strip()
+        stale: TelegramBotTransport | None = None
+        with self._transports_lock:
+            cur = self._transports.get(bot_id)
+            if cur is not None and cur[0] == tok and not cur[1]._closed:
+                return cur[1]
+            if cur is not None:
+                stale = cur[1]
+            transport = TelegramBotTransport(tok)
+            self._transports[bot_id] = (tok, transport)
+        if stale is not None:
+            stale.close()
+        return transport
+
+    def _close_transports(self, keep: dict[str, str] | None = None) -> None:
+        """Closes cached transports whose bot is gone / token changed (`keep` = bot_id -> token), or all."""
+        to_close: list[TelegramBotTransport] = []
+        with self._transports_lock:
+            for bid in list(self._transports):
+                tok, transport = self._transports[bid]
+                if keep is None or keep.get(bid) != tok:
+                    to_close.append(transport)
+                    self._transports.pop(bid, None)
+        for transport in to_close:
+            transport.close()
 
     def get_worker_statuses(self) -> dict[str, dict[str, Any]]:
         statuses: dict[str, dict[str, Any]] = {}
@@ -2159,7 +2298,7 @@ class DynamicBotManager:
         if not bot.token or not bot.token.strip():
             return {"bot_id": bot_id, "processed": 0, "status": "NO_TOKEN"}
 
-        transport = TelegramBotTransport(bot.token, opener=opener)
+        transport = self._transport_for(bot.bot_id, bot.token, opener=opener)
         last_offset = bot.last_offset or 0
         processed = 0
         events: list[dict[str, Any]] = []
@@ -2385,6 +2524,7 @@ class DynamicBotManager:
         if self._tasks:
             await asyncio.gather(*(t for _, t in self._tasks.values()), return_exceptions=True)
         self._tasks.clear()
+        self._close_transports()
 
     async def reload_bots(self) -> dict[str, Any]:
         """Hot-reloads active bot polling tasks without restarting FastAPI."""
@@ -2404,6 +2544,8 @@ class DynamicBotManager:
             if bid not in desired or desired[bid] != old_token or old_task.done():
                 old_task.cancel()
                 self._tasks.pop(bid, None)
+        # Removed / deactivated / token-changed bots release their keep-alive sessions.
+        self._close_transports(keep=desired)
 
         # Start newly added or updated workers
         for bid, tok in desired.items():

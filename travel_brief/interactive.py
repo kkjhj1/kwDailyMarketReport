@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 
@@ -58,6 +59,14 @@ MAX_TRACKED_MESSAGES = 5000  # LRU bound for per-message state registry
 MAX_TRACKED_CHATS = 5000  # LRU bound for conversation states
 SSE_RERANK_ROUNDS = 2
 WATCHDOG_SECONDS = 45.0
+# Hard monotonic budget shared by the on-demand PG/SSE collection AND the hero SSE re-rank: the briefing
+# (PG fallback included) is always ready well before the 45s watchdog.
+LIVE_SEARCH_BUDGET_SECONDS = 15.0
+HERO_RERANK_MIN_REMAINING_SECONDS = 1.0  # less than this left -> skip hero SSE, deliver PG/collected recs
+# Freshness-safe handler cache of rendered on-demand briefings (live mode only, never STALE/empty/errors).
+SEARCH_CACHE_TTL_ALL_SECONDS = 900.0
+SEARCH_CACHE_TTL_CITY_SECONDS = 600.0
+_KST = _timezone(_timedelta(hours=9))
 
 STATE_IDLE = "IDLE"
 STATE_AWAITING_CITY = "AWAITING_CITY"
@@ -302,6 +311,17 @@ class MessageState:
     deadline: float = 0.0
     done_generation: int = 0
     watchdog: Optional[threading.Timer] = None
+    timed_out_generation: int = 0  # terminal: a late worker of this generation never overwrites the timeout card
+
+
+@dataclass
+class SearchCacheEntry:
+    """Rendered on-demand briefing kept for a short TTL (live mode only). `collected_at` is the KST wall time
+    of the live collection, disclosed on every hit so a cached card never poses as a brand-new lookup."""
+    text: str
+    collected_at: Any  # datetime (KST)
+    stored_mono: float
+    ttl: float
 
 
 class UserCooldownManager:
@@ -465,6 +485,11 @@ class TravelInteractiveHandler:
         # Best-effort city detail photo only with a real-looking bot token (`<id>:<secret>`), so dummy-token
         # tests / offline tools never upload anything.
         self._photo_enabled = bool(re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", str(bot_token or "").strip()))
+        self.live_search_budget_seconds = LIVE_SEARCH_BUDGET_SECONDS
+        # target_city -> SearchCacheEntry / epoch (a refresh bumps the epoch; older in-flight workers can't store)
+        self._search_cache_lock = threading.Lock()
+        self._search_cache: dict[str, SearchCacheEntry] = {}
+        self._search_cache_epoch: dict[str, int] = {}
         self._closed = False
 
     def _load_admin_ids(self) -> set[str]:
@@ -903,10 +928,13 @@ class TravelInteractiveHandler:
         text: str,
         reply_markup: Optional[dict[str, Any]] = None,
         is_loading: bool = False,
+        mark_timeout: bool = False,
     ) -> bool:
         """Edits the message only if `request_seq` is still the newest request for it.
         "Check generation then edit" runs under the per-message lock, so an older result can never land
         after a newer one, and a loading card never overwrites the final result of the same request.
+        `mark_timeout` (watchdog only) records the timeout card as terminal under the same lock, so a late
+        worker of the same generation can never overwrite it.
         Returns True when the edit (or its send fallback) was delivered.
         """
         if request_seq is None:
@@ -927,6 +955,11 @@ class TravelInteractiveHandler:
                     if st is not None and st.done_generation >= request_seq:
                         return False
                 return self._edit_in_place_only(chat_id, message_id, text, reply_markup) is not False
+            with self._seq_lock:
+                st = self._msg_states.get(key)
+                if st is not None and st.timed_out_generation >= request_seq:
+                    logger.info("Skipping late edit for %s after watchdog timeout (seq=%s).", key, request_seq)
+                    return False
             ok = self._safe_edit_message(
                 chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
             ) is not False
@@ -935,7 +968,12 @@ class TravelInteractiveHandler:
                     st = self._msg_states.get(key)
                     if st is not None:
                         st.done_generation = max(st.done_generation, request_seq)
-                        st.phase = "DONE"
+                        if mark_timeout:
+                            st.timed_out_generation = max(st.timed_out_generation, request_seq)
+                            st.phase = "TIMEOUT"
+                            st.watchdog = None
+                        else:
+                            st.phase = "DONE"
             return ok
 
     # ------------------------------------------------------------------
@@ -975,15 +1013,11 @@ class TravelInteractiveHandler:
                 return
         logger.warning("Travel watchdog fired for %s (seq=%s, target=%s).", key, seq, target)
         self.cooldown.release(user_id)
-        delivered = self._edit_if_latest(
-            chat_id, message_id, seq, self.build_timeout_card(target), self.build_inline_keyboard(target, chat_id=chat_id)
+        # mark_timeout: the TIMEOUT terminal state is recorded under the per-message lock (no late-worker race).
+        self._edit_if_latest(
+            chat_id, message_id, seq, self.build_timeout_card(target),
+            self.build_inline_keyboard(target, chat_id=chat_id), mark_timeout=True,
         )
-        if delivered:
-            with self._seq_lock:
-                st = self._msg_states.get(key)
-                if st is not None and st.generation == seq:
-                    st.phase = "TIMEOUT"
-                    st.watchdog = None
 
     # ------------------------------------------------------------------
     # Transient cards (TG-01/TG-02: short, fully escaped)
@@ -2569,6 +2603,82 @@ class TravelInteractiveHandler:
         except Exception as exc:
             logger.warning("Scope cache invalidation failed for %s: %s", scope, exc)
 
+    # ------------------------------------------------------------------
+    # Freshness-safe on-demand briefing cache (live mode only)
+    # ------------------------------------------------------------------
+    def _search_cache_enabled(self) -> bool:
+        # Offline / mock / demo engines never use the handler cache (every call re-renders deterministically).
+        return bool(getattr(self.engine, "live_naver", False)) and not self._closed
+
+    @staticmethod
+    def _search_cache_ttl(target: str) -> float:
+        return SEARCH_CACHE_TTL_ALL_SECONDS if target == "ALL" else SEARCH_CACHE_TTL_CITY_SECONDS
+
+    def _search_cache_current_epoch(self, target: str) -> int:
+        with self._search_cache_lock:
+            return self._search_cache_epoch.get(target, 0)
+
+    def _invalidate_search_cache(self, target: str) -> None:
+        """Refresh (`trv:r:*`): bump epochs and drop entries. ALL clears ALL + every curated city; a city clears
+        only itself. Workers that captured an older epoch can no longer store their result."""
+        if target == "ALL":
+            scopes = {"ALL", *(getattr(self.catalog, "curated_codes", None) or ())}
+        else:
+            scopes = {target}
+        with self._search_cache_lock:
+            for scope in scopes:
+                self._search_cache_epoch[scope] = self._search_cache_epoch.get(scope, 0) + 1
+                self._search_cache.pop(scope, None)
+
+    @staticmethod
+    def _recs_cacheable(recs: list[TravelRecommendation]) -> bool:
+        if not recs:
+            return False
+        for rec in recs[:3]:
+            deal = getattr(rec, "best_deal", None)
+            if deal is None or getattr(deal, "freshness", "FRESH") == "STALE":
+                return False
+        return True
+
+    def _search_cache_store(
+        self, target: str, epoch: Optional[int], recs: list[TravelRecommendation], text: str, collected_at: Any
+    ) -> bool:
+        if epoch is None or not text or not self._search_cache_enabled() or not self._recs_cacheable(recs):
+            return False
+        with self._search_cache_lock:
+            if self._search_cache_epoch.get(target, 0) != epoch:
+                logger.info("Search cache store skipped for %s (epoch moved: refresh happened mid-flight).", target)
+                return False
+            self._search_cache[target] = SearchCacheEntry(
+                text=text, collected_at=collected_at, stored_mono=time.monotonic(), ttl=self._search_cache_ttl(target)
+            )
+        return True
+
+    @staticmethod
+    def _cache_notice_line(collected_at: Any) -> str:
+        try:
+            hhmm = collected_at.strftime("%H:%M")
+        except Exception:
+            hhmm = "--:--"
+        return f"🗂 <i>조회 시각: {html.escape(hhmm)} · 캐시 제공 (🔄 새로고침 시 실시간 재조회)</i>"
+
+    def _search_cache_lookup(self, target: str) -> Optional[str]:
+        """Returns the cached briefing with an honest `조회 시각 · 캐시 제공` notice, or None (miss/expired/
+        notice would break the TG-01 caps -> caller runs a live search instead)."""
+        if not self._search_cache_enabled():
+            return None
+        with self._search_cache_lock:
+            entry = self._search_cache.get(target)
+            if entry is None:
+                return None
+            if (time.monotonic() - entry.stored_mono) > entry.ttl:
+                self._search_cache.pop(target, None)
+                return None
+        text = f"{self._cache_notice_line(entry.collected_at)}\n{entry.text}"
+        if len(text) > 3500 or len(html_to_plain(text)) > 1800:
+            return None
+        return text
+
     def _launch_search(
         self,
         chat_id: str,
@@ -2583,6 +2693,21 @@ class TravelInteractiveHandler:
         # open a fresh card so the result stays readable.
         with self._seq_lock:
             self._watch_cards.pop(key, None)
+
+        # Refresh -> bump epoch & drop entries first; otherwise a valid (FRESH, unexpired) entry is served at once.
+        if is_refresh:
+            self._invalidate_search_cache(target)
+        else:
+            cached_text = self._search_cache_lookup(target)
+            if cached_text is not None:
+                request_seq = self._next_request_seq(chat_id, message_id)
+                markup = self.build_inline_keyboard(current_filter=target, chat_id=chat_id)
+                # Cache hit: no loading card, no watchdog, no worker, no photo (immediate ui_pool edit).
+                self.cooldown.release(user_id)
+                self._submit_ui(self._edit_if_latest, chat_id, message_id, request_seq, cached_text, markup)
+                return
+        cache_epoch = self._search_cache_current_epoch(target)
+
         request_seq = self._next_request_seq(chat_id, message_id)
         markup = self.build_inline_keyboard(current_filter=target, chat_id=chat_id)
 
@@ -2613,6 +2738,7 @@ class TravelInteractiveHandler:
                 loading_future=loading_future,
                 _tracked=True,
                 send_photo=(target != "ALL" and not is_refresh),
+                cache_epoch=cache_epoch,
             )
         except Exception as exc:
             logger.error("Worker submission failed for %s: %s", user_id, exc)
@@ -2647,17 +2773,24 @@ class TravelInteractiveHandler:
         loading_future: Optional[concurrent.futures.Future] = None,
         _tracked: bool = False,
         send_photo: bool = False,
+        cache_epoch: Optional[int] = None,
     ) -> None:
         """Runs in background worker thread to collect deals and edit Telegram message in-place.
         Always ends with either the briefing or an error card (never a stuck loading card).
         `send_photo` (fresh single-city search only) adds a best-effort reference photo AFTER the briefing.
+        One monotonic `live_deadline` (LIVE_SEARCH_BUDGET_SECONDS) bounds collection + hero SSE together.
+        `cache_epoch` (captured at launch) lets a FRESH live result be stored unless a refresh happened since.
         """
         key = (str(chat_id), int(message_id or 0))
         markup = self.build_inline_keyboard(current_filter=target_city, chat_id=chat_id)
         try:
+            deadline = time.monotonic() + float(self.live_search_budget_seconds)
+            collected_at = _datetime.now(_KST)
             target_dest = None if target_city == "ALL" else target_city
             custom = self.catalog.custom_destinations_for(target_dest) if target_dest else None
-            search_kwargs: dict[str, Any] = {"dest_code": target_dest, "months_ahead": 6, "fast_live": True}
+            search_kwargs: dict[str, Any] = {
+                "dest_code": target_dest, "months_ahead": 6, "fast_live": True, "live_deadline": deadline,
+            }
             if custom:
                 search_kwargs["custom_destinations"] = custom
             all_deals = self.engine.search_deals(**search_kwargs)
@@ -2668,9 +2801,18 @@ class TravelInteractiveHandler:
                 top_n=3,
             )
 
-            # SSE-verify the hero deal and re-rank (a price surge may promote another date)
+            # SSE-verify the hero deal and re-rank (a price surge may promote another date) within the SAME
+            # budget; when it is (nearly) spent, the PG/collected recommendations are delivered as-is.
             if recs and getattr(self.engine, "live_naver", False):
-                recs = self._verify_hero_with_rerank(all_deals, recs, custom_destinations=custom)
+                remaining = deadline - time.monotonic()
+                if remaining <= HERO_RERANK_MIN_REMAINING_SECONDS:
+                    logger.info(
+                        "Hero SSE re-rank skipped for %s: live budget nearly spent (%.2fs left).", target_city, remaining
+                    )
+                else:
+                    recs = self._verify_hero_with_rerank(
+                        all_deals, recs, custom_destinations=custom, live_deadline=deadline
+                    )
 
             # M-D fix: never overwrite with blank text, but never leave the loading card stuck either
             if not recs:
@@ -2694,6 +2836,8 @@ class TravelInteractiveHandler:
             if fx_map:
                 format_kwargs["fx_map"] = fx_map
             new_text = format_telegram_briefing(**format_kwargs)
+            # FRESH (LIVE_SSE / LIVE_PG) only; STALE/empty/errors never reach here or are rejected inside.
+            self._search_cache_store(target_city, cache_epoch, recs, new_text, collected_at)
 
             # Safe in-place edit (M-E), generation-guarded
             edited = self._finish_with_card(chat_id, message_id, request_seq, loading_future, new_text, markup)
@@ -2787,9 +2931,12 @@ class TravelInteractiveHandler:
         deals: list[Any],
         recs: list[TravelRecommendation],
         custom_destinations: Optional[dict] = None,
+        live_deadline: Optional[float] = None,
     ) -> list[TravelRecommendation]:
         """SSE-verifies the #1 deal, re-ranks, and repeats if a different unverified deal becomes #1.
         On SSE timeout/empty the deal stays LIVE_PG and is labelled as price-graph data by the formatter.
+        `live_deadline` (monotonic, shared with the collection) stops further rounds once (nearly) spent and is
+        forwarded to the engine so the SSE socket never outlives the budget.
         """
         dest_map = (
             {**custom_destinations, **self.engine.destinations} if custom_destinations else self.engine.destinations
@@ -2803,12 +2950,17 @@ class TravelInteractiveHandler:
             k = (hero.destination_code, hero.departure_date, hero.return_date)
             if hero.data_source != "LIVE_PG" or k in attempted:
                 break
+            if live_deadline is not None and (live_deadline - time.monotonic()) <= HERO_RERANK_MIN_REMAINING_SECONDS:
+                logger.info("Hero SSE round skipped for %s: live budget spent.", k)
+                break
             attempted.add(k)
+            verify_kwargs: dict[str, Any] = {}
+            if custom_destinations:
+                verify_kwargs["custom_destinations"] = custom_destinations
+            if live_deadline is not None:
+                verify_kwargs["live_deadline"] = live_deadline
             try:
-                if custom_destinations:
-                    verified = self.engine.ensure_deals_sse_verified([hero], custom_destinations=custom_destinations)
-                else:
-                    verified = self.engine.ensure_deals_sse_verified([hero])
+                verified = self.engine.ensure_deals_sse_verified([hero], **verify_kwargs)
             except Exception as exc:
                 logger.warning("Hero SSE verification failed for %s: %s", k, exc)
                 break

@@ -548,11 +548,15 @@ class FlightEngine:
         self,
         deals: list[FlightDeal],
         custom_destinations: Optional[dict[str, DestinationMeta]] = None,
+        live_deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
-        """Ensures any display-selected deals are upgraded from LIVE_PG to LIVE_SSE when live mode is active."""
+        """Ensures any display-selected deals are upgraded from LIVE_PG to LIVE_SSE when live mode is active.
+        `live_deadline` (monotonic) bounds the SSE calls; deals not verified in time stay LIVE_PG."""
         if not self.live_naver or self._live_client is None or not deals:
             return deals
         dest_map = {**custom_destinations, **self.destinations} if custom_destinations else self.destinations
+        if live_deadline is not None:
+            return self._live_client.ensure_deals_sse_verified(deals, dest_map, deadline=live_deadline)
         return self._live_client.ensure_deals_sse_verified(deals, dest_map)
 
     # ------------------------------------------------------------------
