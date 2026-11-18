@@ -1092,7 +1092,9 @@ def test_v2_country_flex_wizard_callbacks(handler, mem_db):
     assert "알림 대상 선택" in text
     cbs = set(all_callbacks(markup))
     assert {f"trv:w:rg:{r}:0" for r in ("JP", "TWHK", "CNMN", "SEASIA", "PAC", "OCE", "NA", "EU")} <= cbs
-    assert {"trv:w:ki", "trv:w:l"} <= cbs
+    assert {"trv:w:l", "trv:m:home"} <= cbs and "trv:w:ki" not in cbs
+    assert handler.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_CITY
+    assert handler.handle_text_message("c1", 10, "u1", "밴쿠버") == (True, "travel_watch_city_selected")
     assert not any("@" in cb for cb in cbs)  # legacy country scopes are never offered for new registration
     # a chat without an existing country watch can never start one (read-only compatibility)
     _cb(handler, "trv:w:s:@JP", mid=900)
@@ -2244,6 +2246,7 @@ def test_watch_add_region_pages_seattle_city_and_direct_key_in(handler, mem_db):
     assert mem_db.get_travel_watch("c1", "SEA")["is_active"] == 1
     _cb(handler, "trv:w:rg:NA:0", mid=900)
     assert any(b["text"] == "🔔 시애틀" for r in handler.edits[-1][2]["inline_keyboard"] for b in r)
+    assert handler.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_CITY
     for bad in ("trv:w:rg:SEA:0", "trv:w:ct:SEA:0:LAX", "trv:w:ct:NA:0:@JP", "trv:w:ct:NA:0:XYZ", "trv:w:ki:1"):
         _cb(handler, bad)
         assert "지원하지 않는" in handler.tg.answer_callback.call_args[1]["text"], bad

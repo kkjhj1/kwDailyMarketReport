@@ -1492,7 +1492,7 @@ class TravelInteractiveHandler:
                 self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
                 return
             self._answer(cq_id, self._WATCH_TOASTS[sub])  # TG-04: ack before any DB / network work
-            if sub == "ki":
+            if sub in ("ki", "rg"):
                 self._set_chat_state(chat_id, STATE_AWAITING_WATCH_CITY, user_id=user_id)
             else:
                 st = self.get_chat_context(chat_id, user_id)
@@ -1539,6 +1539,11 @@ class TravelInteractiveHandler:
             self._set_chat_state(chat_id, STATE_AWAITING_WATCH_PRICE, user_id=user_id, dest_code=code)
         elif sub == "f":
             self._set_chat_state(chat_id, STATE_AWAITING_WATCH_DATES, user_id=user_id, dest_code=code)
+        elif sub == "g":
+            if self._at_watch_limit(chat_id):
+                self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            else:
+                self._set_chat_state(chat_id, STATE_AWAITING_WATCH_CITY, user_id=user_id)
         else:
             st = self.get_chat_context(chat_id, user_id)
             if st is not None and st.state in (
@@ -2283,12 +2288,12 @@ class TravelInteractiveHandler:
             "🌏 <b>[특가 알림 대상 선택]</b>",
             "━━━━━━━━━━━━━━━━━━",
             "🗺️ 권역을 고르면 인천 직항 도시 목록이 나와요.",
-            "⌨️ 도시 이름을 알고 있다면 [도시 직접 입력]이 더 빨라요.",
+            "💬 권역·도시 화면에서 <b>채팅창에 도시 이름(예: 오사카, 밴쿠버)을 바로 입력</b>해도 알림을 설정할 수 있어요.",
         ]
         rows = self.build_region_grid("w")
         rows.append([
-            {"text": "⌨️ 도시 직접 입력", "callback_data": "trv:w:ki"},
             {"text": "📋 내 알림", "callback_data": "trv:w:l"},
+            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
         ])
         return "\n".join(lines), {"inline_keyboard": rows}
 
