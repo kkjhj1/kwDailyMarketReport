@@ -677,7 +677,9 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("sub:ask_sub:brief_bot:all", cbs)
         for nav in ("cat:home", "nav:subs", "nav:main"):
             self.assertIn(nav, cbs)
-        self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 6)
+        # Only the subscribed bot (TRAVEL) exposes its chat-room URL; the other 5 are locked
+        self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 1)
+        self.assertEqual(sum(1 for cb in cbs if cb.startswith("sub:locked:")), 5)
         for cb in cbs:
             self.assertLessEqual(len(cb.encode("utf-8")), 64)
         self.assertLessEqual(len(text), 3500)
@@ -814,6 +816,182 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("정규 발송 시점", text)
         self.assertIn("매 영업일 아침 07:50", text)
         self.assertIn("시작(START)", text)
+
+
+class PortalHubSubscriptionLockTests(unittest.TestCase):
+    """Menu bot: un-subscribed bots never expose `🚀 대화방` (URL or gate) and show `🔒 구독필요` instead."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "test_alerts.sqlite3"
+        self.mb_db = MarketBriefDatabase(db_path=str(self.db_path))
+        self.portal_db = PortalDatabase(self.db_path)
+        self.mock_client = MagicMock(spec=TelegramPortalClient)
+        self.mock_client.edit_message_text.return_value = True
+        self.uid = 91001
+        self.portal_db.get_or_create_user(self.uid, self.uid, first_name="잠금테스터")
+
+    def tearDown(self):
+        del self.mb_db
+        del self.portal_db
+        gc.collect()
+        try:
+            self.tmp_dir.cleanup()
+        except PermissionError:
+            pass
+
+    def _click(self, data: str) -> None:
+        cq = {
+            "id": f"cq_{data}",
+            "from": {"id": self.uid, "first_name": "잠금테스터"},
+            "message": {"message_id": 30, "chat": {"id": self.uid}},
+            "data": data,
+        }
+        handle_callback_query(cq, self.portal_db, self.mock_client)
+
+    @staticmethod
+    def _bot_rows(markup: dict, bot: BotServiceType) -> list[list[dict]]:
+        return [
+            row for row in markup["inline_keyboard"]
+            if any(bot.value in str(b.get("callback_data", "")) for b in row)
+        ]
+
+    def _assert_locked_and_open(self, markup: dict, subscribed: BotServiceType, locked: list[BotServiceType]):
+        all_btns = _all_buttons(markup)
+        for b in locked:
+            rows = self._bot_rows(markup, b)
+            self.assertTrue(rows, f"{b.value} row missing")
+            flat = [btn for row in rows for btn in row]
+            self.assertFalse(any("url" in btn for btn in flat), f"{b.value} exposes a URL while un-subscribed")
+            self.assertFalse(any("🚀" in btn["text"] for btn in flat), f"{b.value} exposes 🚀 while un-subscribed")
+            self.assertFalse(any(str(btn.get("callback_data", "")).startswith("gate:") for btn in flat))
+            cbs = [btn.get("callback_data") for btn in flat]
+            self.assertIn(f"sub:locked:{b.value}", cbs)
+            self.assertTrue(any(str(c).startswith(f"sub:ask_sub:{b.value}") for c in cbs))
+        sub_rows = self._bot_rows(markup, subscribed)
+        sub_flat = [btn for row in sub_rows for btn in row]
+        self.assertTrue(any("🚀" in btn["text"] for btn in sub_flat), "subscribed bot lost its 🚀 대화방")
+        self.assertNotIn(f"sub:locked:{subscribed.value}", [btn.get("callback_data") for btn in sub_flat])
+        for btn in all_btns:
+            if "callback_data" in btn:
+                self.assertLessEqual(len(btn["callback_data"].encode("utf-8")), 64)
+
+    def test_all_four_views_lock_unsubscribed_bots(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=UserTier.GREEN)
+        subs = {b: False for b in BotServiceType}
+        subs[BotServiceType.BRIEF] = True
+        others = [b for b in BotServiceType if b != BotServiceType.BRIEF]
+
+        _, m_subs = render_subscription_view(user, subs)
+        self._assert_locked_and_open(m_subs, BotServiceType.BRIEF, others)
+
+        _, m_all = render_catalog_all_view(user, subs)
+        self._assert_locked_and_open(m_all, BotServiceType.BRIEF, others)
+
+        _, m_cat = render_category_view(BotCategory.FINANCE, user, subs)
+        self._assert_locked_and_open(m_cat, BotServiceType.BRIEF, [])
+        _, m_life = render_category_view(BotCategory.LIFE, user, subs)
+        life_bots = [b for b in BotServiceType if b.category == BotCategory.LIFE]
+        self.assertTrue(life_bots)
+        for b in life_bots:
+            flat = [btn for row in self._bot_rows(m_life, b) for btn in row]
+            self.assertIn(f"sub:locked:{b.value}", [btn.get("callback_data") for btn in flat])
+            self.assertFalse(any("🚀" in btn["text"] or "url" in btn for btn in flat))
+
+        _, m_search = render_search_results_view("시황", [BotServiceType.BRIEF, BotServiceType.TRAVEL], user, subs)
+        self._assert_locked_and_open(m_search, BotServiceType.BRIEF, [BotServiceType.TRAVEL])
+
+    def test_sub_locked_callback_shows_modal_alert_only(self):
+        self._click("sub:locked:travel_bot")
+        self.mock_client.answer_callback_query.assert_called_once_with(
+            "cq_sub:locked:travel_bot",
+            "🔒 구독 중인 봇만 대화방에 입장할 수 있습니다.\n먼저 [➕ 구독] 버튼을 눌러 구독을 완료해 주세요.",
+            show_alert=True,
+        )
+        self.mock_client.edit_message_text.assert_not_called()
+        self.mock_client.send_message.assert_not_called()
+
+    def test_stale_gate_button_for_unsubscribed_bot_is_locked(self):
+        self._click("gate:g:bot_travel")
+        self.assertEqual(self.mock_client.answer_callback_query.call_count, 1)
+        self.assertTrue(self.mock_client.answer_callback_query.call_args.kwargs.get("show_alert"))
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        self.assertIn("구독 센터", text)
+        self.assertNotIn("페이지 이동 안내", text)
+
+    def test_gate_cancel_resolves_user_without_name_error(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.TRAVEL)
+        self._click("gate:c:bot_travel")
+        self.assertEqual(self.mock_client.answer_callback_query.call_count, 1)
+        text = self.mock_client.edit_message_text.call_args.args[2]
+        self.assertIn("구독 센터", text)
+
+    def test_banned_or_blocked_user_has_no_active_subscriptions(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.BRIEF])
+        for status in ("BANNED", "BLOCKED"):
+            with self.portal_db._get_conn() as conn:
+                conn.execute("UPDATE users SET status = ? WHERE telegram_user_id = ?", (status, str(self.uid)))
+                conn.commit()
+            subs = self.portal_db.get_user_subscriptions(self.uid)
+            self.assertFalse(any(subs.values()), status)
+
+    def test_grace_user_keeps_active_bot_but_not_suspended(self):
+        self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
+        self.portal_db.subscribe(self.uid, BotServiceType.TRAVEL)
+        with self.portal_db._get_conn() as conn:
+            conn.execute("UPDATE users SET status = 'GRACE_PERIOD' WHERE telegram_user_id = ?", (str(self.uid),))
+            conn.execute(
+                "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE telegram_user_id = ? AND bot_id = ?",
+                (str(self.uid), BotServiceType.TRAVEL.value),
+            )
+            conn.commit()
+        subs = self.portal_db.get_user_subscriptions(self.uid)
+        self.assertTrue(subs[BotServiceType.BRIEF])
+        self.assertFalse(subs[BotServiceType.TRAVEL])
+
+    def test_search_callback_context_stays_within_64_bytes(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="t")
+        subs = {b: False for b in BotServiceType}
+        long_q = "아주아주긴한국어검색어테스트입니다정말로길어요" * 2
+        for kwargs in ({}, {"confirming_bot_id": "admission_bot"}, {"confirming_sub_bot_id": "admission_bot"}):
+            _, markup = render_search_results_view(long_q, list(BotServiceType), user, subs, **kwargs)
+            ctxs = set()
+            for btn in _all_buttons(markup):
+                cb = btn.get("callback_data", "")
+                self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
+                if ":search:" in cb:
+                    ctxs.add(cb.split(":search:", 1)[1])
+            self.assertEqual(len(ctxs), 1, "all search buttons must share one normalized query")
+            self.assertTrue(long_q.startswith(next(iter(ctxs))))
+
+    def test_unsubscribe_and_swap_deactivate_domain_alerts(self):
+        uid_s = str(self.uid)
+        with self.mb_db._connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS admission_subscribers (
+                       chat_id TEXT PRIMARY KEY, target_grade TEXT NOT NULL DEFAULT 'ALL',
+                       alert_enabled INTEGER NOT NULL DEFAULT 1)"""
+            )
+            conn.execute("INSERT INTO admission_subscribers (chat_id) VALUES (?)", (uid_s,))
+        self.portal_db.subscribe(self.uid, BotServiceType.ADMISSION)
+        self._click("sub:do_unsub:admission_bot:subs")
+        with self.mb_db._connect() as conn:
+            row = conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()
+        self.assertEqual(row["alert_enabled"], 0)
+
+        # Re-subscribe restores the switch, swap-out clears it again
+        self._click("sub:do_sub:admission_bot:subs")
+        with self.mb_db._connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()[0], 1
+            )
+        self._click("sub:swap:admission_bot:kids_bot:subs")
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.KIDS])
+        with self.mb_db._connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()[0], 0
+            )
 
 
 if __name__ == "__main__":

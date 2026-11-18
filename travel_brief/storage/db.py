@@ -24,6 +24,59 @@ from travel_brief.storage.models import (
 )
 
 
+def _platform_active_subscriber_ids(
+    db_path: str, bot_ids: tuple[str, ...], conn: Optional[sqlite3.Connection] = None
+) -> Optional[set[str]]:
+    """Platform subscription SSOT for outbound delivery (same DB or sibling `alerts.sqlite3`).
+    None -> no platform `subscriptions` table reachable (standalone / `:memory:`): caller applies no filter.
+    set  -> chat ids holding an ACTIVE subscription to `bot_ids` AND an ACTIVE/GRACE_PERIOD platform user.
+    Fail-closed: a platform DB that exists but cannot be read yields an empty set."""
+
+    def _query(c: sqlite3.Connection) -> Optional[set[str]]:
+        tables = {
+            r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('subscriptions', 'users')"
+            ).fetchall()
+        }
+        if "subscriptions" not in tables:
+            return None
+        marks = ",".join("?" * len(bot_ids))
+        sql = f"SELECT DISTINCT s.telegram_user_id FROM subscriptions s WHERE s.status = 'ACTIVE' AND s.bot_id IN ({marks})"
+        if "users" in tables:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM users u"
+                " WHERE u.telegram_user_id = s.telegram_user_id AND u.status IN ('ACTIVE', 'GRACE_PERIOD'))"
+            )
+        return {str(r[0]).strip() for r in c.execute(sql, tuple(bot_ids)).fetchall()}
+
+    try:
+        if conn is not None:
+            found = _query(conn)
+            if found is not None:
+                return found
+        path = str(db_path or "").strip()
+        if not path or path == ":memory:" or path.startswith("file:"):
+            return None
+        own = Path(path).resolve()
+        candidates = [] if conn is not None else [own]
+        sibling = own.with_name("alerts.sqlite3")
+        if sibling != own:
+            candidates.append(sibling)
+        for cand in candidates:
+            if not cand.is_file():
+                continue
+            ext = sqlite3.connect(str(cand), timeout=5.0)
+            try:
+                found = _query(ext)
+            finally:
+                ext.close()
+            if found is not None:
+                return found
+        return None
+    except Exception:
+        return set()
+
+
 DEFAULT_THRESHOLDS = {
     "KOSPI": {"unit": "PERCENT", "threshold": 3.0, "recovery": 1.5, "cooldown_minutes": 120, "max_daily": 2},
     "KOSDAQ": {"unit": "PERCENT", "threshold": 3.0, "recovery": 1.5, "cooldown_minutes": 120, "max_daily": 2},
@@ -738,8 +791,17 @@ class TravelBriefDatabase:
             rows = db.execute(
                 "SELECT * FROM recipients WHERE is_active = 1 ORDER BY created_at ASC"
             ).fetchall()
+            # Platform SSOT for TRAVEL broadcasts: ACTIVE user + ACTIVE travel_bot subscription
+            # (no-op when no platform `subscriptions` table is reachable, e.g. standalone / `:memory:`).
+            platform_ids = (
+                _platform_active_subscriber_ids(self.db_path, (TRAVEL_BOT_ID,), conn=db)
+                if topic.strip().upper() == "TRAVEL"
+                else None
+            )
             results = []
             for r in rows:
+                if platform_ids is not None and str(r["chat_id"]).strip() not in platform_ids:
+                    continue
                 topics = [t.strip().upper() for t in (r["subscribed_topics"] or "").split(",") if t.strip()]
                 if topic.upper() in topics or "ALL" in topics:
                     results.append(
@@ -1373,6 +1435,12 @@ class TravelBriefDatabase:
                              SELECT 1 FROM subscriptions s
                              WHERE s.telegram_user_id = w.chat_id AND s.bot_id = ? AND s.status = 'ACTIVE')"""
                 params.append(bot_id)
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'").fetchone():
+                    # Fail-closed: BANNED / BLOCKED / missing platform users get no deliveries
+                    # (GRACE_PERIOD keeps its ACTIVE kept bot)
+                    sql += """ AND EXISTS (
+                                 SELECT 1 FROM users u
+                                 WHERE u.telegram_user_id = w.chat_id AND u.status IN ('ACTIVE', 'GRACE_PERIOD'))"""
             sql += " ORDER BY w.dest_code ASC, w.watch_id ASC"
             rows = db.execute(sql, params).fetchall()
         out = []

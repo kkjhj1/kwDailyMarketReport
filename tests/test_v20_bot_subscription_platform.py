@@ -178,6 +178,17 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         self.assertEqual(updated["used_slots"], 1)
         self.assertEqual(len(updated["suspended_subscriptions"]), 2)
 
+        # Option 1: GRACE_PERIOD keeps its 1 ACTIVE bot; SUSPENDED_OVER_QUOTA bots stay blocked
+        kept = {s["bot_id"] for s in updated["active_subscriptions"]}
+        suspended = {s["bot_id"] for s in updated["suspended_subscriptions"]}
+        self.assertEqual(len(kept), 1)
+        for b in kept:
+            self.assertTrue(self.engine.is_user_subscribed(uid, b), b)
+            self.assertIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients(b)])
+        for b in suspended:
+            self.assertFalse(self.engine.is_user_subscribed(uid, b), b)
+            self.assertNotIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients(b)])
+
         # Upgrade back to RED -> suspended bots automatically restored!
         upgraded = self.engine.update_user_tier(uid, "RED", tier_expires_at="2000-01-01")
         # Since 2000-01-01 is in the past, next profile fetch sweeps expiry -> rolls back to WHITE!
@@ -287,6 +298,352 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         r_gen = client.post("/api/platform/bots/brief_bot/preview", json={"preset": "morning"})
         self.assertEqual(r_gen.status_code, 200)
         self.assertIn("모닝", r_gen.json()["title"])
+
+
+LOCKED_ALERT = "🔒 현재 구독 중인 봇이 아닙니다. 메뉴봇에서 구독 후 이용해 주세요."
+DOMAIN_DISPATCHERS = (
+    "_dispatch_travel_bot_update",
+    "_dispatch_admission_bot_update",
+    "_dispatch_silver_bot_update",
+    "_dispatch_kids_bot_update",
+    "_dispatch_yolo_bot_update",
+    "_dispatch_brief_watch_callback",
+)
+
+
+class SubscriptionAccessGateTests(unittest.TestCase):
+    """Fail-closed inbound gate: un-subscribed callers never reach `mbw:` or any domain dispatcher."""
+
+    INFO_BOTS = ("brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot")
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "alerts.sqlite3"
+        self.env_path = Path(self.tmp_dir.name) / "empty.env"
+        self.db = MarketBriefDatabase(db_path=str(self.db_path), env_path=self.env_path)
+        self.engine = SubscriptionEngine(self.db)
+        self.router = MultiBotInteractionRouter(self.engine)
+        with self.db._connect() as conn:
+            for i, bid in enumerate(self.INFO_BOTS):
+                conn.execute("UPDATE bots SET token = ?, last_offset = 1 WHERE bot_id = ?", (f"10{i}:FAKE_{bid}", bid))
+            conn.execute("UPDATE bots SET telegram_username = 'KwMenu_bot' WHERE bot_id = 'menu_bot'")
+        self.calls: list[tuple[str, dict]] = []
+        self.updates: list[dict] = []
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.tmp_dir.cleanup()
+        except PermissionError:
+            pass
+
+    # ---- fake Telegram ------------------------------------------------------
+    def _opener(self, req, timeout=10):
+        url = req.full_url
+        method = url.rsplit("/", 1)[-1].split("?")[0]
+        if method == "getUpdates":
+            return FakeTelegramHTTPResponse(json.dumps({"ok": True, "result": self.updates}).encode("utf-8"))
+        body = json.loads(req.data.decode("utf-8")) if req.data else {}
+        self.calls.append((method, body))
+        return FakeTelegramHTTPResponse(json.dumps({"ok": True, "result": {"message_id": 99}}).encode("utf-8"))
+
+    def _cb(self, uid: str, data: str, update_id: int = 10) -> dict:
+        return {
+            "update_id": update_id,
+            "callback_query": {
+                "id": f"cq_{update_id}",
+                "from": {"id": int(uid), "first_name": "잠금"},
+                "message": {"message_id": 5, "chat": {"id": int(uid), "type": "private"}},
+                "data": data,
+            },
+        }
+
+    def _msg(self, uid: str, text: str, update_id: int = 10) -> dict:
+        return {
+            "update_id": update_id,
+            "message": {
+                "message_id": 5,
+                "from": {"id": int(uid), "first_name": "잠금"},
+                "chat": {"id": int(uid), "type": "private", "first_name": "잠금"},
+                "text": text,
+            },
+        }
+
+    def _manager_with_tripwires(self):
+        from unittest.mock import patch
+
+        mgr = DynamicBotManager(self.engine, self.router)
+        patches = [patch.object(mgr, name, side_effect=AssertionError(f"{name} reached")) for name in DOMAIN_DISPATCHERS]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return mgr
+
+    def _run(self, mgr, bot_id: str, update: dict) -> dict:
+        self.calls.clear()
+        self.updates = [update]
+        res = mgr.sync_bot_updates_once(bot_id, opener=self._opener)
+        self.assertEqual(res["processed"], 1)
+        return res
+
+    def _assert_locked(self, bot_id: str, is_callback: bool):
+        methods = [m for m, _ in self.calls]
+        if is_callback:
+            self.assertEqual(methods[0], "answerCallbackQuery", "[TG-04] answerCallbackQuery must be first")
+            self.assertEqual(self.calls[0][1].get("text"), LOCKED_ALERT)
+            self.assertTrue(self.calls[0][1].get("show_alert"))
+        sends = [b for m, b in self.calls if m == "sendMessage"]
+        self.assertEqual(len(sends), 1, methods)
+        self.assertIn("구독 중인 봇이 아닙니다", sends[0]["text"])
+        kb = json.dumps(sends[0].get("reply_markup", {}), ensure_ascii=False)
+        self.assertIn("https://t.me/KwMenu_bot", kb)
+        self.assertIn(f"info:sub:{bot_id}", kb)
+
+    # ---- tests --------------------------------------------------------------
+    def test_swap_away_blocks_old_bot_callbacks_commands_and_text(self):
+        uid = "60001"
+        self.assertEqual(self.engine.attempt_subscribe(uid, "travel_bot")["code"], "SUBSCRIBED")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "travel_bot"))
+        self.assertTrue(self.engine.atomic_swap_subscription(uid, "travel_bot", "admission_bot")["success"])
+        self.assertFalse(self.engine.is_user_subscribed(uid, "travel_bot"))
+
+        mgr = self._manager_with_tripwires()
+        for i, data in enumerate(("trv:menu", "info:preview:travel_bot", "info:target:travel_bot:NRT", "info:retarget:travel_bot")):
+            self._run(mgr, "travel_bot", self._cb(uid, data, 100 + i))
+            self._assert_locked("travel_bot", is_callback=True)
+        for i, text in enumerate(("/watch", "/menu", "도쿄 항공권")):
+            self._run(mgr, "travel_bot", self._msg(uid, text, 200 + i))
+            self._assert_locked("travel_bot", is_callback=False)
+        # Plain text never auto-subscribes
+        self.assertFalse(self.engine.is_user_subscribed(uid, "travel_bot"))
+
+    def test_unsubscribed_user_blocked_on_every_domain_bot(self):
+        uid = "60002"
+        self.engine.attempt_subscribe(uid, "brief_bot")
+        self.engine.unsubscribe_bot(uid, "brief_bot")
+        mgr = self._manager_with_tripwires()
+        cases = {
+            "brief_bot": (["mbw:m", "mbw:q3", "info:preview:brief_bot"], ["/briefing", "/market", "/watch", "안녕"]),
+            "travel_bot": (["trv:home"], ["/search"]),
+            "admission_bot": (["adm:home", "grade:HIGH_3_N", "region:SEOUL", "menu:todo"], ["/todo", "/briefing"]),
+            "silver_bot": (["SC:home"], ["/parents", "/bookmarks"]),
+            "kids_bot": (["k:home"], ["/fever", "/weekend"]),
+            "yolo_bot": (["yolo:home"], ["/weekend", "/curation"]),
+        }
+        n = 300
+        for bot_id, (cbs, texts) in cases.items():
+            for data in cbs:
+                n += 1
+                self._run(mgr, bot_id, self._cb(uid, data, n))
+                self._assert_locked(bot_id, is_callback=True)
+            for text in texts:
+                n += 1
+                self._run(mgr, bot_id, self._msg(uid, text, n))
+                self._assert_locked(bot_id, is_callback=False)
+
+    def test_start_on_unsubscribed_bot_shows_swap_prompt_not_domain_onboarding(self):
+        uid = "60003"
+        self.engine.attempt_subscribe(uid, "brief_bot")  # WHITE: 1/1 used
+        mgr = self._manager_with_tripwires()
+        res = self._run(mgr, "travel_bot", self._msg(uid, "/start"))
+        self.assertEqual(res["events"][0]["code"], "QUOTA_EXCEEDED")
+        kb = json.dumps([b for m, b in self.calls if m == "sendMessage"][0]["reply_markup"])
+        self.assertIn("info:swap:brief_bot:travel_bot", kb)
+
+        # The swap callback itself is allowed and re-opens access to travel_bot
+        res = self._run(mgr, "travel_bot", self._cb(uid, "info:swap:brief_bot:travel_bot", 11))
+        self.assertEqual(res["events"][0]["code"], "SWAPPED")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "travel_bot"))
+        self.assertFalse(self.engine.is_user_subscribed(uid, "brief_bot"))
+        # ...and brief_bot is now locked (mbw: never reaches the watch dispatcher)
+        self._run(mgr, "brief_bot", self._cb(uid, "mbw:m", 12))
+        self._assert_locked("brief_bot", is_callback=True)
+
+    def test_stop_and_info_sub_allowed_for_unsubscribed_user(self):
+        uid = "60004"
+        mgr = self._manager_with_tripwires()
+        res = self._run(mgr, "kids_bot", self._msg(uid, "/stop"))
+        self.assertEqual(res["events"][0]["code"], "NOT_SUBSCRIBED")
+        res = self._run(mgr, "kids_bot", self._cb(uid, "info:sub:kids_bot", 11))
+        self.assertEqual(res["events"][0]["code"], "SUBSCRIBED")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "kids_bot"))
+
+    def test_subscribed_user_still_reaches_domain_dispatcher(self):
+        from unittest.mock import patch
+
+        uid = "60005"
+        self.engine.attempt_subscribe(uid, "kids_bot")
+        mgr = DynamicBotManager(self.engine, self.router)
+        with patch.object(mgr, "_dispatch_kids_bot_update", return_value=(True, "kids_callback_handled")) as disp:
+            res = self._run(mgr, "kids_bot", self._cb(uid, "k:home"))
+        disp.assert_called_once()
+        self.assertEqual(res["events"][0]["code"], "kids_callback_handled")
+
+    def test_gate_cancel_for_unsubscribed_user_shows_locked_card(self):
+        uid = "60006"
+        out = self.router.handle_interaction("brief_bot", uid, callback_data="gate:c:bf_rep")
+        self.assertEqual(out["result_code"], "GATE_CANCEL")
+        self.assertEqual(out.get("access"), "LOCKED")
+        self.assertIn("구독 중인 봇이 아닙니다", out["reply_html"])
+
+        mgr = self._manager_with_tripwires()
+        self._run(mgr, "brief_bot", self._cb(uid, "gate:c:bf_rep"))
+        edits = [b for m, b in self.calls if m == "editMessageText"]
+        self.assertEqual(len(edits), 1)
+        self.assertIn("구독 중인 봇이 아닙니다", edits[0]["text"])
+
+    def test_router_plain_text_and_preview_never_auto_subscribe(self):
+        uid = "60007"
+        for kwargs in ({"text": "안녕하세요"}, {"callback_data": "info:preview:travel_bot"},
+                       {"callback_data": "info:target:travel_bot:NRT"}):
+            out = self.router.handle_interaction("travel_bot", uid, **kwargs)
+            self.assertEqual(out["result_code"], "NOT_SUBSCRIBED_LOCKED", kwargs)
+        self.assertFalse(self.engine.is_user_subscribed(uid, "travel_bot"))
+        out = self.router.handle_interaction("travel_bot", uid, text="/start")
+        self.assertEqual(out["result_code"], "SUBSCRIBED")
+        out = self.router.handle_interaction("travel_bot", uid, callback_data="info:preview:travel_bot")
+        self.assertEqual(out["result_code"], "BRIEFING_PREVIEW")
+
+    def test_is_user_subscribed_fails_closed(self):
+        from unittest.mock import patch
+
+        uid = "60008"
+        self.assertFalse(self.engine.is_user_subscribed(uid, "brief_bot"))  # unknown user
+        self.engine.attempt_subscribe(uid, "admission_bot")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
+        self.assertTrue(self.engine.is_user_subscribed(uid, "edu_bot"))  # legacy alias
+
+        for status in ("BANNED", "BLOCKED"):
+            with self.db._connect() as conn:
+                conn.execute("UPDATE users SET status = ? WHERE telegram_user_id = ?", (status, uid))
+            self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"), status)
+        # GRACE_PERIOD keeps access to its kept ACTIVE subscription ...
+        with self.db._connect() as conn:
+            conn.execute("UPDATE users SET status = 'GRACE_PERIOD' WHERE telegram_user_id = ?", (uid,))
+        self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
+        # ... but never to a SUSPENDED_OVER_QUOTA one
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE telegram_user_id = ? AND bot_id = 'admission_bot'",
+                (uid,),
+            )
+        self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        with self.db._connect() as conn:
+            conn.execute("UPDATE subscriptions SET status = 'ACTIVE' WHERE telegram_user_id = ?", (uid,))
+            conn.execute("UPDATE users SET status = 'ACTIVE' WHERE telegram_user_id = ?", (uid,))
+            conn.execute(
+                "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE telegram_user_id = ? AND bot_id = 'admission_bot'",
+                (uid,),
+            )
+        self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        with self.db._connect() as conn:
+            conn.execute("UPDATE subscriptions SET status = 'ACTIVE' WHERE telegram_user_id = ?", (uid,))
+            conn.execute("UPDATE bots SET is_active = 0 WHERE bot_id = 'admission_bot'")
+        self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        with self.db._connect() as conn:
+            conn.execute("UPDATE bots SET is_active = 1 WHERE bot_id = 'admission_bot'")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
+        self.assertFalse(self.engine.is_user_subscribed(uid, "menu_bot"))  # MENU is not an INFO bot
+
+        with patch.object(self.engine, "_read_conn", side_effect=RuntimeError("db down")):
+            self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        mgr = DynamicBotManager(self.engine, self.router)
+        with patch.object(self.engine, "is_user_subscribed", side_effect=RuntimeError("boom")):
+            self.assertFalse(mgr._brief_subscription_active(uid))
+
+    def test_active_recipients_exclude_non_active_users(self):
+        uid = "60009"
+        self.engine.attempt_subscribe(uid, "brief_bot")
+        self.assertIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients("brief_bot")])
+        with self.db._connect() as conn:
+            conn.execute("UPDATE users SET status = 'GRACE_PERIOD' WHERE telegram_user_id = ?", (uid,))
+        # GRACE_PERIOD keeps receiving its kept ACTIVE bot
+        self.assertIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients("brief_bot")])
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET status = 'SUSPENDED_OVER_QUOTA' WHERE telegram_user_id = ? AND bot_id = 'brief_bot'",
+                (uid,),
+            )
+        self.assertNotIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients("brief_bot")])
+        with self.db._connect() as conn:
+            conn.execute("UPDATE subscriptions SET status = 'ACTIVE' WHERE telegram_user_id = ?", (uid,))
+        for status in ("BANNED", "BLOCKED"):
+            with self.db._connect() as conn:
+                conn.execute("UPDATE users SET status = ? WHERE telegram_user_id = ?", (status, uid))
+            self.assertNotIn(uid, [r.chat_id for r in self.engine.get_bot_active_recipients("brief_bot")], status)
+
+    def test_unsubscribe_and_swap_deactivate_brief_watches(self):
+        uid = "60010"
+        self.router.handle_interaction("brief_bot", uid, text="/start")
+        self.router.handle_interaction("brief_bot", uid, callback_data="mbw:q3")
+        self.assertTrue(self.db.list_market_watches(uid))
+        self.assertTrue(self.db.list_evaluable_market_watches())
+        with self.db._connect() as conn:
+            conn.execute("UPDATE users SET status = 'BANNED' WHERE telegram_user_id = ?", (uid,))
+        self.assertEqual(self.db.list_evaluable_market_watches(), [])  # fail-closed outbound
+        with self.db._connect() as conn:
+            conn.execute("UPDATE users SET status = 'ACTIVE' WHERE telegram_user_id = ?", (uid,))
+
+        self.assertTrue(self.engine.atomic_swap_subscription(uid, "brief_bot", "travel_bot")["success"])
+        self.assertEqual(self.db.list_market_watches(uid), [])
+
+    def test_domain_outbound_filters_respect_platform_subscriptions(self):
+        from admission_brief.models import ParentUserProfile
+        from admission_brief.storage.db import AdmissionDatabase
+        from kids_compass.storage.db import KidsCompassDatabase
+        from yolo_brief.models import SoloArchetype
+        from yolo_brief.storage.db import YoloDatabase
+
+        sub_uid, other_uid = "60011", "60012"
+        self.engine.attempt_subscribe(other_uid, "brief_bot")  # platform user, not a domain subscriber
+
+        # admission lives in the platform DB itself
+        self.engine.attempt_subscribe(sub_uid, "admission_bot")
+        adm = AdmissionDatabase(db_path=str(self.db_path))
+        for uid in (sub_uid, other_uid):
+            adm.upsert_subscriber(ParentUserProfile(chat_id=uid))
+        self.assertEqual([p.chat_id for p in adm.list_subscribers()], [sub_uid])
+        self.engine.unsubscribe_bot(sub_uid, "admission_bot")
+        self.assertEqual(adm.list_subscribers(), [])
+        self.assertFalse(adm.get_subscriber(sub_uid).alert_enabled)  # deactivate_domain_alerts
+        self.engine.attempt_subscribe(sub_uid, "admission_bot")
+        self.assertTrue(adm.get_subscriber(sub_uid).alert_enabled)  # restored on re-subscribe
+        self.assertEqual([p.chat_id for p in adm.list_subscribers()], [sub_uid])
+
+        # kids / yolo use sibling files next to alerts.sqlite3
+        self.engine.unsubscribe_bot(sub_uid, "admission_bot")
+        self.engine.attempt_subscribe(sub_uid, "kids_bot")
+        kids = KidsCompassDatabase(Path(self.tmp_dir.name) / "kids_compass.sqlite3")
+        try:
+            for uid in (sub_uid, other_uid):
+                kids.ensure_user(uid)
+            self.assertEqual([r["telegram_user_id"] for r in kids.list_alert_subscribers("weekend")], [sub_uid])
+        finally:
+            kids.close()
+
+        self.engine.unsubscribe_bot(sub_uid, "kids_bot")
+        self.engine.attempt_subscribe(sub_uid, "yolo_bot")
+        yolo = YoloDatabase(Path(self.tmp_dir.name) / "yolo_brief.sqlite3")
+        try:
+            for uid in (sub_uid, other_uid):
+                yolo.set_user_archetype(uid, SoloArchetype.URBAN_HIPSTER)
+            self.assertEqual([u.chat_id for u in yolo.list_active_users()], [sub_uid])
+            with self.db._connect() as conn:
+                conn.execute("UPDATE users SET status = 'BANNED' WHERE telegram_user_id = ?", (sub_uid,))
+            self.assertEqual(yolo.list_active_users(), [])
+        finally:
+            yolo.close()
+
+        # Standalone `:memory:` stores (no platform tables) are left unfiltered
+        mem_kids = KidsCompassDatabase(":memory:")
+        mem_kids.ensure_user("1")
+        self.assertEqual(len(mem_kids.list_alert_subscribers("weekend")), 1)
+        mem_kids.close()
+        mem_yolo = YoloDatabase(":memory:")
+        mem_yolo.set_user_archetype("1", SoloArchetype.URBAN_HIPSTER)
+        self.assertEqual(len(mem_yolo.list_active_users()), 1)
+        mem_yolo.close()
 
 
 if __name__ == "__main__":

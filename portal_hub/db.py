@@ -250,15 +250,18 @@ class PortalDatabase:
             return cur.rowcount > 0
 
     def get_user_subscriptions(self, user_id: int) -> dict[BotServiceType, bool]:
-        """Returns subscription state for all bots from alerts.sqlite3 subscriptions table."""
+        """Returns subscription state for all bots from alerts.sqlite3 subscriptions table.
+        GRACE_PERIOD users keep their ACTIVE (kept) subscriptions; SUSPENDED_OVER_QUOTA stays inactive.
+        Fail-closed: a BANNED / BLOCKED / unknown user has no active subscriptions."""
         uid_str = str(user_id).strip()
         result = {bot: False for bot in BotServiceType}
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT bot_id, status FROM subscriptions
-                WHERE telegram_user_id = ?
+                SELECT s.bot_id, s.status FROM subscriptions s
+                JOIN users u ON u.telegram_user_id = s.telegram_user_id
+                WHERE s.telegram_user_id = ? AND u.status IN ('ACTIVE', 'GRACE_PERIOD')
                 """,
                 (uid_str,),
             )

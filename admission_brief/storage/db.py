@@ -21,6 +21,59 @@ from admission_brief.models import (
 )
 
 
+def _platform_active_subscriber_ids(
+    db_path: str, bot_ids: tuple[str, ...], conn: Optional[sqlite3.Connection] = None
+) -> Optional[set[str]]:
+    """Platform subscription SSOT for outbound delivery (same DB or sibling `alerts.sqlite3`).
+    None -> no platform `subscriptions` table reachable (standalone / `:memory:`): caller applies no filter.
+    set  -> chat ids holding an ACTIVE subscription to `bot_ids` AND an ACTIVE/GRACE_PERIOD platform user.
+    Fail-closed: a platform DB that exists but cannot be read yields an empty set."""
+
+    def _query(c: sqlite3.Connection) -> Optional[set[str]]:
+        tables = {
+            r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('subscriptions', 'users')"
+            ).fetchall()
+        }
+        if "subscriptions" not in tables:
+            return None
+        marks = ",".join("?" * len(bot_ids))
+        sql = f"SELECT DISTINCT s.telegram_user_id FROM subscriptions s WHERE s.status = 'ACTIVE' AND s.bot_id IN ({marks})"
+        if "users" in tables:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM users u"
+                " WHERE u.telegram_user_id = s.telegram_user_id AND u.status IN ('ACTIVE', 'GRACE_PERIOD'))"
+            )
+        return {str(r[0]).strip() for r in c.execute(sql, tuple(bot_ids)).fetchall()}
+
+    try:
+        if conn is not None:
+            found = _query(conn)
+            if found is not None:
+                return found
+        path = str(db_path or "").strip()
+        if not path or path == ":memory:" or path.startswith("file:"):
+            return None
+        own = Path(path).resolve()
+        candidates = [] if conn is not None else [own]
+        sibling = own.with_name("alerts.sqlite3")
+        if sibling != own:
+            candidates.append(sibling)
+        for cand in candidates:
+            if not cand.is_file():
+                continue
+            ext = sqlite3.connect(str(cand), timeout=5.0)
+            try:
+                found = _query(ext)
+            finally:
+                ext.close()
+            if found is not None:
+                return found
+        return None
+    except Exception:
+        return set()
+
+
 class AdmissionDatabase:
     """Thread-safe SQLite storage for Admission Briefing."""
 
@@ -348,9 +401,17 @@ class AdmissionDatabase:
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
+            # Platform SSOT: outbound delivery only to ACTIVE users with an ACTIVE admission subscription
+            platform_ids = (
+                _platform_active_subscriber_ids(str(self.db_path), ("admission_bot", "edu_bot"), conn=conn)
+                if active_only
+                else None
+            )
 
             results = []
             for r in rows:
+                if platform_ids is not None and str(r["chat_id"]).strip() not in platform_ids:
+                    continue
                 profile = self._row_to_subscriber(r)
                 targets = (
                     [(c.grade, c.region) for c in profile.children]

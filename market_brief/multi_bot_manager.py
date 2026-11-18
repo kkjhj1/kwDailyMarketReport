@@ -28,7 +28,7 @@ from typing import Any
 
 from market_brief.link_gate import GATE_REGISTRY, LinkGateRouter, build_gate_button
 from market_brief.storage.models import BotRecord, BotType
-from market_brief.subscription_engine import SubscriptionEngine
+from market_brief.subscription_engine import SubscriptionEngine, normalize_bot_id
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +333,32 @@ BRIEF_MENU_UNSUB_CALLBACKS = ("menu:unsub:brief_bot", "info:unsub:brief_bot", "s
 BRIEF_MENU_SWAP_CALLBACKS = ("menu:swap:brief_bot:", "sub:swap:brief_bot:")
 
 WATCH_COMMANDS = {"/watch", "/alert", "/알림", "/타겟"}
+
+# [Subscription Access Gate] What an un-subscribed user may still do on an INFO bot.
+INFO_STOP_TEXTS = {"/stop", "/탈퇴", "/해지", "/구독취소", "/unsubscribe", "탈퇴", "구독취소"}
+INFO_SUBSCRIBE_COMMANDS = {"/start", "/구독"}
+INFO_SUBSCRIBE_CALLBACK_PREFIXES = ("info:sub:", "info:swap:")
+LOCKED_CALLBACK_ALERT = "🔒 현재 구독 중인 봇이 아닙니다. 메뉴봇에서 구독 후 이용해 주세요."
+
+
+def classify_info_access(text: str | None, callback_data: str | None) -> str:
+    """Classifies an INFO-bot update for the un-subscribed gate: GATE / STOP / SUBSCRIBE / BLOCK."""
+    cb = (callback_data or "").strip()
+    if cb:
+        if cb.startswith("gate:"):
+            return "GATE"
+        if cb.startswith("info:unsub:"):
+            return "STOP"
+        if cb.startswith(INFO_SUBSCRIBE_CALLBACK_PREFIXES):
+            return "SUBSCRIBE"
+        return "BLOCK"
+    clean_text = (text or "").strip().lower()
+    if clean_text in INFO_STOP_TEXTS:
+        return "STOP"
+    cmd = clean_text.split()[0].split("@")[0] if clean_text else ""
+    if cmd in INFO_SUBSCRIBE_COMMANDS:
+        return "SUBSCRIBE"
+    return "BLOCK"
 BRIEF_WATCH_CTA_ROW: list[dict[str, Any]] = [
     {"text": "🔔 내 변동성 타겟 설정", "callback_data": "mbw:m"},
     {"text": "⚡ ±3% 기본 알림", "callback_data": "mbw:q3"},
@@ -387,15 +413,8 @@ class MultiBotInteractionRouter:
         """`/watch`, `/alert`, `mbw:*` and pending manual-level input. `uid` MUST be the caller's `from.id`."""
         uid = str(uid).strip()
         user = self.engine.get_user_profile(uid)
-        if not self._is_brief_subscriber(uid):
-            return {
-                "bot_id": "brief_bot",
-                "reply_html": "🔔 <b>장중 변동성 타겟</b>은 시황 브리핑 구독자 전용 기능입니다.\n먼저 /start 로 구독해 주세요.",
-                "inline_keyboard": [[{"text": "📈 시황 브리핑 구독하기", "callback_data": "info:sub:brief_bot"}]],
-                "callback_toast": "구독 후 이용할 수 있습니다.",
-                "result_code": "WATCH_REQUIRES_SUBSCRIPTION",
-                "user_profile": user,
-            }
+        if not self._is_brief_subscriber(uid) or not self.engine.is_user_subscribed(uid, "brief_bot"):
+            return self._watch_requires_subscription(uid, user)
         svc = self.market_watch
         if callback_data:
             res = svc.handle_callback(uid, chat_id, callback_data)
@@ -410,6 +429,17 @@ class MultiBotInteractionRouter:
             "callback_toast": res.get("toast") or None,
             "result_code": res["code"],
             "user_profile": user,
+        }
+
+    def _watch_requires_subscription(self, uid: str, user: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Fail-closed watch denial (un-subscribed or non-ACTIVE user): subscribe CTA only, no watch data."""
+        return {
+            "bot_id": "brief_bot",
+            "reply_html": "🔔 <b>장중 변동성 타겟</b>은 시황 브리핑 구독자 전용 기능입니다.\n먼저 /start 로 구독해 주세요.",
+            "inline_keyboard": [[{"text": "📈 시황 브리핑 구독하기", "callback_data": "info:sub:brief_bot"}]],
+            "callback_toast": "구독 후 이용할 수 있습니다.",
+            "result_code": "WATCH_REQUIRES_SUBSCRIPTION",
+            "user_profile": user if user is not None else self.engine.get_user_profile(str(uid)),
         }
 
     @staticmethod
@@ -1213,6 +1243,11 @@ class MultiBotInteractionRouter:
                         "user_profile": self.engine.get_user_profile(uid),
                     }
                 elif gate_res.get("action") == "CANCEL":
+                    if not self.engine.is_user_subscribed(uid, bot.bot_id):
+                        # Gate action stays GATE_CANCEL, but an un-subscribed caller gets the locked card
+                        locked = self.render_locked_response(bot, uid, menu_uname=menu_uname)
+                        locked.update({"result_code": "GATE_CANCEL", "access": "LOCKED"})
+                        return locked
                     from market_brief.briefing_service import generate_bot_briefing
                     try:
                         gen = generate_bot_briefing(bot.bot_id, db=self.engine)
@@ -1264,6 +1299,15 @@ class MultiBotInteractionRouter:
                 "result_code": res["code"],
                 "user_profile": user,
             }
+
+        # 1-0. [Subscription Access Gate] Fail-closed: only `/start`, `/구독`, `info:sub:`, `info:swap:` may
+        #      (re-)subscribe. Plain text, previews, target selection, watches etc. never auto-subscribe.
+        if classify_info_access(text, cb) != "SUBSCRIBE" and not self.engine.is_user_subscribed(uid, bot.bot_id):
+            if bot.bot_id == "brief_bot":
+                watch_cmd = clean_text.split()[0].split("@")[0] if clean_text else ""
+                if cb.startswith("mbw:") or (not cb and watch_cmd in WATCH_COMMANDS):
+                    return self._watch_requires_subscription(uid)
+            return self.render_locked_response(bot, uid, menu_uname=menu_uname)
 
         # 1-1. brief_bot intraday volatility target watches (`/watch`, `/alert`, `mbw:*`, pending level input)
         if bot.bot_id == "brief_bot":
@@ -1486,6 +1530,34 @@ class MultiBotInteractionRouter:
             "callback_toast": "🎉 구독이 완료되었습니다!" if (cb and res["code"] == "SUBSCRIBED") else None,
             "result_code": res["code"],
             "user_profile": user,
+        }
+
+    def render_locked_response(
+        self, bot: BotRecord, uid: str, menu_uname: str | None = None
+    ) -> dict[str, Any]:
+        """Locked notice for an INFO bot the caller is not (or no longer) actively subscribed to."""
+        if menu_uname is None:
+            menu_bot = self.engine.get_menu_bot()
+            menu_uname = (menu_bot.telegram_username or "").lstrip("@").strip() if menu_bot else ""
+        label = html.escape(f"{bot.icon_emoji} {bot.name}")
+        lines = [
+            f"🔒 <b>[{label}] 구독 중인 봇이 아닙니다</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            "이 봇의 브리핑·알림·메뉴는 <b>구독 중인 회원</b>만 이용할 수 있습니다.",
+            "👇 메뉴봇에서 구독하거나 아래 버튼으로 이 봇을 다시 구독해 주세요.",
+        ]
+        kb: list[list[dict[str, Any]]] = []
+        if menu_uname:
+            kb.append([{"text": "🧭 메뉴봇에서 구독하기", "url": f"https://t.me/{menu_uname}"}])
+        kb.append([{"text": "🔄 이 봇 다시 구독하기", "callback_data": f"info:sub:{normalize_bot_id(bot.bot_id)}"[:64]}])
+        return {
+            "bot_id": bot.bot_id,
+            "reply_html": "\n".join(lines),
+            "inline_keyboard": kb,
+            "callback_toast": LOCKED_CALLBACK_ALERT,
+            "show_alert": True,
+            "result_code": "NOT_SUBSCRIBED_LOCKED",
+            "user_profile": None,
         }
 
     def _render_quota_exceeded_prompt(
@@ -1749,15 +1821,103 @@ class DynamicBotManager:
         return handled, reason
 
     def _brief_subscription_active(self, uid: str) -> bool:
+        """Fail-closed: ACTIVE user + ACTIVE brief_bot subscription; unknown / DB error -> False."""
         try:
-            with self.engine.db._connect() as conn:
-                row = conn.execute(
-                    "SELECT status FROM subscriptions WHERE telegram_user_id = ? AND bot_id = 'brief_bot'",
-                    (str(uid),),
-                ).fetchone()
-            return bool(row and row["status"] == "ACTIVE")
+            return bool(self.engine.is_user_subscribed(str(uid), "brief_bot"))
         except Exception:
-            return True  # unknown -> keep watches (evaluator still requires an ACTIVE subscription to send)
+            return False
+
+    @staticmethod
+    def _extract_update_context(item: dict[str, Any]) -> dict[str, Any] | None:
+        """Caller identity + payload of a callback / message update (None for other update types)."""
+        if "callback_query" in item:
+            cq = item["callback_query"] or {}
+            sender = cq.get("from", {}) or {}
+            msg = cq.get("message", {}) or {}
+            chat = msg.get("chat", {}) or sender
+            chat_id = str(chat.get("id") or sender.get("id") or "")
+            return {
+                "kind": "callback",
+                "uid": str(sender.get("id") or chat_id),
+                "chat_id": chat_id,
+                "chat_type": chat.get("type", "private"),
+                "cq_id": str(cq.get("id", "")),
+                "msg_id": int(msg.get("message_id") or 0),
+                "cb_data": str(cq.get("data") or ""),
+                "text": "",
+                "full_name": " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip(),
+                "username": sender.get("username") or "",
+            }
+        if "message" in item:
+            msg = item["message"] or {}
+            chat = msg.get("chat", {}) or {}
+            sender = msg.get("from", {}) or chat
+            chat_id = str(chat.get("id") or "")
+            full_name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip()
+            return {
+                "kind": "message",
+                "uid": str(sender.get("id") or chat_id),
+                "chat_id": chat_id,
+                "chat_type": chat.get("type", "private"),
+                "cq_id": "",
+                "msg_id": int(msg.get("message_id") or 0),
+                "cb_data": "",
+                "text": (msg.get("text") or "").strip(),
+                "full_name": full_name or (chat.get("first_name") or ""),
+                "username": sender.get("username") or chat.get("username") or "",
+            }
+        return None
+
+    def _send_router_output(self, transport: "TelegramBotTransport", chat_id: str, out: dict[str, Any]) -> None:
+        transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+        for extra in out.get("extra_messages") or []:
+            if extra.get("html"):
+                transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
+
+    def _enforce_info_access_gate(
+        self, bot: BotRecord, transport: "TelegramBotTransport", item: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """[Subscription Access Gate] Runs BEFORE `mbw:` and every domain dispatcher on INFO bots.
+        Returns None to continue normal routing (subscribed caller, `gate:` callback, other update types),
+        or an event dict when the update was fully handled here (un-subscribed caller)."""
+        ctx = self._extract_update_context(item)
+        if ctx is None:
+            return None
+        access = classify_info_access(ctx["text"], ctx["cb_data"])
+        if access == "GATE":
+            return None  # link gate; its CANCEL branch re-checks the subscription
+        if ctx["uid"] and self.engine.is_user_subscribed(ctx["uid"], bot.bot_id):
+            return None
+
+        chat_id = ctx["chat_id"]
+        is_callback = ctx["kind"] == "callback"
+        if access in ("STOP", "SUBSCRIBE"):
+            # Route straight to the platform router: skips domain onboarding so QUOTA_EXCEEDED shows the swap prompt.
+            if not chat_id or (not is_callback and (ctx["chat_type"] != "private" or not ctx["text"])):
+                return {"user_id": chat_id, "type": "gate_skipped", "code": "IGNORED"}
+            if is_callback and ctx["cq_id"]:
+                transport.answer_callback(ctx["cq_id"], text=self.router.get_quick_callback_toast(ctx["cb_data"]))
+            if access == "STOP" and bot.bot_id == "travel_bot":
+                self._deactivate_travel_for_stop(chat_id, recipient=True)
+            out = self.router.handle_interaction(
+                bot_id=bot.bot_id,
+                telegram_user_id=chat_id,
+                full_name=ctx["full_name"],
+                username=ctx["username"],
+                text=None if is_callback else ctx["text"],
+                callback_data=ctx["cb_data"] if is_callback else None,
+            )
+            self._send_router_output(transport, chat_id, out)
+            return {"user_id": chat_id, "type": "callback" if is_callback else "message", "code": out["result_code"]}
+
+        # BLOCK: answerCallbackQuery FIRST ([TG-04]), then the locked card.
+        if is_callback and ctx["cq_id"]:
+            transport.answer_callback(ctx["cq_id"], text=LOCKED_CALLBACK_ALERT, show_alert=True)
+        if not chat_id or (not is_callback and (ctx["chat_type"] != "private" or not ctx["text"])):
+            return {"user_id": chat_id, "type": "locked", "code": "NOT_SUBSCRIBED_SILENT"}
+        out = self.router.render_locked_response(bot, ctx["uid"])
+        transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+        return {"user_id": chat_id, "type": "locked", "code": out["result_code"]}
 
     def _dispatch_brief_watch_callback(self, transport: "TelegramBotTransport", cq: dict[str, Any]) -> str:
         """`mbw:*` on brief_bot: answerCallbackQuery FIRST, private chat only, caller `from.id` owns the chat."""
@@ -2020,6 +2180,14 @@ class DynamicBotManager:
             if up_id > last_offset:
                 last_offset = up_id
 
+            # [Subscription Access Gate] Un-subscribed callers never reach `mbw:` or the 5 domain dispatchers.
+            if bot.bot_type == BotType.INFO.value:
+                gate_event = self._enforce_info_access_gate(bot, transport, item)
+                if gate_event is not None:
+                    processed += 1
+                    events.append(gate_event)
+                    continue
+
             # [TG-04 & INV-01] Link Confirmation Gate intercepts before any domain bot
             if "callback_query" in item:
                 cq = item["callback_query"]
@@ -2037,6 +2205,13 @@ class DynamicBotManager:
                             transport.answer_callback(cq_id, text=gate_res.get("toast", ""))
                         if gate_res.get("action") == "CONFIRM_CARD":
                             transport.edit_message_text(chat_id, msg_id, gate_res["html"], gate_res["inline_keyboard"])
+                        elif gate_res.get("action") == "CANCEL" and bot.bot_type == BotType.INFO.value and not (
+                            self.engine.is_user_subscribed(
+                                str((cq.get("from", {}) or {}).get("id") or chat_id), bot.bot_id
+                            )
+                        ):
+                            locked = self.router.render_locked_response(bot, chat_id)
+                            transport.edit_message_text(chat_id, msg_id, locked["reply_html"], locked["inline_keyboard"])
                         elif gate_res.get("action") == "CANCEL":
                             from market_brief.briefing_service import generate_bot_briefing
                             try:

@@ -58,6 +58,42 @@ def build_slot_gauge(active_count: int, tier: UserTier) -> str:
     return f"[ {gauge_str} ] {filled_len}/{max_slots}개 사용 중{status_suffix}"
 
 
+SUB_LOCKED_ALERT = "🔒 구독 중인 봇만 대화방에 입장할 수 있습니다.\n먼저 [➕ 구독] 버튼을 눌러 구독을 완료해 주세요."
+
+
+def build_locked_room_button(bot: BotServiceType) -> dict[str, str]:
+    """Replaces `🚀 대화방` for un-subscribed bots: no URL / gate exposure, alert-only callback."""
+    return {"text": "🔒 구독필요", "callback_data": f"sub:locked:{bot.value}"}
+
+
+def _sync_domain_alerts(db: PortalDatabase, user_id: Any, bot_id: str, active: bool) -> None:
+    """Best-effort platform-engine hook: swap-out / unsubscribe deactivates domain watches & alerts;
+    a new subscription restores the admission alert switch. Never raises."""
+    if str(getattr(db, "db_path", ":memory:")) == ":memory:":
+        return
+    try:
+        from market_brief.storage.db import MarketBriefDatabase
+        from market_brief.subscription_engine import SubscriptionEngine
+
+        engine = SubscriptionEngine(MarketBriefDatabase(db_path=str(db.db_path)))
+        if active:
+            engine.restore_domain_alerts(str(user_id), bot_id)
+        else:
+            engine.deactivate_domain_alerts(str(user_id), bot_id)
+    except Exception as exc:
+        logger.warning("domain alert sync failed for %s/%s: %s", user_id, bot_id, exc)
+
+
+def _gate_target_bot(data: str) -> Optional[BotServiceType]:
+    """Maps `gate:<action>:bot_<name>` back to its BotServiceType (None for non-bot gate tokens)."""
+    parts = data.split(":")
+    token = parts[2] if len(parts) >= 3 else ""
+    for b in BotServiceType:
+        if token == f"bot_{b.value.replace('_bot', '')}":
+            return b
+    return None
+
+
 def _safe_edit_or_send(
     client: TelegramPortalClient,
     chat_id: int | str,
@@ -176,12 +212,14 @@ def render_subscription_view(
         else:
             if is_subbed:
                 action_btn = {"text": f"🟢 {bot.short_name}", "callback_data": f"sub:ask_unsub:{bot.value}:subs"}
+                room_btn = {"text": "🚀 대화방", "url": deep_link_url}
             else:
                 action_btn = {"text": f"➕ {bot.short_name}", "callback_data": f"sub:ask_sub:{bot.value}:subs"}
+                room_btn = build_locked_room_button(bot)
 
             keyboard.append([
                 action_btn,
-                {"text": "🚀 대화방", "url": deep_link_url},
+                room_btn,
             ])
 
     keyboard.extend([
@@ -253,12 +291,12 @@ def render_category_view(
         else:
             if is_sub:
                 action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:cat:{category.value}"}
+                tok = f"bot_{b.value.replace('_bot', '')}"
+                GATE_REGISTRY.update_preset_url(tok, deep_link_url)
+                move_btn = build_gate_button(tok, "🚀 대화방")
             else:
                 action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:cat:{category.value}"}
-
-            tok = f"bot_{b.value.replace('_bot', '')}"
-            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-            move_btn = build_gate_button(tok, "🚀 대화방")
+                move_btn = build_locked_room_button(b)
 
             keyboard.append([
                 action_btn,
@@ -319,6 +357,19 @@ CATALOG_ALL_ORDER = (
 )
 
 CALLBACK_DATA_MAX_BYTES = 64
+# Longest search-context prefix: `sub:ask_unsub:<longest bot_id>:search:`
+_SEARCH_CB_PREFIX_MAX = len("sub:ask_unsub:") + max(len(b.value) for b in BotServiceType) + len(":search:")
+
+
+def fit_search_query_for_callback(query: str) -> str:
+    """Normalizes the `search:<q>` context so EVERY search button stays <= 64 bytes ([TG-04]).
+    One shared byte budget (not per-button) keeps all buttons of a view on the same query; cut on a
+    character boundary so multi-byte Korean text never splits. Raw text (no HTML escape) is stored."""
+    budget = CALLBACK_DATA_MAX_BYTES - _SEARCH_CB_PREFIX_MAX
+    q = " ".join((query or "").split())
+    while q and len(q.encode("utf-8")) > budget:
+        q = q[:-1]
+    return q.rstrip()
 
 
 def render_catalog_all_view(
@@ -370,11 +421,14 @@ def render_catalog_all_view(
 
         if subs.get(b, False):
             row = [{"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:all"}]
+            deep_link = b.get_start_link()
+            if deep_link:
+                row.append({"text": "🚀 대화방", "url": deep_link})
         else:
-            row = [{"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:all"}]
-        deep_link = b.get_start_link()
-        if deep_link:
-            row.append({"text": "🚀 대화방", "url": deep_link})
+            row = [
+                {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:all"},
+                build_locked_room_button(b),
+            ]
         keyboard.append(row)
 
     keyboard.extend([
@@ -495,6 +549,7 @@ def render_search_results_view(
 ) -> tuple[str, dict[str, Any]]:
     """Renders instant keyword search results with In-Place Subscription/Unsubscription Confirmation."""
     clean_q = html.escape(query.strip())
+    cb_q = fit_search_query_for_callback(query)
     lines = [
         f"🔍 <b>'{clean_q}' 검색 결과 (총 {len(matched_bots)}건)</b>",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -530,23 +585,23 @@ def render_search_results_view(
 
         if confirming_bot_id == b.value:
             keyboard.append([
-                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:search:{clean_q}"},
-                {"text": "↩️ 취소", "callback_data": f"sub:cancel_unsub:search:{clean_q}"},
+                {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{b.value}:search:{cb_q}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_unsub:search:{cb_q}"},
             ])
         elif confirming_sub_bot_id == b.value:
             keyboard.append([
-                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{b.value}:search:{clean_q}"},
-                {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:search:{clean_q}"},
+                {"text": "✅ 구독 확정", "callback_data": f"sub:do_sub:{b.value}:search:{cb_q}"},
+                {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:search:{cb_q}"},
             ])
         else:
             if is_sub:
-                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:search:{clean_q}"}
+                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:search:{cb_q}"}
+                tok = f"bot_{b.value.replace('_bot', '')}"
+                GATE_REGISTRY.update_preset_url(tok, deep_link_url)
+                move_btn = build_gate_button(tok, "🚀 대화방")
             else:
-                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:search:{clean_q}"}
-
-            tok = f"bot_{b.value.replace('_bot', '')}"
-            GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-            move_btn = build_gate_button(tok, "🚀 대화방")
+                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:search:{cb_q}"}
+                move_btn = build_locked_room_button(b)
 
             keyboard.append([
                 action_btn,
@@ -848,24 +903,48 @@ def handle_callback_query(
     data = cq.get("data", "")
 
     # 1. Stop button loading spinner immediately (except modal alerts: sub:toggle, adm, sub:do_sub, sub:do_unsub, sub:swap, support:req_tier)
-    MODAL_ACTIONS = ("sub:toggle:", "adm:", "sub:do_sub:", "sub:do_unsub:", "sub:swap:", "support:req_tier:")
+    MODAL_ACTIONS = (
+        "sub:toggle:", "adm:", "sub:do_sub:", "sub:do_unsub:", "sub:swap:", "support:req_tier:",
+        "sub:locked:", "gate:",
+    )
     if not any(data.startswith(prefix) for prefix in MODAL_ACTIONS):
         client.answer_callback_query(cq_id)
 
-    # 0. Link Confirmation Gate Intercept
+    # 0-A. Locked chat-room button of an un-subscribed bot: modal alert only (no URL exposure)
+    if data.startswith("sub:locked:"):
+        client.answer_callback_query(cq_id, SUB_LOCKED_ALERT, show_alert=True)
+        return
+
+    # 0-B. Link Confirmation Gate Intercept (answered here: modal alert when the target bot is locked)
     if data.startswith("gate:"):
         from market_brief.link_gate import LinkGateRouter, GATE_REGISTRY
+        user = db.get_or_create_user(
+            user_id=user_id,
+            chat_id=chat_id,
+            username=from_user.get("username"),
+            first_name=from_user.get("first_name"),
+            last_name=from_user.get("last_name"),
+        )
+        subs = db.get_user_subscriptions(user_id)
+        target_bot = _gate_target_bot(data)
+        if target_bot is not None and not subs.get(target_bot, False):
+            # Stale `🚀 대화방` gate button for a bot the user no longer subscribes to -> locked menu card
+            client.answer_callback_query(cq_id, SUB_LOCKED_ALERT, show_alert=True)
+            text, markup = render_subscription_view(user, subs)
+            _safe_edit_or_send(client, chat_id, message_id, text, markup)
+            return
+        client.answer_callback_query(cq_id)
         gate_router = LinkGateRouter(GATE_REGISTRY)
         gate_res = gate_router.handle_callback(data, "menu_bot", str(chat_id), int(message_id or 0))
         if gate_res.get("handled"):
             if gate_res.get("action") == "CONFIRM_CARD":
                 _safe_edit_or_send(client, chat_id, message_id, gate_res["html"], {"inline_keyboard": gate_res["inline_keyboard"]})
                 return
-            elif gate_res.get("action") == "CANCEL":
-                subs = db.get_user_subscriptions(user_id)
-                text, markup = render_subscription_view(user, subs)
-                _safe_edit_or_send(client, chat_id, message_id, text, markup)
-                return
+            # CANCEL / EXPIRED: back to the subscription card (locked bots carry no room link)
+            text, markup = render_subscription_view(user, subs)
+            _safe_edit_or_send(client, chat_id, message_id, text, markup)
+            return
+        return
 
     if data == "noop":
         return
@@ -880,6 +959,8 @@ def handle_callback_query(
 
         ok, is_active, msg = db.toggle_subscription(user_id, bot_type)
         client.answer_callback_query(cq_id, msg, show_alert=not ok)
+        if ok:
+            _sync_domain_alerts(db, user_id, bot_type.value, active=is_active)
         return
 
     user = db.get_or_create_user(
@@ -957,6 +1038,7 @@ def handle_callback_query(
             client.send_message(chat_id, msg, reply_markup=quota_markup)
             return
 
+        _sync_domain_alerts(db, user_id, bot_type.value, active=True)
         text, markup = render_subscribe_onboarding_view(bot_type, f"cat:{bot_type.category.value}")
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
         return
@@ -972,6 +1054,8 @@ def handle_callback_query(
             return
 
         ok, msg = db.unsubscribe(user_id, bot_type)
+        if ok:
+            _sync_domain_alerts(db, user_id, bot_type.value, active=False)
         subs = db.get_user_subscriptions(user_id)
         text, markup = render_category_view(bot_type.category, user, subs)
         _safe_edit_or_send(client, chat_id, message_id, text, markup)
@@ -989,6 +1073,9 @@ def handle_callback_query(
                 sub_ok, _ = db.subscribe(user_id, new_type)
                 if not sub_ok:
                     db.subscribe(user_id, cancel_type)  # rollback if new sub failed
+                else:
+                    _sync_domain_alerts(db, user_id, cancel_type.value, active=False)
+                    _sync_domain_alerts(db, user_id, new_type.value, active=True)
             except ValueError:
                 pass
         subs = db.get_user_subscriptions(user_id)
@@ -1221,6 +1308,8 @@ def handle_callback_query(
             return
 
         ok, msg = db.unsubscribe(user_id, bot_type)
+        if ok:
+            _sync_domain_alerts(db, user_id, bot_type.value, active=False)
         subs = db.get_user_subscriptions(user_id)
 
         client.answer_callback_query(
@@ -1274,6 +1363,7 @@ def handle_callback_query(
             client.send_message(chat_id, text, reply_markup=markup)
             return
 
+        _sync_domain_alerts(db, user_id, bot_type.value, active=True)
         client.answer_callback_query(
             cq_id,
             f"🎉 [{bot_type.short_name}] 알림 구독이 완료되었습니다!",
@@ -1301,6 +1391,8 @@ def handle_callback_query(
 
         ok, msg = db.atomic_swap_subscription(user_id, old_bot, new_bot)
         if ok:
+            _sync_domain_alerts(db, user_id, old_bot.value, active=False)
+            _sync_domain_alerts(db, user_id, new_bot.value, active=True)
             client.answer_callback_query(
                 cq_id,
                 f"✅ [{old_bot.short_name}] ➔ [{new_bot.short_name}] 교체가 완료되었습니다!",

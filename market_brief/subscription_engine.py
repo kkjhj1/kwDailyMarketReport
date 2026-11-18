@@ -47,6 +47,15 @@ def now_kst_str() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 
+BOT_ID_ALIASES: dict[str, str] = {"edu_bot": "admission_bot"}
+
+
+def normalize_bot_id(bot_id: str) -> str:
+    """Canonical platform bot id (`edu_bot` is a legacy alias of `admission_bot`)."""
+    bid = str(bot_id or "").strip()
+    return BOT_ID_ALIASES.get(bid, bid)
+
+
 def normalize_expiry_str(expiry: str | None) -> str | None:
     if not expiry or not str(expiry).strip():
         return None
@@ -1278,6 +1287,89 @@ class SubscriptionEngine:
             return True
         return False
 
+    # =========================================================================
+    # Access Gate & Domain Alert Cleanup (fail-closed)
+    # =========================================================================
+
+    def is_user_subscribed(self, telegram_user_id: str, bot_id: str) -> bool:
+        """True only for an ACTIVE/GRACE_PERIOD user holding an ACTIVE subscription to an active INFO bot.
+        GRACE_PERIOD users keep their kept ACTIVE bot; over-quota bots stay SUSPENDED_OVER_QUOTA.
+        Fail-closed: unknown user, BANNED/BLOCKED user, SUSPENDED_OVER_QUOTA/CANCELLED
+        subscription, inactive bot or any DB error -> False."""
+        uid = str(telegram_user_id or "").strip()
+        raw = str(bot_id or "").strip()
+        if not uid or not raw:
+            return False
+        canonical = normalize_bot_id(raw)
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    """SELECT 1
+                       FROM users u
+                       JOIN subscriptions s ON u.telegram_user_id = s.telegram_user_id
+                       JOIN bots b ON s.bot_id = b.bot_id
+                       WHERE u.telegram_user_id = ? AND s.bot_id IN (?, ?)
+                         AND u.status IN ('ACTIVE', 'GRACE_PERIOD') AND s.status = 'ACTIVE'
+                         AND b.bot_type = 'INFO' AND b.is_active = 1
+                       LIMIT 1""",
+                    (uid, raw, canonical),
+                ).fetchone()
+            return row is not None
+        except Exception as exc:
+            logger.warning("is_user_subscribed fail-closed for %s/%s: %s", uid, raw, exc)
+            return False
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone() is not None
+
+    def deactivate_domain_alerts(self, telegram_user_id: str, bot_id: str) -> None:
+        """Best-effort domain cleanup after unsubscribe / swap-out (never raises).
+        `/start` never revives brief/travel watches; admission alerts are restored on re-subscribe."""
+        uid = str(telegram_user_id or "").strip()
+        bid = normalize_bot_id(bot_id)
+        if not uid or not bid:
+            return
+        try:
+            if bid == "brief_bot":
+                with self._read_conn() as conn:
+                    has_table = self._table_exists(conn, "market_volatility_watches")
+                if has_table:
+                    self.db.deactivate_all_market_watches(uid, reason="PLATFORM_UNSUBSCRIBED")
+            elif bid == "travel_bot":
+                with self.db._connect() as conn:
+                    if self._table_exists(conn, "travel_price_watches"):
+                        conn.execute(
+                            "UPDATE travel_price_watches SET is_active = 0, updated_at = ? "
+                            "WHERE chat_id = ? AND is_active = 1",
+                            (datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S"), uid),
+                        )
+            elif bid == "admission_bot":
+                with self.db._connect() as conn:
+                    if self._table_exists(conn, "admission_subscribers"):
+                        conn.execute(
+                            "UPDATE admission_subscribers SET alert_enabled = 0 WHERE chat_id = ?", (uid,)
+                        )
+        except Exception as exc:
+            logger.warning("deactivate_domain_alerts failed for %s/%s: %s", uid, bid, exc)
+
+    def restore_domain_alerts(self, telegram_user_id: str, bot_id: str) -> None:
+        """Best-effort: re-enables the admission alert switch cleared by `deactivate_domain_alerts`
+        (it has no other on/off control). Brief/travel watches intentionally stay inactive."""
+        uid = str(telegram_user_id or "").strip()
+        if not uid or normalize_bot_id(bot_id) != "admission_bot":
+            return
+        try:
+            with self.db._connect() as conn:
+                if self._table_exists(conn, "admission_subscribers"):
+                    conn.execute(
+                        "UPDATE admission_subscribers SET alert_enabled = 1 WHERE chat_id = ?", (uid,)
+                    )
+        except Exception as exc:
+            logger.warning("restore_domain_alerts failed for %s/%s: %s", uid, bot_id, exc)
+
     def attempt_subscribe(
         self,
         telegram_user_id: str,
@@ -1288,6 +1380,22 @@ class SubscriptionEngine:
         bypass_quota: bool = False,
     ) -> dict[str, Any]:
         """Atomically verifies user tier quota and subscribes user to an INFO bot if allowed."""
+        res = self._attempt_subscribe_tx(
+            telegram_user_id, bot_id, full_name=full_name, username=username, actor=actor, bypass_quota=bypass_quota
+        )
+        if res.get("code") == "SUBSCRIBED":
+            self.restore_domain_alerts(telegram_user_id, bot_id)
+        return res
+
+    def _attempt_subscribe_tx(
+        self,
+        telegram_user_id: str,
+        bot_id: str,
+        full_name: str = "",
+        username: str = "",
+        actor: str = "USER",
+        bypass_quota: bool = False,
+    ) -> dict[str, Any]:
         uid = str(telegram_user_id).strip()
         bid = str(bot_id).strip()
         now_str = now_kst_str()
@@ -1459,6 +1567,19 @@ class SubscriptionEngine:
         actor: str = "USER",
     ) -> dict[str, Any]:
         """Atomically unsubscribes `cancel_bot_id` and subscribes `new_bot_id` in one locked transaction."""
+        res = self._atomic_swap_tx(telegram_user_id, cancel_bot_id, new_bot_id, actor=actor)
+        if res.get("success"):
+            self.deactivate_domain_alerts(telegram_user_id, cancel_bot_id)
+            self.restore_domain_alerts(telegram_user_id, new_bot_id)
+        return res
+
+    def _atomic_swap_tx(
+        self,
+        telegram_user_id: str,
+        cancel_bot_id: str,
+        new_bot_id: str,
+        actor: str = "USER",
+    ) -> dict[str, Any]:
         uid = str(telegram_user_id).strip()
         old_bid = str(cancel_bot_id).strip()
         new_bid = str(new_bot_id).strip()
@@ -1552,6 +1673,18 @@ class SubscriptionEngine:
         reason: str = "USER_STOP",
     ) -> dict[str, Any]:
         """Unsubscribes user from an INFO bot and releases the quota slot immediately."""
+        res = self._unsubscribe_bot_tx(telegram_user_id, bot_id, actor=actor, reason=reason)
+        if res.get("success"):
+            self.deactivate_domain_alerts(telegram_user_id, bot_id)
+        return res
+
+    def _unsubscribe_bot_tx(
+        self,
+        telegram_user_id: str,
+        bot_id: str,
+        actor: str = "USER",
+        reason: str = "USER_STOP",
+    ) -> dict[str, Any]:
         uid = str(telegram_user_id).strip()
         bid = str(bot_id).strip()
         now_str = now_kst_str()
@@ -1631,7 +1764,7 @@ class SubscriptionEngine:
                    FROM subscriptions s
                    JOIN users u ON s.telegram_user_id = u.telegram_user_id
                    JOIN bots b ON s.bot_id = b.bot_id
-                   WHERE s.bot_id = ? AND s.status = 'ACTIVE' AND u.status != 'BLOCKED'
+                   WHERE s.bot_id = ? AND s.status = 'ACTIVE' AND u.status IN ('ACTIVE', 'GRACE_PERIOD')
                    ORDER BY s.subscribed_at ASC""",
                 (bid,),
             ).fetchall()

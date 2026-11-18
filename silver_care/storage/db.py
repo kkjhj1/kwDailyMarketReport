@@ -91,6 +91,59 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _platform_active_subscriber_ids(
+    db_path: str, bot_ids: tuple[str, ...], conn: Optional[sqlite3.Connection] = None
+) -> Optional[set[str]]:
+    """Platform subscription SSOT for outbound delivery (same DB or sibling `alerts.sqlite3`).
+    None -> no platform `subscriptions` table reachable (standalone / `:memory:`): caller applies no filter.
+    set  -> chat ids holding an ACTIVE subscription to `bot_ids` AND an ACTIVE/GRACE_PERIOD platform user.
+    Fail-closed: a platform DB that exists but cannot be read yields an empty set."""
+
+    def _query(c: sqlite3.Connection) -> Optional[set[str]]:
+        tables = {
+            r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('subscriptions', 'users')"
+            ).fetchall()
+        }
+        if "subscriptions" not in tables:
+            return None
+        marks = ",".join("?" * len(bot_ids))
+        sql = f"SELECT DISTINCT s.telegram_user_id FROM subscriptions s WHERE s.status = 'ACTIVE' AND s.bot_id IN ({marks})"
+        if "users" in tables:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM users u"
+                " WHERE u.telegram_user_id = s.telegram_user_id AND u.status IN ('ACTIVE', 'GRACE_PERIOD'))"
+            )
+        return {str(r[0]).strip() for r in c.execute(sql, tuple(bot_ids)).fetchall()}
+
+    try:
+        if conn is not None:
+            found = _query(conn)
+            if found is not None:
+                return found
+        path = str(db_path or "").strip()
+        if not path or path == ":memory:" or path.startswith("file:"):
+            return None
+        own = Path(path).resolve()
+        candidates = [] if conn is not None else [own]
+        sibling = own.with_name("alerts.sqlite3")
+        if sibling != own:
+            candidates.append(sibling)
+        for cand in candidates:
+            if not cand.is_file():
+                continue
+            ext = sqlite3.connect(str(cand), timeout=5.0)
+            try:
+                found = _query(ext)
+            finally:
+                ext.close()
+            if found is not None:
+                return found
+        return None
+    except Exception:
+        return set()
+
+
 class SilverCareDatabase:
     """Single-connection SQLite store (thread-safe via lock) so ':memory:' persists across calls."""
 
@@ -363,7 +416,13 @@ class SilverCareDatabase:
             "LEFT JOIN silver_sessions s ON s.chat_id = p.chat_id "
             "WHERE COALESCE(s.weekly_opt_in, 1) = 1 ORDER BY p.chat_id"
         )
-        return [r["chat_id"] for r in rows]
+        # Platform SSOT: only ACTIVE users with an ACTIVE silver_bot subscription (no-op when standalone)
+        with self._lock:
+            platform_ids = _platform_active_subscriber_ids(self.db_path, ("silver_bot",), conn=self._conn)
+        return [
+            r["chat_id"] for r in rows
+            if platform_ids is None or str(r["chat_id"]).strip() in platform_ids
+        ]
 
     # ── Dispatch log (weekly briefing idempotency) ────────────
     def has_dispatched(self, dispatch_key: str, chat_id: int) -> bool:

@@ -1227,16 +1227,17 @@ class MarketBriefDatabase:
             return int(db.execute("SELECT COUNT(*) FROM market_volatility_watches WHERE is_active = 1").fetchone()[0])
 
     def list_evaluable_market_watches(self) -> list[dict[str, Any]]:
-        """Active watches of ACTIVE `brief_bot` subscribers (non-blocked), capped per current tier oldest-first."""
+        """Active watches of ACTIVE `brief_bot` subscribers whose platform user is ACTIVE or GRACE_PERIOD
+        (fail-closed: BLOCKED / BANNED / missing user rows are excluded), capped per current tier oldest-first."""
         with self._connect() as db:
             rows = db.execute(
                 """SELECT w.*, COALESCE(u.tier, 'WHITE') AS user_tier
                    FROM market_volatility_watches w
                    JOIN subscriptions s
                      ON s.telegram_user_id = w.telegram_user_id AND s.bot_id = 'brief_bot' AND s.status = 'ACTIVE'
-                   LEFT JOIN users u ON u.telegram_user_id = w.telegram_user_id
+                   JOIN users u ON u.telegram_user_id = w.telegram_user_id
                    WHERE w.is_active = 1 AND w.bot_id = 'brief_bot'
-                     AND COALESCE(u.status, 'ACTIVE') != 'BLOCKED'
+                     AND u.status IN ('ACTIVE', 'GRACE_PERIOD')
                    ORDER BY w.telegram_user_id ASC, w.created_at ASC, w.watch_id ASC"""
             ).fetchall()
         result: list[dict[str, Any]] = []
