@@ -30,6 +30,8 @@ from datetime import datetime as _datetime, timedelta as _timedelta, timezone as
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 
+from market_brief.channels.http_keepalive import answer_callback_once
+
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
 from travel_brief.city_catalog import (
@@ -2982,8 +2984,12 @@ class TravelInteractiveHandler:
     # Telegram I/O
     # ------------------------------------------------------------------
     def _answer(self, cq_id: str, text: str) -> None:
-        try:
+        # Exactly one ack per callback id inside a single-ack scope (manager-dispatched); pass-through otherwise.
+        def _send() -> None:
             self.tg.answer_callback(cq_id, text=text, show_alert=False)
+
+        try:
+            answer_callback_once(cq_id, _send)
         except Exception as exc:
             logger.warning("answerCallbackQuery failed for %s: %s", cq_id, exc)
 

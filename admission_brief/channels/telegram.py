@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from market_brief.channels.http_keepalive import open_request
 from admission_brief.models import (
     AdmissionBriefing,
     AdmissionEvent,
@@ -228,6 +229,7 @@ class TelegramChannel:
 
     def __init__(self, bot_token: str, opener=None):
         self.bot_token = bot_token.strip()
+        self._injected_opener = opener  # None -> shared keep-alive helper (patched urlopen still honoured)
         self._opener = opener or urllib.request.urlopen
         if not self.bot_token:
             logger.warning("TelegramChannel initialized with empty bot_token")
@@ -245,7 +247,7 @@ class TelegramChannel:
                 method="POST",
             )
         try:
-            with self._opener(req, timeout=timeout) as resp:
+            with open_request(req, timeout, opener=self._injected_opener) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             err_body = ""
@@ -419,7 +421,7 @@ class TelegramChannel:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        with self._opener(req, timeout=30) as resp:
+        with open_request(req, 30, opener=self._injected_opener) as resp:
             res = json.loads(resp.read().decode("utf-8"))
 
         if not res.get("ok"):

@@ -12,6 +12,8 @@ import logging
 import os
 import re
 from typing import Any, Optional
+
+from market_brief.channels.http_keepalive import AckOnceClient, callback_ack_scope
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from portal_hub.db import PortalDatabase
@@ -892,7 +894,17 @@ def _is_portal_admin(user_id: Any, chat_id: Any) -> bool:
 def handle_callback_query(
     cq: dict[str, Any], db: PortalDatabase, client: TelegramPortalClient
 ) -> None:
-    """Dispatches inline button clicks with zero lag and in-place confirmation."""
+    """Dispatches inline button clicks with zero lag and in-place confirmation.
+
+    Single-ack ownership: several branches below may try to acknowledge; inside the scope only the FIRST
+    `answer_callback_query` reaches Telegram (joins the manager's scope when dispatched by the manager)."""
+    with callback_ack_scope(cq.get("id", "")):
+        _handle_callback_query_scoped(cq, db, AckOnceClient(client))
+
+
+def _handle_callback_query_scoped(
+    cq: dict[str, Any], db: PortalDatabase, client: TelegramPortalClient
+) -> None:
     cq_id = cq["id"]
     from_user = cq.get("from") or {}
     user_id = from_user.get("id")

@@ -11,6 +11,8 @@ from datetime import date
 import logging
 from typing import Any, Optional
 
+from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
+
 from yolo_brief.channels.telegram import YoloTelegramChannel
 from yolo_brief.channels.telegram_card import (
     render_curation_card,
@@ -132,6 +134,16 @@ class YoloInteractiveBot:
         weather_override: Optional[WeatherSnapshot] = None,
         ref_date: Optional[date] = None,
     ) -> Optional[dict[str, Any]]:
+        # Single-ack scope: joins the manager's scope when dispatched by `DynamicBotManager`.
+        with callback_ack_scope(str(cb.get("id", "")).strip()):
+            return self._handle_callback_scoped(cb, weather_override=weather_override, ref_date=ref_date)
+
+    def _handle_callback_scoped(
+        self,
+        cb: dict[str, Any],
+        weather_override: Optional[WeatherSnapshot] = None,
+        ref_date: Optional[date] = None,
+    ) -> Optional[dict[str, Any]]:
         cb_id = str(cb.get("id", "")).strip()
         data = str(cb.get("data", "")).strip()
         msg = cb.get("message") or {}
@@ -141,7 +153,7 @@ class YoloInteractiveBot:
 
         # [TG-04] MANDATORY FIRST ACTION: answerCallbackQuery before any DB or weather work!
         if cb_id:
-            self.channel.answer_callback(cb_id)
+            answer_callback_once(cb_id, lambda: self.channel.answer_callback(cb_id))
 
         if not chat_id or not data:
             return None

@@ -4,11 +4,14 @@ to provide real-time briefing previews, admin test dispatch, and batch subscribe
 """
 from __future__ import annotations
 
+import copy
 import html
 import os
 import sys
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -173,8 +176,53 @@ def get_bot_presets(bot_id: str) -> List[Dict[str, str]]:
     ]
 
 
-def generate_bot_briefing(bot_id: str, preset: Optional[str] = None, db=None) -> Dict[str, Any]:
-    """Generates real-time domain briefing content and rich HTML directly from domain engines."""
+_BRIEFING_CACHE_LOCK = threading.RLock()
+_BRIEFING_CACHE: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+
+
+def _briefing_cache_key(bot_id: str, preset: Optional[str], db=None) -> Tuple[Any, ...]:
+    """(bot_id, preset, live_mode, db identity): a live/fixture flip or another DB never shares a snapshot."""
+    live_mode = os.environ.get("PYTEST_CURRENT_TEST") is None and (
+        (bot_id == "brief_bot" and os.environ.get("BRIEF_LIVE_ON_START", "0") == "1")
+        or (bot_id == "travel_bot" and os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0")
+    )
+    db_key = str(getattr(getattr(db, "db", db), "db_path", "") or id(db) if db is not None else "")
+    return (bot_id, (preset or "").strip(), bool(live_mode), db_key)
+
+
+def clear_briefing_cache() -> None:
+    with _BRIEFING_CACHE_LOCK:
+        _BRIEFING_CACHE.clear()
+
+
+def generate_bot_briefing(
+    bot_id: str,
+    preset: Optional[str] = None,
+    db=None,
+    *,
+    cache_ttl: float = 0.0,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Generates real-time domain briefing content and rich HTML directly from domain engines.
+
+    Opt-in, thread-safe TTL cache: `cache_ttl > 0` serves a snapshot younger than `cache_ttl` seconds keyed by
+    `(bot_id, preset, live_mode, db)`; `refresh=True` bypasses the lookup. Default (`cache_ttl=0`) is uncached,
+    so admin previews/test sends always see fresh content. Every return value is a private deep copy."""
+    if cache_ttl <= 0:
+        return _generate_bot_briefing_uncached(bot_id, preset=preset, db=db)
+    key = _briefing_cache_key(bot_id, preset, db)
+    if not refresh:
+        with _BRIEFING_CACHE_LOCK:
+            hit = _BRIEFING_CACHE.get(key)
+            if hit and (time.monotonic() - hit[0]) < cache_ttl:
+                return copy.deepcopy(hit[1])
+    result = _generate_bot_briefing_uncached(bot_id, preset=preset, db=db)
+    with _BRIEFING_CACHE_LOCK:
+        _BRIEFING_CACHE[key] = (time.monotonic(), copy.deepcopy(result))
+    return result
+
+
+def _generate_bot_briefing_uncached(bot_id: str, preset: Optional[str] = None, db=None) -> Dict[str, Any]:
     now_kst = datetime.now(KST)
     now_str = now_kst.strftime("%Y-%m-%d %H:%M")
     presets = get_bot_presets(bot_id)

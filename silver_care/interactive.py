@@ -16,6 +16,8 @@ import re
 from datetime import date
 from typing import Any, Optional
 
+from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
+
 from silver_care.channels.telegram_card import (
     LIST_PAGE_SIZE,
     esc,
@@ -239,11 +241,17 @@ class SilverCareInteractiveBot:
         }.get(action, "")
 
     def _handle_callback(self, cq: dict[str, Any]) -> None:
+        # Single-ack scope: joins the manager's scope when dispatched by `DynamicBotManager`.
+        with callback_ack_scope(cq.get("id", "")):
+            self._handle_callback_scoped(cq)
+
+    def _handle_callback_scoped(self, cq: dict[str, Any]) -> None:
         data = str(cq.get("data") or "")
         parts = data.split(":")
         action = parts[1] if len(parts) > 1 and parts[0] == CB_PREFIX else ""
-        # [TG-04] Acknowledge first — before any DB work — to clear the loading spinner
-        self.channel.answer_callback_query(cq.get("id", ""), text=self._toast(action))
+        # [TG-04] Acknowledge first — before any DB work — to clear the loading spinner (exactly once)
+        cq_id, toast = cq.get("id", ""), self._toast(action)
+        answer_callback_once(cq_id, lambda: self.channel.answer_callback_query(cq_id, text=toast))
 
         msg = cq.get("message") or {}
         chat_id = int((msg.get("chat") or {}).get("id") or (cq.get("from") or {}).get("id") or 0)

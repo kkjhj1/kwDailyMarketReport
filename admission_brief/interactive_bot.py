@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
+from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
+
 from admission_brief.ai_curator import AICurator
 from admission_brief.channels.telegram import (
     TelegramChannel,
@@ -755,16 +757,21 @@ class AdmissionInteractiveBot:
         return ""
 
     def _handle_callback_query(self, cb: dict[str, Any]) -> None:
-        """Processes inline button clicks (grade/region selection, event category browsing)."""
+        """Processes inline button clicks (grade/region selection, event category browsing).
+        Single-ack scope: joins the manager's scope when dispatched by `DynamicBotManager`."""
+        with callback_ack_scope(cb.get("id", "")):
+            self._handle_callback_query_scoped(cb)
+
+    def _handle_callback_query_scoped(self, cb: dict[str, Any]) -> None:
         cb_id = cb["id"]
         data = cb.get("data", "")
 
-        # [TG-04] Acknowledge first to clear the loading spinner before any DB work
+        # [TG-04] Acknowledge first to clear the loading spinner before any DB work (exactly once)
         toast = self._callback_toast(data)
         if toast:
-            self.channel.answer_callback_query(cb_id, text=toast)
+            answer_callback_once(cb_id, lambda: self.channel.answer_callback_query(cb_id, text=toast))
         else:
-            self.channel.answer_callback_query(cb_id)
+            answer_callback_once(cb_id, lambda: self.channel.answer_callback_query(cb_id))
 
         msg = cb.get("message") or {}
         chat = msg.get("chat") or {}

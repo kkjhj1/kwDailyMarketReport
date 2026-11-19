@@ -13,6 +13,8 @@ from typing import Any, Optional
 import urllib.error
 import urllib.request
 
+from market_brief.channels.http_keepalive import open_request
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +26,7 @@ class YoloTelegramChannel:
         token: Optional[str] = None,
         dry_run: bool = False,
         timeout: float = 10.0,
+        opener: Optional[Any] = None,
     ) -> None:
         self.token = (
             token
@@ -33,6 +36,8 @@ class YoloTelegramChannel:
         ).strip()
         self.dry_run = dry_run or not bool(self.token)
         self.timeout = timeout
+        # Injected opener (tests/tools) is used verbatim; None -> shared keep-alive helper.
+        self._opener = opener
         self.call_log: list[tuple[str, dict[str, Any]]] = []
 
     def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +54,7 @@ class YoloTelegramChannel:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with open_request(req, self.timeout, opener=self._opener) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.HTTPError as exc:

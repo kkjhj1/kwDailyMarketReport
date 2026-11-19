@@ -9,6 +9,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Iterable, Optional
 
+from market_brief.channels.http_keepalive import open_request
+
 logger = logging.getLogger(__name__)
 
 SILVER_COMMANDS = [
@@ -27,10 +29,11 @@ class TelegramAPIError(RuntimeError):
 
 
 class SilverTelegramChannel:
-    """Minimal Telegram Bot API client (stdlib only)."""
+    """Minimal Telegram Bot API client (shared keep-alive helper; stdlib fallback)."""
 
     def __init__(self, bot_token: str, opener: Optional[Callable[..., Any]] = None):
         self.bot_token = (bot_token or "").strip()
+        self._injected_opener = opener  # None -> shared keep-alive helper (patched urlopen still honoured)
         self._opener = opener or urllib.request.urlopen
         if not self.bot_token:
             logger.warning("SilverTelegramChannel initialized with empty bot_token")
@@ -43,7 +46,7 @@ class SilverTelegramChannel:
             headers={"Content-Type": "application/json", "User-Agent": "SilverCareBot/1.0"},
         )
         try:
-            with self._opener(req, timeout=timeout) as resp:
+            with open_request(req, timeout, opener=self._injected_opener) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             desc, retry_after = str(exc), 0.0

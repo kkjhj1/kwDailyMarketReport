@@ -26,8 +26,13 @@ import os
 import threading
 import urllib.error
 import urllib.request
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from typing import Any
 
+from market_brief.channels import http_keepalive
+from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
 from market_brief.link_gate import GATE_REGISTRY, LinkGateRouter, build_gate_button
 from market_brief.storage.models import BotRecord, BotType
 from market_brief.subscription_engine import SubscriptionEngine, normalize_bot_id
@@ -48,7 +53,7 @@ def format_slot_usage(used: int, max_slots: int | None, is_unlimited: bool = Fal
     return f"{used} / {max_slots}개 사용 중"
 
 
-_ORIG_URLOPEN = urllib.request.urlopen  # identity check: a patched urlopen keeps the legacy urllib path
+_ORIG_URLOPEN = http_keepalive._ORIGINAL_URLOPEN  # identity check: a patched urlopen keeps the legacy urllib path
 
 
 def _import_requests():
@@ -82,14 +87,11 @@ class TelegramBotTransport:
         return (not self._has_custom_opener) and (urllib.request.urlopen is _ORIG_URLOPEN) and not self._closed
 
     def _new_session(self) -> Any:
-        """Session factory (patch point for tests); None when `requests` is unavailable."""
-        requests_mod, adapter_cls = _import_requests()
-        if requests_mod is None:
+        """Session factory (patch point for tests); None when `requests` is unavailable.
+        Shared config SSOT: `http_keepalive.new_session` (pool 4/8, max_retries=0)."""
+        if _import_requests()[0] is None:
             return None
-        sess = requests_mod.Session()
-        sess.mount("https://", adapter_cls(pool_connections=1, pool_maxsize=2, max_retries=0))
-        sess.headers.update({"User-Agent": "MultiBotPlatform/2.0"})
-        return sess
+        return http_keepalive.new_session("MultiBotPlatform/2.0")
 
     def _get_session(self) -> Any:
         """Thread-local keep-alive session (None when `requests` is unavailable or the transport is closed)."""
@@ -256,14 +258,19 @@ class TelegramBotTransport:
             return self.send_html(chat_id, html_text, inline_keyboard=inline_keyboard)
 
     def answer_callback(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
-        try:
-            self.api_call(
-                "answerCallbackQuery",
-                {"callback_query_id": callback_query_id, "text": text[:190], "show_alert": show_alert},
-                timeout=5,
-            )
-        except Exception as exc:
-            logger.debug(f"answerCallbackQuery ignored error: {exc}")
+        """Single-ack guarded: inside a `callback_ack_scope` only the first acknowledgement is sent."""
+
+        def _send() -> None:
+            try:
+                self.api_call(
+                    "answerCallbackQuery",
+                    {"callback_query_id": callback_query_id, "text": text[:190], "show_alert": show_alert},
+                    timeout=5,
+                )
+            except Exception as exc:
+                logger.debug(f"answerCallbackQuery ignored error: {exc}")
+
+        answer_callback_once(callback_query_id, _send, suppressed_result=None)
 
     def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
         try:
@@ -483,7 +490,9 @@ class MultiBotInteractionRouter:
         self.engine = engine
         self._delivered_initial_briefing: set[tuple[str, str]] = set()
         self._user_targets: dict[tuple[str, str], str] = {}
-        self._briefing_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+        # (bot_id, target_code, preset, live_mode, menu_username) -> (monotonic_ts, frozen snapshot)
+        self._briefing_cache: dict[tuple[str, str, str, bool, str], tuple[float, dict[str, Any]]] = {}
+        self._briefing_cache_lock = threading.RLock()
         self._market_watch_service = None
 
     # -------------------------------------------------------------------------
@@ -956,18 +965,67 @@ class MultiBotInteractionRouter:
             text_out = "\n".join(kept)
         return text_out
 
+    BRIEFING_CACHE_TTL_SEC = 30.0
+
+    @staticmethod
+    def _briefing_live_mode(bot_id: str) -> bool:
+        """Live/fixture data mode for the cache key (a mode flip never serves the other mode's snapshot)."""
+        if os.environ.get("PYTEST_CURRENT_TEST") is not None:
+            return False
+        if bot_id == "brief_bot":
+            return os.environ.get("BRIEF_LIVE_ON_START", "0") == "1"
+        if bot_id == "travel_bot":
+            return os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0"
+        return False
+
+    @staticmethod
+    def _copy_briefing(payload: dict[str, Any]) -> dict[str, Any]:
+        """Immutable-snapshot semantics: callers get a private copy (keyboard rows get appended downstream)."""
+        return {
+            "html": payload.get("html", ""),
+            "inline_keyboard": [[dict(btn) for btn in row] for row in (payload.get("inline_keyboard") or [])],
+        }
+
+    def clear_briefing_cache(self) -> None:
+        with self._briefing_cache_lock:
+            self._briefing_cache.clear()
+
     def _build_target_briefing(
-        self, bot: BotRecord, target_code: str = "ALL", uid: str = "", menu_uname: str = ""
+        self,
+        bot: BotRecord,
+        target_code: str = "ALL",
+        uid: str = "",
+        menu_uname: str = "",
+        preset: str | None = None,
+        refresh: bool = False,
     ) -> dict[str, Any]:
-        """Generates the most recently dispatched / current domain briefing for `bot` and `target_code`."""
+        """Generates the most recently dispatched / current domain briefing for `bot` and `target_code`.
+
+        Thread-safe 30s cache keyed by `(bot_id, target_code, preset, live_mode, menu_username)`; `refresh=True`
+        bypasses the lookup (the fresh result replaces the snapshot). Every return value is a private copy."""
         import time
 
         norm_target = (target_code or "ALL").strip().upper()
-        cache_key = (bot.bot_id, norm_target)
+        cache_key = (
+            bot.bot_id,
+            norm_target,
+            (preset or "").strip(),
+            self._briefing_live_mode(bot.bot_id),
+            (menu_uname or "").lstrip("@").strip(),
+        )
+        if not refresh:
+            with self._briefing_cache_lock:
+                cached = self._briefing_cache.get(cache_key)
+                if cached and (time.monotonic() - cached[0]) < self.BRIEFING_CACHE_TTL_SEC:
+                    return self._copy_briefing(cached[1])
+        return self._copy_briefing(self._render_and_store_briefing(bot, norm_target, uid, menu_uname, cache_key))
+
+    def _render_and_store_briefing(
+        self, bot: BotRecord, norm_target: str, uid: str, menu_uname: str, cache_key: tuple
+    ) -> dict[str, Any]:
+        import time
+
         now_mono = time.monotonic()
-        cached = self._briefing_cache.get(cache_key)
-        if cached and (now_mono - cached[0]) < 30.0:
-            return cached[1]
 
         content_html = ""
         kb: list[list[dict[str, Any]]] = []
@@ -1315,8 +1373,9 @@ class MultiBotInteractionRouter:
         if menu_uname:
             kb.append([{"text": "🧭 메뉴봇(다른 정보봇 보기)", "url": f"https://t.me/{menu_uname}"}])
 
-        result = {"html": content_html, "inline_keyboard": kb}
-        self._briefing_cache[cache_key] = (now_mono, result)
+        result = self._copy_briefing({"html": content_html, "inline_keyboard": kb})
+        with self._briefing_cache_lock:
+            self._briefing_cache[cache_key] = (now_mono, result)
         return result
 
     def _handle_info_bot(
@@ -1737,6 +1796,118 @@ class DynamicBotManager:
         # bot_id -> (token, transport): one keep-alive transport per (bot_id, token) across poll iterations.
         self._transports: dict[str, tuple[str, TelegramBotTransport]] = {}
         self._transports_lock = threading.Lock()
+        # Per-bot polling lock: never two concurrent `sync_bot_updates_once()` on the same bot_id.
+        self._poll_locks: dict[str, threading.Lock] = {}
+        self._poll_locks_guard = threading.Lock()
+        # Worker pools (lazy). Callback lanes run on `_worker_pool`; acks on the bounded `_ack_pool`.
+        self._pools_lock = threading.Lock()
+        self._worker_pool: ThreadPoolExecutor | None = None
+        self._ack_pool: ThreadPoolExecutor | None = None
+        self._ack_slots = threading.BoundedSemaphore(self.ACK_POOL_CAPACITY)
+        # Seed-once registry: (bot_id, normalized db path) whose fixtures were already seeded.
+        self._seeded: set[tuple[str, str]] = set()
+        self._seed_lock = threading.Lock()
+        self._domain_lock = threading.RLock()  # lazily-shared domain objects (travel handler / travel DB)
+        # Offset bookkeeping for parallel batches.
+        self._completed_ahead: dict[str, set[int]] = {}  # bot_id -> update_ids done above the committed offset
+        self._update_failures: dict[tuple[str, int], int] = {}  # (bot_id, update_id) -> failed attempts
+        self._answered_cq: "OrderedDict[str, None]" = OrderedDict()  # recently acked callback ids (replays)
+        self._answered_cq_lock = threading.Lock()
+
+    # Bounded pools: ack pool saturation -> the ack runs inline BEFORE any DB/render work ([TG-04]).
+    CALLBACK_WORKERS = 8
+    ACK_WORKERS = 4
+    ACK_POOL_CAPACITY = 16  # in-flight + queued acks
+    ACK_WAIT_SEC = 10.0
+    MAX_UPDATE_ATTEMPTS = 3  # a deterministically failing update is quarantined after this many tries
+    ANSWERED_CQ_MEMORY = 2048
+
+    # ------------------------------------------------------------------
+    # Pools / locks / seeds
+    # ------------------------------------------------------------------
+    def _poll_lock_for(self, bot_id: str) -> threading.Lock:
+        with self._poll_locks_guard:
+            lock = self._poll_locks.get(bot_id)
+            if lock is None:
+                lock = self._poll_locks[bot_id] = threading.Lock()
+            return lock
+
+    def _get_worker_pool(self) -> ThreadPoolExecutor:
+        with self._pools_lock:
+            if self._worker_pool is None:
+                self._worker_pool = ThreadPoolExecutor(max_workers=self.CALLBACK_WORKERS, thread_name_prefix="tg-lane")
+            return self._worker_pool
+
+    def _get_ack_pool(self) -> ThreadPoolExecutor:
+        with self._pools_lock:
+            if self._ack_pool is None:
+                self._ack_pool = ThreadPoolExecutor(max_workers=self.ACK_WORKERS, thread_name_prefix="tg-ack")
+            return self._ack_pool
+
+    def _offload_ack(self, send) -> Any:
+        """Hands `send` to the bounded ack pool; returns its Future, or None when saturated/closed so the
+        caller acknowledges inline (still before DB/render work)."""
+        if not self._ack_slots.acquire(blocking=False):
+            return None
+
+        def _run() -> None:
+            try:
+                send()
+            finally:
+                self._ack_slots.release()
+
+        try:
+            return self._get_ack_pool().submit(_run)
+        except RuntimeError:  # pool shut down
+            self._ack_slots.release()
+            return None
+
+    def _shutdown_pools(self) -> None:
+        """Drains lane workers first (they may still enqueue acks), then the ack pool."""
+        with self._pools_lock:
+            worker, self._worker_pool = self._worker_pool, None
+        if worker is not None:
+            worker.shutdown(wait=True)
+        with self._pools_lock:
+            ack, self._ack_pool = self._ack_pool, None
+        if ack is not None:
+            ack.shutdown(wait=True)
+
+    @staticmethod
+    def _normalize_db_path(db_path: Any) -> str:
+        raw = str(db_path or ":memory:")
+        if raw == ":memory:":
+            return raw
+        return os.path.normcase(os.path.abspath(raw))
+
+    def _seed_once(self, bot_id: str, db_path: Any, seed_fn, epoch: str = "") -> bool:
+        """Runs `seed_fn()` once per (bot_id, normalized db path[, epoch]). `:memory:` databases are always
+        fresh instances, so they are seeded every time. `epoch` (e.g. today's date) re-arms date-relative
+        seeds in the 24/7 process. Returns True when the seed actually ran."""
+        norm = self._normalize_db_path(db_path)
+        if norm == ":memory:":
+            seed_fn()
+            return True
+        key = (bot_id, f"{norm}|{epoch}" if epoch else norm)
+        if key in self._seeded:
+            return False
+        with self._seed_lock:
+            if key in self._seeded:
+                return False
+            seed_fn()
+            self._seeded.add(key)
+        return True
+
+    def _remember_answered(self, cq_id: str) -> None:
+        with self._answered_cq_lock:
+            self._answered_cq[cq_id] = None
+            self._answered_cq.move_to_end(cq_id)
+            while len(self._answered_cq) > self.ANSWERED_CQ_MEMORY:
+                self._answered_cq.popitem(last=False)
+
+    def _was_answered(self, cq_id: str) -> bool:
+        with self._answered_cq_lock:
+            return cq_id in self._answered_cq
 
     def _transport_for(self, bot_id: str, token: str, opener=None) -> TelegramBotTransport:
         """Reused per-(bot_id, token) transport; an injected `opener` (tests/tools) gets a fresh one-off
@@ -1930,16 +2101,17 @@ class DynamicBotManager:
         except ImportError:
             return False, "travel_interactive_not_available"
 
-        handler = getattr(self, "_travel_handler", None)
         is_testing = os.environ.get("PYTEST_CURRENT_TEST") is not None
         live_flag = (not is_testing) and (os.environ.get("TRAVEL_LIVE_NAVER", "1").strip() != "0")
-        travel_db = self._get_travel_db()
-        if handler is None or getattr(handler, "bot_token", "") != bot_token or getattr(handler, "db", None) is not travel_db:
-            from travel_brief.flight_engine import FlightEngine
-            handler = TravelInteractiveHandler(
-                bot_token=bot_token, engine=FlightEngine(live_naver=live_flag), db=travel_db
-            )
-            self._travel_handler = handler
+        with self._domain_lock:  # parallel lanes: build the shared handler exactly once
+            handler = getattr(self, "_travel_handler", None)
+            travel_db = self._get_travel_db()
+            if handler is None or getattr(handler, "bot_token", "") != bot_token or getattr(handler, "db", None) is not travel_db:
+                from travel_brief.flight_engine import FlightEngine
+                handler = TravelInteractiveHandler(
+                    bot_token=bot_token, engine=FlightEngine(live_naver=live_flag), db=travel_db
+                )
+                self._travel_handler = handler
 
         # Same single entry as `travel_bot_runner --poll` (handler.handle_text_message / handle_callback_query).
         # /stop is delegated back (handled=False) so the router performs the real unsubscribe; the travel
@@ -2100,10 +2272,11 @@ class DynamicBotManager:
         from travel_brief.storage.db import TravelBriefDatabase
 
         base_path = str(getattr(self.engine.db, "db_path", None) or ":memory:")
-        travel_db = getattr(self, "_travel_db", None)
-        if travel_db is None or getattr(travel_db, "db_path", None) != base_path:
-            travel_db = TravelBriefDatabase(db_path=base_path)
-            self._travel_db = travel_db
+        with self._domain_lock:
+            travel_db = getattr(self, "_travel_db", None)
+            if travel_db is None or getattr(travel_db, "db_path", None) != base_path:
+                travel_db = TravelBriefDatabase(db_path=base_path)
+                self._travel_db = travel_db
         return travel_db
 
     def _deactivate_travel_for_stop(self, chat_id: str, recipient: bool = True) -> None:
@@ -2167,8 +2340,11 @@ class DynamicBotManager:
         sc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("silver_care.sqlite3"))
         sc_db = SilverCareDatabase(sc_db_path)
         try:
-            if sc_db.count_benefits() == 0:
-                sc_db.upsert_benefits(SEED_BENEFITS)
+            def _seed_silver() -> None:
+                if sc_db.count_benefits() == 0:
+                    sc_db.upsert_benefits(SEED_BENEFITS)
+
+            self._seed_once("silver_bot", sc_db_path, _seed_silver)
 
             if "callback_query" in item:
                 cq = item["callback_query"]
@@ -2211,7 +2387,9 @@ class DynamicBotManager:
         kc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("kids_compass.sqlite3"))
         kc_db = KidsCompassDatabase(kc_db_path)
         try:
-            seed_all(kc_db)
+            # booking events are relative to today -> re-seed once per day (not once per update)
+            from datetime import date as _date
+            self._seed_once("kids_bot", kc_db_path, lambda: seed_all(kc_db), epoch=_date.today().isoformat())
             if "callback_query" in item:
                 cq = item["callback_query"]
                 cb_data = str(cq.get("data") or "")
@@ -2226,17 +2404,31 @@ class DynamicBotManager:
                 msg = item["message"]
                 text = (msg.get("text") or "").strip()
                 cmd = text.split()[0].lower().split("@")[0] if text else ""
-                if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help"):
+                # `/start` is intentionally NOT intercepted (portal subscription router owns it).
+                if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help", "/preg", "/cancel", "/settings"):
                     kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
                     kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)
                     kc_bot.handle_update(item)
                     return True, "kids_message_handled"
+                # Conversational onboarding: plain-text replies while a flow is open.
+                chat_id = (msg.get("chat") or {}).get("id")
+                if chat_id and text and not text.startswith("/"):
+                    try:
+                        state = kc_db.get_onboarding_state(chat_id)
+                    except Exception:  # noqa: BLE001 - missing table/corrupt row must not break routing
+                        logger.exception("Kids onboarding state lookup failed")
+                        state = None
+                    if state is not None:
+                        kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
+                        kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)
+                        kc_bot.handle_update(item)
+                        return True, "kids_onboarding_message_handled"
             return False, "not_kids_interactive_event"
         finally:
             if kc_db_path != ":memory:":
                 kc_db.close()
 
-    def _dispatch_yolo_bot_update(self, bot_token: str, item: dict[str, Any]) -> tuple[bool, str]:
+    def _dispatch_yolo_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
         """Dispatches domain-specific YOLO Bot callbacks (`yolo:`) and commands to YoloInteractiveBot."""
         try:
             from pathlib import Path
@@ -2252,7 +2444,7 @@ class DynamicBotManager:
         yolo_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("yolo_brief.sqlite3"))
         yolo_db = YoloDatabase(yolo_db_path)
         try:
-            yolo_db.seed_curations(SEED_CURATIONS)
+            self._seed_once("yolo_bot", yolo_db_path, lambda: yolo_db.seed_curations(SEED_CURATIONS))
             if "callback_query" in item:
                 cq = item["callback_query"]
                 cb_data = str(cq.get("data") or "")
@@ -2270,7 +2462,7 @@ class DynamicBotManager:
                                 pass
                         elif yolo_db.get_user(chat_id) is None or yolo_db.get_user(chat_id).archetype is None:
                             yolo_db.set_user_archetype(chat_id, SoloArchetype.URBAN_HIPSTER)
-                    yolo_channel = YoloTelegramChannel(token=bot_token)
+                    yolo_channel = YoloTelegramChannel(token=bot_token, opener=opener)
                     yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
                     yolo_bot.handle_update(item)
                     return True, "yolo_callback_handled"
@@ -2281,7 +2473,7 @@ class DynamicBotManager:
                 text = (msg.get("text") or "").strip()
                 cmd = text.split()[0].lower().split("@")[0] if text else ""
                 if cmd in ("/weekend", "/yolo", "/help"):
-                    yolo_channel = YoloTelegramChannel(token=bot_token)
+                    yolo_channel = YoloTelegramChannel(token=bot_token, opener=opener)
                     yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
                     yolo_bot.handle_update(item)
                     return True, "yolo_message_handled"
@@ -2290,8 +2482,25 @@ class DynamicBotManager:
             if yolo_db_path != ":memory:":
                 yolo_db.close()
 
-    def sync_bot_updates_once(self, bot_id: str, opener=None, timeout: int = 1) -> dict[str, Any]:
-        """Synchronously fetches pending Telegram updates for `bot_id`, routes them, and replies."""
+    def sync_bot_updates_once(
+        self, bot_id: str, opener=None, timeout: int = 1, parallel_callbacks: bool = False
+    ) -> dict[str, Any]:
+        """Synchronously fetches pending Telegram updates for `bot_id`, routes them, and replies.
+
+        - Per-bot polling lock: concurrent calls for the same bot are serialized (never double-fetch).
+        - `parallel_callbacks=False` (default: tests/direct callers): updates run one by one on this thread.
+        - `parallel_callbacks=True` (production poll loop): updates are grouped into per-`(bot_id, chat_id)`
+          FIFO lanes; different chats run concurrently, the same chat strictly in `update_id` order. The call
+          still waits for every lane (and offloaded ack) before returning.
+        - `events` are returned in `update_id` order; `last_offset` is persisted only up to the highest
+          contiguous successfully completed `update_id` (never past a failure; failures -> `failed_update_ids`).
+        """
+        with self._poll_lock_for(bot_id):
+            return self._sync_bot_updates_locked(bot_id, opener, timeout, parallel_callbacks)
+
+    def _sync_bot_updates_locked(
+        self, bot_id: str, opener, timeout: int, parallel_callbacks: bool
+    ) -> dict[str, Any]:
         bot = self.engine.get_bot(bot_id)
         if not bot:
             raise KeyError(f"봇을 찾을 수 없습니다: {bot_id}")
@@ -2300,8 +2509,7 @@ class DynamicBotManager:
 
         transport = self._transport_for(bot.bot_id, bot.token, opener=opener)
         last_offset = bot.last_offset or 0
-        processed = 0
-        events: list[dict[str, Any]] = []
+        persisted_offset = last_offset
 
         if last_offset <= 0:
             try:
@@ -2309,203 +2517,321 @@ class DynamicBotManager:
                 if stale:
                     last_offset = int(stale[-1]["update_id"])
                     self.engine.update_bot_offset(bot.bot_id, last_offset)
+                    persisted_offset = last_offset
                     logger.info("⏩ [초기화] 과거 대기 업데이트 %d건 소거 (offset: %d)", len(stale), last_offset)
             except Exception as exc:
                 logger.warning("초기 offset 소거 실패 on %s: %s", bot_id, exc)
 
         updates = transport.get_updates(offset=last_offset + 1, timeout=timeout)
-        for item in updates:
-            up_id = int(item.get("update_id", 0))
-            if up_id > last_offset:
-                last_offset = up_id
+        ordered = sorted(
+            ((int(item.get("update_id", 0) or 0), idx, item) for idx, item in enumerate(updates or [])),
+            key=lambda t: (t[0], t[1]),
+        )
+        done_ahead = self._completed_ahead.setdefault(bot.bot_id, set())
+        # idx -> ("ok", event | None) | ("failed", exc) | ("deferred", None)
+        outcomes: dict[int, tuple[str, Any]] = {}
+        first_exc: BaseException | None = None
 
-            # [Subscription Access Gate] Un-subscribed callers never reach `mbw:` or the 5 domain dispatchers.
-            if bot.bot_type == BotType.INFO.value:
-                gate_event = self._enforce_info_access_gate(bot, transport, item)
-                if gate_event is not None:
-                    processed += 1
-                    events.append(gate_event)
+        if parallel_callbacks and len(ordered) > 1:
+            lanes: "OrderedDict[tuple[str, str], list[tuple[int, int, dict[str, Any]]]]" = OrderedDict()
+            for entry in ordered:
+                ctx = self._extract_update_context(entry[2]) or {}
+                lanes.setdefault((bot.bot_id, str(ctx.get("chat_id") or "")), []).append(entry)
+            futures = []
+            for lane in lanes.values():
+                try:
+                    futures.append(
+                        self._get_worker_pool().submit(
+                            self._run_lane, bot, transport, lane, opener, True, done_ahead, outcomes
+                        )
+                    )
+                except RuntimeError:  # pool shut down (stop() in progress) -> run inline
+                    self._run_lane(bot, transport, lane, opener, True, done_ahead, outcomes)
+            wait_futures(futures)
+            for fut in futures:
+                exc = fut.exception()
+                if exc is not None:  # lane bookkeeping bug: never swallow silently
+                    logger.error("[DynamicBotManager] lane crashed on %s: %s", bot.bot_id, exc)
+        else:
+            self._run_lane(bot, transport, ordered, opener, parallel_callbacks, done_ahead, outcomes)
+
+        # Contiguous commit: advance through ok / replay-skipped / quarantined updates, stop at the first failure.
+        commit = last_offset
+        failed_ids: list[int] = []
+        quarantined_ids: list[int] = []
+        blocked = False
+        events: list[dict[str, Any]] = []
+        for up_id, idx, _item in ordered:
+            status, payload = outcomes.get(idx, ("deferred", None))
+            if status == "ok":
+                if payload is not None:
+                    events.append(payload)
+                if blocked:
+                    done_ahead.add(up_id)
+                else:
+                    commit = max(commit, up_id)
+                continue
+            if status == "failed":
+                failed_ids.append(up_id)
+                if first_exc is None:
+                    first_exc = payload
+                key = (bot.bot_id, up_id)
+                attempts = self._update_failures.get(key, 0) + 1
+                self._update_failures[key] = attempts
+                if not blocked and attempts >= self.MAX_UPDATE_ATTEMPTS:
+                    logger.error(
+                        "[DynamicBotManager] update %s on %s failed %d times -> quarantined (offset advances): %s",
+                        up_id, bot.bot_id, attempts, payload,
+                    )
+                    quarantined_ids.append(up_id)
+                    self._update_failures.pop(key, None)
+                    commit = max(commit, up_id)
                     continue
+            blocked = True  # failed or deferred: nothing after it may be committed
+        for up_id in [u for u in done_ahead if u <= commit]:
+            done_ahead.discard(up_id)
+        if not blocked:
+            for key in [k for k in self._update_failures if k[0] == bot.bot_id and k[1] <= commit]:
+                self._update_failures.pop(key, None)
 
-            # [TG-04 & INV-01] Link Confirmation Gate intercepts before any domain bot
-            if "callback_query" in item:
-                cq = item["callback_query"]
-                cb_data = str(cq.get("data") or "")
-                if cb_data.startswith("gate:"):
-                    cq_id = str(cq.get("id", ""))
-                    msg = cq.get("message", {}) or {}
-                    chat = msg.get("chat", {}) or cq.get("from", {}) or {}
-                    chat_id = str(chat.get("id") or "")
-                    msg_id = int(msg.get("message_id") or 0)
-                    gate_router = LinkGateRouter(GATE_REGISTRY)
-                    gate_res = gate_router.handle_callback(cb_data, bot.bot_id, chat_id, msg_id)
-                    if gate_res.get("handled"):
-                        if cq_id:
-                            transport.answer_callback(cq_id, text=gate_res.get("toast", ""))
-                        if gate_res.get("action") == "CONFIRM_CARD":
-                            transport.edit_message_text(chat_id, msg_id, gate_res["html"], gate_res["inline_keyboard"])
-                        elif gate_res.get("action") == "CANCEL" and bot.bot_type == BotType.INFO.value and not (
-                            self.engine.is_user_subscribed(
-                                str((cq.get("from", {}) or {}).get("id") or chat_id), bot.bot_id
-                            )
-                        ):
-                            locked = self.router.render_locked_response(bot, chat_id)
-                            transport.edit_message_text(chat_id, msg_id, locked["reply_html"], locked["inline_keyboard"])
-                        elif gate_res.get("action") == "CANCEL":
-                            from market_brief.briefing_service import generate_bot_briefing
-                            try:
-                                gen = generate_bot_briefing(bot.bot_id, db=self.engine)
-                                transport.edit_message_text(
-                                    chat_id,
-                                    msg_id,
-                                    gen.get("content_html") or "이동이 취소되었습니다.",
-                                    gen.get("inline_keyboard"),
-                                )
-                            except Exception:
-                                transport.edit_message_text(
-                                    chat_id,
-                                    msg_id,
-                                    "이동이 취소되었습니다.\n아래 버튼을 눌러 최신 화면을 확인하세요.",
-                                    [[{"text": "🔄 최신 브리핑 확인", "callback_data": f"info:preview:{bot.bot_id}"}]],
-                                )
-                        processed += 1
-                        events.append({"user_id": chat_id, "type": "gate_callback", "code": gate_res.get("action")})
-                        continue
+        if commit != persisted_offset:
+            self.engine.update_bot_offset(bot.bot_id, commit)
 
-            if bot.bot_id == "menu_bot":
-                cq_menu = item.get("callback_query") or {}
-                if str(cq_menu.get("data") or "").startswith(TRAVEL_MENU_UNSUB_CALLBACKS):
-                    menu_chat = (cq_menu.get("message", {}) or {}).get("chat", {}) or cq_menu.get("from", {}) or {}
-                    if menu_chat.get("id"):
-                        self._deactivate_travel_for_stop(str(menu_chat["id"]), recipient=False)
-                menu_cb = str(cq_menu.get("data") or "")
-                menu_uid = str((cq_menu.get("from", {}) or {}).get("id") or "")
-                if menu_uid and menu_cb.startswith(BRIEF_MENU_UNSUB_CALLBACKS):
-                    self.router.deactivate_brief_watches(menu_uid, "MENU_BOT_UNSUB")
-                handled, reason = self._dispatch_portal_menu_update(bot.token, item)
-                if menu_uid and menu_cb.startswith(BRIEF_MENU_SWAP_CALLBACKS) and not self._brief_subscription_active(menu_uid):
-                    self.router.deactivate_brief_watches(menu_uid, "BRIEF_SWAPPED_OUT")
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "portal", "type": "portal_integrated", "code": reason})
-                    continue
+        if first_exc is not None and not parallel_callbacks:
+            # Sequential mode keeps the legacy contract (the exception surfaces to the caller) — but only after
+            # the contiguous offset was persisted, so the successful prefix is never replayed.
+            raise first_exc
 
-            if bot.bot_id == "brief_bot" and "callback_query" in item:
-                cq_w = item["callback_query"]
-                cb_w = str(cq_w.get("data") or "")
-                if cb_w.startswith("mbw:"):
-                    self._dispatch_brief_watch_callback(transport, cq_w)
-                    processed += 1
-                    events.append({"user_id": str((cq_w.get("from") or {}).get("id") or ""), "type": "watch_callback", "code": cb_w[:16]})
-                    continue
+        result: dict[str, Any] = {"bot_id": bot.bot_id, "processed": len(events), "last_offset": commit, "events": events}
+        if failed_ids:
+            result["failed_update_ids"] = failed_ids
+        if quarantined_ids:
+            result["quarantined_update_ids"] = quarantined_ids
+        return result
 
-            if bot.bot_id == "travel_bot":
-                handled, reason = self._dispatch_travel_bot_update(bot.token, item)
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "travel", "type": "travel_integrated", "code": reason})
-                    continue
+    def _run_lane(
+        self,
+        bot: BotRecord,
+        transport: "TelegramBotTransport",
+        lane: list[tuple[int, int, dict[str, Any]]],
+        opener,
+        parallel: bool,
+        done_ahead: set[int],
+        outcomes: dict[int, tuple[str, Any]],
+    ) -> None:
+        """Processes one FIFO lane in order. After a failure, the rest of the lane is deferred (replayed next
+        poll in order) so a later update of the same chat never overtakes an earlier one."""
+        failed = False
+        for up_id, idx, item in lane:
+            if failed:
+                outcomes[idx] = ("deferred", None)
+                continue
+            if up_id in done_ahead:
+                outcomes[idx] = ("ok", None)  # already completed in an earlier batch (replay after a failure)
+                continue
+            try:
+                outcomes[idx] = ("ok", self._process_update_with_ack(bot, transport, item, opener, parallel))
+            except Exception as exc:
+                logger.warning("[DynamicBotManager] update %s on %s failed: %s", up_id, bot.bot_id, exc)
+                outcomes[idx] = ("failed", exc)
+                failed = True
 
-            if bot.bot_id in ("admission_bot", "edu_bot"):
-                handled, reason = self._dispatch_admission_bot_update(bot.token, item, opener=opener)
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "admission", "type": "admission_integrated", "code": reason})
-                    continue
+    def _process_update_with_ack(
+        self, bot: BotRecord, transport: "TelegramBotTransport", item: dict[str, Any], opener, parallel: bool
+    ) -> dict[str, Any] | None:
+        """Runs one update inside its single-ack scope (`1 callback_query_id -> exactly 1 answerCallbackQuery`).
+        Parallel mode: acks are offloaded to the bounded ack pool (inline when saturated), an un-acked
+        successful callback gets a blank ack, and the offloaded ack is awaited before the lane moves on."""
+        cq_id = str((item.get("callback_query") or {}).get("id") or "")
+        if not cq_id:
+            return self._process_update(bot, transport, item, opener)
+        with callback_ack_scope(
+            cq_id,
+            offload=self._offload_ack if parallel else None,
+            already_answered=self._was_answered(cq_id),
+        ) as ack:
+            ok = False
+            try:
+                event = self._process_update(bot, transport, item, opener)
+                if parallel and ack is not None and not ack.claimed:
+                    transport.answer_callback(cq_id)  # spinner never left hanging
+                ok = True
+                return event
+            finally:
+                if ack is not None:
+                    ack.wait(self.ACK_WAIT_SEC)
+                    if not ok and ack.claimed:
+                        # a failed update is replayed next poll: its callback must not be answered twice
+                        self._remember_answered(cq_id)
 
-            if bot.bot_id == "silver_bot":
-                handled, reason = self._dispatch_silver_bot_update(bot.token, item, opener=opener)
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "silver", "type": "silver_integrated", "code": reason})
-                    continue
+    def _process_update(
+        self, bot: BotRecord, transport: "TelegramBotTransport", item: dict[str, Any], opener
+    ) -> dict[str, Any] | None:
+        """Routes ONE update. Returns its event dict, or None when the update was skipped."""
+        # [Subscription Access Gate] Un-subscribed callers never reach `mbw:` or the 5 domain dispatchers.
+        if bot.bot_type == BotType.INFO.value:
+            gate_event = self._enforce_info_access_gate(bot, transport, item)
+            if gate_event is not None:
+                return gate_event
 
-            if bot.bot_id == "kids_bot":
-                handled, reason = self._dispatch_kids_bot_update(bot.token, item, opener=opener)
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "kids", "type": "kids_integrated", "code": reason})
-                    continue
-
-            if bot.bot_id == "yolo_bot":
-                handled, reason = self._dispatch_yolo_bot_update(bot.token, item)
-                if handled:
-                    processed += 1
-                    events.append({"user_id": "yolo", "type": "yolo_integrated", "code": reason})
-                    continue
-
-            if "callback_query" in item:
-                cq = item["callback_query"]
+        # [TG-04 & INV-01] Link Confirmation Gate intercepts before any domain bot
+        if "callback_query" in item:
+            cq = item["callback_query"]
+            cb_data = str(cq.get("data") or "")
+            if cb_data.startswith("gate:"):
                 cq_id = str(cq.get("id", ""))
-                sender = cq.get("from", {}) or {}
                 msg = cq.get("message", {}) or {}
-                chat = msg.get("chat", {}) or sender
-                chat_id = str(chat.get("id") or sender.get("id") or "")
-                if not chat_id:
-                    continue
-                full_name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip()
-                uname = sender.get("username") or ""
-                cb_data = cq.get("data") or ""
-
-                # [TG-04] Pre-emptive callback acknowledgement (<0.1s) before DB/Briefing work
-                if cq_id:
-                    quick_toast = self.router.get_quick_callback_toast(cb_data)
-                    transport.answer_callback(cq_id, text=quick_toast)
-
-                out = self.router.handle_interaction(
-                    bot_id=bot.bot_id,
-                    telegram_user_id=chat_id,
-                    full_name=full_name,
-                    username=uname,
-                    callback_data=cb_data,
-                )
-                transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
-                for extra in out.get("extra_messages") or []:
-                    if extra.get("html"):
-                        transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
-                processed += 1
-                events.append({"user_id": chat_id, "type": "callback", "code": out["result_code"]})
-
-            elif "message" in item:
-                msg = item["message"]
-                chat = msg.get("chat", {}) or {}
-                if chat.get("type", "private") != "private":
-                    # Only enforce personal tier subscriptions on 1:1 private chats
-                    continue
-                sender = msg.get("from", {}) or chat
+                chat = msg.get("chat", {}) or cq.get("from", {}) or {}
                 chat_id = str(chat.get("id") or "")
-                text = (msg.get("text") or "").strip()
-                if not chat_id or not text:
-                    continue
-                full_name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip()
-                if not full_name:
-                    full_name = chat.get("first_name") or ""
-                uname = sender.get("username") or chat.get("username") or ""
+                msg_id = int(msg.get("message_id") or 0)
+                gate_router = LinkGateRouter(GATE_REGISTRY)
+                gate_res = gate_router.handle_callback(cb_data, bot.bot_id, chat_id, msg_id)
+                if gate_res.get("handled"):
+                    if cq_id:
+                        transport.answer_callback(cq_id, text=gate_res.get("toast", ""))
+                    if gate_res.get("action") == "CONFIRM_CARD":
+                        transport.edit_message_text(chat_id, msg_id, gate_res["html"], gate_res["inline_keyboard"])
+                    elif gate_res.get("action") == "CANCEL" and bot.bot_type == BotType.INFO.value and not (
+                        self.engine.is_user_subscribed(
+                            str((cq.get("from", {}) or {}).get("id") or chat_id), bot.bot_id
+                        )
+                    ):
+                        locked = self.router.render_locked_response(bot, chat_id)
+                        transport.edit_message_text(chat_id, msg_id, locked["reply_html"], locked["inline_keyboard"])
+                    elif gate_res.get("action") == "CANCEL":
+                        from market_brief.briefing_service import generate_bot_briefing
+                        try:
+                            gen = generate_bot_briefing(bot.bot_id, db=self.engine, cache_ttl=30.0)
+                            transport.edit_message_text(
+                                chat_id,
+                                msg_id,
+                                gen.get("content_html") or "이동이 취소되었습니다.",
+                                gen.get("inline_keyboard"),
+                            )
+                        except Exception:
+                            transport.edit_message_text(
+                                chat_id,
+                                msg_id,
+                                "이동이 취소되었습니다.\n아래 버튼을 눌러 최신 화면을 확인하세요.",
+                                [[{"text": "🔄 최신 브리핑 확인", "callback_data": f"info:preview:{bot.bot_id}"}]],
+                            )
+                    return {"user_id": chat_id, "type": "gate_callback", "code": gate_res.get("action")}
 
-                out = self.router.handle_interaction(
-                    bot_id=bot.bot_id,
-                    telegram_user_id=chat_id,
-                    full_name=full_name,
-                    username=uname,
-                    text=text,
-                )
-                transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
-                for extra in out.get("extra_messages") or []:
-                    if extra.get("html"):
-                        transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
-                processed += 1
-                events.append({"user_id": chat_id, "type": "message", "code": out["result_code"]})
+        if bot.bot_id == "menu_bot":
+            cq_menu = item.get("callback_query") or {}
+            if str(cq_menu.get("data") or "").startswith(TRAVEL_MENU_UNSUB_CALLBACKS):
+                menu_chat = (cq_menu.get("message", {}) or {}).get("chat", {}) or cq_menu.get("from", {}) or {}
+                if menu_chat.get("id"):
+                    self._deactivate_travel_for_stop(str(menu_chat["id"]), recipient=False)
+            menu_cb = str(cq_menu.get("data") or "")
+            menu_uid = str((cq_menu.get("from", {}) or {}).get("id") or "")
+            if menu_uid and menu_cb.startswith(BRIEF_MENU_UNSUB_CALLBACKS):
+                self.router.deactivate_brief_watches(menu_uid, "MENU_BOT_UNSUB")
+            handled, reason = self._dispatch_portal_menu_update(bot.token, item)
+            if menu_uid and menu_cb.startswith(BRIEF_MENU_SWAP_CALLBACKS) and not self._brief_subscription_active(menu_uid):
+                self.router.deactivate_brief_watches(menu_uid, "BRIEF_SWAPPED_OUT")
+            if handled:
+                return {"user_id": "portal", "type": "portal_integrated", "code": reason}
 
-        if last_offset != (bot.last_offset or 0):
-            self.engine.update_bot_offset(bot.bot_id, last_offset)
+        if bot.bot_id == "brief_bot" and "callback_query" in item:
+            cq_w = item["callback_query"]
+            cb_w = str(cq_w.get("data") or "")
+            if cb_w.startswith("mbw:"):
+                self._dispatch_brief_watch_callback(transport, cq_w)
+                return {"user_id": str((cq_w.get("from") or {}).get("id") or ""), "type": "watch_callback", "code": cb_w[:16]}
 
-        return {"bot_id": bot.bot_id, "processed": processed, "last_offset": last_offset, "events": events}
+        if bot.bot_id == "travel_bot":
+            handled, reason = self._dispatch_travel_bot_update(bot.token, item)
+            if handled:
+                return {"user_id": "travel", "type": "travel_integrated", "code": reason}
+
+        if bot.bot_id in ("admission_bot", "edu_bot"):
+            handled, reason = self._dispatch_admission_bot_update(bot.token, item, opener=opener)
+            if handled:
+                return {"user_id": "admission", "type": "admission_integrated", "code": reason}
+
+        if bot.bot_id == "silver_bot":
+            handled, reason = self._dispatch_silver_bot_update(bot.token, item, opener=opener)
+            if handled:
+                return {"user_id": "silver", "type": "silver_integrated", "code": reason}
+
+        if bot.bot_id == "kids_bot":
+            handled, reason = self._dispatch_kids_bot_update(bot.token, item, opener=opener)
+            if handled:
+                return {"user_id": "kids", "type": "kids_integrated", "code": reason}
+
+        if bot.bot_id == "yolo_bot":
+            handled, reason = self._dispatch_yolo_bot_update(bot.token, item, opener=opener)
+            if handled:
+                return {"user_id": "yolo", "type": "yolo_integrated", "code": reason}
+
+        if "callback_query" in item:
+            cq = item["callback_query"]
+            cq_id = str(cq.get("id", ""))
+            sender = cq.get("from", {}) or {}
+            msg = cq.get("message", {}) or {}
+            chat = msg.get("chat", {}) or sender
+            chat_id = str(chat.get("id") or sender.get("id") or "")
+            if not chat_id:
+                return None
+            full_name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip()
+            uname = sender.get("username") or ""
+            cb_data = cq.get("data") or ""
+
+            # [TG-04] Pre-emptive callback acknowledgement (<0.1s) before DB/Briefing work
+            if cq_id:
+                quick_toast = self.router.get_quick_callback_toast(cb_data)
+                transport.answer_callback(cq_id, text=quick_toast)
+
+            out = self.router.handle_interaction(
+                bot_id=bot.bot_id,
+                telegram_user_id=chat_id,
+                full_name=full_name,
+                username=uname,
+                callback_data=cb_data,
+            )
+            transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+            for extra in out.get("extra_messages") or []:
+                if extra.get("html"):
+                    transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
+            return {"user_id": chat_id, "type": "callback", "code": out["result_code"]}
+
+        elif "message" in item:
+            msg = item["message"]
+            chat = msg.get("chat", {}) or {}
+            if chat.get("type", "private") != "private":
+                # Only enforce personal tier subscriptions on 1:1 private chats
+                return None
+            sender = msg.get("from", {}) or chat
+            chat_id = str(chat.get("id") or "")
+            text = (msg.get("text") or "").strip()
+            if not chat_id or not text:
+                return None
+            full_name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])).strip()
+            if not full_name:
+                full_name = chat.get("first_name") or ""
+            uname = sender.get("username") or chat.get("username") or ""
+
+            out = self.router.handle_interaction(
+                bot_id=bot.bot_id,
+                telegram_user_id=chat_id,
+                full_name=full_name,
+                username=uname,
+                text=text,
+            )
+            transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+            for extra in out.get("extra_messages") or []:
+                if extra.get("html"):
+                    transport.send_html(chat_id, extra["html"], extra.get("inline_keyboard"))
+            return {"user_id": chat_id, "type": "message", "code": out["result_code"]}
+        return None
 
     async def _poll_loop_for_bot(self, bot_id: str) -> None:
         while self._running:
             try:
-                await asyncio.to_thread(self.sync_bot_updates_once, bot_id, timeout=25)
-                await asyncio.sleep(0.05)
+                res = await asyncio.to_thread(self.sync_bot_updates_once, bot_id, timeout=25, parallel_callbacks=True)
+                # failed updates are retried (bounded by MAX_UPDATE_ATTEMPTS) after a short back-off
+                await asyncio.sleep(1.0 if (res or {}).get("failed_update_ids") else 0.05)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -2524,7 +2850,10 @@ class DynamicBotManager:
         if self._tasks:
             await asyncio.gather(*(t for _, t in self._tasks.values()), return_exceptions=True)
         self._tasks.clear()
+        # Drain callback lanes + offloaded acks BEFORE closing the sessions they use.
+        await asyncio.to_thread(self._shutdown_pools)
         self._close_transports()
+        http_keepalive.close_all_sessions()
 
     async def reload_bots(self) -> dict[str, Any]:
         """Hot-reloads active bot polling tasks without restarting FastAPI."""
@@ -2553,7 +2882,7 @@ class DynamicBotManager:
                 cmds = OFFICIAL_BOT_COMMANDS.get(bid)
                 if cmds:
                     try:
-                        trans = TelegramBotTransport(tok)
+                        trans = self._transport_for(bid, tok)  # cached keep-alive transport (closed on stop/reload)
                         trans.set_my_commands(cmds)
                         trans.set_chat_menu_button({"type": "commands"})
                     except Exception as exc:

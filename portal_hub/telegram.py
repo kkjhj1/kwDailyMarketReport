@@ -1,5 +1,5 @@
 """Lightweight Telegram Bot API Client for Portal Hub.
-Zero external dependencies (pure Python urllib) with automatic retry on WinError 10054.
+Keep-alive via the shared thread-local session helper (stdlib urllib fallback) with automatic retry on WinError 10054.
 """
 from __future__ import annotations
 import json
@@ -10,6 +10,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
+from market_brief.channels.http_keepalive import open_request
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,6 +20,7 @@ class TelegramPortalClient:
 
     def __init__(self, bot_token: str, opener=None):
         self.bot_token = bot_token.strip()
+        self._injected_opener = opener  # None -> shared keep-alive helper (patched urlopen still honoured)
         self._opener = opener or urllib.request.urlopen
         if not self.bot_token:
             logger.warning("TelegramPortalClient initialized with empty bot_token")
@@ -26,10 +29,7 @@ class TelegramPortalClient:
         self, method: str, payload: Optional[dict[str, Any]] = None, timeout: int = 15, retries: int = 2
     ) -> dict[str, Any]:
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
-        headers = {
-            "User-Agent": "PortalHubBot/2.1",
-            "Connection": "close",
-        }
+        headers = {"User-Agent": "PortalHubBot/2.1"}  # no `Connection: close`: TLS is reused (keep-alive)
 
         body = None
         if payload is not None:
@@ -42,7 +42,7 @@ class TelegramPortalClient:
                 url, data=body, headers=headers, method="POST" if payload is not None else "GET"
             )
             try:
-                with self._opener(req, timeout=timeout) as resp:
+                with open_request(req, timeout, opener=self._injected_opener) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 if not data.get("ok"):
                     raise RuntimeError(f"Telegram API error ({method}): {data.get('description', 'unknown')}")
