@@ -17,6 +17,7 @@ from kids_compass.models import (
     BookingEvent,
     ExperienceCategory,
     ExperienceItem,
+    MilestoneDefinition,
     MoonlightHospital,
     PregnancyBenefit,
 )
@@ -70,6 +71,36 @@ OPERATING_HOURS: dict[str, str] = {
     "preg_botanic": "09:30~18:00 (열린숲 잔디마당 24시간 무료)",
     "preg_kna": "09:00~18:00 (동절기 17:00 · 매주 일·월 휴관 · 사전예약제)",
     "preg_namsan": "상시 개방 (연중무휴 · 야외 산책로)",
+    # ── 서울 추가 ──
+    "seoul_sangsang": "10:00~18:00 (회차제 · 매주 월 휴관)",
+    "air_museum": "10:00~18:00 (입장마감 17:00 · 매주 월 휴관)",
+    "seoul_science": "09:30~17:30 (입장마감 17:00 · 매주 월 휴관)",
+    "nfm_kids": "10:00~17:00 (회차제 · 매주 월 휴관)",
+    "gildong_eco": "10:00~17:00 (탐방 사전예약 · 매주 월 휴관)",
+    # ── 경기 ──
+    "gg_gwanggyo_lake": "상시 개방 (연중무휴 · 일몰 후 산책 시 조명 구간 이용)",
+    "gg_agri_museum": "10:00~18:00 (입장마감 17:00 · 매주 월 휴관)",
+    "gg_yuldong_park": "상시 개방 (연중무휴)",
+    "gg_shingu_garden": "09:00~18:00 (동절기 단축 · 휴원일 공식 공지 확인)",
+    "gg_provincial_museum": "10:00~18:00 (입장마감 17:00 · 매주 월 휴관)",
+    "gg_goyang_kids": "10:00~18:00 (회차제 · 매주 월 휴관)",
+    "gg_ilsan_lake": "상시 개방 (연중무휴)",
+    "gg_comics_museum": "10:00~18:00 (입장마감 17:00 · 매주 월 휴관)",
+    "gg_bucheon_eco": "09:30~18:00 (동절기 17:00 · 매주 월 휴관)",
+    "gg_seoul_grandpark": "09:00~18:00 (동절기 17:00 · 연중무휴)",
+    "gg_gwacheon_kids": "09:30~17:30 (회차제 · 매주 월 휴관)",
+    "gg_siheung_gaetgol": "상시 개방 (연중무휴 · 일부 시설 운영시간 별도)",
+    # ── 인천 ──
+    "icn_central_park": "상시 개방 (연중무휴 · 수상택시 등 시설 별도)",
+    "icn_letters_museum": "10:00~18:00 (입장마감 17:30 · 매주 월 휴관)",
+    "icn_city_museum": "09:00~18:00 (입장마감 17:00 · 매주 월 휴관)",
+    "icn_kids_science": "09:30~17:30 (회차제 · 매주 월 휴관)",
+    "icn_butterfly_park": "09:00~18:00 (동절기 단축 · 휴관일 공식 공지 확인)",
+    "icn_grand_park": "05:00~23:00 (어린이동물원 09:00~18:00 · 연중무휴)",
+    "icn_sorae_wetland": "상시 개방 (전시관 10:00~18:00 · 매주 월 휴관)",
+    "icn_seaside_park": "상시 개방 (레일바이크 등 유료시설 별도)",
+    "icn_kids_museum": "10:00~17:00 (회차제 · 매주 월 휴관)",
+    "icn_sudoguksan": "09:00~18:00 (입장마감 17:30 · 매주 월 휴관)",
 }
 
 A, C = AgeGroup, ExperienceCategory
@@ -128,6 +159,66 @@ SEED_EXPERIENCES: list[ExperienceItem] = [
          "유료", "소액 입장료 (사전예약제)", False, True, True, True, "방문일 사전예약", "피톤치드 힐링 · 평지 숲 산책로"),
     _exp("preg_namsan", "남산 야외식물원 태교 숲길", A.PREGNANCY, C.NATURE, "서울", "용산구", "남산 야외식물원",
          "무료", "무료", False, False, False, False, "현장 입장", "완만한 숲길 · 연못·약용식물원 산책"),
+    # ── 서울 추가 (기존 서울 추천 순서를 바꾸지 않도록 뒤에 덧붙임) ──
+    _exp("seoul_sangsang", "서울상상나라 (어린이대공원 내)", A.INFANT, C.PLAY, "서울", "광진구", "서울상상나라",
+         "유료", "소액 입장료 (공식 공지 확인)", True, True, True, True, "회차제 사전예약", "오감·역할놀이 전시 · 영유아 놀이존"),
+    _exp("air_museum", "국립항공박물관", A.ELEMENTARY, C.SCIENCE, "서울", "강서구", "국립항공박물관",
+         "무료", "상설전시 무료 (체험관 별도 예약·유료)", True, True, True, False, "현장 입장 (체험만 예약)",
+         "실물 항공기 전시 · 비행 원리 체험"),
+    _exp("seoul_science", "서울시립과학관 (노원)", A.ELEMENTARY, C.SCIENCE, "서울", "노원구", "서울시립과학관",
+         "유료", "소액 관람료 (공식 공지 확인)", True, True, True, True, "회차제 사전예약", "생활 속 과학 전시 · 탐구형 체험"),
+    _exp("nfm_kids", "국립민속박물관 어린이박물관", A.PRESCHOOL, C.PLAY, "서울", "종로구", "국립민속박물관 어린이박물관",
+         "무료", "무료 (회차별 사전예약)", True, True, True, True, "회차제 사전예약", "옛 생활문화 놀이형 전시"),
+    _exp("gildong_eco", "길동생태공원 생태 탐방", A.PRESCHOOL, C.NATURE, "서울", "강동구", "길동생태공원",
+         "무료", "무료 (탐방 사전예약)", False, False, False, True, "탐방 사전예약", "습지·곤충 관찰 · 생태 해설"),
+    # ── 경기 ──
+    _exp("gg_gwanggyo_lake", "광교호수공원 가족 산책", A.ALL, C.NATURE, "경기", "수원시", "광교호수공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "호수 둘레 평지 산책로 · 어린이 놀이터"),
+    _exp("gg_agri_museum", "국립농업박물관", A.PRESCHOOL, C.PLAY, "경기", "수원시", "국립농업박물관",
+         "무료", "무료 (일부 체험 별도 예약)", True, True, True, False, "현장 입장", "농업·식물 체험 전시 · 야외 식물원"),
+    _exp("gg_yuldong_park", "분당 율동공원", A.ALL, C.NATURE, "경기", "성남시", "율동공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "호수 산책 · 잔디밭 피크닉"),
+    _exp("gg_shingu_garden", "신구대학교식물원", A.PRESCHOOL, C.NATURE, "경기", "성남시", "신구대학교식물원",
+         "유료", "소액 입장료 (공식 공지 확인)", False, True, False, False, "현장 입장", "테마 정원 · 곤충·식물 관찰"),
+    _exp("gg_provincial_museum", "경기도박물관", A.ELEMENTARY, C.PLAY, "경기", "용인시", "경기도박물관",
+         "무료", "상설전시 무료", True, True, True, False, "현장 입장", "경기 역사·민속 전시 · 교과 연계"),
+    _exp("gg_goyang_kids", "고양어린이박물관", A.INFANT, C.PLAY, "경기", "고양시", "고양어린이박물관",
+         "유료", "어린이·보호자 입장료 (공식 공지 확인)", True, True, True, True, "회차제 사전예약", "영유아 놀이 전시 · 회차제"),
+    _exp("gg_ilsan_lake", "일산호수공원", A.ALL, C.NATURE, "경기", "고양시", "일산호수공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "넓은 호숫가 산책로 · 자전거·피크닉"),
+    _exp("gg_comics_museum", "한국만화박물관", A.ELEMENTARY, C.PLAY, "경기", "부천시", "한국만화박물관",
+         "유료", "관람료 (공식 공지 확인)", True, True, True, False, "현장 입장", "만화 역사 전시 · 만화 도서관"),
+    _exp("gg_bucheon_eco", "부천자연생태공원 (식물원·자연생태박물관)", A.PRESCHOOL, C.NATURE, "경기", "부천시",
+         "부천자연생태공원", "유료", "소액 입장료 (공식 공지 확인)", False, True, True, False, "현장 입장",
+         "식물원 온실 · 생태 전시 · 야외 정원"),
+    _exp("gg_seoul_grandpark", "서울대공원 동물원 (과천)", A.ALL, C.NATURE, "경기", "과천시", "서울대공원",
+         "유료", "동물원 소액 입장료", False, True, True, False, "현장 입장", "대형 동물원 · 유아차 대여 · 넓은 산책로"),
+    _exp("gg_gwacheon_kids", "국립과천과학관 어린이탐구체험관", A.PRESCHOOL, C.SCIENCE, "경기", "과천시",
+         "국립과천과학관 어린이탐구체험관", "유료", "소액 관람료 (회차제)", True, True, True, True, "회차제 사전예약",
+         "유아 눈높이 과학 놀이 · 회차제"),
+    _exp("gg_siheung_gaetgol", "시흥갯골생태공원", A.ALL, C.NATURE, "경기", "시흥시", "시흥갯골생태공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "갯골 습지 산책 · 염전 체험 공간"),
+    # ── 인천 ──
+    _exp("icn_central_park", "송도 센트럴파크 산책", A.ALL, C.NATURE, "인천", "연수구", "송도 센트럴파크",
+         "무료", "무료 (수상시설 별도)", False, True, False, False, "현장 입장", "수로 따라 평지 산책 · 사슴농장"),
+    _exp("icn_letters_museum", "국립세계문자박물관", A.ELEMENTARY, C.PLAY, "인천", "연수구", "국립세계문자박물관",
+         "무료", "상설전시 무료", True, True, True, False, "현장 입장", "세계 문자 전시 · 어린이 체험 공간"),
+    _exp("icn_city_museum", "인천시립박물관", A.ELEMENTARY, C.PLAY, "인천", "연수구", "인천시립박물관",
+         "무료", "무료", True, True, False, False, "현장 입장", "인천 역사 전시 · 교과 연계"),
+    _exp("icn_kids_science", "인천어린이과학관", A.PRESCHOOL, C.SCIENCE, "인천", "계양구", "인천어린이과학관",
+         "유료", "소액 관람료 (회차제)", True, True, True, True, "회차제 사전예약", "몸으로 배우는 과학 놀이"),
+    _exp("icn_butterfly_park", "인천나비공원", A.PRESCHOOL, C.NATURE, "인천", "부평구", "인천나비공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "나비·곤충 관찰 · 숲 산책"),
+    _exp("icn_grand_park", "인천대공원 어린이동물원", A.ALL, C.NATURE, "인천", "남동구", "인천대공원",
+         "무료", "입장 무료 (일부 시설 유료)", False, True, True, False, "현장 입장", "어린이동물원 · 넓은 잔디·수목원"),
+    _exp("icn_sorae_wetland", "소래습지생태공원", A.PRESCHOOL, C.NATURE, "인천", "남동구", "소래습지생태공원",
+         "무료", "무료", False, True, False, False, "현장 입장", "갯벌·염전 관찰 · 풍차 산책길"),
+    _exp("icn_seaside_park", "영종 씨사이드파크", A.ALL, C.NATURE, "인천", "중구", "영종 씨사이드파크",
+         "무료", "공원 무료 (레일바이크 등 유료)", False, True, False, False, "현장 입장", "바다 보며 산책 · 놀이터"),
+    _exp("icn_kids_museum", "인천어린이박물관", A.INFANT, C.PLAY, "인천", "미추홀구", "인천어린이박물관",
+         "유료", "소액 입장료 (공식 공지 확인)", True, True, True, True, "회차제 사전예약", "영유아 놀이형 전시 · 회차제"),
+    _exp("icn_sudoguksan", "수도국산달동네박물관", A.ELEMENTARY, C.PLAY, "인천", "동구", "수도국산달동네박물관",
+         "유료", "소액 관람료", True, False, False, False, "현장 입장", "옛 생활상 재현 전시 · 교과 연계"),
 ]
 
 # Walk-in tips (오픈런·주차) shown on the 현장직행 3-Pick card. Generic fallback in the formatter.
@@ -223,17 +314,120 @@ SEED_HOSPITALS: list[MoonlightHospital] = [
 ]
 
 
+MILESTONE_SCHEDULE_VERSION = "KR-2026.1"
+_NIP_URL = naver_search("예방접종도우미 표준예방접종일정표")
+_CHECKUP_URL = naver_search("영유아 건강검진 시기 국민건강보험공단")
+_PREG_URL = naver_search("임신 주차별 산전검사 일정")
+
+
+def _ms(code: str, kind: str, title: str, description: str, source_url: str,
+        months: Optional[tuple[int, int]] = None, week: Optional[int] = None) -> MilestoneDefinition:
+    return MilestoneDefinition(
+        definition_id=f"{code}@{MILESTONE_SCHEDULE_VERSION}", kind=kind, code=code,
+        schedule_version=MILESTONE_SCHEDULE_VERSION,
+        age_min_months=months[0] if months else None, age_max_months=months[1] if months else None,
+        pregnancy_week=week, title=title, description=description, source_url=source_url,
+    )
+
+
+# 건강검진·예방접종·임신 주차 체크포인트. Fact safety: schedules can be revised — every card must say
+# "정확한 일정은 소아청소년과·보건소/예방접종도우미에서 확인". Months are inclusive (4~6 = 4개월 ~ 7개월 전날).
+SEED_MILESTONES: list[MilestoneDefinition] = [
+    # ── 영유아 건강검진 1~8차 ──
+    _ms("CHECKUP_1", "CHECKUP", "영유아 건강검진 1차", "생후 14~35일 · 성장·발달 확인", _CHECKUP_URL, months=(0, 1)),
+    _ms("CHECKUP_2", "CHECKUP", "영유아 건강검진 2차", "생후 4~6개월", _CHECKUP_URL, months=(4, 6)),
+    _ms("CHECKUP_3", "CHECKUP", "영유아 건강검진 3차", "생후 9~12개월", _CHECKUP_URL, months=(9, 12)),
+    _ms("CHECKUP_4", "CHECKUP", "영유아 건강검진 4차", "생후 18~24개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(18, 24)),
+    _ms("CHECKUP_5", "CHECKUP", "영유아 건강검진 5차", "생후 30~36개월", _CHECKUP_URL, months=(30, 36)),
+    _ms("CHECKUP_6", "CHECKUP", "영유아 건강검진 6차", "생후 42~48개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(42, 48)),
+    _ms("CHECKUP_7", "CHECKUP", "영유아 건강검진 7차", "생후 54~60개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(54, 60)),
+    _ms("CHECKUP_8", "CHECKUP", "영유아 건강검진 8차", "생후 66~71개월", _CHECKUP_URL, months=(66, 71)),
+    # ── 국가필수예방접종(NIP) 주요 시점 ──
+    _ms("VAC_BCG", "VACCINE", "BCG(결핵) 접종", "생후 4주 이내 권장", _NIP_URL, months=(0, 1)),
+    _ms("VAC_HEPB_2", "VACCINE", "B형간염 2차 접종", "생후 1개월 (1차는 출생 시)", _NIP_URL, months=(1, 1)),
+    _ms("VAC_2M", "VACCINE", "2개월 접종 (DTaP·폴리오·로타 1차)", "Hib·폐렴구균 1차 동시 시기 · 로타는 제품별 2~3회",
+        _NIP_URL, months=(2, 2)),
+    _ms("VAC_4M", "VACCINE", "4개월 접종 (DTaP·폴리오·로타 2차)", "Hib·폐렴구균 2차 동시 시기", _NIP_URL, months=(4, 4)),
+    _ms("VAC_6M", "VACCINE", "6개월 접종 (DTaP 3차·폴리오 3차·로타)", "폴리오 3차는 6~18개월 · B형간염 3차 · 로타 3차는 해당 제품만",
+        _NIP_URL, months=(6, 6)),
+    _ms("VAC_12M", "VACCINE", "12개월 접종 (MMR 1차·수두)", "생후 12~15개월 권장", _NIP_URL, months=(12, 15)),
+    _ms("VAC_HEPA_1", "VACCINE", "A형간염 1차 접종", "생후 12~23개월 (2차는 6개월 이후)", _NIP_URL, months=(12, 23)),
+    _ms("VAC_4_6Y", "VACCINE", "만 4~6세 추가접종", "DTaP 5차 · 폴리오 4차 · MMR 2차", _NIP_URL, months=(48, 83)),
+    # ── 임신 주차별 체크포인트 ──
+    _ms("PREG_W8", "PREGNANCY", "임신 확인 후 보건소 임산부 등록 · 국민행복카드 신청", "임신·출산 진료비 바우처 신청 시기",
+        _PREG_URL, week=8),
+    _ms("PREG_W12", "PREGNANCY", "초기 정밀검사 (1차 기형아검사·목덜미 투명대)", "통상 11~13주 · 병원별 일정 확인",
+        _PREG_URL, week=12),
+    _ms("PREG_W16", "PREGNANCY", "2차 기형아검사 · 철분제 복용 시작", "통상 15~20주 · 보건소 철분제 지원 확인", _PREG_URL, week=16),
+    _ms("PREG_W24", "PREGNANCY", "임신성 당뇨 검사", "통상 24~28주", _PREG_URL, week=24),
+    _ms("PREG_W28", "PREGNANCY", "백일해(Tdap) 예방접종", "통상 27~36주 권장 · 주치의 상담", _PREG_URL, week=28),
+    _ms("PREG_W32", "PREGNANCY", "출산가방 준비 · 첫만남이용권 사전 확인", "출생 후 신청할 바우처 서류 미리 준비",
+        _PREG_URL, week=32),
+    _ms("PREG_W36", "PREGNANCY", "막달 검사", "출산 전 혈액·태동 검사 등 · 병원별 상이", _PREG_URL, week=36),
+]
+
+
+def _add_months(d: date, months: int) -> date:
+    y, m = divmod(d.month - 1 + months, 12)
+    y, m = d.year + y, m + 1
+    return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def milestone_window(defn: MilestoneDefinition, birth_date: Optional[str] = None,
+                     due_date: Optional[str] = None) -> tuple[str, str]:
+    """(due_from, due_to) ISO dates. Child: [birth + min months, birth + (max+1) months - 1 day].
+    Pregnancy: LMP = due - 280 days; window = week w ~ end of week w+1 (2 weeks)."""
+    if defn.kind == "PREGNANCY":
+        if not due_date or defn.pregnancy_week is None:
+            raise ValueError("pregnancy milestone needs due_date")
+        lmp = date.fromisoformat(due_date) - timedelta(days=280)
+        start = lmp + timedelta(weeks=defn.pregnancy_week)
+        return start.isoformat(), (start + timedelta(days=13)).isoformat()
+    if not birth_date or defn.age_min_months is None or defn.age_max_months is None:
+        raise ValueError("child milestone needs birth_date and an age range")
+    birth = date.fromisoformat(birth_date)
+    start = _add_months(birth, defn.age_min_months)
+    end = _add_months(birth, defn.age_max_months + 1) - timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def sync_user_milestones(db, telegram_user_id) -> int:
+    """Materialise milestone rows for every child (CHECKUP/VACCINE) and the pregnancy (PREGNANCY).
+    Idempotent — existing statuses (USER_CONFIRMED etc.) are preserved. Returns rows ensured."""
+    uid = str(telegram_user_id)
+    n = 0
+    for defn in db.list_milestone_definitions(schedule_version=MILESTONE_SCHEDULE_VERSION):
+        if defn.kind == "PREGNANCY":
+            preg = db.get_pregnancy(uid)
+            if preg is None:
+                continue
+            frm, to = milestone_window(defn, due_date=preg.due_date)
+            db.ensure_subject_milestone(uid, "PREGNANCY", uid, defn.definition_id, defn.schedule_version, frm, to)
+            n += 1
+        else:
+            for child in db.list_children(uid):
+                frm, to = milestone_window(defn, birth_date=child.birth_date)
+                db.ensure_subject_milestone(uid, "CHILD", child.child_id, defn.definition_id,
+                                            defn.schedule_version, frm, to)
+                n += 1
+    return n
+
+
 def recommend_weekend_picks(db, age_group: AgeGroup, region_sido: Optional[str] = None, weather_rain: bool = False,
                             fine_dust_bad: bool = False, is_dispatch: bool = False,
-                            limit: int = 3) -> list[ExperienceItem]:
+                            limit: int = 3, allow_backfill: bool = True,
+                            excluded_exp_ids: Optional[set[str]] = None) -> list[ExperienceItem]:
     """Weather-aware 3-Pick.
     - rain / bad dust: indoor ONLY (returns fewer than `limit` rather than suggest an outdoor spot)
     - sunny: alternate outdoor (nature first) and indoor
     - is_dispatch (현장직행): booking_required == False ONLY — also enforced on the region back-fill
     - PREGNANCY returns PREGNANCY spots only; other age groups never see PREGNANCY spots
-    Region matches come first; other regions back-fill when the region alone is too thin.
+    - excluded_exp_ids: user feedback / recent-send cooldown — never returned (back-fill included)
+    Region matches come first; other regions back-fill when the region alone is too thin, unless
+    allow_backfill=False (push: an out-of-region place is worse than a shorter list).
     """
     indoor_only = weather_rain or fine_dust_bad
+    excluded = set(excluded_exp_ids or ())
 
     def fetch(region: Optional[str]) -> list[ExperienceItem]:
         items = db.list_experiences(age_group=age_group, region_sido=region, indoor_only=indoor_only)
@@ -243,10 +437,10 @@ def recommend_weekend_picks(db, age_group: AgeGroup, region_sido: Optional[str] 
             items = [e for e in items if e.age_group != AgeGroup.PREGNANCY]
         if is_dispatch:
             items = [e for e in items if not e.booking_required]
-        return items
+        return [e for e in items if e.exp_id not in excluded]
 
     pool = fetch(region_sido)
-    if region_sido and len(pool) < limit:
+    if allow_backfill and region_sido and len(pool) < limit:
         seen = {e.exp_id for e in pool}
         pool += [e for e in fetch(None) if e.exp_id not in seen]
     # Exact age-group items before generic ALL items; then drop repeat venues (e.g. 어린이대공원 PRESCHOOL + ALL)
@@ -278,4 +472,5 @@ def seed_all(db, today: Optional[date] = None) -> dict[str, int]:
         "experiences": db.upsert_experiences(SEED_EXPERIENCES),
         "bookings": db.upsert_booking_events(build_booking_events(today)),
         "hospitals": db.upsert_hospitals(SEED_HOSPITALS),
+        "milestones": db.upsert_milestone_definitions(SEED_MILESTONES),
     }

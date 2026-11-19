@@ -396,25 +396,35 @@ def test_weekend_dispatch_is_idempotent_per_week(db):
 
 
 def test_weekend_dispatch_routes_pregnancy_and_preschool(db):
+    """Phase 2-B policy: registered users only, own region only, 1~2 places, pregnancy/child spots never mix."""
     today = date(2026, 11, 12)  # Thursday
     db.set_pregnancy(301, "복덩이", "2027-03-07")              # pregnancy only
     db.add_child(302, "콩이", "2021-03-01", 18.0)               # 4~7세
     db.add_child(303, "아기", "2025-05-01", 9.0)                # 0~3세
     db.set_pregnancy(303, "둘째", "2027-04-01")                 # has a child → child briefing wins
+    db.ensure_user(304)                                         # 미등록 → Silence
     _, messages = build_weekend_messages(db, today)
     by_uid = dict(messages)
-    assert "임신기 태교·바우처" in by_uid["301"] and "D-115" in by_uid["301"] and "첫만남이용권" in by_uid["301"]
-    assert "⚡ 예약 없이 바로 출발 3-Pick" in by_uid["302"] and "📅예약" not in by_uid["302"]
-    assert "임신기" not in by_uid["303"] and "⚡" not in by_uid["303"]
+    assert "304" not in by_uid
+    preg_titles = {e.title for e in SEED_EXPERIENCES if e.age_group == AgeGroup.PREGNANCY}
+    child_titles = {e.title for e in SEED_EXPERIENCES if e.age_group != AgeGroup.PREGNANCY}
+    assert "복덩이 태교" in by_uid["301"] and any(t.replace("&", "&amp;") in by_uid["301"] for t in preg_titles)
+    assert not any(f". {t.replace('&', '&amp;')}</b>" in by_uid["301"] for t in child_titles)
+    assert "📅예약" not in by_uid["302"]                         # 4~7세 → 현장직행 only
+    assert "아기" in by_uid["303"] and "태교" not in by_uid["303"]
     for text in by_uid.values():
+        assert "날씨 반영" not in text                          # offline wrapper → no weather wording
+        assert "📍 서울" in text and "📍 경기" not in text and "📍 인천" not in text  # no back-fill
         html_len, visible_len = measure_message(text)
         assert html_len <= MAX_HTML_CHARS and visible_len <= MAX_VISIBLE_CHARS
 
 
 def test_dday_dispatch_is_idempotent_and_skips_empty_window(db):
-    db.ensure_user(201)
+    db.add_child(201, "콩이", "2021-03-01", 18.0)  # 4~7세 · 서울 → 국립어린이과학관 (Mon 10:00) matches
+    db.ensure_user(202)                           # 미등록 → no broadcast
     key, messages = build_dday_messages(db, FIXED_NOW)
-    assert key == "kids_dday:2026-W46" and len(messages) == 1
+    assert key == "kids_dday:2026-W46" and [m[0] for m in messages] == ["201"]
+    assert "국립어린이과학관" in messages[0][1] and "화폐박물관" not in messages[0][1]  # 초등 예약은 제외
     ch = RecordingChannel()
     _no_sleep_dispatcher().dispatch(ch, db, key, messages)
     assert _no_sleep_dispatcher().dispatch(ch, db, key, messages)["skipped"] == 1

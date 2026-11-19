@@ -1,6 +1,6 @@
 """Domain models for Kids Compass (키즈 나침반)."""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import Optional
@@ -83,7 +83,7 @@ class ChildProfile:
     telegram_user_id: str
     nickname: str
     birth_date: str  # YYYY-MM-DD
-    weight_kg: float
+    weight_kg: Optional[float]  # None/0.0 = 미입력 (fever calculator must ask before dosing)
     is_primary: bool = True
 
     def age_months(self, today: Optional[date] = None) -> int:
@@ -109,6 +109,14 @@ class PregnancyProfile:
         if days > 0:
             return f"D-{days}"
         return "D-DAY" if days == 0 else f"D+{-days}"
+
+    def gestational_days(self, today: Optional[date] = None) -> int:
+        """Days of pregnancy counted back from the due date (40주 0일 = 280일), clamped to 0~300."""
+        days = 280 - (date.fromisoformat(self.due_date) - (today or date.today())).days
+        return min(max(days, 0), 300)
+
+    def gestational_week(self, today: Optional[date] = None) -> int:
+        return self.gestational_days(today) // 7
 
 
 @dataclass
@@ -201,3 +209,65 @@ class MoonlightHospital:
     paired_pharmacy_tel: str
     map_url: str
     last_verified_at: str
+
+
+MILESTONE_KINDS = ("CHECKUP", "VACCINE", "PREGNANCY")
+MILESTONE_STATUSES = ("DUE", "USER_CONFIRMED", "DEFERRED", "NOT_APPLICABLE", "UNKNOWN")
+
+
+@dataclass
+class MilestoneDefinition:
+    """Catalogue row: 영유아 건강검진 / 국가필수예방접종 / 임신 주차 체크포인트.
+    Child items use age_min/max_months (inclusive months); PREGNANCY items use pregnancy_week."""
+    definition_id: str
+    kind: str  # CHECKUP | VACCINE | PREGNANCY
+    code: str
+    schedule_version: str
+    age_min_months: Optional[int]
+    age_max_months: Optional[int]
+    pregnancy_week: Optional[int]
+    title: str
+    description: str
+    source_url: str
+
+
+@dataclass
+class SubjectMilestone:
+    """Per-subject (child / pregnancy) milestone state. Only USER_CONFIRMED counts as done."""
+    milestone_id: int
+    subject_id: str
+    subject_kind: str  # CHILD | PREGNANCY
+    definition_id: str
+    due_from: str  # YYYY-MM-DD
+    due_to: str    # YYYY-MM-DD
+    status: str    # DUE | USER_CONFIRMED | DEFERRED | NOT_APPLICABLE | UNKNOWN
+    status_source: str
+    completed_at: Optional[str]
+    schedule_version: str
+    telegram_user_id: str = ""
+
+
+@dataclass
+class WeatherSnapshot:
+    """Weekend weather for one region/day. is_failed=True means 'unknown' — never treat it as sunny.
+    is_bad_dust is always False from Open-Meteo forecast (no air-quality data) — never present it as '좋음'."""
+    region_sido: str
+    target_date: str  # YYYY-MM-DD
+    is_rain_or_snow: bool
+    is_bad_dust: bool
+    summary_text: str
+    provider: str
+    fetched_at: str
+    expires_at: str
+    is_failed: bool = False
+
+
+@dataclass
+class PushMessage:
+    chat_id: str
+    text: str
+    reply_markup: Optional[dict] = None
+    stream: str = ""
+    entity_type: str = ""
+    entity_ids: list[str] = field(default_factory=list)
+    content_hash: str = ""

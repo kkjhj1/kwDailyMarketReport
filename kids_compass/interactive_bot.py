@@ -1,17 +1,34 @@
-"""Interactive 2-Tap bot for Kids Compass (키즈 나침반).
+"""Interactive 2-Tap bot for Kids Compass (키즈 나침반) — 1:1 assistant (Phase 2-B).
 
 [TG-04] callback_data = 'k:<domain>[:<action>[:<args>]]' (ASCII, <= 64 bytes). answerCallbackQuery is
 always called first — before parsing, DB reads or rendering. Screens update in place via _safe_edit_or_send.
 Deleting a child or pregnancy profile is an in-place 2-step confirm.
 Weekend picks: 'k:exp:a:<age>:<weather>[:<walk|all>]' — walk = 현장직행 (booking_required == False only).
+
+1:1 assistant domains:
+- ob   대화형 온보딩 (kids_onboarding_state): c=아이 등록, p=임신 등록, x=취소, r:<SEL|GGI|ICN>=지역 선택
+- ch   p:<id> 대표 아이 전환 / x·xy:<id> 삭제 2단계
+- hub  목적별 Pull 허브: pl 놀이·체험 / ln 학습·과학·경제 / out 야외·나들이 / med 병원·해열제·검진 ([:t] = 형제 함께)
+- fb   v|x:<opaque token> 장소 피드백 (DB 소유권·만료 검증, 위조/만료는 무해한 no-op)
+- ms   ok:<milestone_id> 검진·접종 확인 완료 (소유권 검증) / l 일정 보기
+- set  h|w|d 알림 토글, m 주말 모드(TOGETHER/PRIMARY), r:<code> 지역
+
+Push builders (Silence Rule: 미등록자·후보 0건·이미 발송 → 미발송, 사용자당 1통):
+build_milestone_push_messages / build_weekend_push_messages / build_dday_push_messages -> list[PushMessage].
 """
 from __future__ import annotations
+import hashlib
 import logging
 import re
+import secrets
+from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional
+
+from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
 
 from kids_compass.channels.telegram import (
+    PUSH_MESSAGE_SENTINEL,
     esc,
     format_category_html,
     format_cross_dosing_html,
@@ -19,15 +36,27 @@ from kids_compass.channels.telegram import (
     format_fever_emergency_html,
     format_fever_menu_html,
     format_fever_result_html,
+    format_fever_weight_pick_html,
     format_home_html,
     format_hospital_list_html,
+    format_hub_picks_html,
+    format_milestone_push_html,
     format_pregnancy_html,
     format_weekend_briefing_html,
+    format_weekend_push_html,
+    kg_text,
 )
-from kids_compass.collector import PREGNANCY_BENEFITS, recommend_by_category, recommend_weekend_picks
-from kids_compass.fever_engine import DEFAULT_MEDICINES, calculate_all
-from kids_compass.models import AgeGroup, ExperienceCategory
-from kids_compass.storage.db import KidsCompassDatabase
+from kids_compass.collector import (
+    MILESTONE_SCHEDULE_VERSION,
+    PREGNANCY_BENEFITS,
+    milestone_window,
+    recommend_by_category,
+    recommend_weekend_picks,
+)
+from kids_compass.fever_engine import DEFAULT_MEDICINES, INFANT_BLOCK_MONTHS, NSAID_MIN_MONTHS, calculate_all
+from kids_compass.models import AgeGroup, ExperienceCategory, ExperienceItem, PushMessage, WeatherSnapshot
+from kids_compass.storage.db import SENT_BLOCKING_STATES, KidsCompassDatabase
+from kids_compass.weather import fetch_weekend_weather, weekend_outlook
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +76,38 @@ DISPATCH_WEATHER_SUMMARY = "날씨 미연동 · 비 오면 봇에서 ☔ 실내 
 EXP_MODES = ("walk", "all")  # walk = 현장직행 (no booking needed), all = 예약 포함 전체
 PREG_MAX_DAYS_AHEAD = 300    # ~42주
 PREG_MAX_DAYS_OVERDUE = 14
+CHILD_MAX_AGE_YEARS = 14
 
+# Onboarding state machine (kids_onboarding_state)
+ONBOARDING_TTL = timedelta(minutes=30)
+ST_CHILD_NICKNAME, ST_CHILD_BIRTH, ST_CHILD_REGION = "CHILD_NICKNAME", "CHILD_BIRTH_DATE", "CHILD_REGION"
+ST_PREG_NICKNAME, ST_PREG_DUE, ST_PREG_REGION = "PREGNANCY_NICKNAME", "PREGNANCY_DUE_DATE", "PREGNANCY_REGION"
+REGION_STEPS = (ST_CHILD_REGION, ST_PREG_REGION)
+
+# Push policy
+PUSH_PICK_LIMIT = 2
+DDAY_PUSH_LIMIT = 2
+MILESTONE_LOOKAHEAD_DAYS = 7       # weekly push: windows overlapping the next 7 days
+MILESTONE_PULL_LOOKAHEAD_DAYS = 30
+REC_TOKEN_TTL = timedelta(days=14)
+FEEDBACK_ACTIONS = {"v": "VISITED", "x": "NOT_INTERESTED"}
+STREAM_WEEKEND, STREAM_DDAY, STREAM_MILESTONE = "weekend", "dday", "milestone"
+
+# Pull hub: code -> (title, categories | None for 야외·나들이)
+HUB_MENUS: dict[str, tuple[str, Optional[tuple[ExperienceCategory, ...]]]] = {
+    "pl": ("🎨 놀이·체험", (ExperienceCategory.PLAY, ExperienceCategory.SAFETY)),
+    "ln": ("🔬 학습·과학·경제", (ExperienceCategory.SCIENCE, ExperienceCategory.ECONOMY)),
+    "out": ("🌳 야외·나들이", None),
+}
+HUB_PICK_LIMIT = 4
+
+_NICK_RE = re.compile(r"^[0-9A-Za-z가-힣]{1,10}$")
+_DATE_COMPACT_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+_DATE_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 _CHILD_CMD_RE = re.compile(r"^/child(?:@\w+)?\s+([0-9A-Za-z가-힣]{1,10})\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,3}(?:\.\d)?)\s*$")
 _PREG_CMD_RE = re.compile(r"^/preg(?:@\w+)?\s+([0-9A-Za-z가-힣]{1,10})\s+(\d{4}-\d{2}-\d{2})\s*$")
+
+WeatherFetcher = Callable[[str, date], list[WeatherSnapshot]]
 
 
 def default_exp_mode(age: AgeGroup) -> str:
@@ -76,26 +134,95 @@ def _chunks(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def parse_user_date(text: str) -> Optional[date]:
+    """'YYYYMMDD' or 'YYYY-MM-DD' -> date; anything else (or an impossible date) -> None."""
+    m = _DATE_COMPACT_RE.match(text.strip()) or _DATE_ISO_RE.match(text.strip())
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _age_short(age: AgeGroup) -> str:
+    return age.label.split(" (")[0]
+
+
+def _round_robin(lists: list[list[ExperienceItem]], limit: int) -> list[ExperienceItem]:
+    """Coverage merge: 1st pick of each subject, then 2nd, ... (dedupe by place and venue)."""
+    out: list[ExperienceItem] = []
+    seen_ids: set[str] = set()
+    seen_venues: set[str] = set()
+    depth = max((len(lst) for lst in lists), default=0)
+    for i in range(depth):
+        for lst in lists:
+            if len(out) >= limit:
+                return out
+            if i < len(lst):
+                e = lst[i]
+                if e.exp_id in seen_ids or e.venue_name in seen_venues:
+                    continue
+                seen_ids.add(e.exp_id)
+                seen_venues.add(e.venue_name)
+                out.append(e)
+    return out
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def push_window(day: date) -> str:
+    """Dispatch window shared by the push builders and the dispatcher (ISO week, e.g. '2026-W47')."""
+    y, w, _ = day.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
 HOME_ROW = [_btn("🏠 홈", cb("home"))]
+CANCEL_ROW = [_btn("❌ 취소", cb("ob", "x"))]
 
 
 # ── Keyboards ─────────────────────────────────────────────────
-def build_home_keyboard() -> dict[str, Any]:
-    return _kb([
-        [_btn("🌡 해열제 계산", cb("fvr")), _btn("🌙 달빛병원", cb("hsp"))],
-        [_btn("🎈 주말 나들이", cb("exp")), _btn("⏰ 예약 D-Day", cb("dday"))],
-        [_btn("🤰 임신기 태교·바우처", cb("preg"))],
-        [_btn("🔔 알림·아이 설정", cb("set"))],
-    ])
+def build_home_keyboard(children: Optional[list] = None, has_profile: bool = False) -> dict[str, Any]:
+    """미등록자: 등록 버튼 최상단 + 응급(해열제·달빛병원). 등록자: 아이 스위처 + 목적별 Pull 허브."""
+    children = children or []
+    if not has_profile and not children:
+        return _kb([
+            [_btn("➕ 아이 등록", cb("ob", "c")), _btn("🤰 임신 중이에요", cb("ob", "p"))],
+            [_btn("🌡 해열제 계산", cb("fvr")), _btn("🌙 달빛병원", cb("hsp"))],
+            [_btn("🎈 주말 나들이", cb("exp")), _btn("⏰ 예약 D-Day", cb("dday"))],
+            [_btn("🤰 임신기 태교·바우처", cb("preg")), _btn("🔔 알림 설정", cb("set"))],
+        ])
+    rows: list[list[dict[str, str]]] = []
+    if len(children) > 1:
+        rows += _chunks([_btn(("⭐ " if c.is_primary else "") + c.nickname, cb("ch", "p", c.child_id))
+                         for c in children[:4]], 3)
+        rows.append([_btn("👨‍👩‍👧 형제 함께 보기", cb("hub", "out", "t"))])
+    rows += [
+        [_btn("🎨 놀이·체험", cb("hub", "pl")), _btn("🔬 학습·과학·경제", cb("hub", "ln"))],
+        [_btn("🌳 야외·나들이", cb("hub", "out")), _btn("🏥 병원·해열제·검진", cb("hub", "med"))],
+        [_btn("🤰 지원금·임신", cb("preg")), _btn("⚙️ 아이·알림 설정", cb("set"))],
+        [_btn("⏰ 예약 D-Day", cb("dday")), _btn("🎈 연령별 나들이", cb("exp"))],
+    ]
+    return _kb(rows)
 
 
 def build_fever_keyboard(children: list) -> dict[str, Any]:
-    rows = [[_btn(f"👧 {c.nickname} ({c.weight_kg:g}kg)", cb("fvr", "c", c.child_id))] for c in children[:4]]
+    rows = [[_btn(f"👧 {c.nickname} ({c.weight_kg:g}kg)" if c.weight_kg else f"👧 {c.nickname} (체중 선택)",
+                  cb("fvr", "c", c.child_id))] for c in children[:4]]
     rows.append([_btn("🚨 생후 3개월 미만", cb("fvr", "m3"))])
     rows += _chunks([_btn(f"4~5개월 {kg}kg", cb("fvr", "m5", kg)) for kg in QUICK_WEIGHTS_4_5M], 2)
     rows += _chunks([_btn(f"{kg}kg", cb("fvr", "w", kg)) for kg in QUICK_WEIGHTS_6M], 5)
     rows.append([_btn("🔥 열이 안 떨어져요", cb("fvr", "x"))])
     rows.append([_btn("🌙 달빛병원", cb("hsp")), *HOME_ROW])
+    return _kb(rows)
+
+
+def build_child_weight_keyboard(child_id: int, months: int) -> dict[str, Any]:
+    weights = QUICK_WEIGHTS_4_5M if months < NSAID_MIN_MONTHS else QUICK_WEIGHTS_6M
+    rows = _chunks([_btn(f"{kg}kg", cb("fvr", "cw", child_id, kg)) for kg in weights], 5)
+    rows.append([_btn("◀ 계산기", cb("fvr")), *HOME_ROW])
     return _kb(rows)
 
 
@@ -143,18 +270,51 @@ def build_exp_result_keyboard(age: Optional[AgeGroup] = None, weather: Optional[
     return _kb(rows)
 
 
+def build_hub_result_keyboard(code: str, together: bool, multi_child: bool) -> dict[str, Any]:
+    rows = []
+    if multi_child:
+        rows.append([_btn("⭐ 대표 아이만" if together else "👨‍👩‍👧 형제 함께",
+                          cb("hub", code) if together else cb("hub", code, "t"))])
+    rows.append([_btn("🎨 놀이", cb("hub", "pl")), _btn("🔬 학습", cb("hub", "ln")), _btn("🌳 야외", cb("hub", "out"))])
+    rows.append(HOME_ROW)
+    return _kb(rows)
+
+
+def build_med_hub_keyboard() -> dict[str, Any]:
+    return _kb([
+        [_btn("🌡 해열제 계산", cb("fvr")), _btn("🌙 달빛병원", cb("hsp"))],
+        [_btn("🩺 검진·접종 일정 보기", cb("ms", "l"))],
+        HOME_ROW,
+    ])
+
+
+def build_milestone_keyboard(items: list[dict], limit: int = 6) -> dict[str, Any]:
+    buttons = [_btn(f"✅ {n} 확인 완료", cb("ms", "ok", it["milestone_id"])) for n, it in enumerate(items[:limit], 1)]
+    return _kb(_chunks(buttons, 2) + [HOME_ROW])
+
+
 def build_settings_keyboard(profile: dict, children: list, pregnancy=None) -> dict[str, Any]:
+    hl = "ON" if profile.get("alert_health_dday") else "OFF"
     wk = "ON" if profile.get("alert_weekend_brief") else "OFF"
     dd = "ON" if profile.get("alert_dday_reserve") else "OFF"
+    together = (profile.get("alert_weekend_mode") or "TOGETHER") == "TOGETHER"
     rows = [
-        [_btn(f"🎈 목 17시 주말브리핑 {wk}", cb("set", "w"))],
+        [_btn(f"🩺 검진·접종 알림 {hl}", cb("set", "h"))],
+        [_btn(f"🎈 목 17시 주말추천 {wk}", cb("set", "w"))],
         [_btn(f"⏰ 월 9시 예약 D-Day {dd}", cb("set", "d"))],
+        [_btn("👨‍👩‍👧 주말추천: 형제 함께" if together else "⭐ 주말추천: 대표 아이만", cb("set", "m"))],
         [_btn(("✅ " if profile.get("default_region") == name else "") + name, cb("set", "r", code))
          for code, name in REGION_CODES.items()],
     ]
-    rows += [[_btn(f"🗑 {c.nickname} 삭제", cb("ch", "x", c.child_id))] for c in children[:4]]
+    for c in children[:4]:
+        row = [] if c.is_primary else [_btn(f"⭐ {c.nickname} 대표로", cb("ch", "p", c.child_id))]
+        rows.append(row + [_btn(f"🗑 {c.nickname} 삭제", cb("ch", "x", c.child_id))])
     if pregnancy is not None:
         rows.append([_btn(f"🗑 {pregnancy.nickname} 임신정보 삭제", cb("preg", "x"))])
+    add_row = [_btn("➕ 아이 등록", cb("ob", "c"))]
+    if pregnancy is None:
+        add_row.append(_btn("🤰 임신 등록", cb("ob", "p")))
+    rows.append(add_row)
     rows.append(HOME_ROW)
     return _kb(rows)
 
@@ -168,6 +328,8 @@ def build_pregnancy_keyboard(has_profile: bool) -> dict[str, Any]:
              _btn("🌿 실내 산책 ☔", cb("exp", "a", AgeGroup.PREGNANCY.value, "rain", "all"))]]
     if has_profile:
         rows.append([_btn("🗑 임신 정보 삭제", cb("preg", "x"))])
+    else:
+        rows.append([_btn("🤰 임신 정보 등록", cb("ob", "p"))])
     rows.append(HOME_ROW)
     return _kb(rows)
 
@@ -176,45 +338,243 @@ def build_pregnancy_delete_confirm_keyboard() -> dict[str, Any]:
     return _kb([[_btn("🗑 네, 삭제", cb("preg", "xy")), _btn("취소", cb("preg"))]])
 
 
-# ── Dispatch message builders (weekend Thu 17:00 / D-Day Mon 09:00) ──
+def build_onboarding_region_keyboard() -> dict[str, Any]:
+    return _kb([[_btn(name, cb("ob", "r", code)) for code, name in REGION_CODES.items()], CANCEL_ROW])
+
+
+def build_weekend_feedback_keyboard(pairs: list[tuple[ExperienceItem, str]]) -> dict[str, Any]:
+    rows = [[_btn(f"{n} 가봄", cb("fb", "v", token)), _btn(f"{n} 관심없음", cb("fb", "x", token))]
+            for n, (_, token) in enumerate(pairs, 1)]
+    rows.append(HOME_ROW)
+    return _kb(rows)
+
+
+# ── Shared subject / push helpers ─────────────────────────────
+def _subjects(db: KidsCompassDatabase, uid: str, today: date, together: bool) -> tuple[list[AgeGroup], str]:
+    """(age groups, label). Children win over pregnancy; TOGETHER covers every child, else the ⭐ primary."""
+    children = db.list_children(uid)
+    if children:
+        if together and len(children) > 1:
+            ages = list(dict.fromkeys(c.age_group(today) for c in children))
+            return ages, "·".join(c.nickname for c in children[:3]) + " 함께"
+        primary = children[0]  # list_children orders is_primary first
+        age = primary.age_group(today)
+        return [age], f"{primary.nickname} · {_age_short(age)}"
+    preg = db.get_pregnancy(uid)
+    if preg is not None:
+        return [AgeGroup.PREGNANCY], f"{preg.nickname} 태교"
+    return [AgeGroup.ALL], "전 연령"
+
+
+def _push_targets(db: KidsCompassDatabase, kind: str) -> list[dict]:
+    """Alert ON (+ platform SSOT inside list_alert_subscribers) AND a registered child/pregnancy."""
+    return [p for p in db.list_alert_subscribers(kind) if db.has_active_profile(p["telegram_user_id"])]
+
+
+def _push_already_claimed(db: KidsCompassDatabase, uid: str, stream: str, entity_type: str, window: str) -> bool:
+    return db.get_sent_status(uid, stream, entity_type, PUSH_MESSAGE_SENTINEL, window) in SENT_BLOCKING_STATES
+
+
+def _sent_entity_ids(db: KidsCompassDatabase, uid: str, stream: str, entity_type: str) -> set[str]:
+    """Entities already pushed in ANY window (IN_FLIGHT / SENT / UNKNOWN / BLOCKED) — never re-pushed."""
+    marks = ",".join("?" * len(SENT_BLOCKING_STATES))
+    rows = db.conn.execute(
+        f"SELECT entity_id FROM kids_sent_history WHERE telegram_user_id = ? AND stream = ? AND entity_type = ? "
+        f"AND status IN ({marks})",
+        (str(uid), stream, entity_type, *SENT_BLOCKING_STATES),
+    ).fetchall()
+    return {r[0] for r in rows} - {PUSH_MESSAGE_SENTINEL}
+
+
+def sync_relevant_milestones(db: KidsCompassDatabase, uid: str, today: date, lookahead_days: int) -> int:
+    """ensure_subject_milestone only for items whose window (from the child's months / the pregnancy week)
+    overlaps [today, today + lookahead]. Idempotent — user answers are never reset."""
+    end = today + timedelta(days=lookahead_days)
+    children = db.list_children(uid)
+    preg = db.get_pregnancy(uid)
+    n = 0
+    for defn in db.list_milestone_definitions(schedule_version=MILESTONE_SCHEDULE_VERSION):
+        if defn.kind == "PREGNANCY":
+            subjects = [("PREGNANCY", uid, {"due_date": preg.due_date})] if preg is not None else []
+        else:
+            subjects = [("CHILD", c.child_id, {"birth_date": c.birth_date}) for c in children]
+        for kind, sid, kw in subjects:
+            frm, to = milestone_window(defn, **kw)
+            if date.fromisoformat(frm) <= end and date.fromisoformat(to) >= today:
+                db.ensure_subject_milestone(uid, kind, sid, defn.definition_id, defn.schedule_version, frm, to)
+                n += 1
+    return n
+
+
+def collect_due_milestone_items(db: KidsCompassDatabase, uid: str, today: date, lookahead_days: int,
+                                exclude_ids: Optional[set[str]] = None) -> list[dict]:
+    """DUE rows only, for subjects that still exist (a deleted child's rows are ignored)."""
+    sync_relevant_milestones(db, uid, today, lookahead_days)
+    children = {str(c.child_id): c.nickname for c in db.list_children(uid)}
+    preg = db.get_pregnancy(uid)
+    defs = {d.definition_id: d for d in db.list_milestone_definitions()}
+    exclude_ids = exclude_ids or set()
+    items = []
+    for m in db.list_due_milestones(uid, today, lookahead_days):
+        if str(m.milestone_id) in exclude_ids or m.definition_id not in defs:
+            continue
+        if m.subject_kind == "CHILD":
+            subject = children.get(m.subject_id)
+        else:
+            subject = f"{preg.nickname} (임신 {preg.gestational_week(today)}주)" if preg is not None else None
+        if subject is None:
+            continue
+        d = defs[m.definition_id]
+        items.append({"milestone_id": m.milestone_id, "subject": subject, "kind": d.kind, "title": d.title,
+                      "description": d.description, "due_from": m.due_from, "due_to": m.due_to})
+    items.sort(key=lambda it: (it["due_to"], it["milestone_id"]))
+    return items
+
+
+def offline_weather(region: str, day: date) -> list[WeatherSnapshot]:
+    """No network: an empty outlook = 'unknown' → indoor-only picks and no weather wording."""
+    return []
+
+
+# ── Push builders (Silence Rule) ──────────────────────────────
+def build_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[PushMessage]:
+    window = push_window(today)
+    out: list[PushMessage] = []
+    for prof in _push_targets(db, "health"):
+        uid = str(prof["telegram_user_id"])
+        if _push_already_claimed(db, uid, STREAM_MILESTONE, "MILESTONE", window):
+            continue
+        sent = _sent_entity_ids(db, uid, STREAM_MILESTONE, "MILESTONE")
+        items = collect_due_milestone_items(db, uid, today, MILESTONE_LOOKAHEAD_DAYS, exclude_ids=sent)
+        if not items:
+            continue  # Silence: nothing due
+        shown = items[:6]
+        text = format_milestone_push_html(items, today)
+        out.append(PushMessage(chat_id=uid, text=text, reply_markup=build_milestone_keyboard(shown),
+                               stream=STREAM_MILESTONE, entity_type="MILESTONE",
+                               entity_ids=[str(it["milestone_id"]) for it in shown],
+                               content_hash=_content_hash(text)))
+    return out
+
+
+def build_weekend_push_messages(db: KidsCompassDatabase, today: date, weather_fetcher: Optional[WeatherFetcher] = None,
+                                now: Optional[datetime] = None, issue_tokens: bool = True) -> list[PushMessage]:
+    """1~2 places per registered user, own region only (no back-fill), feedback/cooldown exclusions applied.
+    Rain → indoor only. Failed/unknown forecast → indoor only AND no weather wording. 0 candidates → Silence.
+    issue_tokens=False (dry-run) renders placeholder tokens without writing recommendation rows."""
+    fetch = weather_fetcher or (lambda region, day: fetch_weekend_weather(region, day, db=db))
+    now = now or datetime.now()
+    window = push_window(today)
+    weather_cache: dict[str, list[WeatherSnapshot]] = {}
+    out: list[PushMessage] = []
+    for prof in _push_targets(db, "weekend"):
+        uid = str(prof["telegram_user_id"])
+        if _push_already_claimed(db, uid, STREAM_WEEKEND, "EXPERIENCE", window):
+            continue
+        region = prof.get("default_region") or "서울"
+        if region not in weather_cache:
+            try:
+                weather_cache[region] = list(fetch(region, today) or [])
+            except Exception:  # noqa: BLE001 - a weather outage must never block (or fake) the briefing
+                logger.warning("weather fetch failed for %s", region, exc_info=True)
+                weather_cache[region] = []
+        snaps = weather_cache[region]
+        rain, failed = weekend_outlook(snaps)
+        indoor_only = rain or failed
+        card_weather = None if failed else replace(
+            next((s for s in snaps if s.is_rain_or_snow), snaps[0]),
+            summary_text=" / ".join(s.summary_text for s in snaps), is_rain_or_snow=rain)
+
+        together = (prof.get("alert_weekend_mode") or "TOGETHER") == "TOGETHER"
+        ages, label = _subjects(db, uid, today, together)
+        excluded = db.get_excluded_exp_ids(uid, today)
+        lists = [recommend_weekend_picks(db, age, region, weather_rain=indoor_only,
+                                         is_dispatch=(age == AgeGroup.PRESCHOOL), limit=PUSH_PICK_LIMIT,
+                                         allow_backfill=False, excluded_exp_ids=excluded) for age in ages]
+        picks = _round_robin(lists, PUSH_PICK_LIMIT)
+        if not picks:
+            continue  # Silence: no in-region candidate
+        if issue_tokens:
+            pairs = db.create_rec_items(uid, STREAM_WEEKEND, picks, now + REC_TOKEN_TTL,
+                                        coverage={"ages": [a.value for a in ages]}, now=now)
+        else:
+            pairs = [(p, f"dryrun{n:04d}") for n, p in enumerate(picks, 1)]
+        text = format_weekend_push_html(picks, label, card_weather, region)
+        out.append(PushMessage(chat_id=uid, text=text, reply_markup=build_weekend_feedback_keyboard(pairs),
+                               stream=STREAM_WEEKEND, entity_type="EXPERIENCE",
+                               entity_ids=[p.exp_id for p in picks], content_hash=_content_hash(text)))
+    return out
+
+
+def booking_entity_id(ev) -> str:
+    """A booking rule re-opens every week/month — the occurrence (id + open time) is the dedupe unit."""
+    return f"{ev.booking_id}@{ev.open_datetime}"
+
+
+def build_dday_push_messages(db: KidsCompassDatabase, now: datetime) -> list[PushMessage]:
+    """Only bookings matching my children's age groups AND my region (max 2), never an occurrence already sent."""
+    window = push_window(now.date())
+    events = db.list_upcoming_bookings(now.strftime("%Y-%m-%d %H:%M"),
+                                       (now + timedelta(days=DDAY_WINDOW_DAYS)).strftime("%Y-%m-%d %H:%M"))
+    if not events:
+        return []
+    exp_cache: dict[str, Optional[ExperienceItem]] = {}
+    out: list[PushMessage] = []
+    for prof in _push_targets(db, "dday"):
+        uid = str(prof["telegram_user_id"])
+        if _push_already_claimed(db, uid, STREAM_DDAY, "BOOKING", window):
+            continue
+        region = prof.get("default_region") or "서울"
+        children = db.list_children(uid)
+        ages = {c.age_group(now.date()) for c in children}
+        if db.get_pregnancy(uid) is not None:
+            ages.add(AgeGroup.PREGNANCY)
+        if children:
+            ages.add(AgeGroup.ALL)
+        sent = _sent_entity_ids(db, uid, STREAM_DDAY, "BOOKING")
+        matches = []
+        for ev in events:
+            if ev.exp_id not in exp_cache:
+                exp_cache[ev.exp_id] = db.get_experience(ev.exp_id)
+            exp = exp_cache[ev.exp_id]
+            if exp is None or exp.region_sido != region or exp.age_group not in ages:
+                continue
+            if booking_entity_id(ev) in sent:
+                continue
+            matches.append(ev)
+            if len(matches) >= DDAY_PUSH_LIMIT:
+                break
+        if not matches:
+            continue  # Silence
+        _, label = _subjects(db, uid, now.date(), together=True)
+        text = format_dday_alert_html(matches, now, subtitle=f"{label} · {region} 맞춤 예약 오픈")
+        out.append(PushMessage(chat_id=uid, text=text,
+                               reply_markup=_kb([[_btn("⏰ 전체 D-Day 보기", cb("dday"))], HOME_ROW]),
+                               stream=STREAM_DDAY, entity_type="BOOKING",
+                               entity_ids=[booking_entity_id(ev) for ev in matches],
+                               content_hash=_content_hash(text)))
+    return out
+
+
+# ── Legacy dispatch wrappers (tests / compat) ─────────────────
 def iso_week_key(prefix: str, day: date) -> str:
     y, w, _ = day.isocalendar()
     return f"{prefix}:{y}-W{w:02d}"
 
 
-def build_weekend_messages(db: KidsCompassDatabase, today: date) -> tuple[str, list[tuple[str, str]]]:
-    """One message per subscriber (idempotency is per chat+week):
-    - registered child → primary child's age group; 4~7세 gets the 현장직행 card (booking_required == False only)
-    - no child but a pregnancy profile → 임신기 태교·바우처 dashboard
-    - neither → all-age picks
-    """
+def build_weekend_messages(db: KidsCompassDatabase, today: date,
+                           weather_fetcher: Optional[WeatherFetcher] = None) -> tuple[str, list[tuple[str, str]]]:
+    """Compat wrapper over build_weekend_push_messages (new policy: registered users only, own region, Silence).
+    Network-free by default (unknown weather → indoor-only, no weather wording)."""
     key = iso_week_key("kids_weekend", today)
-    messages = []
-    for prof in db.list_alert_subscribers("weekend"):
-        uid = prof["telegram_user_id"]
-        region = prof.get("default_region") or None
-        children = db.list_children(uid)
-        pregnancy = db.get_pregnancy(uid) if not children else None
-        if pregnancy is not None:
-            walks = recommend_weekend_picks(db, AgeGroup.PREGNANCY, region)
-            messages.append((uid, format_pregnancy_html(pregnancy, PREGNANCY_BENEFITS, walks, today)))
-            continue
-        age = children[0].age_group(today) if children else AgeGroup.ALL
-        walk_in = age == AgeGroup.PRESCHOOL
-        picks = recommend_weekend_picks(db, age, region, is_dispatch=walk_in)
-        messages.append((uid, format_weekend_briefing_html(picks, age, DISPATCH_WEATHER_SUMMARY, walk_in=walk_in)))
-    return key, messages
+    msgs = build_weekend_push_messages(db, today, weather_fetcher=weather_fetcher or offline_weather)
+    return key, [(m.chat_id, m.text) for m in msgs]
 
 
 def build_dday_messages(db: KidsCompassDatabase, now: datetime) -> tuple[str, list[tuple[str, str]]]:
-    """Empty list when nothing opens in the window — no 'nothing to report' spam."""
+    """Compat wrapper over build_dday_push_messages (personalised; empty when nothing matches)."""
     key = iso_week_key("kids_dday", now.date())
-    events = db.list_upcoming_bookings(now.strftime("%Y-%m-%d %H:%M"),
-                                       (now + timedelta(days=DDAY_WINDOW_DAYS)).strftime("%Y-%m-%d %H:%M"))
-    if not events:
-        return key, []
-    text = format_dday_alert_html(events, now)
-    return key, [(prof["telegram_user_id"], text) for prof in db.list_alert_subscribers("dday")]
+    return key, [(m.chat_id, m.text) for m in build_dday_push_messages(db, now)]
 
 
 # ── Bot ───────────────────────────────────────────────────────
@@ -246,6 +606,19 @@ class KidsCompassInteractiveBot:
         if not chat_id or not text:
             return
         cmd = text.split()[0].split("@")[0].lower()
+        if cmd == "/cancel":
+            self.db.clear_onboarding_state(chat_id)
+            self.db.ensure_user(chat_id)
+            self.channel.send_message(chat_id, "❌ 등록을 취소했어요.")
+            self._show_home(chat_id, None)
+            return
+        if cmd.startswith("/"):
+            self.db.clear_onboarding_state(chat_id)  # any other command abandons an open flow
+        else:
+            state = self.db.get_onboarding_state(chat_id, self._clock())
+            if state is not None:
+                self._onboarding_input(chat_id, state, text)
+                return
         if cmd == "/child":
             self._add_child(chat_id, text)
             return
@@ -267,7 +640,7 @@ class KidsCompassInteractiveBot:
             except ValueError:
                 born = None
             today = self._clock().date()
-            if born is None or born > today or born < today.replace(year=today.year - 14):
+            if born is None or born > today or born < today.replace(year=today.year - CHILD_MAX_AGE_YEARS):
                 error = "생년월일을 확인해 주세요 (최근 14년 이내, 미래 날짜 불가)."
             elif not (1.0 <= weight <= 100.0):
                 error = "체중을 확인해 주세요 (1~100kg)."
@@ -287,9 +660,7 @@ class KidsCompassInteractiveBot:
                 due_date = date.fromisoformat(due)
             except ValueError:
                 due_date = None
-            today = self._clock().date()
-            if (due_date is None or due_date < today - timedelta(days=PREG_MAX_DAYS_OVERDUE)
-                    or due_date > today + timedelta(days=PREG_MAX_DAYS_AHEAD)):
+            if due_date is None or not self._due_date_ok(due_date):
                 error = "출산예정일을 확인해 주세요 (오늘부터 약 10개월 이내)."
             else:
                 self.db.set_pregnancy(chat_id, nickname, due)
@@ -298,10 +669,100 @@ class KidsCompassInteractiveBot:
                 return
         self.channel.send_message(chat_id, f"⚠️ {error}")
 
+    def _birth_date_ok(self, born: date) -> bool:
+        today = self._clock().date()
+        return today.replace(year=today.year - CHILD_MAX_AGE_YEARS) <= born <= today
+
+    def _due_date_ok(self, due: date) -> bool:
+        today = self._clock().date()
+        return today - timedelta(days=PREG_MAX_DAYS_OVERDUE) <= due <= today + timedelta(days=PREG_MAX_DAYS_AHEAD)
+
+    # ---------- onboarding state machine ----------
+    _PROMPTS = {
+        ST_CHILD_NICKNAME: "➕ <b>아이 등록</b> (1/3)\n아이 <b>별명</b>을 입력해 주세요.\n예) 콩이 · 한글·영문·숫자 10자 이내",
+        ST_CHILD_BIRTH: "➕ <b>아이 등록</b> (2/3)\n<b>생년월일</b>을 입력해 주세요.\n예) 20230501 또는 2023-05-01",
+        ST_CHILD_REGION: "➕ <b>아이 등록</b> (3/3)\n주로 다니는 <b>지역</b>을 골라 주세요 👇",
+        ST_PREG_NICKNAME: "🤰 <b>임신 등록</b> (1/3)\n<b>태명</b>을 입력해 주세요.\n예) 복덩이 · 한글·영문·숫자 10자 이내",
+        ST_PREG_DUE: "🤰 <b>임신 등록</b> (2/3)\n<b>출산예정일</b>을 입력해 주세요.\n예) 20270315 또는 2027-03-15",
+        ST_PREG_REGION: "🤰 <b>임신 등록</b> (3/3)\n주로 다니는 <b>지역</b>을 골라 주세요 👇",
+    }
+
+    def _start_onboarding(self, chat_id: int, mid: Optional[int], kind: str) -> None:
+        step = ST_CHILD_NICKNAME if kind == "CHILD" else ST_PREG_NICKNAME
+        self.db.set_onboarding_state(chat_id, secrets.token_hex(4), kind, step, {},
+                                     self._clock() + ONBOARDING_TTL)
+        self._prompt_step(chat_id, mid, step)
+
+    def _prompt_step(self, chat_id: int, mid: Optional[int], step: str, error: str = "") -> None:
+        text = (f"⚠️ {error}\n\n" if error else "") + self._PROMPTS[step]
+        kb = build_onboarding_region_keyboard() if step in REGION_STEPS else _kb([CANCEL_ROW])
+        self._safe_edit_or_send(chat_id, mid, text, kb)
+
+    def _advance(self, chat_id: int, state: dict, step: str, payload: dict) -> None:
+        self.db.set_onboarding_state(chat_id, state.get("flow_id", ""), state.get("kind", ""), step, payload,
+                                     self._clock() + ONBOARDING_TTL)
+        self._prompt_step(chat_id, None, step)
+
+    def _onboarding_input(self, chat_id: int, state: dict, text: str) -> None:
+        step, payload = state.get("step"), dict(state.get("payload") or {})
+        if step in (ST_CHILD_NICKNAME, ST_PREG_NICKNAME):
+            if not _NICK_RE.match(text):
+                self._prompt_step(chat_id, None, step, "한글·영문·숫자 10자 이내로 입력해 주세요 (기호·띄어쓰기 불가).")
+                return
+            payload["nickname"] = text
+            self._advance(chat_id, state, ST_CHILD_BIRTH if step == ST_CHILD_NICKNAME else ST_PREG_DUE, payload)
+        elif step == ST_CHILD_BIRTH:
+            born = parse_user_date(text)
+            if born is None or not self._birth_date_ok(born):
+                self._prompt_step(chat_id, None, step, "생년월일을 확인해 주세요 (최근 14년 이내, 미래 날짜 불가).")
+                return
+            payload["birth_date"] = born.isoformat()
+            self._advance(chat_id, state, ST_CHILD_REGION, payload)
+        elif step == ST_PREG_DUE:
+            due = parse_user_date(text)
+            if due is None or not self._due_date_ok(due):
+                self._prompt_step(chat_id, None, step, "출산예정일을 확인해 주세요 (오늘부터 약 10개월 이내).")
+                return
+            payload["due_date"] = due.isoformat()
+            self._advance(chat_id, state, ST_PREG_REGION, payload)
+        elif step in REGION_STEPS:
+            region = text if text in REGION_CODES.values() else None
+            if region is None:
+                self._prompt_step(chat_id, None, step, "아래 버튼에서 지역을 골라 주세요.")
+                return
+            self._finish_onboarding(chat_id, None, state, region)
+        else:  # unknown / corrupted step → reset
+            self.db.clear_onboarding_state(chat_id)
+            self._show_home(chat_id, None)
+
+    def _finish_onboarding(self, chat_id: int, mid: Optional[int], state: dict, region: str) -> None:
+        payload = dict(state.get("payload") or {})
+        nickname = payload.get("nickname") or ""
+        if state.get("step") == ST_CHILD_REGION and nickname and payload.get("birth_date"):
+            self.db.add_child(chat_id, nickname, payload["birth_date"], None)
+            done = f"✅ <b>{esc(nickname)}</b> 등록 완료! 체중은 해열제 계산 때 골라요."
+        elif state.get("step") == ST_PREG_REGION and nickname and payload.get("due_date"):
+            self.db.set_pregnancy(chat_id, nickname, payload["due_date"])
+            done = f"✅ <b>{esc(nickname)}</b> 임신 정보 등록 완료!"
+        else:
+            self.db.clear_onboarding_state(chat_id)
+            self._show_home(chat_id, mid)
+            return
+        self.db.set_default_region(chat_id, region)
+        self.db.clear_onboarding_state(chat_id)
+        self.channel.send_message(chat_id, f"{done}\n📍 지역: <b>{esc(region)}</b>")
+        self._show_home(chat_id, None)
+
     # ---------- callbacks ----------
     def _handle_callback(self, cq: dict[str, Any]) -> None:
-        # [TG-04] Acknowledge first — before parsing, DB work or rendering — to clear the spinner
-        self.channel.answer_callback_query(cq.get("id", ""))
+        # Single-ack scope: joins the manager's scope when dispatched by `DynamicBotManager`.
+        with callback_ack_scope(cq.get("id", "")):
+            self._handle_callback_scoped(cq)
+
+    def _handle_callback_scoped(self, cq: dict[str, Any]) -> None:
+        # [TG-04] Acknowledge first — before parsing, DB work or rendering — to clear the spinner (exactly once)
+        cq_id = cq.get("id", "")
+        answer_callback_once(cq_id, lambda: self.channel.answer_callback_query(cq_id))
 
         data = str(cq.get("data") or "")
         msg = cq.get("message") or {}
@@ -320,24 +781,7 @@ class KidsCompassInteractiveBot:
     def _route(self, chat_id: int, mid: Optional[int], domain: str, args: list[str]) -> None:
         action = args[0] if args else ""
         if domain == "fvr":
-            if action == "":
-                self._show_fever_menu(chat_id, mid)
-            elif action == "m3":
-                self._safe_edit_or_send(chat_id, mid, format_fever_emergency_html(), build_fever_result_keyboard())
-            elif action == "m5":
-                self._show_fever_result(chat_id, mid, float(args[1]), AGE_FOR_4_5M, age_label="4~5개월")
-            elif action == "w":
-                self._show_fever_result(chat_id, mid, float(args[1]), AGE_FOR_6M_PLUS, age_label="6개월 이상")
-            elif action == "c":
-                child = self.db.get_child(int(args[1]), chat_id)
-                if child is None:
-                    self._show_fever_menu(chat_id, mid)
-                else:
-                    self._show_fever_result(chat_id, mid, child.weight_kg, child.age_months(self._clock().date()), child)
-            elif action == "x":
-                self._safe_edit_or_send(chat_id, mid, format_cross_dosing_html(), build_fever_result_keyboard())
-            else:
-                raise ValueError(action)
+            self._route_fever(chat_id, mid, action, args)
         elif domain == "hsp":
             if action == "r":
                 region = REGION_CODES[args[1]]
@@ -383,6 +827,11 @@ class KidsCompassInteractiveBot:
                 self.db.set_alert(chat_id, "weekend", not profile.get("alert_weekend_brief"))
             elif action == "d":
                 self.db.set_alert(chat_id, "dday", not profile.get("alert_dday_reserve"))
+            elif action == "h":
+                self.db.set_alert(chat_id, "health", not profile.get("alert_health_dday"))
+            elif action == "m":
+                together = (profile.get("alert_weekend_mode") or "TOGETHER") == "TOGETHER"
+                self.db.set_weekend_mode(chat_id, "PRIMARY" if together else "TOGETHER")
             elif action == "r":
                 self.db.set_default_region(chat_id, REGION_CODES[args[1]])
             self._show_settings(chat_id, mid)
@@ -390,6 +839,9 @@ class KidsCompassInteractiveBot:
             child = self.db.get_child(int(args[1]), chat_id)
             if child is None:
                 self._show_settings(chat_id, mid)
+            elif action == "p":
+                self.db.set_primary_child(chat_id, child.child_id)
+                self._show_home(chat_id, mid)
             elif action == "x":
                 text = f"🗑 <b>{esc(child.nickname)}</b> 정보를 삭제할까요?\n되돌릴 수 없어요."
                 self._safe_edit_or_send(chat_id, mid, text, build_delete_confirm_keyboard(child.child_id))
@@ -398,15 +850,136 @@ class KidsCompassInteractiveBot:
                 self._show_settings(chat_id, mid)
             else:
                 raise ValueError(action)
+        elif domain == "ob":
+            self._route_onboarding(chat_id, mid, action, args)
+        elif domain == "hub":
+            self._route_hub(chat_id, mid, action, args)
+        elif domain == "fb":
+            self._route_feedback(chat_id, action, args)
+        elif domain == "ms":
+            self._route_milestone(chat_id, mid, action, args)
         else:
             self._show_home(chat_id, mid)
 
+    def _route_fever(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
+        if action == "":
+            self._show_fever_menu(chat_id, mid)
+        elif action == "m3":
+            self._safe_edit_or_send(chat_id, mid, format_fever_emergency_html(), build_fever_result_keyboard())
+        elif action == "m5":
+            self._show_fever_result(chat_id, mid, float(args[1]), AGE_FOR_4_5M, age_label="4~5개월")
+        elif action == "w":
+            self._show_fever_result(chat_id, mid, float(args[1]), AGE_FOR_6M_PLUS, age_label="6개월 이상")
+        elif action in ("c", "cw"):
+            child = self.db.get_child(int(args[1]), chat_id)
+            if child is None:
+                self._show_fever_menu(chat_id, mid)
+                return
+            months = child.age_months(self._clock().date())
+            if action == "cw":
+                weight = float(args[2])
+                if not (1.0 <= weight <= 100.0):
+                    raise ValueError(weight)
+            else:
+                weight = child.weight_kg or 0.0
+            if not weight:
+                # 체중 미입력 아이: 3개월 미만은 계산 없이 즉시 진료 안내, 그 외에는 월령에 맞는 체중 버튼
+                if months < INFANT_BLOCK_MONTHS:
+                    self._safe_edit_or_send(chat_id, mid, format_fever_emergency_html(), build_fever_result_keyboard())
+                else:
+                    self._safe_edit_or_send(chat_id, mid, format_fever_weight_pick_html(child, months),
+                                            build_child_weight_keyboard(child.child_id, months))
+                return
+            self._show_fever_result(chat_id, mid, weight, months, child)
+        elif action == "x":
+            self._safe_edit_or_send(chat_id, mid, format_cross_dosing_html(), build_fever_result_keyboard())
+        else:
+            raise ValueError(action)
+
+    def _route_onboarding(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
+        if action == "c":
+            self._start_onboarding(chat_id, mid, "CHILD")
+        elif action == "p":
+            self._start_onboarding(chat_id, mid, "PREGNANCY")
+        elif action == "x":
+            self.db.clear_onboarding_state(chat_id)
+            self._show_home(chat_id, mid)
+        elif action == "r":
+            region = REGION_CODES[args[1]]
+            state = self.db.get_onboarding_state(chat_id, self._clock())
+            if state is None or state.get("step") not in REGION_STEPS:
+                self._show_home(chat_id, mid)  # stale button: harmless
+                return
+            self._finish_onboarding(chat_id, mid, state, region)
+        else:
+            raise ValueError(action)
+
+    def _route_hub(self, chat_id: int, mid: Optional[int], code: str, args: list[str]) -> None:
+        if code == "med":
+            text = ("🏥 <b>병원·해열제·검진</b>\n밤에 열이 날 때 · 야간 소아과 · 표준 검진/접종 시기\n\n"
+                    "📞 위급하면 <b>119</b>")
+            self._safe_edit_or_send(chat_id, mid, text, build_med_hub_keyboard())
+            return
+        title, cats = HUB_MENUS[code]
+        together = len(args) > 1 and args[1] == "t"
+        today = self._clock().date()
+        region = (self.db.get_user_profile(chat_id) or {}).get("default_region") or "서울"
+        ages, label = _subjects(self.db, str(chat_id), today, together)
+        lists = []
+        for age in ages:
+            if cats is None:  # 야외·나들이: outdoor first, nature first
+                items = [e for e in recommend_weekend_picks(self.db, age, region, limit=HUB_PICK_LIMIT * 2,
+                                                            allow_backfill=False) if not e.is_indoor]
+            else:
+                items = [e for e in self.db.list_experiences(age_group=age, region_sido=region)
+                         if e.category in cats]
+            if age == AgeGroup.PREGNANCY:
+                items = [e for e in items if e.age_group == AgeGroup.PREGNANCY]
+            else:
+                items = [e for e in items if e.age_group != AgeGroup.PREGNANCY]
+            lists.append(items)
+        picks = _round_robin(lists, HUB_PICK_LIMIT)
+        multi = len(self.db.list_children(chat_id)) > 1
+        self._safe_edit_or_send(chat_id, mid, format_hub_picks_html(title, label, region, picks),
+                                build_hub_result_keyboard(code, together, multi))
+
+    def _route_feedback(self, chat_id: int, action: str, args: list[str]) -> None:
+        """Forged / expired / other user's token → harmless no-op (nothing recorded, nothing rendered)."""
+        if action not in FEEDBACK_ACTIONS or len(args) < 2:
+            return
+        now = self._clock()
+        exp = self.db.resolve_rec_token(chat_id, args[1], now)
+        if exp is None:
+            return
+        feedback = FEEDBACK_ACTIONS[action]
+        self.db.record_place_feedback(chat_id, exp.exp_id, feedback, now)
+        note = "다녀오셨군요! 4주간 추천에서 빼 둘게요." if feedback == "VISITED" else "관심 없음 — 3개월간 추천하지 않을게요."
+        self.channel.send_message(chat_id, f"👍 <b>{esc(exp.title)}</b>\n{note}")
+
+    def _route_milestone(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
+        if action == "ok":
+            m = self.db.get_subject_milestone(chat_id, int(args[1]))  # owner-scoped
+            if m is None:
+                return  # other user's / unknown milestone → harmless no-op
+            if m.status != "USER_CONFIRMED":
+                self.db.set_milestone_status(chat_id, m.milestone_id, "USER_CONFIRMED", "USER", self._clock())
+            defn = next((d for d in self.db.list_milestone_definitions() if d.definition_id == m.definition_id), None)
+            title = defn.title if defn else "검진·접종"
+            self.channel.send_message(chat_id, f"✅ <b>{esc(title)}</b> 확인 완료로 기록했어요. 다시 알리지 않아요.")
+        elif action == "l":
+            today = self._clock().date()
+            items = collect_due_milestone_items(self.db, str(chat_id), today, MILESTONE_PULL_LOOKAHEAD_DAYS)
+            text = format_milestone_push_html(items, today, subtitle="앞으로 30일 안에 챙길 표준 시기 항목이에요")
+            self._safe_edit_or_send(chat_id, mid, text, build_milestone_keyboard(items))
+        else:
+            raise ValueError(action)
+
     # ---------- screens ----------
     def _show_home(self, chat_id: int, mid: Optional[int]) -> None:
-        self._safe_edit_or_send(chat_id, mid, format_home_html(self.db.list_children(chat_id),
-                                                               self.db.get_user_profile(chat_id),
-                                                               self.db.get_pregnancy(chat_id)),
-                                build_home_keyboard())
+        children = self.db.list_children(chat_id)
+        pregnancy = self.db.get_pregnancy(chat_id)
+        text = format_home_html(children, self.db.get_user_profile(chat_id), pregnancy, self._clock().date())
+        self._safe_edit_or_send(chat_id, mid, text, build_home_keyboard(children, pregnancy is not None))
 
     def _show_fever_menu(self, chat_id: int, mid: Optional[int]) -> None:
         children = self.db.list_children(chat_id)
@@ -444,12 +1017,15 @@ class KidsCompassInteractiveBot:
         profile = self.db.get_user_profile(chat_id) or {}
         children = self.db.list_children(chat_id)
         preg = self.db.get_pregnancy(chat_id)
-        lines = ["🔔 <b>알림·아이 설정</b>", f"📍 기본 지역: <b>{esc(profile.get('default_region', '서울'))}</b>"]
-        lines += [f"👧 {esc(c.nickname)} · {esc(c.birth_date)} · {c.weight_kg:g}kg" for c in children]
+        lines = ["⚙️ <b>아이·알림 설정</b>", f"📍 기본 지역: <b>{esc(profile.get('default_region', '서울'))}</b>"]
+        lines += [f"{'⭐' if c.is_primary else '👧'} {esc(c.nickname)} · {esc(c.birth_date)} · {esc(kg_text(c.weight_kg))}"
+                  for c in children]
         if not children:
-            lines.append("👧 아이 등록: <code>/child 별명 2023-05-01 11.2</code>")
+            lines.append("👧 아래 <b>[➕ 아이 등록]</b>으로 5초 만에 등록하세요.")
         if preg is not None:
             lines.append(f"🤰 {esc(preg.nickname)} · 출산예정 {esc(preg.due_date)}")
+        lines += ["", "🩺 검진·접종: 이번 주 챙길 항목만 1통 · 🎈 목 17시: 내 지역 1~2곳 · ⏰ 월 9시: 내 아이 맞춤 예약",
+                  "추천할 게 없으면 보내지 않아요."]
         self._safe_edit_or_send(chat_id, mid, "\n".join(lines), build_settings_keyboard(profile, children, preg))
 
     # ---------- transport ----------
@@ -459,3 +1035,10 @@ class KidsCompassInteractiveBot:
         if message_id and self.channel.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup):
             return
         self.channel.send_message(chat_id, text, reply_markup=reply_markup)
+
+
+def iter_push_preview(messages: Iterable[PushMessage]) -> Iterable[tuple[PushMessage, list[str]]]:
+    """(message, button lines) for dry-run / demo previews."""
+    for m in messages:
+        rows = (m.reply_markup or {}).get("inline_keyboard", [])
+        yield m, [" | ".join(f"[{b['text']}]({b.get('callback_data')})" for b in row) for row in rows]

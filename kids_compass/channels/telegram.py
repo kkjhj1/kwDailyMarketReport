@@ -13,9 +13,10 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable, Iterable, Optional
 
+from market_brief.channels.http_keepalive import open_request
 from kids_compass.collector import WALK_IN_TIPS
 from kids_compass.fever_engine import (
     CROSS_ALLOWED_WITH_CAUTION,
@@ -37,9 +38,18 @@ from kids_compass.models import (
     MoonlightHospital,
     PregnancyBenefit,
     PregnancyProfile,
+    PushMessage,
+    WeatherSnapshot,
 )
 
 logger = logging.getLogger(__name__)
+
+# Message-level idempotency row in kids_sent_history: at most ONE push per (user, stream, window),
+# independent of which entities the (re)built message happens to contain.
+PUSH_MESSAGE_SENTINEL = "__msg__"
+MILESTONE_DISCLAIMER = "참고용 표준 시기 안내이며 실제 접종·검진 여부는 예방접종도우미·소아과와 확인하세요"
+MILESTONE_KIND_ICONS = {"CHECKUP": "🩺", "VACCINE": "💉", "PREGNANCY": "🤰"}
+MILESTONE_PUSH_MAX_ITEMS = 6
 
 MAX_VISIBLE_CHARS = 1800
 MAX_HTML_CHARS = 3500
@@ -83,21 +93,43 @@ def fits_limits(html_text: str) -> bool:
 
 
 # ── Cards ─────────────────────────────────────────────────────
+def kg_text(weight: Optional[float]) -> str:
+    """'11.2kg' or '체중 미입력' — never raises on a missing (None / 0) weight."""
+    return f"{weight:g}kg" if weight else "체중 미입력"
+
+
+def _on_off(profile: Optional[dict], column: str) -> str:
+    return "ON" if (profile or {}).get(column) else "OFF"
+
+
 def format_home_html(children: list[ChildProfile], profile: Optional[dict] = None,
-                     pregnancy: Optional[PregnancyProfile] = None) -> str:
+                     pregnancy: Optional[PregnancyProfile] = None, today: Optional[date] = None) -> str:
     lines = ["🍼 <b>키즈 나침반</b>", "평일엔 응급육아 · 주말엔 체험 나들이", ""]
-    if pregnancy:
-        lines += [f"🤰 {esc(pregnancy.nickname)} · 출산예정 <b>{esc(pregnancy.dday())}</b>", ""]
-    if children:
-        lines.append("👧 <b>우리 아이</b>")
-        for c in children[:4]:
-            lines.append(f"• {esc(c.nickname)} · 생후 <b>{c.age_months()}개월</b> · <b>{c.weight_kg:g}kg</b>")
+    if not children and pregnancy is None:
+        lines += [
+            "👋 <b>5초 간편 등록</b>으로 우리 아이 맞춤 비서를 시작하세요",
+            "아래 <b>[➕ 아이 등록]</b> 또는 <b>[🤰 임신 중이에요]</b>를 눌러 주세요.",
+            "",
+            "🚨 급하면 등록 없이 바로 <b>해열제 계산</b> · <b>달빛병원</b>을 누르세요.",
+        ]
     else:
-        lines.append("👧 아이 등록: <code>/child 별명 2023-05-01 11.2</code>")
+        if pregnancy is not None:
+            lines.append(f"🤰 {esc(pregnancy.nickname)} · 출산예정 <b>{esc(pregnancy.dday(today))}</b>"
+                         f" · 임신 {pregnancy.gestational_week(today)}주")
+        if children:
+            lines.append("👧 <b>우리 아이</b>")
+            for c in children[:4]:
+                star = "⭐ " if c.is_primary else "• "
+                lines.append(f"{star}{esc(c.nickname)} · 생후 <b>{c.age_months(today)}개월</b> · {esc(kg_text(c.weight_kg))}")
+        region = (profile or {}).get("default_region") or "서울"
+        lines += ["", f"📍 기본 지역 <b>{esc(region)}</b> · ⭐ 선택된 아이 기준으로 추천해요"]
     if profile:
-        wk = "ON" if profile.get("alert_weekend_brief") else "OFF"
-        dd = "ON" if profile.get("alert_dday_reserve") else "OFF"
-        lines += ["", f"🔔 목 17시 주말브리핑 <b>{wk}</b> · 월 9시 D-Day <b>{dd}</b>"]
+        lines += [
+            "",
+            f"🔔 검진·접종 <b>{_on_off(profile, 'alert_health_dday')}</b> · "
+            f"주말추천 <b>{_on_off(profile, 'alert_weekend_brief')}</b> · "
+            f"예약 D-Day <b>{_on_off(profile, 'alert_dday_reserve')}</b>",
+        ]
     lines += ["", "아래 버튼을 눌러 주세요 👇"]
     return "\n".join(lines)
 
@@ -167,14 +199,87 @@ def format_category_html(picks: list[ExperienceItem], category: ExperienceCatego
     return "\n".join(lines)
 
 
+def format_hub_picks_html(title: str, subject_label: str, region: str, picks: list[ExperienceItem]) -> str:
+    """Pull hub card: selected child (or 형제 함께) + default region applied automatically."""
+    lines = [f"<b>{esc(title)}</b>", f"👧 {esc(subject_label)} · 📍 {esc(region)}", ""]
+    if not picks:
+        lines.append("이 지역·연령에 맞는 장소가 아직 없어요. 설정에서 지역을 바꿔 보세요.")
+    for i, e in enumerate(picks, 1):
+        lines += _exp_line(i, e) + [""]
+    lines.append("ℹ️ 요금·운영시간은 방문 전 공식 공지를 확인하세요.")
+    return "\n".join(lines)
+
+
+def format_weekend_push_html(picks: list[ExperienceItem], subject_label: str,
+                             weather: Optional[WeatherSnapshot], region: str) -> str:
+    """Thursday 1:1 push: 1~2 hand-picked places. Weather wording appears ONLY for a real (non-failed) snapshot —
+    a missing/failed forecast is never presented as '날씨 반영' (and never as sunny)."""
+    lines = ["🎈 <b>이번 주말, 여기 어때요?</b>", f"👧 {esc(subject_label)} · 📍 {esc(region)}"]
+    if weather is not None and not weather.is_failed:
+        lines.append(f"🌤 {esc(weather.summary_text)}")
+        lines.append("☔ 날씨 반영 · 실내 위주로 골랐어요" if weather.is_rain_or_snow else "🌤 날씨 반영 · 야외+실내 균형")
+    lines.append("")
+    for i, e in enumerate(picks[:2], 1):
+        lines += _exp_line(i, e) + [""]
+    lines += [
+        "👇 다녀왔거나 관심 없으면 눌러 주세요 — 다음 추천에서 빼 드려요.",
+        "ℹ️ 요금·운영시간은 방문 전 공식 공지를 확인하세요.",
+    ]
+    return "\n".join(lines)
+
+
+MILESTONE_DDAY_SHOW_DAYS = 60  # long windows (e.g. 만 4~6세) show the end date only, not 'D-731'
+
+
+def _md(iso: str, today: date) -> str:
+    try:
+        d = date.fromisoformat(iso)
+    except ValueError:
+        return esc(iso)
+    year = f"{d.year}." if d.year != today.year else ""
+    return f"{year}{d.month}/{d.day}({WEEKDAYS_KO[d.weekday()]})"
+
+
+def format_milestone_push_html(items: list[dict], today: date, subtitle: str = "이번 주 챙길 표준 시기 항목이에요") -> str:
+    """검진·예방접종·임신 체크포인트를 사용자당 1통으로 통합.
+    items: {"subject", "kind", "title", "description", "due_from", "due_to"} (milestone_id is used by the keyboard)."""
+    lines = ["🩺 <b>우리 아이 건강 체크 알림</b>", esc(subtitle), ""]
+    if not items:
+        lines += ["지금 챙길 검진·접종 항목이 없어요 👍", ""]
+    shown = items[:MILESTONE_PUSH_MAX_ITEMS]
+    for n, it in enumerate(shown, 1):
+        icon = MILESTONE_KIND_ICONS.get(str(it.get("kind")), "📌")
+        try:
+            left = (date.fromisoformat(str(it.get("due_to"))) - today).days
+            until = "" if left > MILESTONE_DDAY_SHOW_DAYS else (f"D-{left}" if left > 0 else "D-DAY")
+        except ValueError:
+            until = ""
+        lines += [
+            f"{n}. {icon} <b>{esc(it.get('title', ''))}</b>",
+            f"   👧 {esc(it.get('subject', ''))} · {_md(str(it.get('due_from')), today)} ~ "
+            f"{_md(str(it.get('due_to')), today)}"
+            + (f" (<b>{until}</b>)" if until else ""),
+        ]
+        if it.get("description"):
+            lines.append(f"   {esc(it['description'])}")
+        lines.append("")
+    if len(items) > len(shown):
+        lines += [f"➕ 그 외 {len(items) - len(shown)}건은 홈 ▸ 병원·해열제·검진에서 확인하세요.", ""]
+    if shown:
+        lines += ["✅ 이미 했다면 아래 버튼으로 표시해 주세요 (다시 알리지 않아요).", ""]
+    lines.append(f"<i>{esc(MILESTONE_DISCLAIMER)}</i>")
+    return "\n".join(lines)
+
+
 def dday_label(open_dt: datetime, now: datetime) -> str:
     days = (open_dt.date() - now.date()).days
     return "D-DAY" if days <= 0 else f"D-{days}"
 
 
-def format_dday_alert_html(events: list[BookingEvent], now: Optional[datetime] = None) -> str:
+def format_dday_alert_html(events: list[BookingEvent], now: Optional[datetime] = None,
+                           subtitle: Optional[str] = None) -> str:
     now = now or datetime.now()
-    lines = ["⏰ <b>예약 오픈 D-Day 스나이퍼</b>", "놓치면 마감되는 국공립 체험", ""]
+    lines = ["⏰ <b>예약 오픈 D-Day 스나이퍼</b>", esc(subtitle) if subtitle else "놓치면 마감되는 국공립 체험", ""]
     if not events:
         lines.append("2주 안에 열리는 예약이 없어요.")
     for ev in events[:8]:
@@ -202,7 +307,22 @@ def format_fever_menu_html(children: list[ChildProfile]) -> str:
         "⚠️ <b>생후 4~5개월</b>은 아세트아미노펜만 안내해요",
     ]
     if not children:
-        lines += ["", "👧 아이 등록: <code>/child 별명 2023-05-01 11.2</code>"]
+        lines += ["", "👧 홈의 <b>[➕ 아이 등록]</b>으로 등록하면 아이 버튼이 생겨요."]
+    elif any(not c.weight_kg for c in children):
+        lines += ["", "⚖️ 체중 미입력 아이는 누르면 체중을 고르는 화면이 나와요."]
+    return "\n".join(lines)
+
+
+def format_fever_weight_pick_html(child: ChildProfile, months: int) -> str:
+    """Child without a stored weight: ask for the weight first (age bucket comes from the child's birth date)."""
+    lines = [
+        "🌡 <b>해열제 용량 계산기</b>",
+        f"👧 {esc(child.nickname)} · 생후 <b>{months}개월</b> · 체중 미입력",
+        "",
+        "⚖️ 지금 체중에 가장 가까운 버튼을 눌러 주세요.",
+    ]
+    if months < 6:
+        lines.append("⚠️ <b>생후 4~5개월</b>은 아세트아미노펜만 안내해요")
     return "\n".join(lines)
 
 
@@ -223,11 +343,12 @@ def format_fever_result_html(
 ) -> str:
     """age_label overrides the exact month count for quick-weight buttons (e.g. '6개월 이상')."""
     any_result = next(iter(results_by_ingredient.values()), None)
-    weight = any_result.weight_kg if any_result else (child.weight_kg if child else 0)
+    weight = any_result.weight_kg if any_result else (child.weight_kg if child else None)
     months = any_result.age_months if any_result else 0
     who = f"{esc(child.nickname)} · " if child else ""
     age_text = esc(age_label) if age_label else f"{months}개월"
-    lines = ["🌡 <b>해열제 1회 용량</b>", f"{who}체중 <b>{weight:g}kg</b> · 생후 <b>{age_text}</b>", ""]
+    weight_text = f"체중 <b>{weight:g}kg</b>" if weight else "체중 미입력"
+    lines = ["🌡 <b>해열제 1회 용량</b>", f"{who}{weight_text} · 생후 <b>{age_text}</b>", ""]
 
     if any(r.status == STATUS_BLOCKED_INFANT for r in results_by_ingredient.values()):
         lines += [esc(WARN_INFANT_UNDER_3M), "", EMERGENCY_FALLBACK]
@@ -306,10 +427,11 @@ class TelegramAPIError(RuntimeError):
 
 
 class KidsTelegramChannel:
-    """Minimal Telegram Bot API client (stdlib only)."""
+    """Minimal Telegram Bot API client (shared keep-alive helper; stdlib fallback)."""
 
     def __init__(self, bot_token: str, opener: Optional[Callable[..., Any]] = None):
         self.bot_token = (bot_token or "").strip()
+        self._injected_opener = opener  # None -> shared keep-alive helper (patched urlopen still honoured)
         self._opener = opener or urllib.request.urlopen
         if not self.bot_token:
             logger.warning("KidsTelegramChannel initialized with empty bot_token")
@@ -321,7 +443,7 @@ class KidsTelegramChannel:
             headers={"Content-Type": "application/json", "User-Agent": "KidsCompassBot/1.0"},
         )
         try:
-            with self._opener(req, timeout=timeout) as resp:
+            with open_request(req, timeout, opener=self._injected_opener) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             desc, retry_after = str(exc), 0.0
@@ -435,11 +557,55 @@ class SafeTelegramDispatcher:
                 stats["errors"][str(chat_id)] = err
         return stats
 
-    def _send_with_retry(self, channel: Any, chat_id: int | str, text: str) -> tuple[str, Optional[str]]:
+    def dispatch_push_messages(self, channel: Any, db: Any, push_messages: Iterable[PushMessage],
+                               dispatch_window: str) -> dict[str, Any]:
+        """1:1 push with inline buttons, idempotent on kids_sent_history.
+
+        Per message: [TG-01] pre-check -> atomic IN_FLIGHT claim of the message sentinel row
+        (user, stream, window) -> per-entity claims (cooldown / already-sent bookkeeping) -> send ->
+        finalize every claimed row with the same status. Existing IN_FLIGHT / SENT / UNKNOWN / BLOCKED rows are
+        skipped (UNKNOWN = possibly delivered → never resent); only FAILED is claimed again.
+        """
+        stats: dict[str, Any] = {"total": 0, "sent": 0, "skipped": 0, "unknown": 0, "blocked": 0, "failed": 0,
+                                 "invalid": 0, "errors": {}}
+        for msg in push_messages:
+            stats["total"] += 1
+            chat_id, stream, etype = str(msg.chat_id), msg.stream or "push", msg.entity_type
+            if not fits_limits(msg.text):
+                stats["invalid"] += 1
+                stats["errors"][chat_id] = "TG-01 limit exceeded (%d html / %d visible)" % measure_message(msg.text)
+                continue
+            try:
+                claimed = db.claim_sent_history(chat_id, stream, etype, PUSH_MESSAGE_SENTINEL, dispatch_window,
+                                                content_hash=msg.content_hash)
+            except ValueError as exc:  # unknown entity_type
+                stats["invalid"] += 1
+                stats["errors"][chat_id] = str(exc)
+                continue
+            if not claimed:
+                stats["skipped"] += 1
+                continue
+            entity_rows = [eid for eid in dict.fromkeys(str(e) for e in msg.entity_ids)
+                           if eid != PUSH_MESSAGE_SENTINEL
+                           and db.claim_sent_history(chat_id, stream, etype, eid, dispatch_window,
+                                                     content_hash=msg.content_hash)]
+            status, err = self._send_with_retry(channel, chat_id, msg.text, msg.reply_markup)
+            for eid in [PUSH_MESSAGE_SENTINEL, *entity_rows]:
+                db.finalize_sent_history(chat_id, stream, etype, eid, dispatch_window, status)
+            stats[status.lower()] += 1
+            if err:
+                stats["errors"][chat_id] = err
+        return stats
+
+    def _send_with_retry(self, channel: Any, chat_id: int | str, text: str,
+                         reply_markup: Optional[dict[str, Any]] = None) -> tuple[str, Optional[str]]:
         for attempt in range(self.max_retries + 1):
             self.limiter.wait_before_send(chat_id)
             try:
-                channel.send_message(chat_id, text)
+                if reply_markup is None:
+                    channel.send_message(chat_id, text)
+                else:
+                    channel.send_message(chat_id, text, reply_markup=reply_markup)
                 return "SENT", None
             except TelegramAPIError as exc:
                 if exc.code == 429 and attempt < self.max_retries:
