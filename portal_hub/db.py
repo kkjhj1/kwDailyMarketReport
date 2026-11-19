@@ -541,8 +541,8 @@ class PortalDatabase:
             return ok, False if ok else True, msg
 
     def get_bots_by_category(self, category: BotCategory) -> list[BotServiceType]:
-        """Returns list of bots belonging to given category."""
-        return [b for b in BotServiceType if b.category == category]
+        """Returns list of public (Menu Bot visible) bots belonging to given category."""
+        return [b for b in BotServiceType if b.is_public and b.category == category]
 
     def search_bots(self, query: str) -> list[BotServiceType]:
         """Performs instant keyword matching against bot names, descriptions, and tags."""
@@ -551,7 +551,7 @@ class PortalDatabase:
             return []
 
         matched = []
-        for b in BotServiceType:
+        for b in [b for b in BotServiceType if b.is_public]:
             if q in b.title.lower() or q in b.short_name.lower():
                 matched.append(b)
                 continue

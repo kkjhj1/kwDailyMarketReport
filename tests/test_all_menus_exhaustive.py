@@ -140,6 +140,17 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             self.client.edit_message_text.assert_called_once()
             called_text = self.client.edit_message_text.call_args[0][2]
             self.assertIn(expected_keyword, called_text)
+            if cb_data == "cat:view:EDU":
+                # All EDU bots are hidden WIP -> placeholder, no admission_bot buttons
+                self.assertIn("현재 준비 중인 카테고리입니다", called_text)
+                markup = self.client.edit_message_text.call_args[1]["reply_markup"]
+                cbs = [b.get("callback_data", "") for row in markup["inline_keyboard"] for b in row]
+                self.assertFalse(any("admission_bot" in cb for cb in cbs))
+            if cb_data == "cat:view:LIFE":
+                for hidden in ("silver_bot", "yolo_bot"):
+                    markup = self.client.edit_message_text.call_args[1]["reply_markup"]
+                    cbs = [b.get("callback_data", "") for row in markup["inline_keyboard"] for b in row]
+                    self.assertFalse(any(hidden in cb for cb in cbs), hidden)
 
     # -------------------------------------------------------------
     # 3. Subscription Flow & 2-Step In-Place Confirmation

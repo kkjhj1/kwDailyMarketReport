@@ -96,6 +96,46 @@ def _gate_target_bot(data: str) -> Optional[BotServiceType]:
     return None
 
 
+HIDDEN_BOT_ALERT = "🚧 현재 서비스 준비 중인 봇입니다."
+
+# New-subscription entry points: bot id at parts[2] (subscribe) or parts[3] (swap target).
+_NEW_SUB_PREFIXES = ("sub:ask_sub:", "sub:do_sub:", "menu:sub:", "info:sub:")
+_SWAP_PREFIXES = ("sub:swap:", "menu:swap:", "info:swap:")
+
+
+def _hidden_new_sub_target(data: str) -> Optional[BotServiceType]:
+    """Returns the hidden (non-public) bot a callback tries to newly subscribe/swap into, else None.
+    Unknown bot ids return None so the existing ValueError handling of each branch still applies."""
+    parts = data.split(":")
+    if data.startswith(_NEW_SUB_PREFIXES):
+        token = parts[2] if len(parts) >= 3 else ""
+    elif data.startswith(_SWAP_PREFIXES):
+        token = parts[3] if len(parts) >= 4 else ""
+    else:
+        return None
+    try:
+        bot_type = BotServiceType(token)
+    except ValueError:
+        return None
+    return None if bot_type.is_public else bot_type
+
+
+def render_hidden_unsub_confirm_view(
+    bot_type: BotServiceType, context_str: str = "subs"
+) -> tuple[str, dict[str, Any]]:
+    """Standalone 2-button unsubscribe confirm card for a hidden bot (it is not listed in any public view)."""
+    text = (
+        f"⚠️ <b>[{html.escape(bot_type.short_name)}] 구독을 정말 해지하시겠습니까?</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>"
+    )
+    keyboard = [[
+        {"text": "🔴 해지 확정", "callback_data": f"sub:do_unsub:{bot_type.value}:{context_str}"},
+        {"text": "↩️ 취소", "callback_data": f"sub:cancel_unsub:{context_str}"},
+    ]]
+    return text, {"inline_keyboard": keyboard}
+
+
 def _safe_edit_or_send(
     client: TelegramPortalClient,
     chat_id: int | str,
@@ -123,7 +163,7 @@ def render_main_menu(
     name = html.escape(user.first_name or user.username or "회원")
     active_line = ""
     if subs is not None:
-        active_bots = [b.short_name for b, act in subs.items() if act]
+        active_bots = [b.short_name for b, act in subs.items() if act and b.is_public]
         if active_bots:
             chips = " · ".join(active_bots)
             active_line = f"📌 <b>내 활성 구독 ({len(active_bots)}개)</b>: {chips}\n"
@@ -138,7 +178,7 @@ def render_main_menu(
         f"📦 <b>구독 가능 슬롯</b>: <b>{user.tier.max_slots if user.tier != UserTier.BLACK else '무제한'}개</b>\n"
         f"{active_line}"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '입시', '실버', '키즈', '욜로')를 입력하세요!</i>"
+        f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '키즈')를 입력하세요!</i>"
     )
 
     markup = {
@@ -197,7 +237,7 @@ def render_subscription_view(
     )
 
     keyboard = []
-    for bot in BotServiceType:
+    for bot in [b for b in BotServiceType if b.is_public]:
         is_subbed = subs.get(bot, False)
         deep_link_url = bot.get_start_link() or f"https://t.me/{bot.telegram_handle}?start=portal"
 
@@ -245,7 +285,7 @@ def render_category_view(
     confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Renders 3-item Compact Chip View for selected category with In-Place Confirmation."""
-    bots = [b for b in BotServiceType if b.category == category]
+    bots = [b for b in BotServiceType if b.is_public and b.category == category]
 
     lines = [
         f"<b>{html.escape(category.title)} 봇 카탈로그</b>",
@@ -325,8 +365,8 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"원하시는 분야를 선택하시면 세부 봇 목록을 확인하실 수 있습니다.\n\n"
         f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율 등 (시황 브리핑)\n"
-        f"• 🎓 <b>교육 / 입시</b>: 대입/수시 To-Do, 설명회 요약 등 (입시 나침반)\n"
-        f"• ✈️ <b>라이프 / 여가</b>: 특가 항공권(여행), 부모님 복지(실버케어), 주말 나들이·육아(키즈), 1인 취미·힐링(욜로)\n"
+        f"• 🎓 <b>교육 / 입시</b>: 신규 교육 봇 출시 예정 (준비중)\n"
+        f"• ✈️ <b>라이프 / 여가</b>: 특가 항공권, 주말 나들이·육아 등 (여행, 키즈)\n"
         f"• 💼 <b>업무 / 생산성</b>: 뉴스 클리핑, 생산성 도구 등 (준비중)\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -351,11 +391,8 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
 
 CATALOG_ALL_ORDER = (
     BotServiceType.BRIEF,
-    BotServiceType.ADMISSION,
     BotServiceType.TRAVEL,
-    BotServiceType.SILVER,
     BotServiceType.KIDS,
-    BotServiceType.YOLO,
 )
 
 CALLBACK_DATA_MAX_BYTES = 64
@@ -380,10 +417,10 @@ def render_catalog_all_view(
     confirming_bot_id: Optional[str] = None,
     confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Renders all 6 bots on one screen with subscription badges and 2-step confirmation buttons."""
+    """Renders all public bots on one screen with subscription badges and 2-step confirmation buttons."""
     active_count = sum(1 for v in subs.values() if v)
     lines = [
-        "📋 <b>6개 봇 한눈에 보기</b>",
+        "📋 <b>전체 봇 한눈에 보기</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"📊 <b>구독 슬롯</b>: <b>{build_slot_gauge(active_count, user.tier)}</b>",
     ]
@@ -448,7 +485,7 @@ def render_catalog_all_view(
 def _context_return_buttons(bot_type: BotServiceType, context_str: str) -> list[dict[str, Any]]:
     """Returns a 'back to where you came from' button for catalog/category contexts."""
     if context_str == "all":
-        return [{"text": "📋 6대 봇 목록", "callback_data": "cat:all"}]
+        return [{"text": "📋 전체 봇 목록", "callback_data": "cat:all"}]
     if context_str.startswith("cat:"):
         return [{"text": "📂 카테고리", "callback_data": f"cat:view:{bot_type.category.value}"}]
     return []
@@ -507,7 +544,8 @@ def render_quota_swap_view(
     reason: str,
     context_str: str = "subs",
 ) -> tuple[str, dict[str, Any]]:
-    """Renders over-quota notice with 1-click swap buttons for each currently active bot."""
+    """Renders over-quota notice with 1-click swap buttons for each currently active public bot."""
+    swappable_bots = [b for b in swappable_bots if b.is_public]
     text = html.escape(reason)
     if swappable_bots:
         text += (
@@ -550,6 +588,7 @@ def render_search_results_view(
     confirming_sub_bot_id: Optional[str] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Renders instant keyword search results with In-Place Subscription/Unsubscription Confirmation."""
+    matched_bots = [b for b in matched_bots if b.is_public]
     clean_q = html.escape(query.strip())
     cb_q = fit_search_query_for_callback(query)
     lines = [
@@ -570,7 +609,7 @@ def render_search_results_view(
 
     if not matched_bots:
         lines.append(f"'{clean_q}'와(과) 일치하는 봇을 찾지 못했습니다. 😢\n")
-        lines.append("💡 <i>추천 검색어: '환율', '시황', '입시', '수능', '여행', '특가', '실버', '효도', '키즈', '해열제', '욜로', '혼놀'</i>")
+        lines.append("💡 <i>추천 검색어: '환율', '시황', '여행', '특가', '키즈', '해열제'</i>")
     else:
         for i, b in enumerate(matched_bots, 1):
             is_sub = subs.get(b, False)
@@ -740,7 +779,7 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
         f"❓ <b>포털 봇 이용 가이드</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Q. 원하는 봇을 가장 빠르게 찾는 방법은?</b>\n"
-        f"A. 채팅창에 '환율', '수능', '항공', '실버', '키즈', '욜로' 등 찾으시는 단어를 그냥 입력하시면 0.1초 만에 봇을 찾아드립니다!\n\n"
+        f"A. 채팅창에 '환율', '여행', '키즈' 등 찾으시는 단어를 그냥 입력하시면 0.1초 만에 봇을 찾아드립니다!\n\n"
         f"<b>Q. 실수로 해지 버튼을 눌렀는데 바로 해지되나요?</b>\n"
         f"A. 아닙니다! 실수 방지를 위해 [해지 확정] / [취소] 버튼이 펼쳐지며, [취소]를 누르면 안전하게 구독이 유지됩니다.\n\n"
         f"<b>Q. 알림은 어디로 오나요?</b>\n"
@@ -914,6 +953,12 @@ def _handle_callback_query_scoped(
     message_id = msg.get("message_id")
     data = cq.get("data", "")
 
+    # 0. Hidden (WIP) bot guard: MUST run before any silent ACK — AckOnceClient delivers only the first
+    #    answer, so a prior silent ACK would swallow this show_alert. No DB mutation on block.
+    if _hidden_new_sub_target(data) is not None:
+        client.answer_callback_query(cq_id, HIDDEN_BOT_ALERT, show_alert=True)
+        return
+
     # 1. Stop button loading spinner immediately (except modal alerts: sub:toggle, adm, sub:do_sub, sub:do_unsub, sub:swap, support:req_tier)
     MODAL_ACTIONS = (
         "sub:toggle:", "adm:", "sub:do_sub:", "sub:do_unsub:", "sub:swap:", "support:req_tier:",
@@ -967,6 +1012,11 @@ def _handle_callback_query_scoped(
             bot_type = BotServiceType(bot_raw)
         except ValueError:
             client.answer_callback_query(cq_id)
+            return
+
+        # Toggle on a hidden bot is allowed only as an unsubscribe of an existing subscription
+        if not bot_type.is_public and not db.get_user_subscriptions(user_id).get(bot_type, False):
+            client.answer_callback_query(cq_id, HIDDEN_BOT_ALERT, show_alert=True)
             return
 
         ok, is_active, msg = db.toggle_subscription(user_id, bot_type)
@@ -1262,6 +1312,13 @@ def _handle_callback_query_scoped(
         parts = data.split(":")
         bot_raw = parts[2]
         context_str = ":".join(parts[3:]) if len(parts) > 3 else "subs"
+
+        hidden_bot = next((b for b in BotServiceType if b.value == bot_raw and not b.is_public), None)
+        if hidden_bot is not None:
+            # Stale unsubscribe of a hidden bot: public views no longer list it, so show a standalone card
+            text, markup = render_hidden_unsub_confirm_view(hidden_bot, context_str)
+            _safe_edit_or_send(client, chat_id, message_id, text, markup)
+            return
 
         subs = db.get_user_subscriptions(user_id)
         if context_str.startswith("cat:"):

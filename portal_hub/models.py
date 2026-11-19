@@ -194,6 +194,20 @@ class BotServiceType(str, Enum):
             return None
         return f"https://t.me/{handle}?start={payload}"
 
+    @property
+    def is_public(self) -> bool:
+        """True when the bot is exposed in Menu Bot (portal_hub) catalogs/search/new subscriptions.
+        WIP bots stay in the enum for DB/backend compatibility but are hidden (default-deny)."""
+        return self in PUBLIC_BOT_SERVICES
+
+
+# Bots visible in Menu Bot. ADMISSION / SILVER / YOLO are WIP and hidden (enum members kept for DB compat).
+PUBLIC_BOT_SERVICES: frozenset[BotServiceType] = frozenset({
+    BotServiceType.BRIEF,
+    BotServiceType.TRAVEL,
+    BotServiceType.KIDS,
+})
+
 
 @dataclass
 class UserProfile:
