@@ -19,6 +19,7 @@ from yolo_brief.channels.telegram_card import (
     render_curation_card,
     render_guide_card,
     render_onboarding_card,
+    render_plan_card,
     render_profile_card,
     render_saved_locker_card,
     render_unsub_confirm_card,
@@ -27,6 +28,13 @@ from yolo_brief.channels.telegram_card import (
 )
 from yolo_brief.channels.telegram_limiter import SafeTelegramDispatcher
 from yolo_brief.matching import MatchResult, match_curations
+from yolo_brief.planner import (
+    BudgetTier,
+    PlanQuery,
+    SettingFilter,
+    parse_plan_command,
+    plan_curations,
+)
 from yolo_brief.models import (
     AREA_SHORT_CODES,
     KST,
@@ -56,6 +64,12 @@ ALLOWED_STATIC_CALLBACKS = {
     "yolo:unsub:ask",
     "yolo:unsub:ok",
     "yolo:unsub:no",
+    "yolo:plan:all",
+    "yolo:plan:home",
+    "yolo:plan:out",
+    "yolo:plan:0",
+    "yolo:plan:10k",
+    "yolo:plan:30k",
 }
 ALLOWED_ARCHETYPE_CALLBACKS = {
     f"yolo:set:{arc.value}": arc for arc in SoloArchetype
@@ -76,6 +90,14 @@ _LOG_ACTION_MAP = {
     "sav": "SAVED",
     "done": "DONE",
     "skip": "SKIP",
+}
+ALLOWED_PLAN_CALLBACKS = {
+    "yolo:plan:all": PlanQuery(),
+    "yolo:plan:home": PlanQuery(setting=SettingFilter.HOME_ONLY),
+    "yolo:plan:out": PlanQuery(setting=SettingFilter.OUT_ONLY),
+    "yolo:plan:0": PlanQuery(budget_tier=BudgetTier.FREE, budget_cap_krw=0),
+    "yolo:plan:10k": PlanQuery(budget_tier=BudgetTier.FREE_OR_10K, budget_cap_krw=10_000),
+    "yolo:plan:30k": PlanQuery(budget_tier=BudgetTier.UNDER_30K, budget_cap_krw=30_000),
 }
 
 
@@ -175,6 +197,24 @@ class YoloInteractiveBot:
         if not chat_id:
             return None
         text = str(message.get("text", "")).strip()
+
+        plan_query, plan_error = parse_plan_command(text)
+        if plan_query is not None or plan_error is not None:
+            if plan_error:
+                # The parser returns a fixed, normalised error; never echo the
+                # original command into HTML.
+                return self.channel.send_message(chat_id, plan_error)
+            user = self.db.get_user(chat_id) or self.db.upsert_onboarding_user(chat_id)
+            result = plan_curations(
+                user,
+                self.db.list_active_curations(),
+                plan_query or PlanQuery(),
+                snapshot=self._resolve_weather(user.weather_area_code, weather_override=weather_override),
+                ref_date=ref_date,
+                user_stats=self.db.get_user_curation_stats(chat_id),
+            )
+            card_html, markup = render_plan_card(user, result)
+            return self.channel.send_message(chat_id, card_html, reply_markup=markup)
 
         if text.startswith("/start") or text.startswith("/menu"):
             user = self.db.upsert_onboarding_user(chat_id)
@@ -338,6 +378,25 @@ class YoloInteractiveBot:
             user = self.db.get_user(chat_id) or self.db.upsert_onboarding_user(chat_id)
             snap = self._resolve_weather(user.weather_area_code, weather_override=weather_override)
             card_html, markup = render_guide_card(user, curation, snapshot=snap)
+            return self.channel.safe_edit_or_send(
+                chat_id, message_id, card_html, reply_markup=markup
+            )
+
+        # Phase C plan filters are a strict allowlist.  This branch is below
+        # the mandatory callback ACK and above the generic unknown callback
+        # rejection, so malformed `yolo:plan:*` values never reach the DB.
+        if data in ALLOWED_PLAN_CALLBACKS:
+            user = self.db.get_user(chat_id) or self.db.upsert_onboarding_user(chat_id)
+            query = ALLOWED_PLAN_CALLBACKS[data]
+            result = plan_curations(
+                user,
+                self.db.list_active_curations(),
+                query,
+                snapshot=self._resolve_weather(user.weather_area_code, weather_override=weather_override),
+                ref_date=ref_date,
+                user_stats=self.db.get_user_curation_stats(chat_id),
+            )
+            card_html, markup = render_plan_card(user, result)
             return self.channel.safe_edit_or_send(
                 chat_id, message_id, card_html, reply_markup=markup
             )

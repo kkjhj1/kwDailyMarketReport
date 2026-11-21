@@ -287,3 +287,18 @@ def match_curations(
         gated, slot, limit, eff_weather, season, is_severe, user_stats, user=user
     )
     return result(items, fallback_applied=fallback_applied, relaxed=relaxed)
+
+
+# Phase C public planner exports are kept here as compatibility shims for
+# callers that historically imported all recommendation functions from this
+# module.  The implementation lives in planner.py to keep command parsing and
+# legacy weather matching separate.
+from yolo_brief.planner import (  # noqa: E402  (intentional late import)
+    BudgetTier,
+    MoodFilter,
+    PlanQuery,
+    PlanResult,
+    SettingFilter,
+    parse_plan_command,
+    plan_curations,
+)

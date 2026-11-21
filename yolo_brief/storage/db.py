@@ -676,7 +676,11 @@ class YoloDatabase:
                     is_fallback, fallback_for, priority, is_active, emoji, created_at,
                     hero_image_url, hero_image_alt, solo_secrets, map_naver_url, map_kakao_url,
                     time_slot, solo_difficulty, social_fit, pace_fit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                )
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     summary = excluded.summary,

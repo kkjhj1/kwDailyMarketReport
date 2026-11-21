@@ -10,6 +10,7 @@ import re
 from typing import Any, Optional, Sequence
 
 from yolo_brief.matching import TIME_SLOT_RELAXED_NOTICE, MatchResult
+from yolo_brief.planner import PlanResult
 from yolo_brief.models import (
     AREA_NAMES,
     AREA_SHORT_CODES,
@@ -128,6 +129,7 @@ def build_main_keyboard(
     rows = build_item_action_rows(match)
     rows += [
         build_time_slot_row(TimeSlot(user.preferred_time_slot)),
+        [_btn("🎯 맞춤 플랜", "yolo:plan:all")],
         [
             _btn("🔀 다른 코스 보기", "yolo:view:next"),
             _btn("⭐ 내 찜·완료 보관함", "yolo:view:saved"),
@@ -149,6 +151,81 @@ def build_main_keyboard(
         ],
     ]
     return {"inline_keyboard": rows}
+
+
+def render_plan_card(
+    user: YoloUserProfile,
+    plan_result: PlanResult,
+) -> tuple[str, dict[str, Any]]:
+    """Render a `/plan` result using only normalised condition labels."""
+    query = plan_result.query
+    condition_bits = [
+        html.escape(query.time_slot.label),
+        html.escape(query.budget_tier.label),
+        html.escape(query.setting.label),
+    ]
+    lines: list[str] = [
+        "🎯 <b>나홀로 맞춤 플랜</b>",
+        f"조건: <b>{' · '.join(condition_bits)}</b>",
+        f"기분: <b>{html.escape(query.mood.label)}</b>",
+    ]
+    if plan_result.weather_forced_indoor:
+        lines.append("☔ <b>악천후·기상 미확인으로 안전한 실내 코스로 전환했어요.</b>")
+    if plan_result.relaxation_labels:
+        lines.append("ℹ️ " + " · ".join(html.escape(label) for label in plan_result.relaxation_labels))
+    lines.append("───────────────────────")
+    if not plan_result.items:
+        lines.append("조건에 맞는 코스가 아직 없어요. 예산이나 시간 조건을 바꿔보세요.")
+    else:
+        for idx, item in enumerate(plan_result.items[:3], start=1):
+            budget_text = (
+                f"₩{item.known_budget_krw:,}"
+                if item.budget_known and item.known_budget_krw is not None
+                else "예산 미상"
+            )
+            lines.append(f"{idx}. {item.emoji} <b>{html.escape(item.title)}</b>")
+            lines.append(
+                f"📍 {html.escape(item.location_name)} · ⏱ {html.escape(item.cost_or_duration)} · 💸 <b>{html.escape(budget_text)}</b>"
+            )
+    lines.append("───────────────────────")
+    lines.append("👇 조건을 바꾸거나 코스별 실행 가이드를 열어보세요.")
+    full_html = "\n".join(lines)
+    vis_len, html_len = measure_message(full_html)
+    if vis_len > MAX_VISIBLE_CHARS or html_len > MAX_HTML_CHARS:
+        slim_lines = [
+            "🎯 <b>나홀로 맞춤 플랜</b>",
+            f"조건: <b>{' · '.join(condition_bits)}</b>",
+        ]
+        if plan_result.weather_forced_indoor:
+            slim_lines.append("☔ <b>안전 실내 전환</b>")
+        for idx, item in enumerate(plan_result.items[:3], start=1):
+            budget_text = (
+                f"₩{item.known_budget_krw:,}"
+                if item.budget_known and item.known_budget_krw is not None
+                else "예산 미상"
+            )
+            slim_lines.append(
+                f"{idx}. {item.emoji} <b>{html.escape(item.title[:55])}</b> · {html.escape(budget_text)}"
+            )
+        full_html = "\n".join(slim_lines)
+    # Fixed fallback content is deliberately short; re-measure after fallback
+    # so callers can rely on TG-01 limits even with hostile long seed text.
+    final_visible, final_html = measure_message(full_html)
+    if final_visible > MAX_VISIBLE_CHARS or final_html > MAX_HTML_CHARS:
+        full_html = "🎯 <b>나홀로 맞춤 플랜</b>\n조건: <b>안전 추천</b>\n조건에 맞는 코스를 확인해 보세요."
+
+    filter_rows = [
+        [_btn("전체", "yolo:plan:all"), _btn("🏠 집콕", "yolo:plan:home"), _btn("🚶 외출", "yolo:plan:out")],
+        [_btn("무료", "yolo:plan:0"), _btn("1만원", "yolo:plan:10k"), _btn("3만원", "yolo:plan:30k")],
+    ]
+    guide_row: list[dict[str, str]] = []
+    for idx, item in enumerate(plan_result.items[:3], start=1):
+        callback = f"yolo:guide:{item.id}"
+        if len(callback.encode("utf-8")) <= MAX_CALLBACK_BYTES:
+            guide_row.append(_btn(f"📘 {idx}번 가이드", callback))
+    rows = filter_rows + ([guide_row] if guide_row else [])
+    rows.append([_btn("↩️ 추천 보드로", "yolo:view:weekend")])
+    return full_html, {"inline_keyboard": rows}
 
 
 def build_area_keyboard(user: YoloUserProfile) -> dict[str, Any]:
@@ -437,9 +514,13 @@ def render_guide_card(
             slim.append(f"🤫 {html.escape(curation.solo_secrets[:140])}")
         full_html = "\n".join(slim)
 
-    rows: list[list[dict[str, str]]] = [
-        [{"text": "🔗 상세·1인 예약 안내 바로가기", "url": curation.action_url}],
-    ]
+    # Telegram URL buttons are not HTML, but still enforce the same HTTPS
+    # allowlist as model construction.  A malformed legacy object gets no
+    # external button rather than becoming an unsafe link.
+    rows: list[list[dict[str, str]]] = []
+    action_url = str(curation.action_url or "")
+    if action_url.startswith("https://"):
+        rows.append([{"text": "🔗 상세·1인 예약 안내 바로가기", "url": action_url}])
     sav_cb = f"yolo:log:sav:{curation.id}"
     done_cb = f"yolo:log:done:{curation.id}"
     if len(done_cb.encode("utf-8")) <= MAX_CALLBACK_BYTES:

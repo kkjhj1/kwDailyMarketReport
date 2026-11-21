@@ -1400,6 +1400,196 @@ _QUICK_SEED_CURATIONS: list[YoloCuration] = [
 ]
 
 
+def _home_seed(
+    *,
+    id: str,
+    title: str,
+    summary: str,
+    archetype: SoloArchetype,
+    emoji: str,
+    time_slot: TimeSlot,
+    cost_or_duration: str,
+    budget: tuple[tuple[str, int, str], ...],
+    tags: tuple[str, str, str],
+    mbti: tuple[str, str, str],
+    howto: tuple[str, str, str],
+    checklist: tuple[str, str, str],
+    timeline: tuple[tuple[str, str, str], ...],
+    secret: str,
+) -> YoloCuration:
+    """Build a complete, explicitly HOME-scoped Phase C curation."""
+    return YoloCuration(
+        id=id,
+        title=title,
+        summary=summary,
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        setting=SettingType.HOME,
+        location_name="집 또는 내 방",
+        cost_or_duration=cost_or_duration,
+        action_url="https://www.google.com/",
+        archetypes=(archetype,),
+        solo_tags=tags,
+        priority=108,
+        emoji=emoji,
+        time_slot=time_slot,
+        timeline=tuple(TimelineEntry(time=t, spot=s, desc=d) for t, s, d in timeline),
+        budget_breakdown=tuple(BudgetLine(item=i, cost_krw=c, category=cat) for i, c, cat in budget),
+        solo_secrets=secret,
+        mbti_tags=mbti,
+        how_to_steps=howto,
+        checklist=checklist,
+    )
+
+
+# =========================================================================
+# Phase C: HOME-only solo hobbies, routines, and self-development (14)
+# =========================================================================
+_HOME_SEED_CURATIONS: list[YoloCuration] = [
+    _home_seed(
+        id="ACT-HOME-01", title="폼롤러 전신 근막이완 30분", summary="집에서 뭉친 전신을 순서대로 풀며 운동 후 회복하는 혼자만의 리커버리 루틴.",
+        archetype=SoloArchetype.ACTIVE_CHALLENGER, emoji="🧘", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 30분", budget=(("폼롤러", 0, "etc"),),
+        tags=("#집콕운동", "#근막이완", "#1인루틴"), mbti=("ISTP", "ESTP", "ISTJ"),
+        howto=("매트를 펴고 종아리·허벅지·등 순서로 압박 강도를 정한다", "부위마다 60초씩 천천히 굴리며 통증이 아닌 시원함을 기준으로 멈춘다", "물 한 컵을 마시고 호흡과 몸의 가벼움을 1~5점으로 기록한다"),
+        checklist=("폼롤러", "요가 매트", "물 한 컵"),
+        timeline=(("19:00", "거실", "가벼운 관절 워밍업"), ("19:05", "매트", "하체와 등 근막이완"), ("19:30", "창가", "수분 보충과 컨디션 기록")),
+        secret="아픈 곳을 세게 누르기보다 숨을 길게 내쉴 때 압력을 조금만 더하면 다음 날 몸이 편해요.",
+    ),
+    _home_seed(
+        id="ACT-HOME-02", title="20분 타바타 맨몸 인터벌", summary="좁은 방 한 칸에서도 점프와 스쿼트로 짧고 선명하게 땀내는 홈 챌린지.",
+        archetype=SoloArchetype.ACTIVE_CHALLENGER, emoji="🔥", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 20분", budget=(("맨몸 운동", 0, "etc"),),
+        tags=("#타바타", "#맨몸운동", "#20분챌린지"), mbti=("ESTP", "ENTJ", "ESFP"),
+        howto=("타이머를 20초 운동·10초 휴식으로 맞추고 스쿼트부터 시작한다", "버피·마운틴클라이머·런지 세 종목을 네 라운드 반복한다", "호흡을 가라앉히며 오늘의 라운드 수와 몸 상태를 체크한다"),
+        checklist=("운동복", "타이머", "물"),
+        timeline=(("18:30", "거실", "관절 워밍업"), ("18:35", "운동 공간", "타바타 네 라운드"), ("18:50", "매트", "쿨다운과 기록")),
+        secret="아랫집을 배려해야 한다면 점프 대신 까치발 버피로 바꿔도 심박수는 충분히 올라가요.",
+    ),
+    _home_seed(
+        id="ACT-HOME-03", title="1평 코어 플랭크 챌린지", summary="매트 한 장이면 충분한 코어 집중 루틴으로 내 기록을 조용히 갱신한다.",
+        archetype=SoloArchetype.ACTIVE_CHALLENGER, emoji="💪", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 25분", budget=(("맨몸 코어 루틴", 0, "etc"),),
+        tags=("#코어챌린지", "#1평운동", "#기록갱신"), mbti=("ISTJ", "INTJ", "ESTJ"),
+        howto=("팔꿈치 플랭크 자세에서 머리부터 발끝까지 일직선을 만든다", "사이드 플랭크와 데드버그를 번갈아 하며 세 세트를 진행한다", "기록 앱에 버틴 시간과 허리·어깨의 느낌을 남긴다"),
+        checklist=("요가 매트", "스톱워치", "수건"),
+        timeline=(("07:30", "방 한 칸", "코어 워밍업"), ("07:35", "매트", "플랭크와 데드버그"), ("07:55", "바닥", "호흡과 기록")),
+        secret="시간보다 자세가 우선이에요. 허리가 꺾이는 순간 무릎을 대고 정확하게 이어가세요.",
+    ),
+    _home_seed(
+        id="URB-HOME-01", title="오일파스텔 1인 홈드로잉", summary="좋아하는 색 세 가지만 골라 빈 종이를 작은 전시 공간으로 만드는 저녁 취미.",
+        archetype=SoloArchetype.URBAN_HIPSTER, emoji="🎨", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="재료비 1만원 · 60분", budget=(("오일파스텔 세트", 10000, "etc"),),
+        tags=("#홈드로잉", "#오일파스텔", "#혼자취미"), mbti=("INFP", "ISFP", "ENTP"),
+        howto=("창가에 종이와 오일파스텔을 펼치고 오늘의 색 세 가지를 고른다", "큰 도형부터 겹쳐 칠한 뒤 손가락이나 티슈로 경계를 부드럽게 문지른다", "작품에 제목과 날짜를 적어 벽이나 앨범에 보관한다"),
+        checklist=("오일파스텔", "두꺼운 종이", "티슈"),
+        timeline=(("20:00", "책상", "색 세 가지 고르기"), ("20:10", "드로잉 자리", "큰 형태와 질감 표현"), ("20:50", "벽면", "제목을 붙여 전시")),
+        secret="완성도를 올리려면 새 색을 계속 추가하기보다 처음 고른 세 색의 농도만 바꿔보세요.",
+    ),
+    _home_seed(
+        id="URB-HOME-02", title="세계 미술관 온라인 투어 & 도슨트", summary="입장료 없이 세계 미술관을 골라 한 작품을 깊게 보는 집 안의 문화 산책.",
+        archetype=SoloArchetype.URBAN_HIPSTER, emoji="🖼️", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 45분", budget=(("온라인 미술관 투어", 0, "ticket"),),
+        tags=("#온라인투어", "#무료문화생활", "#도슨트"), mbti=("INTJ", "INFJ", "INTP"),
+        howto=("오늘 보고 싶은 도시와 미술관을 정하고 공식 온라인 컬렉션을 연다", "대표 작품 한 점을 확대해 도슨트 설명을 들으며 세부를 관찰한다", "작품에서 발견한 색·질감·질문을 한 줄씩 메모한다"),
+        checklist=("이어폰", "노트", "따뜻한 음료"),
+        timeline=(("21:00", "책상", "미술관과 전시 선택"), ("21:10", "모니터", "작품 감상과 도슨트"), ("21:40", "노트", "감상 세 줄 기록")),
+        secret="작품을 여러 점 훑기보다 한 점을 10분 이상 확대해 보면 온라인 투어도 실제 관람처럼 깊어져요.",
+    ),
+    _home_seed(
+        id="URB-HOME-03", title="독립·단편영화 방구석 큐레이션", summary="상영관 대신 집의 조명을 낮추고 오늘의 단편 세 편을 나만의 테마로 엮는다.",
+        archetype=SoloArchetype.URBAN_HIPSTER, emoji="🎬", time_slot=TimeSlot.HALF_DAY,
+        cost_or_duration="무료 · 90분", budget=(("공개 단편영화 감상", 0, "ticket"),),
+        tags=("#단편영화", "#홈시네마", "#나만의큐레이션"), mbti=("INFJ", "INFP", "INTP"),
+        howto=("공식 공개 플랫폼에서 한 가지 주제의 단편 세 편을 고른다", "휴대폰 알림을 끄고 작품마다 인상 깊은 장면 하나를 표시한다", "세 작품의 공통점과 다음에 볼 감독을 메모해 플레이리스트를 만든다"),
+        checklist=("이어폰 또는 스피커", "간식", "감상 노트"),
+        timeline=(("20:00", "거실", "상영작 세 편 선택"), ("20:10", "소파", "단편 감상"), ("21:40", "노트", "감독과 장면 기록")),
+        secret="러닝타임이 짧은 작품부터 시작하면 마지막 영화까지 집중력이 살아 있어요.",
+    ),
+    _home_seed(
+        id="URB-HOME-04", title="만년필 손글씨 필사", summary="좋아하는 문장 한 페이지를 천천히 옮겨 쓰며 화면에서 멀어지는 밤 루틴.",
+        archetype=SoloArchetype.URBAN_HIPSTER, emoji="✒️", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="1만원 · 40분", budget=(("필사 노트와 잉크", 10000, "etc"),),
+        tags=("#손글씨", "#필사", "#느린취미"), mbti=("ISFP", "INFJ", "ISTJ"),
+        howto=("오늘 옮겨 쓸 문장과 만년필의 잉크 색을 고른다", "문장 사이 간격을 일정하게 두고 소리 내지 않고 한 줄씩 필사한다", "마지막 줄에 날짜와 오늘의 기분을 짧게 적는다"),
+        checklist=("만년필", "필사 노트", "좋아하는 문장"),
+        timeline=(("21:30", "책상", "잉크와 문장 고르기"), ("21:35", "노트", "한 페이지 필사"), ("22:05", "노트", "날짜와 감정 기록")),
+        secret="처음부터 예쁜 글씨를 목표로 하지 말고 잉크가 종이에 스미는 속도를 느껴보세요.",
+    ),
+    _home_seed(
+        id="NOM-HOME-01", title="방구석 세계여행 4K 다큐 + 야식 페어링", summary="떠나고 싶은 도시의 풍경과 그 지역의 한입 야식을 함께 즐기는 여행 전야.",
+        archetype=SoloArchetype.ROAD_NOMAD, emoji="🌍", time_slot=TimeSlot.HALF_DAY,
+        cost_or_duration="1만 5천원 · 90분", budget=(("세계여행 다큐 야식", 15000, "food"),),
+        tags=("#방구석세계여행", "#4K다큐", "#야식페어링"), mbti=("INFP", "ISFP", "ENFP"),
+        howto=("오늘 갈 도시를 고르고 4K 다큐와 그 지역 간식을 준비한다", "지도를 옆에 띄워 다큐 속 장소를 표시하며 천천히 감상한다", "가장 가고 싶은 장소와 실제 여행 때 할 일을 한 줄로 적는다"),
+        checklist=("4K 화면", "지역 간식", "세계지도 앱"),
+        timeline=(("19:30", "주방", "야식과 여행 도시 준비"), ("19:45", "거실", "다큐와 지도 감상"), ("21:15", "노트", "다음 여행 한 줄 계획")),
+        secret="간식 포장지에 도시 이름을 써두면 다큐를 보는 동안 작은 여행 기념품처럼 남아요.",
+    ),
+    _home_seed(
+        id="NOM-HOME-02", title="다음 혼여 1인 루트 지도 스크랩", summary="무료 지도와 사진만으로 다음 혼자 여행의 하루 동선을 미리 설계하는 놀이.",
+        archetype=SoloArchetype.ROAD_NOMAD, emoji="🗺️", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 60분", budget=(("온라인 지도 스크랩", 0, "etc"),),
+        tags=("#혼여계획", "#루트스크랩", "#무료취미"), mbti=("INTJ", "INFP", "ISTP"),
+        howto=("가고 싶은 도시의 역과 핵심 장소 세 곳을 지도에 저장한다", "도보·대중교통 시간을 확인해 아침부터 저녁까지 선으로 잇는다", "혼자 먹기 좋은 식당과 비상 플랜 하나를 추가해 저장한다"),
+        checklist=("지도 앱", "여행 노트", "충전된 휴대폰"),
+        timeline=(("10:00", "책상", "도시와 장소 고르기"), ("10:10", "지도 앱", "동선과 이동시간 확인"), ("10:50", "노트", "식사와 비상 플랜 저장")),
+        secret="첫 장소와 마지막 장소를 기차역으로 고정하면 하루가 훨씬 현실적인 루트로 정리돼요.",
+    ),
+    _home_seed(
+        id="NOM-HOME-03", title="가상 열차 드라이브 ASMR 홈카페", summary="창밖 풍경 영상과 열차 소리를 틀어 두고 집을 나서지 않는 느린 이동 시간.",
+        archetype=SoloArchetype.ROAD_NOMAD, emoji="🚆", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="5천원 · 60분", budget=(("홈카페 음료와 간식", 5000, "food"),),
+        tags=("#열차ASMR", "#홈카페", "#가상드라이브"), mbti=("ISFP", "INFP", "ISTP"),
+        howto=("창가 자리를 만들고 열차 전면 영상과 주행 소리를 재생한다", "여행지에 어울리는 커피나 차를 내려 창밖 화면을 보며 마신다", "도착역에 도착하면 다음에 실제로 가고 싶은 이유를 메모한다"),
+        checklist=("이어폰", "머그컵", "창가 자리"),
+        timeline=(("15:00", "창가", "열차 영상과 음료 준비"), ("15:10", "의자", "가상 이동 감상"), ("16:00", "노트", "도착역 메모")),
+        secret="영상의 이동 시간과 음료를 맞추면 집에서도 실제 출발 직전의 설렘이 생겨요.",
+    ),
+    _home_seed(
+        id="WEL-HOME-01", title="원팬 15분 1인 파스타 요리", summary="설거지 부담을 줄이고 한 팬으로 완성하는 따뜻한 1인 저녁 셰프 타임.",
+        archetype=SoloArchetype.WELLNESS_DEEPDIVER, emoji="🍝", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="8천원 · 30분", budget=(("파스타와 채소 재료", 8000, "food"),),
+        tags=("#원팬요리", "#15분레시피", "#혼밥"), mbti=("ISFJ", "ISFP", "ISTJ"),
+        howto=("팬 하나에 면·물·채소를 넣고 오늘의 소스를 고른다", "중불에서 면이 익을 때까지 저으며 간과 농도를 맞춘다", "좋아하는 접시에 담고 한 끼의 만족도를 기록한다"),
+        checklist=("작은 팬", "파스타면", "채소와 소스"),
+        timeline=(("18:30", "주방", "재료와 팬 준비"), ("18:35", "가스레인지", "원팬 조리"), ("18:50", "식탁", "천천히 식사")),
+        secret="면수는 처음부터 다 붓지 말고 조금씩 더하면 소스가 자연스럽게 걸쭉해져요.",
+    ),
+    _home_seed(
+        id="WEL-HOME-02", title="논알콜 1인 목테일 홈바", summary="술 없이도 잔과 향을 고르는 재미를 누리는 차분한 금요일 밤 홈바.",
+        archetype=SoloArchetype.WELLNESS_DEEPDIVER, emoji="🍹", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="1만 2천원 · 40분", budget=(("과일·탄산수·허브", 12000, "food"),),
+        tags=("#논알콜홈바", "#목테일", "#혼자마시는밤"), mbti=("INFP", "ISFJ", "INTP"),
+        howto=("투명한 잔과 얼음, 과일·허브·탄산수를 취향대로 꺼낸다", "향을 먼저 맡고 색이 예쁜 순서로 재료를 겹쳐 목테일을 만든다", "완성한 잔의 이름을 붙이고 음악 한 곡을 끝까지 듣는다"),
+        checklist=("긴 잔", "얼음", "과일과 허브"),
+        timeline=(("20:00", "주방", "재료와 잔 세팅"), ("20:10", "홈바", "목테일 만들기"), ("20:25", "소파", "음악과 천천히 음미")),
+        secret="탄산수는 마지막에 잔 벽을 타고 부으면 색 층이 남아 사진도 예쁘게 나와요.",
+    ),
+    _home_seed(
+        id="WEL-HOME-03", title="무료 온라인 명강·영어/코딩 30분 자기계발", summary="비용 없이 오늘의 지식을 한 조각 쌓는 부담 없는 집중 학습 루틴.",
+        archetype=SoloArchetype.WELLNESS_DEEPDIVER, emoji="💡", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 30분", budget=(("무료 온라인 강의", 0, "ticket"),),
+        tags=("#무료자기계발", "#영어공부", "#코딩학습"), mbti=("INTJ", "ISTJ", "INTP"),
+        howto=("공식 무료 강의에서 오늘 끝낼 30분짜리 한 강의를 고른다", "25분 동안 영상을 보고 핵심 개념 세 줄을 손으로 적는다", "마지막 5분에 배운 내용을 내 일이나 다음 학습 목표에 연결한다"),
+        checklist=("노트", "이어폰", "집중 타이머"),
+        timeline=(("07:30", "책상", "강의와 목표 선택"), ("07:35", "노트북", "25분 집중 학습"), ("08:00", "노트", "핵심 세 줄 복습")),
+        secret="강의 목록을 오래 고르는 시간이 공부보다 길어지지 않게 첫 번째 후보를 바로 재생하세요.",
+    ),
+    _home_seed(
+        id="WEL-HOME-04", title="디지털 디톡스 60분 명상", summary="알림과 화면을 내려놓고 호흡·감각·침묵으로 하루의 속도를 낮추는 홈 루틴.",
+        archetype=SoloArchetype.WELLNESS_DEEPDIVER, emoji="🌙", time_slot=TimeSlot.QUICK_2H,
+        cost_or_duration="무료 · 60분", budget=(("명상 루틴", 0, "etc"),),
+        tags=("#디지털디톡스", "#60분명상", "#홈루틴"), mbti=("INFJ", "ISFJ", "INFP"),
+        howto=("휴대폰을 다른 방에 두고 조명을 낮춰 앉을 자리를 만든다", "10분 호흡·20분 바디스캔·20분 침묵·10분 기록 순서로 진행한다", "마지막에 지금 느끼는 감각 세 가지와 내일의 한 가지 의도를 적는다"),
+        checklist=("타이머", "방석", "물 한 컵"),
+        timeline=(("21:00", "거실", "휴대폰과 알림 내려놓기"), ("21:05", "방석", "호흡·바디스캔·침묵"), ("21:55", "노트", "감각과 내일의 의도 기록")),
+        secret="명상이 잘되지 않아도 괜찮아요. 생각이 떠오른 횟수보다 다시 호흡으로 돌아온 횟수를 세어보세요.",
+    ),
+]
+
+
 def _pb(
     diff: int,
     social: str,
@@ -1637,12 +1827,46 @@ _PHASE_B_DETAILS: dict[str, dict[str, Any]] = {
 }
 
 
+_PHASE_B_DETAILS.update(
+    {
+        c.id: _pb(
+            2 if c.id.startswith(("ACT-", "NOM-")) else 1,
+            "I",
+            "P",
+            tuple(c.mbti_tags),
+            tuple(c.how_to_steps),  # type: ignore[arg-type]
+            tuple(c.checklist),  # type: ignore[arg-type]
+        )
+        for c in _HOME_SEED_CURATIONS
+    }
+)
+
+
 _RAW_CURATIONS: list[YoloCuration] = [
     replace(c, **_V2_DETAILS.get(c.id, {}), time_slot=_TIME_SLOTS[c.id])
     for c in _BASE_SEED_CURATIONS
-] + _QUICK_SEED_CURATIONS
+] + _QUICK_SEED_CURATIONS + _HOME_SEED_CURATIONS
+
+_SETTINGS: dict[str, SettingType] = {
+    **{c.id: SettingType.OUTDOOR for c in _BASE_SEED_CURATIONS if c.id.startswith(("ACT-", "NOM-")) and "FB" not in c.id},
+    **{c.id: SettingType.URBAN for c in _BASE_SEED_CURATIONS if c.id.startswith(("ACT-", "NOM-")) and "FB" in c.id},
+    **{c.id: SettingType.URBAN for c in _BASE_SEED_CURATIONS if c.id.startswith("URB-")},
+    **{c.id: SettingType.HOME for c in _BASE_SEED_CURATIONS if c.id.startswith("WEL-")},
+    "ACT-Q2-01": SettingType.OUTDOOR,
+    "ACT-Q2-02": SettingType.URBAN,
+    "ACT-Q2-03": SettingType.URBAN,
+    "URB-Q2-01": SettingType.URBAN,
+    "URB-Q2-02": SettingType.URBAN,
+    "URB-Q2-03": SettingType.URBAN,
+    "NOM-Q2-01": SettingType.OUTDOOR,
+    "NOM-Q2-02": SettingType.URBAN,
+    "WEL-Q2-01": SettingType.HOME,
+    "WEL-Q2-02": SettingType.URBAN,
+    **{c.id: SettingType.HOME for c in _HOME_SEED_CURATIONS},
+}
+assert set(_SETTINGS) == {c.id for c in _RAW_CURATIONS}, "every seed needs an explicit SettingType"
 assert set(_PHASE_B_DETAILS) == {c.id for c in _RAW_CURATIONS}, "every seed needs Phase B details"
 
 SEED_CURATIONS: list[YoloCuration] = [
-    replace(c, **_PHASE_B_DETAILS[c.id]) for c in _RAW_CURATIONS
+    replace(c, setting=_SETTINGS[c.id], **_PHASE_B_DETAILS[c.id]) for c in _RAW_CURATIONS
 ]
