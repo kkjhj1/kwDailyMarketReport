@@ -36,6 +36,7 @@ from market_brief.channels import http_keepalive
 from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
 from market_brief.link_gate import GATE_REGISTRY, LinkGateRouter, build_gate_button
 from market_brief.storage.models import BotRecord, BotType
+from market_brief.bot_visibility import BOT_WIP_CODE, BOT_WIP_MESSAGE, is_wip_bot_id
 from market_brief.subscription_engine import SubscriptionEngine, normalize_bot_id
 
 logger = logging.getLogger(__name__)
@@ -1405,6 +1406,15 @@ class MultiBotInteractionRouter:
         menu_bot = self.engine.get_menu_bot()
         menu_uname = (menu_bot.telegram_username or "").lstrip("@").strip() if menu_bot else ""
 
+        # 0-W. [WIP Bot Gate] Un-subscribed callers of a WIP bot (서비스 준비 중) are stopped before any
+        #      gate/target/preview/subscribe handling. STOP always passes; ACTIVE subscribers are grandfathered.
+        if (
+            is_wip_bot_id(bot.bot_id)
+            and classify_info_access(text, cb) != "STOP"
+            and not self.engine.is_user_subscribed(uid, bot.bot_id)
+        ):
+            return self.render_wip_response(bot, uid, menu_uname=menu_uname)
+
         # 0. Link Confirmation Gate Callback
         if cb.startswith("gate:"):
             gate_router = LinkGateRouter(GATE_REGISTRY)
@@ -1463,9 +1473,11 @@ class MultiBotInteractionRouter:
                 f"📊 현재 구독 슬롯: <code>{html.escape(slot_str)}</code>",
                 "이제 다른 정보봇에 접속하거나 메뉴봇에서 새로운 봇을 구독하실 수 있습니다.",
             ]
-            kb: list[list[dict[str, Any]]] = [
-                [{"text": f"🔄 {bot.icon_emoji} {bot.name} 다시 구독하기", "callback_data": f"info:sub:{bot.bot_id}"}]
-            ]
+            kb: list[list[dict[str, Any]]] = []
+            if not is_wip_bot_id(bot.bot_id):
+                kb.append(
+                    [{"text": f"🔄 {bot.icon_emoji} {bot.name} 다시 구독하기", "callback_data": f"info:sub:{bot.bot_id}"}]
+                )
             if menu_uname:
                 kb.append([{"text": "🧭 메뉴봇(전체 봇 목록)으로 이동", "url": f"https://t.me/{menu_uname}"}])
             return {
@@ -1707,6 +1719,33 @@ class MultiBotInteractionRouter:
             "callback_toast": "🎉 구독이 완료되었습니다!" if (cb and res["code"] == "SUBSCRIBED") else None,
             "result_code": res["code"],
             "user_profile": user,
+        }
+
+    def render_wip_response(
+        self, bot: BotRecord, uid: str, menu_uname: str | None = None
+    ) -> dict[str, Any]:
+        """`BOT_WIP` notice for a WIP (서비스 준비 중) INFO bot: menu-bot URL button only, no `info:sub:` retry."""
+        if menu_uname is None:
+            menu_bot = self.engine.get_menu_bot()
+            menu_uname = (menu_bot.telegram_username or "").lstrip("@").strip() if menu_bot else ""
+        label = html.escape(f"{bot.icon_emoji} {bot.name}")
+        lines = [
+            html.escape(BOT_WIP_MESSAGE),
+            "━━━━━━━━━━━━━━━━━━",
+            f"<b>[{label}]</b>은(는) 아직 신규 구독을 받지 않습니다.",
+            "👇 메뉴봇에서 현재 이용 가능한 정보봇을 확인해 주세요.",
+        ]
+        kb: list[list[dict[str, Any]]] = []
+        if menu_uname:
+            kb.append([{"text": "🧭 메뉴봇으로 이동", "url": f"https://t.me/{menu_uname}"}])
+        return {
+            "bot_id": bot.bot_id,
+            "reply_html": self._enforce_tg01_limits("\n".join(lines)),
+            "inline_keyboard": kb,
+            "callback_toast": BOT_WIP_MESSAGE,
+            "show_alert": True,
+            "result_code": BOT_WIP_CODE,
+            "user_profile": None,
         }
 
     def render_locked_response(
@@ -2257,6 +2296,21 @@ class DynamicBotManager:
         if ctx is None:
             return None
         access = classify_info_access(ctx["text"], ctx["cb_data"])
+        is_callback = ctx["kind"] == "callback"
+        if (
+            access != "STOP"
+            and is_wip_bot_id(bot.bot_id)
+            and not (ctx["uid"] and self.engine.is_user_subscribed(ctx["uid"], bot.bot_id))
+        ):
+            # [WIP Bot Gate] answerCallbackQuery FIRST ([TG-04]), then the WIP card; never reaches a domain dispatcher.
+            if is_callback and ctx["cq_id"]:
+                transport.answer_callback(ctx["cq_id"], text=BOT_WIP_MESSAGE, show_alert=True)
+            chat_id = ctx["chat_id"]
+            if not chat_id or (not is_callback and (ctx["chat_type"] != "private" or not ctx["text"])):
+                return {"user_id": chat_id, "type": "wip", "code": "BOT_WIP_SILENT"}
+            out = self.router.render_wip_response(bot, ctx["uid"])
+            transport.send_html(chat_id, out["reply_html"], out.get("inline_keyboard"))
+            return {"user_id": chat_id, "type": "wip", "code": out["result_code"]}
         if access == "GATE":
             return None  # link gate; its CANCEL branch re-checks the subscription
         if ctx["uid"] and self.engine.is_user_subscribed(ctx["uid"], bot.bot_id):

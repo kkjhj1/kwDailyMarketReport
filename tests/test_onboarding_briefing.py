@@ -17,6 +17,7 @@ from admission_brief.channels.telegram import TelegramChannel as AdmTelegramChan
 from admission_brief.interactive_bot import AdmissionInteractiveBot
 from admission_brief.models import ParentUserProfile, TargetGrade
 from admission_brief.storage.db import AdmissionDatabase
+from market_brief.bot_visibility import is_wip_bot_id
 from market_brief.multi_bot_manager import (
     COMMON_BRIEFING_BOTS,
     DynamicBotManager,
@@ -94,9 +95,15 @@ class OnboardingBriefingDeliveryTests(unittest.TestCase):
         """Type B (admission_bot): Step 1 target selection -> Step 2 [정보보기] button -> Step 3 grade-specific briefing."""
         self.assertFalse(self.router.is_common_briefing_bot("admission_bot"))
 
+        # admission_bot is a WIP bot: direct /start subscription is blocked (BOT_WIP) for non-ADMIN users.
+        # Pre-subscribe as an admin-assigned subscriber so the onboarding flow can be verified.
+        self.engine.attempt_subscribe(
+            "u_test_1", "admission_bot", full_name="학부모", actor="ADMIN", bypass_quota=True
+        )
+
         # Step 1: Enter admission_bot (/start) -> NO extra_messages; shows target selection buttons
         r1 = self.router.handle_interaction("admission_bot", "u_test_1", full_name="학부모", text="/start")
-        self.assertEqual(r1["result_code"], "SUBSCRIBED")
+        self.assertEqual(r1["result_code"], "ALREADY_SUBSCRIBED")
         self.assertEqual(len(r1.get("extra_messages") or []), 0)
         self.assertIn("자녀 학년 선택", r1["reply_html"])
 
@@ -308,9 +315,17 @@ class OnboardingBriefingDeliveryTests(unittest.TestCase):
             ("yolo_bot", "URBAN_HIPSTER", "직전 발송 욜로봇 큐레이션"),
         ]
         for bot_id, target_code, expected_banner in cases:
-            # 1. /start -> SUBSCRIBED, no auto-push, shows target options
+            # WIP bots (silver_bot, yolo_bot) block direct /start subscription (BOT_WIP);
+            # pre-subscribe as an admin-assigned subscriber so the flow can be verified.
+            wip = is_wip_bot_id(bot_id)
+            if wip:
+                self.engine.attempt_subscribe(
+                    "u_test_1", bot_id, full_name="통합테스터", actor="ADMIN", bypass_quota=True
+                )
+
+            # 1. /start -> SUBSCRIBED (public) / ALREADY_SUBSCRIBED (WIP), no auto-push, shows target options
             r1 = self.router.handle_interaction(bot_id, "u_test_1", full_name="통합테스터", text="/start")
-            self.assertEqual(r1["result_code"], "SUBSCRIBED")
+            self.assertEqual(r1["result_code"], "ALREADY_SUBSCRIBED" if wip else "SUBSCRIBED", bot_id)
             self.assertEqual(len(r1.get("extra_messages") or []), 0)
             cbs1 = [btn["callback_data"] for row in r1["inline_keyboard"] for btn in row if "callback_data" in btn]
             self.assertIn(f"info:target:{bot_id}:{target_code}", cbs1)

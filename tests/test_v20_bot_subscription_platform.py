@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from admin_server import create_admin_app
+from market_brief.bot_visibility import BOT_WIP_MESSAGE, is_wip_bot_id
 from market_brief.multi_bot_manager import DynamicBotManager, MultiBotInteractionRouter
 from market_brief.storage.db import MarketBriefDatabase
 from market_brief.subscription_engine import SubscriptionEngine
@@ -82,13 +83,13 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         active_ids = [s["bot_id"] for s in r3["user_profile"]["active_subscriptions"]]
         self.assertEqual(active_ids, ["travel_bot"])
 
-        # 4. Test Atomic One-Click Swap from travel_bot -> admission_bot directly!
+        # 4. Test Atomic One-Click Swap from travel_bot -> kids_bot (public) directly!
         r_swap = self.router.handle_interaction(
-            "admission_bot", uid, full_name="김화이트", callback_data="info:swap:travel_bot:admission_bot"
+            "kids_bot", uid, full_name="김화이트", callback_data="info:swap:travel_bot:kids_bot"
         )
         self.assertEqual(r_swap["result_code"], "SWAPPED")
         active_ids_after = [s["bot_id"] for s in r_swap["user_profile"]["active_subscriptions"]]
-        self.assertEqual(active_ids_after, ["admission_bot"])
+        self.assertEqual(active_ids_after, ["kids_bot"])
 
     def test_green_red_black_tier_quotas(self):
         """Requirement #2: GREEN=3, RED=5, BLACK=Unlimited."""
@@ -96,7 +97,7 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         self.engine.upsert_bot("realestate_bot", "부동산 청약봇", bot_type="INFO", category="부동산", icon_emoji="🏢")
         self.engine.upsert_bot("english_bot", "매일 영어봇", bot_type="INFO", category="교육", icon_emoji="📘")
         self.engine.upsert_bot("trend_bot", "트렌드 봇", bot_type="INFO", category="트렌드", icon_emoji="🔥")
-        all_6_bots = ["brief_bot", "travel_bot", "admission_bot", "realestate_bot", "english_bot", "trend_bot"]
+        all_6_bots = ["brief_bot", "travel_bot", "kids_bot", "realestate_bot", "english_bot", "trend_bot"]
 
         # GREEN user: up to 3 bots allowed, 4th rejected
         u_green = "20002"
@@ -150,7 +151,7 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         uid = "60006"
         self.engine.upsert_user(uid, "동시성테스터", tier="WHITE")
         self.engine.upsert_bot("custom_bot", "커스텀 봇", bot_type="INFO", category="기타", icon_emoji="🤖")
-        bots = ["brief_bot", "travel_bot", "admission_bot", "custom_bot"]
+        bots = ["brief_bot", "travel_bot", "kids_bot", "custom_bot"]
 
         def worker(bot_id: str):
             eng = SubscriptionEngine(self.db)
@@ -168,7 +169,7 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         """Claude Review #3 & #4: Tier downgrade reconciliation & expired tier rollback."""
         uid = "70007"
         self.engine.upsert_user(uid, "강등만료테스터", tier="GREEN", tier_expires_at="2099-12-31")
-        for b in ["brief_bot", "travel_bot", "admission_bot"]:
+        for b in ["brief_bot", "travel_bot", "kids_bot"]:
             self.engine.attempt_subscribe(uid, b)
 
         # Admin downgrades GREEN (3 used) -> WHITE (max 1) with GRACE mode
@@ -400,12 +401,25 @@ class SubscriptionAccessGateTests(unittest.TestCase):
         self.assertIn("https://t.me/KwMenu_bot", kb)
         self.assertIn(f"info:sub:{bot_id}", kb)
 
+    def _assert_wip(self, is_callback: bool):
+        methods = [m for m, _ in self.calls]
+        if is_callback:
+            self.assertEqual(methods[0], "answerCallbackQuery", "[TG-04] answerCallbackQuery must be first")
+            self.assertEqual(self.calls[0][1].get("text"), BOT_WIP_MESSAGE)
+            self.assertTrue(self.calls[0][1].get("show_alert"))
+        sends = [b for m, b in self.calls if m == "sendMessage"]
+        self.assertEqual(len(sends), 1, methods)
+        self.assertIn("서비스 준비 중", sends[0]["text"])
+        kb = json.dumps(sends[0].get("reply_markup", {}), ensure_ascii=False)
+        self.assertIn("https://t.me/KwMenu_bot", kb)
+        self.assertNotIn("info:sub:", kb)
+
     # ---- tests --------------------------------------------------------------
     def test_swap_away_blocks_old_bot_callbacks_commands_and_text(self):
         uid = "60001"
         self.assertEqual(self.engine.attempt_subscribe(uid, "travel_bot")["code"], "SUBSCRIBED")
         self.assertTrue(self.engine.is_user_subscribed(uid, "travel_bot"))
-        self.assertTrue(self.engine.atomic_swap_subscription(uid, "travel_bot", "admission_bot")["success"])
+        self.assertTrue(self.engine.atomic_swap_subscription(uid, "travel_bot", "kids_bot")["success"])
         self.assertFalse(self.engine.is_user_subscribed(uid, "travel_bot"))
 
         mgr = self._manager_with_tripwires()
@@ -436,11 +450,17 @@ class SubscriptionAccessGateTests(unittest.TestCase):
             for data in cbs:
                 n += 1
                 self._run(mgr, bot_id, self._cb(uid, data, n))
-                self._assert_locked(bot_id, is_callback=True)
+                if is_wip_bot_id(bot_id):
+                    self._assert_wip(is_callback=True)
+                else:
+                    self._assert_locked(bot_id, is_callback=True)
             for text in texts:
                 n += 1
                 self._run(mgr, bot_id, self._msg(uid, text, n))
-                self._assert_locked(bot_id, is_callback=False)
+                if is_wip_bot_id(bot_id):
+                    self._assert_wip(is_callback=False)
+                else:
+                    self._assert_locked(bot_id, is_callback=False)
 
     def test_start_on_unsubscribed_bot_shows_swap_prompt_not_domain_onboarding(self):
         uid = "60003"
@@ -510,7 +530,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
 
         uid = "60008"
         self.assertFalse(self.engine.is_user_subscribed(uid, "brief_bot"))  # unknown user
-        self.engine.attempt_subscribe(uid, "admission_bot")
+        self.engine.attempt_subscribe(uid, "admission_bot", actor="ADMIN")  # WIP bot: admin assignment
         self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
         self.assertTrue(self.engine.is_user_subscribed(uid, "edu_bot"))  # legacy alias
 
@@ -599,7 +619,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
         self.engine.attempt_subscribe(other_uid, "brief_bot")  # platform user, not a domain subscriber
 
         # admission lives in the platform DB itself
-        self.engine.attempt_subscribe(sub_uid, "admission_bot")
+        self.engine.attempt_subscribe(sub_uid, "admission_bot", actor="ADMIN")
         adm = AdmissionDatabase(db_path=str(self.db_path))
         for uid in (sub_uid, other_uid):
             adm.upsert_subscriber(ParentUserProfile(chat_id=uid))
@@ -607,7 +627,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
         self.engine.unsubscribe_bot(sub_uid, "admission_bot")
         self.assertEqual(adm.list_subscribers(), [])
         self.assertFalse(adm.get_subscriber(sub_uid).alert_enabled)  # deactivate_domain_alerts
-        self.engine.attempt_subscribe(sub_uid, "admission_bot")
+        self.engine.attempt_subscribe(sub_uid, "admission_bot", actor="ADMIN")
         self.assertTrue(adm.get_subscriber(sub_uid).alert_enabled)  # restored on re-subscribe
         self.assertEqual([p.chat_id for p in adm.list_subscribers()], [sub_uid])
 
@@ -623,7 +643,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
             kids.close()
 
         self.engine.unsubscribe_bot(sub_uid, "kids_bot")
-        self.engine.attempt_subscribe(sub_uid, "yolo_bot")
+        self.engine.attempt_subscribe(sub_uid, "yolo_bot", actor="ADMIN")
         yolo = YoloDatabase(Path(self.tmp_dir.name) / "yolo_brief.sqlite3")
         try:
             for uid in (sub_uid, other_uid):

@@ -10,6 +10,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
+from market_brief.bot_visibility import PUBLIC_BOT_IDS
+
 
 class UserTier(str, Enum):
     """Membership Tiers matching alerts.sqlite3 tier_policies."""
@@ -202,11 +204,10 @@ class BotServiceType(str, Enum):
 
 
 # Bots visible in Menu Bot. ADMISSION / SILVER / YOLO are WIP and hidden (enum members kept for DB compat).
-PUBLIC_BOT_SERVICES: frozenset[BotServiceType] = frozenset({
-    BotServiceType.BRIEF,
-    BotServiceType.TRAVEL,
-    BotServiceType.KIDS,
-})
+# Derived from the SSOT `market_brief.bot_visibility.PUBLIC_BOT_IDS`.
+PUBLIC_BOT_SERVICES: frozenset[BotServiceType] = frozenset(
+    member for member in BotServiceType if member.value in PUBLIC_BOT_IDS
+)
 
 
 @dataclass

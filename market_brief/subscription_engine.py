@@ -47,13 +47,14 @@ def now_kst_str() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 
-BOT_ID_ALIASES: dict[str, str] = {"edu_bot": "admission_bot"}
-
-
-def normalize_bot_id(bot_id: str) -> str:
-    """Canonical platform bot id (`edu_bot` is a legacy alias of `admission_bot`)."""
-    bid = str(bot_id or "").strip()
-    return BOT_ID_ALIASES.get(bid, bid)
+from market_brief.bot_visibility import (  # noqa: E402  (SSOT; re-exported for existing importers)
+    BOT_ID_ALIASES,
+    BOT_WIP_CODE,
+    BOT_WIP_MESSAGE,
+    is_admin_actor,
+    is_wip_bot_id,
+    normalize_bot_id,
+)
 
 
 def normalize_expiry_str(expiry: str | None) -> str | None:
@@ -1370,6 +1371,34 @@ class SubscriptionEngine:
         except Exception as exc:
             logger.warning("restore_domain_alerts failed for %s/%s: %s", uid, bot_id, exc)
 
+    @staticmethod
+    def _bot_wip_result(bot_id: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "code": BOT_WIP_CODE,
+            "message": BOT_WIP_MESSAGE,
+            "bot_id": normalize_bot_id(bot_id),
+        }
+
+    def _has_active_sub_readonly(self, telegram_user_id: str, bot_id: str) -> bool:
+        """Read-only probe (no user creation): ACTIVE subscription row for `bot_id` or its alias."""
+        uid = str(telegram_user_id or "").strip()
+        raw = str(bot_id or "").strip()
+        if not uid or not raw:
+            return False
+        ids = tuple({raw, normalize_bot_id(raw)} | {k for k, v in BOT_ID_ALIASES.items() if v == normalize_bot_id(raw)})
+        marks = ",".join("?" for _ in ids)
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    f"SELECT 1 FROM subscriptions WHERE telegram_user_id = ? AND bot_id IN ({marks}) "
+                    "AND status = 'ACTIVE' LIMIT 1",
+                    (uid, *ids),
+                ).fetchone()
+            return row is not None
+        except sqlite3.Error:
+            return False
+
     def attempt_subscribe(
         self,
         telegram_user_id: str,
@@ -1379,7 +1408,13 @@ class SubscriptionEngine:
         actor: str = "USER",
         bypass_quota: bool = False,
     ) -> dict[str, Any]:
-        """Atomically verifies user tier quota and subscribes user to an INFO bot if allowed."""
+        """Atomically verifies user tier quota and subscribes user to an INFO bot if allowed.
+        WIP bots: non-ADMIN callers get `BOT_WIP` before any user/subscription row is written
+        (`bypass_quota` alone never bypasses it). Already-ACTIVE subscribers are grandfathered."""
+        if is_wip_bot_id(bot_id) and not is_admin_actor(actor) and not self._has_active_sub_readonly(
+            telegram_user_id, bot_id
+        ):
+            return self._bot_wip_result(bot_id)
         res = self._attempt_subscribe_tx(
             telegram_user_id, bot_id, full_name=full_name, username=username, actor=actor, bypass_quota=bypass_quota
         )
@@ -1566,7 +1601,10 @@ class SubscriptionEngine:
         new_bot_id: str,
         actor: str = "USER",
     ) -> dict[str, Any]:
-        """Atomically unsubscribes `cancel_bot_id` and subscribes `new_bot_id` in one locked transaction."""
+        """Atomically unsubscribes `cancel_bot_id` and subscribes `new_bot_id` in one locked transaction.
+        Swapping INTO a WIP bot is `BOT_WIP` for non-ADMIN actors (no DB change; old subscription kept)."""
+        if is_wip_bot_id(new_bot_id) and not is_admin_actor(actor):
+            return self._bot_wip_result(new_bot_id)
         res = self._atomic_swap_tx(telegram_user_id, cancel_bot_id, new_bot_id, actor=actor)
         if res.get("success"):
             self.deactivate_domain_alerts(telegram_user_id, cancel_bot_id)
