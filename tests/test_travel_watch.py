@@ -495,7 +495,8 @@ def test_watch_callbacks_reject_all_and_unknown_and_missing_db(handler, mem_db):
 def test_watch_list_quick_add_custom_city_and_limit(handler, mem_db):
     _cb(handler, "trv:w:l")
     text, markup = handler.tg.send_text.call_args[0][1], handler.tg.send_text.call_args[1]["reply_markup"]
-    assert "(0/4)" in text and "trv:w:m:NRT" in all_callbacks(markup)
+    cbs = set(all_callbacks(markup))
+    assert "(0/4)" in text and "trv:w:g" in cbs and "trv:w:m:NRT" not in cbs
     # FALLBACK (custom) city works through the same catalog
     _cb(handler, "trv:w:p:CTS:D", mid=900)
     w = mem_db.get_travel_watch("c1", "CTS")
@@ -1106,8 +1107,12 @@ def test_v2_country_flex_wizard_callbacks(handler, mem_db):
     _cb(handler, "trv:w:s:@JP", mid=900)
     _mid, text, markup = handler.edits[-1]
     assert "일본 전체" in text and "도쿄" in text and "5곳 중 최저가" in text and "참고 시세" in text
+    assert {"trv:w:a:@JP", "trv:w:k:@JP:1", "trv:w:i:@JP"} <= set(all_callbacks(markup))
+    assert "trv:w:h:@JP:12" not in set(all_callbacks(markup))  # compact by default
+    _cb(handler, "trv:w:a:@JP", mid=900)
+    _mid, text, markup = handler.edits[-1]
     assert {"trv:w:m2:@JP:F", "trv:w:m2:@JP:X", "trv:w:h:@JP:12", "trv:w:d:@JP:D", "trv:w:n:@JP:Y",
-            "trv:w:k:@JP:1", "trv:w:i:@JP"} <= set(all_callbacks(markup))
+            "trv:w:k:@JP:1", "trv:w:i:@JP", "trv:w:a:@JP"} <= set(all_callbacks(markup))
     for h in (1, 3, 6, 12):
         _cb(handler, f"trv:w:h:@JP:{h}", mid=900)
         assert f"앞으로 {h}개월" in handler.edits[-1][1]
@@ -1120,6 +1125,13 @@ def test_v2_country_flex_wizard_callbacks(handler, mem_db):
     assert "매일 아침 7:30" in handler.edits[-1][1]
     stored = mem_db.get_travel_watch("c1", "@JP")  # nothing persisted before an explicit save
     assert (stored["target_price_krw"], stored["notify_mode"]) == (300_000, "DROP")
+    # FIXED mode can also collapse & re-expand via trv:w:a
+    handler._get_draft("c1", "u1", "@JP").watch_mode = "FIXED"
+    _cb(handler, "trv:w:a:@JP", mid=900)
+    assert "trv:w:f:@JP" not in set(all_callbacks(handler.edits[-1][2]))
+    _cb(handler, "trv:w:a:@JP", mid=900)
+    assert "trv:w:f:@JP" in set(all_callbacks(handler.edits[-1][2]))
+    handler._get_draft("c1", "u1", "@JP").watch_mode = "FLEX"
     # another user in the same chat has an independent draft
     _cb(handler, "trv:w:s:@JP", mid=901, user="u2")  # untracked message -> fresh card
     assert "앞으로 3개월" in handler.tg.send_text.call_args[0][1]

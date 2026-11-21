@@ -79,7 +79,6 @@ MAX_TRACKED_WATCH_CARDS = 2000
 
 WATCH_PRICE_MIN_KRW = 50_000
 WATCH_PRICE_MAX_KRW = 5_000_000
-WATCH_QUICK_ADD_CODES = ("NRT", "KIX", "FUK", "TPE", "DAD", "BKK")
 WATCH_DAY_LABELS = {"ANY": "전체 요일", "FRI_MON": "금~월", "THU_SUN": "목~일"}
 WATCH_PRESET_LABELS = {"DEAL": "실속 특가", "FLOOR": "바닥가", "CUSTOM": "직접 입력", "BASELINE": "평균가 기준"}
 CANCEL_COMMANDS = {"/cancel", "/취소"}
@@ -206,6 +205,7 @@ class WatchDraft:
     fixed_dep_date: str = ""
     fixed_ret_date: str = ""
     expires_at: float = 0.0
+    show_advanced: bool = False
 
 
 _PRICE_TEXT_RE = re.compile(r"^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,4}))?(만)?(?:원)?(?:이하|미만)?$")
@@ -1521,6 +1521,7 @@ class TravelInteractiveHandler:
         "d": "",
         "f": "🗓️ 여행 날짜를 채팅창에 입력해 주세요.",
         "n": "",
+        "a": "",
         "k": "✅ 알림을 저장하는 중입니다...",
         # Chat-level delivery controls (Track A opt-out / Track B pause / 2-step reset)
         "wb": "📰 정기발송 설정을 변경합니다.",
@@ -1551,7 +1552,7 @@ class TravelInteractiveHandler:
         "k": ("1", "W"),
     }
 
-    _FAST_WATCH_TOGGLES = frozenset({"m2", "h", "d", "n"})
+    _FAST_WATCH_TOGGLES = frozenset({"m2", "h", "d", "n", "a"})
     # Pure read/navigation subs (no DB write): UI edit submitted first, ack in parallel. Every DB-mutating
     # sub (wb / wp / Z / k / p / t / X / fq / rgn / th ...) keeps the ack-before-work ordering.
     _READ_NAV_WATCH_SUBS = frozenset({"rg", "rgp", "ki"})
@@ -1909,6 +1910,11 @@ class TravelInteractiveHandler:
             elif sub in ("m2", "h", "d", "n"):
                 text, markup = self._apply_draft_option(chat_id, uid, code, sub, arg)
                 self._render_watch_card(chat_id, message_id, text, markup)
+            elif sub == "a":
+                draft = self._get_draft(chat_id, uid, code)
+                draft.show_advanced = not draft.show_advanced
+                text, markup = self.build_watch_setup_card(chat_id, uid, code)
+                self._render_watch_card(chat_id, message_id, text, markup)
             elif sub == "k":
                 text, markup = self._confirm_draft_watch(chat_id, uid, code, arg)
                 self._render_watch_card(chat_id, message_id, text, markup)
@@ -2059,6 +2065,8 @@ class TravelInteractiveHandler:
                 draft.notify_mode = str(watch.get("notify_mode") or "DROP").upper()
                 draft.fixed_dep_date = watch.get("fixed_dep_date") or ""
                 draft.fixed_ret_date = watch.get("fixed_ret_date") or ""
+                if draft.watch_mode == "FIXED":
+                    draft.show_advanced = True
         key = self._draft_key(chat_id, user_id, scope)
         with self._seq_lock:
             draft.expires_at = time.monotonic() + self.watch_draft_ttl
@@ -2084,6 +2092,7 @@ class TravelInteractiveHandler:
         self, chat_id: str, user_id: str, code: str, sub: str, arg: str
     ) -> tuple[str, dict[str, Any]]:
         draft = self._get_draft(chat_id, user_id, code)
+        draft.show_advanced = True
         notice = ""
         if sub == "m2":
             draft.watch_mode = WATCH_MODE_CODES[arg]
@@ -2341,11 +2350,6 @@ class TravelInteractiveHandler:
             ])
         if len(watches) >= WATCH_MAX_ACTIVE_PER_CHAT and WATCH_LIMIT_NOTICE not in notice:
             lines.append(f"ℹ️ {WATCH_LIMIT_NOTICE}")
-        if len(watches) < 3:
-            watched = {w["dest_code"] for w in watches}
-            quick = [c for c in WATCH_QUICK_ADD_CODES if c not in watched and self.catalog.get(c)][:3]
-            if quick:
-                rows.append([{"text": f"➕ {self.label_for(c)}", "callback_data": f"trv:w:m:{c}"} for c in quick])
         if len(watches) < WATCH_MAX_ACTIVE_PER_CHAT:
             rows.append([{"text": "➕ 도시 추가하기", "callback_data": "trv:w:g"}])
         if watches:  # pause / reset only make sense with >= 1 watch (grandfathered > cap included)
@@ -2459,32 +2463,35 @@ class TravelInteractiveHandler:
             if draft.horizon_months > 6:
                 lines.append("ℹ️ 9~12개월 먼 일정은 LCC 특가가 아직 미오픈일 수 있어요.")
         lines.append(f"🔔 알림: {WATCH_NOTIFY_LABELS.get(draft.notify_mode, WATCH_NOTIFY_LABELS['DROP'])}")
-        lines.append("👇 조건을 고른 뒤 [💾 저장] 버튼을 눌러 주세요. 실시간 검증 요금만 알려드려요.")
+        lines.append("👇 아래 목표가 버튼(실속/평균)을 누르거나 [✍️ 목표가 직접 입력]으로 바로 저장할 수 있어요. (실시간 검증 요금만 알림)")
 
         def mark(selected: bool, text: str) -> str:
             return f"✅ {text}" if selected else text
 
         flex = draft.watch_mode != "FIXED"
-        rows: list[list[dict[str, Any]]] = [[
-            {"text": mark(flex, "📅 기간 탐색"), "callback_data": f"trv:w:m2:{code}:F"},
-            {"text": mark(not flex, "📌 날짜 고정"), "callback_data": f"trv:w:m2:{code}:X"},
-        ]]
-        if flex:
+        show_adv = bool(draft.show_advanced)
+        rows: list[list[dict[str, Any]]] = []
+        if show_adv:
             rows.append([
-                {"text": mark(draft.horizon_months == h, f"{h}개월"), "callback_data": f"trv:w:h:{code}:{h}"}
-                for h in WATCH_HORIZON_CHOICES
+                {"text": mark(flex, "📅 기간 탐색"), "callback_data": f"trv:w:m2:{code}:F"},
+                {"text": mark(not flex, "📌 날짜 고정"), "callback_data": f"trv:w:m2:{code}:X"},
             ])
+            if flex:
+                rows.append([
+                    {"text": mark(draft.horizon_months == h, f"{h}개월"), "callback_data": f"trv:w:h:{code}:{h}"}
+                    for h in WATCH_HORIZON_CHOICES
+                ])
+                rows.append([
+                    {"text": mark(draft.weekday_option == opt, WATCH_WEEKDAY_SHORT[opt]),
+                     "callback_data": f"trv:w:d:{code}:{c}"}
+                    for c, opt in WATCH_WEEKDAY_CODES.items()
+                ])
+            else:
+                rows.append([{"text": "🗓️ 여행 날짜 입력·변경", "callback_data": f"trv:w:f:{code}"}])
             rows.append([
-                {"text": mark(draft.weekday_option == opt, WATCH_WEEKDAY_SHORT[opt]),
-                 "callback_data": f"trv:w:d:{code}:{c}"}
-                for c, opt in WATCH_WEEKDAY_CODES.items()
+                {"text": mark(draft.notify_mode == "DROP", "🔔 하락 시 알림"), "callback_data": f"trv:w:n:{code}:D"},
+                {"text": mark(draft.notify_mode == "DAILY", "📰 매일 아침"), "callback_data": f"trv:w:n:{code}:Y"},
             ])
-        else:
-            rows.append([{"text": "🗓️ 여행 날짜 입력·변경", "callback_data": f"trv:w:f:{code}"}])
-        rows.append([
-            {"text": mark(draft.notify_mode == "DROP", "🔔 하락 시 알림"), "callback_data": f"trv:w:n:{code}:D"},
-            {"text": mark(draft.notify_mode == "DAILY", "📰 매일 아침"), "callback_data": f"trv:w:n:{code}:Y"},
-        ])
         # Compact 2-column save / input rows (mobile: fewer rows, same callbacks).
         save_row: list[dict[str, Any]] = []
         if "DEAL" in refs:
@@ -2499,6 +2506,10 @@ class TravelInteractiveHandler:
         if active:
             input_row.append({"text": "🔕 알림 끄기", "callback_data": f"trv:w:x:{code}"})
         rows.append(input_row)
+        rows.append([{
+            "text": "🔼 세부 조건 접기" if show_adv else "⚙️ 세부 조건 설정 (기간·날짜·매일알림)",
+            "callback_data": f"trv:w:a:{code}",
+        }])
         rows.append([
             {"text": "📋 내 알림", "callback_data": "trv:w:l"},
             {"text": "🌏 대상 바꾸기", "callback_data": "trv:w:g"},
