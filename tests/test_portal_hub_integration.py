@@ -2,6 +2,7 @@
 Verifies complete subscription connection across alerts.sqlite3, brief_bot, travel_bot, and admission_bot.
 """
 import gc
+import html
 import os
 import re
 import sys
@@ -786,9 +787,10 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("sub:ask_sub:brief_bot:all", cbs)
         for nav in ("cat:home", "nav:subs", "nav:main"):
             self.assertIn(nav, cbs)
-        # Only the subscribed bot (TRAVEL) exposes its chat-room URL; the other 2 public bots are locked
+        # Only the subscribed bot (TRAVEL) exposes its chat-room URL; the other 2 get a single subscribe CTA
         self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 1)
-        self.assertEqual(sum(1 for cb in cbs if cb.startswith("sub:locked:")), 2)
+        self.assertFalse(any(cb.startswith("sub:locked:") for cb in cbs))
+        self.assertEqual(sum(1 for cb in cbs if cb.startswith("sub:ask_sub:")), 2)
         for cb in cbs:
             self.assertLessEqual(len(cb.encode("utf-8")), 64)
         self.assertLessEqual(len(text), 3500)
@@ -802,8 +804,23 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
             self.assertIn("전체 봇 한눈에 보기", self.mock_client.edit_message_text.call_args.args[2])
 
         user = UserProfile(user_id=1, chat_id=1, first_name="t")
-        for _, markup in (render_main_menu(user), render_category_home_view()):
+        subs = {b: False for b in BotServiceType}
+        for _, markup in (render_category_home_view(), render_subscription_view(user, subs)):
             self.assertIn("cat:all", [b.get("callback_data") for b in _all_buttons(markup)])
+        # Main menu consolidates catalog + subs into a single `nav:subs` entry
+        self.assertIn("nav:subs", [b.get("callback_data") for b in _all_buttons(render_main_menu(user)[1])])
+
+    def test_legacy_catalog_and_category_routes_still_work(self):
+        for data, marker in (
+            ("cat:all", "전체 봇 한눈에 보기"),
+            ("nav:catalog", "전체 봇 한눈에 보기"),
+            ("cat:home", "전체 카테고리 탐색"),
+            ("menu:cats", "전체 카테고리 탐색"),
+            ("menu:categories", "전체 카테고리 탐색"),
+        ):
+            self.mock_client.reset_mock()
+            self._click(data)
+            self.assertIn(marker, self.mock_client.edit_message_text.call_args.args[2], data)
 
     def test_catalog_in_place_unsubscribe_confirmation(self):
         self.portal_db.subscribe(self.uid, BotServiceType.KIDS)
@@ -935,12 +952,42 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertIn("여행 특가", text)
 
         rows = markup["inline_keyboard"]
-        self.assertEqual(len(rows), 3, "Main menu must have exactly 3 streamlined rows")
-        self.assertEqual(rows[0][0]["callback_data"], "cat:all")
-        self.assertEqual(rows[1][0]["callback_data"], "nav:subs")
-        self.assertEqual(rows[1][1]["callback_data"], "nav:tiers")
-        self.assertEqual(rows[2][0]["callback_data"], "support:home")
-        self.assertEqual(rows[2][1]["callback_data"], "nav:help")
+        # Row 0: compact 2-column direct entry buttons for the 2 active public bots
+        self.assertEqual(len(rows[0]), 2)
+        self.assertEqual([b["text"] for b in rows[0]], ["🚀 시황 입장", "🚀 여행 입장"])
+        self.assertTrue(all(b["url"].startswith("https://t.me/") for b in rows[0]))
+        self.assertTrue(all("callback_data" not in b for b in rows[0]))
+        self.assertEqual(rows[1], [{"text": "📋 봇 둘러보기 · 구독", "callback_data": "nav:subs"}])
+        self.assertEqual(rows[2][0]["callback_data"], "nav:tiers")
+        self.assertEqual(rows[3][0]["callback_data"], "support:home")
+        self.assertEqual(rows[3][1]["callback_data"], "nav:help")
+        self.assertEqual(len(rows), 4)
+        cbs = [b.get("callback_data") for b in _all_buttons(markup)]
+        self.assertNotIn("cat:all", cbs, "catalog/subs duplicates must be consolidated into nav:subs")
+
+    def test_main_menu_entry_buttons_by_active_count(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="테스터", tier=UserTier.BLACK)
+        # 0 active -> no URL entry buttons, first row is the consolidated nav:subs
+        none_subs = {b: False for b in BotServiceType}
+        _, m0 = render_main_menu(user, none_subs)
+        self.assertFalse(any("url" in b for b in _all_buttons(m0)))
+        self.assertEqual(m0["inline_keyboard"][0][0]["callback_data"], "nav:subs")
+        # 1 active -> single full-width `바로가기`
+        one = dict(none_subs, **{BotServiceType.KIDS: True})
+        _, m1 = render_main_menu(user, one)
+        self.assertEqual(len(m1["inline_keyboard"][0]), 1)
+        self.assertEqual(m1["inline_keyboard"][0][0]["text"], "🚀 키즈 나침반 바로가기")
+        self.assertIn("url", m1["inline_keyboard"][0][0])
+        # 3 active -> 2 + 1 compact entry rows
+        three = {b: b.is_public for b in BotServiceType}
+        _, m3 = render_main_menu(user, three)
+        rows = m3["inline_keyboard"]
+        self.assertEqual([len(rows[0]), len(rows[1])], [2, 1])
+        self.assertEqual([b["text"] for b in rows[0] + rows[1]], ["🚀 시황 입장", "🚀 여행 입장", "🚀 키즈 입장"])
+        # Hidden (non-public) bots never get an entry button
+        hidden_only = {b: not b.is_public for b in BotServiceType}
+        _, mh = render_main_menu(user, hidden_only)
+        self.assertFalse(any("url" in b for b in _all_buttons(mh)))
 
     def test_subscribe_onboarding_view_schedule_and_cta_notice(self):
         from portal_hub.interactive import render_subscribe_onboarding_view
@@ -992,23 +1039,33 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
         all_btns = _all_buttons(markup)
         for b in locked:
             rows = self._bot_rows(markup, b)
-            self.assertTrue(rows, f"{b.value} row missing")
-            flat = [btn for row in rows for btn in row]
-            self.assertFalse(any("url" in btn for btn in flat), f"{b.value} exposes a URL while un-subscribed")
-            self.assertFalse(any("🚀" in btn["text"] for btn in flat), f"{b.value} exposes 🚀 while un-subscribed")
-            self.assertFalse(any(str(btn.get("callback_data", "")).startswith("gate:") for btn in flat))
-            cbs = [btn.get("callback_data") for btn in flat]
-            self.assertIn(f"sub:locked:{b.value}", cbs)
-            self.assertTrue(any(str(c).startswith(f"sub:ask_sub:{b.value}") for c in cbs))
-        sub_rows = self._bot_rows(markup, subscribed)
-        sub_flat = [btn for row in sub_rows for btn in row]
-        self.assertTrue(any("🚀" in btn["text"] for btn in sub_flat), "subscribed bot lost its 🚀 대화방")
-        self.assertNotIn(f"sub:locked:{subscribed.value}", [btn.get("callback_data") for btn in sub_flat])
+            self.assertEqual(len(rows), 1, f"{b.value} row missing")
+            row = rows[0]
+            # Single full-width subscribe CTA: no URL, no 🚀, no gate:, no sub:locked:
+            self.assertEqual(row, [{
+                "text": f"➕ {b.short_name} 구독하기",
+                "callback_data": row[0]["callback_data"],
+            }])
+            self.assertTrue(row[0]["callback_data"].startswith(f"sub:ask_sub:{b.value}:"))
+        sub_rows = [r for r in markup["inline_keyboard"]
+                    if any(subscribed.value in str(btn.get("callback_data", "")) for btn in r)]
+        self.assertEqual(len(sub_rows), 1)
+        sub_row = sub_rows[0]
+        chip = subscribed.short_name.split()[0]
+        self.assertEqual(len(sub_row), 2)
+        self.assertEqual(sub_row[0]["text"], f"🚀 {chip} 입장")
+        self.assertTrue(sub_row[0]["url"].startswith("https://t.me/"), "subscribed bot must use a direct url")
+        self.assertNotIn("callback_data", sub_row[0])
+        self.assertEqual(sub_row[1]["text"], f"{chip} 해지")
+        self.assertTrue(sub_row[1]["callback_data"].startswith(f"sub:ask_unsub:{subscribed.value}:"))
         for btn in all_btns:
-            if "callback_data" in btn:
-                self.assertLessEqual(len(btn["callback_data"].encode("utf-8")), 64)
+            cb = btn.get("callback_data", "")
+            self.assertFalse(cb.startswith("sub:locked:"), cb)
+            self.assertFalse(cb.startswith("gate:"), cb)
+            if cb:
+                self.assertLessEqual(len(cb.encode("utf-8")), 64)
 
-    def test_all_four_views_lock_unsubscribed_bots(self):
+    def test_all_four_views_render_subscribe_cta_and_direct_entry(self):
         user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=UserTier.GREEN)
         subs = {b: False for b in BotServiceType}
         subs[BotServiceType.BRIEF] = True
@@ -1027,11 +1084,50 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
         self.assertTrue(life_bots)
         for b in life_bots:
             flat = [btn for row in self._bot_rows(m_life, b) for btn in row]
-            self.assertIn(f"sub:locked:{b.value}", [btn.get("callback_data") for btn in flat])
+            self.assertEqual([btn["text"] for btn in flat], [f"➕ {b.short_name} 구독하기"])
             self.assertFalse(any("🚀" in btn["text"] or "url" in btn for btn in flat))
 
         _, m_search = render_search_results_view("시황", [BotServiceType.BRIEF, BotServiceType.TRAVEL], user, subs)
         self._assert_locked_and_open(m_search, BotServiceType.BRIEF, [BotServiceType.TRAVEL])
+
+    def test_subscription_view_desc_chips_escape_and_bottom_nav(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="<b>x</b>", tier=UserTier.GREEN)
+        subs = {b: False for b in BotServiceType}
+        subs[BotServiceType.TRAVEL] = True
+        text, markup = render_subscription_view(user, subs)
+        public = [b for b in BotServiceType if b.is_public]
+        for b in public:
+            self.assertIn(html.escape(b.one_line_desc), text)
+        self.assertEqual(text.count("[🟢 구독중]"), 1)
+        self.assertEqual(text.count("[⚪ 미구독]"), len(public) - 1)
+        self.assertNotIn("<b>x</b>", text)
+        rows = markup["inline_keyboard"]
+        self.assertEqual(rows[-2], [
+            {"text": "📋 전체 봇", "callback_data": "cat:all"},
+            {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
+        ])
+        self.assertEqual(rows[-1], [{"text": "🏠 홈으로", "callback_data": "nav:main"}])
+        self.assertNotIn("📂 카테고리", [b["text"] for b in _all_buttons(markup)])
+        self.assertLessEqual(len(text), 3500)
+        self.assertLessEqual(_visible_len(text), 1800)
+
+    def test_confirm_banners_escape_unknown_target_name(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="t")
+        subs = {b: False for b in BotServiceType}
+        evil = "<i>x&y</i>"
+        views = [
+            render_subscription_view(user, subs, confirming_bot_id=evil)[0],
+            render_subscription_view(user, subs, confirming_sub_bot_id=evil)[0],
+            render_category_view(BotCategory.FINANCE, user, subs, confirming_bot_id=evil)[0],
+            render_category_view(BotCategory.FINANCE, user, subs, confirming_sub_bot_id=evil)[0],
+            render_catalog_all_view(user, subs, confirming_bot_id=evil)[0],
+            render_catalog_all_view(user, subs, confirming_sub_bot_id=evil)[0],
+            render_search_results_view("시황", [BotServiceType.BRIEF], user, subs, confirming_bot_id=evil)[0],
+            render_search_results_view("시황", [BotServiceType.BRIEF], user, subs, confirming_sub_bot_id=evil)[0],
+        ]
+        for text in views:
+            self.assertNotIn(evil, text)
+            self.assertIn(html.escape(evil), text)
 
     def test_sub_locked_callback_shows_modal_alert_only(self):
         self._click("sub:locked:travel_bot")

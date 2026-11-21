@@ -115,6 +115,42 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             called_text = self.client.edit_message_text.call_args[0][2]
             self.assertIn(expected_text, called_text, f"Callback {cb_data} did not render expected text")
 
+    def _cq(self, cb_data: str) -> None:
+        cq = {
+            "id": f"cq_{cb_data}",
+            "from": {"id": self.user_id, "first_name": "테스터김"},
+            "message": {"message_id": 100, "chat": {"id": self.chat_id}},
+            "data": cb_data,
+        }
+        handle_callback_query(cq, self.db, self.client)
+
+    def test_every_main_menu_callback_button_is_routable(self):
+        """Every callback on the new main menu (incl. URL entry layout) renders a screen."""
+        self.db.subscribe(self.user_id, BotServiceType.BRIEF)
+        _, markup = render_main_menu(self.user, self.db.get_user_subscriptions(self.user_id))
+        buttons = [b for row in markup["inline_keyboard"] for b in row]
+        self.assertTrue(any("url" in b for b in buttons), "active subscriber must get a direct entry button")
+        cbs = [b["callback_data"] for b in buttons if "callback_data" in b]
+        self.assertEqual(cbs, ["nav:subs", "nav:tiers", "support:home", "nav:help"])
+        for cb_data in cbs:
+            self.client.reset_mock()
+            self._cq(cb_data)
+            self.client.edit_message_text.assert_called_once()
+
+    def test_stale_sub_locked_and_gate_callbacks_still_handled(self):
+        """Old chat messages may still carry `sub:locked:` / `gate:` buttons: handlers must stay intact."""
+        self._cq("sub:locked:brief_bot")
+        self.client.answer_callback_query.assert_called_once()
+        self.assertTrue(self.client.answer_callback_query.call_args.kwargs.get("show_alert"))
+        self.client.edit_message_text.assert_not_called()
+
+        # Stale gate for an un-subscribed bot -> locked alert + subscription card
+        self.client.reset_mock()
+        self._cq("gate:g:bot_brief")
+        self.assertEqual(self.client.answer_callback_query.call_count, 1)
+        self.assertTrue(self.client.answer_callback_query.call_args.kwargs.get("show_alert"))
+        self.assertIn("구독 센터", self.client.edit_message_text.call_args[0][2])
+
     # -------------------------------------------------------------
     # 2. Category Views Callbacks (All 4 categories + home)
     # -------------------------------------------------------------

@@ -19,7 +19,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from portal_hub.db import PortalDatabase
 from portal_hub.models import BotCategory, BotServiceType, UserProfile, UserTier
 from portal_hub.telegram import TelegramPortalClient
-from market_brief.link_gate import GATE_REGISTRY, build_gate_button
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +59,39 @@ def build_slot_gauge(active_count: int, tier: UserTier) -> str:
     return f"[ {gauge_str} ] {filled_len}/{max_slots}개 사용 중{status_suffix}"
 
 
+# Alert for legacy `sub:locked:` / stale `gate:` buttons still present in old chat messages.
 SUB_LOCKED_ALERT = "🔒 구독 중인 봇만 대화방에 입장할 수 있습니다.\n먼저 [➕ 구독] 버튼을 눌러 구독을 완료해 주세요."
 
 
-def build_locked_room_button(bot: BotServiceType) -> dict[str, str]:
-    """Replaces `🚀 대화방` for un-subscribed bots: no URL / gate exposure, alert-only callback."""
-    return {"text": "🔒 구독필요", "callback_data": f"sub:locked:{bot.value}"}
+def _bot_deep_link(bot: BotServiceType) -> str:
+    """Direct chat-room URL for a bot (start link, else handle fallback)."""
+    return bot.get_start_link() or f"https://t.me/{bot.telegram_handle}?start=portal"
+
+
+def _short_chip(bot: BotServiceType) -> str:
+    """Compact bot label for 360px 2-column buttons (e.g. `시황`, `여행`, `키즈`)."""
+    return bot.short_name.split()[0]
+
+
+def _bot_action_row(bot: BotServiceType, is_sub: bool, context_str: str) -> list[dict[str, str]]:
+    """Subscribed: [🚀 <칩> 입장](url) + [<칩> 해지]; un-subscribed: single [➕ <봇> 구독하기] (no URL/gate/lock)."""
+    if is_sub:
+        chip = _short_chip(bot)
+        return [
+            {"text": f"🚀 {chip} 입장", "url": _bot_deep_link(bot)},
+            {"text": f"{chip} 해지", "callback_data": f"sub:ask_unsub:{bot.value}:{context_str}"},
+        ]
+    return [{"text": f"➕ {bot.short_name} 구독하기", "callback_data": f"sub:ask_sub:{bot.value}:{context_str}"}]
+
+
+# Tier rank for upgrade validation (WHITE and FREE are equivalent base tiers).
+_TIER_RANK: dict[UserTier, int] = {
+    UserTier.WHITE: 0,
+    UserTier.FREE: 0,
+    UserTier.GREEN: 1,
+    UserTier.RED: 2,
+    UserTier.BLACK: 3,
+}
 
 
 def _sync_domain_alerts(db: PortalDatabase, user_id: Any, bot_id: str, active: bool) -> None:
@@ -181,22 +207,24 @@ def render_main_menu(
         f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '키즈')를 입력하세요!</i>"
     )
 
-    markup = {
-        "inline_keyboard": [
-            [
-                {"text": "📋 전체 봇 둘러보기", "callback_data": "cat:all"},
-            ],
-            [
-                {"text": "📋 구독 관리", "callback_data": "nav:subs"},
-                {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
-            ],
-            [
-                {"text": "💬 고객센터", "callback_data": "support:home"},
-                {"text": "❓ 이용안내", "callback_data": "nav:help"},
-            ],
-        ]
-    }
-    return text, markup
+    keyboard: list[list[dict[str, str]]] = []
+    active_public = [b for b in BotServiceType if b.is_public and (subs or {}).get(b, False)]
+    if len(active_public) == 1:
+        b = active_public[0]
+        keyboard.append([{"text": f"🚀 {b.short_name} 바로가기", "url": _bot_deep_link(b)}])
+    elif active_public:
+        entry_btns = [{"text": f"🚀 {_short_chip(b)} 입장", "url": _bot_deep_link(b)} for b in active_public]
+        keyboard.extend(entry_btns[i:i + 2] for i in range(0, len(entry_btns), 2))
+
+    keyboard.extend([
+        [{"text": "📋 봇 둘러보기 · 구독", "callback_data": "nav:subs"}],
+        [{"text": "💎 등급 혜택", "callback_data": "nav:tiers"}],
+        [
+            {"text": "💬 고객센터", "callback_data": "support:home"},
+            {"text": "❓ 이용안내", "callback_data": "nav:help"},
+        ],
+    ])
+    return text, {"inline_keyboard": keyboard}
 
 
 def render_subscription_view(
@@ -213,33 +241,42 @@ def render_subscription_view(
     notice_part = ""
     if confirming_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_bot_id)
         notice_part = (
             f"\n⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>\n"
             f"<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>\n"
         )
     elif confirming_sub_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_sub_bot_id)
         notice_part = (
             f"\n⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>\n"
             f"<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>\n"
         )
+
+    public_bots = [b for b in BotServiceType if b.is_public]
+    bot_lines = []
+    for i, b in enumerate(public_bots, 1):
+        status_chip = "[🟢 구독중]" if subs.get(b, False) else "[⚪ 미구독]"
+        bot_lines.append(f"<b>{i}. {b.icon} {html.escape(b.short_name)}</b> {status_chip}")
+        bot_lines.append(f"   • {html.escape(b.one_line_desc)}")
+    bot_block = "\n".join(bot_lines)
 
     text = (
         f"📋 <b>[{name}] 님의 구독 센터</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏅 <b>회원 등급</b>: {user.tier.badge}\n"
         f"📊 <b>구독 슬롯</b>: <b>{gauge_display}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{bot_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━"
         f"{notice_part}\n"
         f"💡 <i>버튼을 누르면 2단계 확인 후 구독 또는 해지가 진행됩니다.</i>"
     )
 
     keyboard = []
-    for bot in [b for b in BotServiceType if b.is_public]:
+    for bot in public_bots:
         is_subbed = subs.get(bot, False)
-        deep_link_url = bot.get_start_link() or f"https://t.me/{bot.telegram_handle}?start=portal"
 
         if confirming_bot_id == bot.value:
             keyboard.append([
@@ -252,21 +289,11 @@ def render_subscription_view(
                 {"text": "↩️ 취소", "callback_data": "sub:cancel_sub:subs"},
             ])
         else:
-            if is_subbed:
-                action_btn = {"text": f"🟢 {bot.short_name}", "callback_data": f"sub:ask_unsub:{bot.value}:subs"}
-                room_btn = {"text": "🚀 대화방", "url": deep_link_url}
-            else:
-                action_btn = {"text": f"➕ {bot.short_name}", "callback_data": f"sub:ask_sub:{bot.value}:subs"}
-                room_btn = build_locked_room_button(bot)
-
-            keyboard.append([
-                action_btn,
-                room_btn,
-            ])
+            keyboard.append(_bot_action_row(bot, is_subbed, "subs"))
 
     keyboard.extend([
         [
-            {"text": "📂 카테고리", "callback_data": "cat:home"},
+            {"text": "📋 전체 봇", "callback_data": "cat:all"},
             {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
         ],
         [
@@ -294,12 +321,12 @@ def render_category_view(
 
     if confirming_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_bot_id)
         lines.append(f"⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
         lines.append("<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
     elif confirming_sub_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_sub_bot_id)
         lines.append(f"⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>")
         lines.append("<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
 
@@ -318,7 +345,6 @@ def render_category_view(
     keyboard = []
     for b in bots:
         is_sub = subs.get(b, False)
-        deep_link_url = b.get_start_link() or f"https://t.me/{b.telegram_handle}?start=portal"
 
         if confirming_bot_id == b.value:
             keyboard.append([
@@ -331,19 +357,7 @@ def render_category_view(
                 {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:cat:{category.value}"},
             ])
         else:
-            if is_sub:
-                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:cat:{category.value}"}
-                tok = f"bot_{b.value.replace('_bot', '')}"
-                GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-                move_btn = build_gate_button(tok, "🚀 대화방")
-            else:
-                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:cat:{category.value}"}
-                move_btn = build_locked_room_button(b)
-
-            keyboard.append([
-                action_btn,
-                move_btn,
-            ])
+            keyboard.append(_bot_action_row(b, is_sub, f"cat:{category.value}"))
 
     keyboard.extend([
         [
@@ -458,17 +472,7 @@ def render_catalog_all_view(
             ])
             continue
 
-        if subs.get(b, False):
-            row = [{"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:all"}]
-            deep_link = b.get_start_link()
-            if deep_link:
-                row.append({"text": "🚀 대화방", "url": deep_link})
-        else:
-            row = [
-                {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:all"},
-                build_locked_room_button(b),
-            ]
-        keyboard.append(row)
+        keyboard.append(_bot_action_row(b, subs.get(b, False), "all"))
 
     keyboard.extend([
         [
@@ -598,12 +602,12 @@ def render_search_results_view(
 
     if confirming_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_bot_id)
         lines.append(f"⚠️ <b>[{target_name}] 구독을 정말 해지하시겠습니까?</b>")
         lines.append("<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
     elif confirming_sub_bot_id:
         target_bot = next((b for b in BotServiceType if b.value == confirming_sub_bot_id), None)
-        target_name = target_bot.short_name if target_bot else confirming_sub_bot_id
+        target_name = html.escape(target_bot.short_name if target_bot else confirming_sub_bot_id)
         lines.append(f"⚠️ <b>[{target_name}] 알림을 구독하시겠습니까?</b>")
         lines.append("<i>아래 [✅ 구독 확정] 또는 [↩️ 취소]를 터치하세요.</i>\n")
 
@@ -622,7 +626,6 @@ def render_search_results_view(
     keyboard = []
     for b in matched_bots:
         is_sub = subs.get(b, False)
-        deep_link_url = b.get_start_link() or f"https://t.me/{b.telegram_handle}?start=portal"
 
         if confirming_bot_id == b.value:
             keyboard.append([
@@ -635,19 +638,7 @@ def render_search_results_view(
                 {"text": "↩️ 취소", "callback_data": f"sub:cancel_sub:search:{cb_q}"},
             ])
         else:
-            if is_sub:
-                action_btn = {"text": "🟢 구독중", "callback_data": f"sub:ask_unsub:{b.value}:search:{cb_q}"}
-                tok = f"bot_{b.value.replace('_bot', '')}"
-                GATE_REGISTRY.update_preset_url(tok, deep_link_url)
-                move_btn = build_gate_button(tok, "🚀 대화방")
-            else:
-                action_btn = {"text": "➕ 구독", "callback_data": f"sub:ask_sub:{b.value}:search:{cb_q}"}
-                move_btn = build_locked_room_button(b)
-
-            keyboard.append([
-                action_btn,
-                move_btn,
-            ])
+            keyboard.append(_bot_action_row(b, is_sub, f"search:{cb_q}"))
 
     keyboard.extend([
         [
@@ -689,10 +680,13 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
 
     keyboard = [
         [
-            {"text": "💬 관리자 문의 & 등급 신청", "callback_data": "support:home"},
+            {"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"},
         ],
         [
+            {"text": "💬 고객센터", "callback_data": "support:home"},
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
+        ],
+        [
             {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
     ]
@@ -727,31 +721,44 @@ def render_support_center_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     return text, {"inline_keyboard": keyboard}
 
 
+_UPGRADE_OPTIONS: tuple[tuple[UserTier, str], ...] = (
+    (UserTier.GREEN, "🟢 그린 등급 신청 (최대 3개)"),
+    (UserTier.RED, "🔴 레드 등급 신청 (최대 5개)"),
+    (UserTier.BLACK, "⚫ 블랙 VIP 신청 (무제한)"),
+)
+
+
 def render_upgrade_request_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
-    """Renders 1-click tier upgrade request form."""
+    """Renders 1-click tier upgrade request form (only tiers strictly above the current one)."""
+    current_rank = _TIER_RANK.get(user.tier, 0)
+    if user.tier == UserTier.BLACK:
+        guide = (
+            "👑 <b>최고 등급(BLACK VIP)을 이용 중입니다.</b>\n"
+            "더 이상 상향 가능한 등급이 없습니다. 문의는 고객센터를 이용해 주세요.\n"
+        )
+    else:
+        guide = (
+            "원하시는 희망 등급을 선택해 주세요.\n"
+            "터치 즉시 운영팀에 신청서가 전송되며, 확인 후 신속히 승인해 드립니다!\n"
+        )
     text = (
         f"💎 <b>등급 업그레이드 신청</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"현재 회원님의 등급: {user.tier.badge}\n\n"
-        f"원하시는 희망 등급을 선택해 주세요.\n"
-        f"터치 즉시 운영팀에 신청서가 전송되며, 확인 후 신속히 승인해 드립니다!\n"
+        f"✅ 현재 이용 중인 등급: {user.tier.badge}\n\n"
+        f"{guide}"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
     keyboard = [
-        [
-            {"text": "🟢 그린 등급 신청 (최대 3개)", "callback_data": "support:req_tier:GREEN"},
-        ],
-        [
-            {"text": "🔴 레드 등급 신청 (최대 5개)", "callback_data": "support:req_tier:RED"},
-        ],
-        [
-            {"text": "⚫ 블랙 VIP 신청 (무제한)", "callback_data": "support:req_tier:BLACK"},
-        ],
+        [{"text": label, "callback_data": f"support:req_tier:{tier.value}"}]
+        for tier, label in _UPGRADE_OPTIONS
+        if _TIER_RANK[tier] > current_rank
+    ]
+    keyboard.extend([
         [
             {"text": "💬 고객센터", "callback_data": "support:home"},
             {"text": "🏠 홈으로", "callback_data": "nav:main"},
         ],
-    ]
+    ])
     return text, {"inline_keyboard": keyboard}
 
 
@@ -1174,6 +1181,11 @@ def _handle_callback_query_scoped(
         raw_tier = data.split(":", 2)[2].upper()
         if raw_tier not in ("GREEN", "RED", "BLACK"):
             client.answer_callback_query(cq_id, "유효하지 않은 등급입니다.", show_alert=True)
+            return
+
+        # Stale/forged lower-or-same tier request: alert only, never touch the DB
+        if _TIER_RANK[UserTier(raw_tier)] <= _TIER_RANK.get(user.tier, 0):
+            client.answer_callback_query(cq_id, "ℹ️ 이미 이용 중이거나 하위 등급입니다.", show_alert=True)
             return
 
         req_tier = raw_tier

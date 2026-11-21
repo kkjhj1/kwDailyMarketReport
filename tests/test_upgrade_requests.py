@@ -22,6 +22,8 @@ from portal_hub import (
     TelegramPortalClient,
     handle_callback_query,
 )
+from portal_hub.interactive import render_tier_benefits_view, render_upgrade_request_view
+from portal_hub.models import UserProfile, UserTier
 
 
 class UpgradeRequestsWorkflowTests(unittest.TestCase):
@@ -245,6 +247,90 @@ class UpgradeRequestsWorkflowTests(unittest.TestCase):
         # User is NOT approved yet because expected_tier mismatch prevented race condition
         user_in_db = self.sub_engine.get_user_profile(str(self.user_id))
         self.assertEqual(user_in_db["tier"], "WHITE")
+
+    # --- Tier-rank gated upgrade UI & stale-callback DB immutability ---
+    def _promote_to(self, tier: str) -> None:
+        req_id, _ = self.portal_db.request_tier_upgrade(self.user_id, tier)
+        self.sub_engine.approve_upgrade_request(req_id, actor="ADMIN")
+        self.assertEqual(self.sub_engine.get_user_profile(str(self.user_id))["tier"], tier)
+
+    def _req_tier_cbs(self, user) -> list[str]:
+        _, markup = render_upgrade_request_view(user)
+        return [
+            b["callback_data"] for row in markup["inline_keyboard"] for b in row
+            if b.get("callback_data", "").startswith("support:req_tier:")
+        ]
+
+    def test_upgrade_view_only_offers_higher_tiers(self):
+        expected = {
+            UserTier.WHITE: ["GREEN", "RED", "BLACK"],
+            UserTier.FREE: ["GREEN", "RED", "BLACK"],
+            UserTier.GREEN: ["RED", "BLACK"],
+            UserTier.RED: ["BLACK"],
+            UserTier.BLACK: [],
+        }
+        for tier, tiers in expected.items():
+            user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=tier)
+            self.assertEqual(self._req_tier_cbs(user), [f"support:req_tier:{t}" for t in tiers], tier)
+            text, markup = render_upgrade_request_view(user)
+            self.assertIn("✅ 현재 이용 중인 등급:", text)
+            self.assertIn(tier.badge, text)
+            cbs = [b.get("callback_data") for row in markup["inline_keyboard"] for b in row]
+            self.assertIn("support:home", cbs)
+            self.assertIn("nav:main", cbs)
+
+    def test_black_tier_shows_vip_max_notice_without_upgrade_buttons(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=UserTier.BLACK)
+        text, _ = render_upgrade_request_view(user)
+        self.assertIn("최고 등급(BLACK VIP)", text)
+        self.assertEqual(self._req_tier_cbs(user), [])
+
+    def test_tier_benefits_primary_cta_is_upgrade_menu(self):
+        user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=UserTier.GREEN)
+        _, markup = render_tier_benefits_view(user)
+        rows = markup["inline_keyboard"]
+        self.assertEqual(rows[0], [{"text": "💎 등급 업그레이드 신청", "callback_data": "support:upgrade_menu"}])
+        cbs = [b.get("callback_data") for row in rows for b in row]
+        for nav in ("support:home", "nav:subs", "nav:main"):
+            self.assertIn(nav, cbs)
+
+    def _click_req(self, tier: str) -> None:
+        cq = {
+            "id": f"cq_req_{tier}",
+            "from": {"id": self.user_id, "first_name": "테스터조", "username": "kw_tester"},
+            "message": {"message_id": 321, "chat": {"id": self.user_id}},
+            "data": f"support:req_tier:{tier}",
+        }
+        handle_callback_query(cq, self.portal_db, self.tg_client)
+
+    def _assert_blocked_without_db_mutation(self, tier: str) -> None:
+        self.tg_client.reset_mock()
+        with patch.object(PortalDatabase, "request_tier_upgrade") as mock_req:
+            self._click_req(tier)
+            mock_req.assert_not_called()
+        self.tg_client.answer_callback_query.assert_called_once_with(
+            f"cq_req_{tier}", "ℹ️ 이미 이용 중이거나 하위 등급입니다.", show_alert=True
+        )
+        self.tg_client.edit_message_text.assert_not_called()
+        self.tg_client.send_message.assert_not_called()
+        self.assertEqual(self.portal_db.get_pending_upgrade_requests(), [])
+
+    def test_stale_same_or_lower_tier_request_is_blocked_without_db_mutation(self):
+        self._promote_to("RED")
+        self._assert_blocked_without_db_mutation("RED")    # same tier
+        self._assert_blocked_without_db_mutation("GREEN")  # lower tier
+
+        # A strictly higher tier is still accepted and recorded
+        self.tg_client.reset_mock()
+        self._click_req("BLACK")
+        pending = self.portal_db.get_pending_upgrade_requests()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["requested_tier"], "BLACK")
+
+    def test_black_user_stale_request_buttons_are_all_blocked(self):
+        self._promote_to("BLACK")
+        for tier in ("GREEN", "RED", "BLACK"):
+            self._assert_blocked_without_db_mutation(tier)
 
 
 if __name__ == "__main__":
