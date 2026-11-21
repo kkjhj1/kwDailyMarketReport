@@ -89,7 +89,11 @@ from kids_compass.home_play import (
     play_stage_for_months,
 )
 from kids_compass.models import AgeGroup, ExperienceCategory, ExperienceItem, IngredientType, PushMessage, WeatherSnapshot
-from kids_compass.storage.db import SENT_BLOCKING_STATES, KidsCompassDatabase
+from kids_compass.storage.db import (
+    SENT_BLOCKING_STATES,
+    KidsCompassDatabase,
+    _platform_active_subscriber_ids,
+)
 from kids_compass.weather import fetch_weekend_weather, weekend_outlook
 
 logger = logging.getLogger(__name__)
@@ -610,16 +614,32 @@ def build_d14_milestone_push_messages(db: KidsCompassDatabase, today: date) -> l
     return out
 
 
-def dispatch_due_dose_timers(db: KidsCompassDatabase, channel: Any,
-                             now_dt: Optional[datetime] = None) -> dict[str, Any]:
+def dispatch_due_dose_timers(
+    db: KidsCompassDatabase,
+    channel: Any,
+    now_dt: Optional[datetime] = None,
+    *,
+    now: Optional[datetime] = None,
+    startup_cutoff: Optional[str] = None,
+) -> dict[str, Any]:
     """Claim and deliver due dose timers exactly once.
 
     A timeout is deliberately finalized as UNKNOWN: Telegram may have accepted the
     request, so the timer must never be returned to PENDING or sent again.
     """
-    now = now_dt or datetime.now()
+    if now_dt is not None and now is not None:
+        raise TypeError("pass either now_dt or now, not both")
+    dispatch_now = now or now_dt or datetime.now()
     claim_token = secrets.token_hex(16)
-    timers = db.claim_due_dose_timers(now, claim_token)
+    active_ids = _platform_active_subscriber_ids(
+        db.db_path, ("kids_bot",), conn=db.conn
+    )
+    timers = db.claim_due_dose_timers(
+        dispatch_now,
+        claim_token,
+        cutoff_iso=startup_cutoff,
+        eligible_user_ids=active_ids,
+    )
     stats: dict[str, Any] = {
         "total": len(timers), "claimed": len(timers), "sent": 0,
         "unknown": 0, "blocked": 0, "failed": 0, "errors": {},
@@ -646,7 +666,7 @@ def dispatch_due_dose_timers(db: KidsCompassDatabase, channel: Any,
         except Exception as exc:  # noqa: BLE001 - one timer must not stop the sweep
             status, error = "FAILED", str(exc)
         try:
-            db.finalize_dose_timer(timer.timer_id, claim_token, status, error or "", now=now)
+            db.finalize_dose_timer(timer.timer_id, claim_token, status, error or "", now=dispatch_now)
         except Exception:  # noqa: BLE001 - leave the row terminally guarded by its lease
             logger.exception("Failed to finalize dose timer %s", timer.timer_id)
         stats[status.lower()] += 1

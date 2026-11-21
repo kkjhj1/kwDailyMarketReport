@@ -33,13 +33,13 @@ tags: ["telegram", "bot", "message", "callback"]
 - 다수 수신자 발송 시 단순 루프 직발송을 금한다.
 - `SafeTelegramDispatcher` + 토큰 버킷 제한기(전역 `25 msg/s`, 동일 채팅 `1.0s/chat`) + 지수 백오프 재시도로 429 및 네트워크 타임아웃 중복 발송을 차단한다.
 - 디스패처는 `[PROD-LIVE]` 게이트를 통과한 정상 작업만 전달받아 발송한다.
+- Telegram Keep-Alive는 유휴 연결 단절에만 최대 1회 재시도하고 `TimeoutError`는 `UNKNOWN`으로 격리하여 재시도하지 않으며, callback query는 ID당 1회만 ACK하고 롱폴링은 전용 executor를 사용한다.
 
 ## [TG-06] 토큰 프리 `--demo` & 운영 자산 무오염
 - 모든 봇 러너는 실제 토큰 없이 1초 내 콘솔 검증이 가능한 `--demo` 플래그를 제공한다.
 - 데모·테스트 실행 중 운영 DB(`*.sqlite3`) 및 배포 폴더(`reports/`)에 기록하지 않는다(`:memory:` 또는 `scratch/` 격리).
-- 현행 과제: `travel_bot_runner.py`, `portal_bot_runner.py`는 `--demo` 완비. `telegram_bot_runner.py`, `admission_bot_runner.py`는 향후 L2 작업 시 `--demo`를 최우선 구현한다.
 
 ## [TG-07] 제로 브레이킹 & 선행 컴파일 검증
-- GitHub Actions의 기존 크론 CLI(`telegram_bot_runner.py --auto-schedule --live-naver` 등)에 대해 하위 호환성을 100% 보장한다.
+- 운영 스케줄·발송 SSOT는 OCI VM이며 기존 CLI 플래그(`telegram_bot_runner.py --auto-schedule --live-naver` 등) 하위 호환성을 100% 보장한다.
 - 코드 수정 직후 `python -m py_compile` 및 관련 `pytest` 통과를 확인한 뒤에만 완료 보고한다.
 - 완료 보고에는 실제 실행 명령과 실측 결과를 반드시 제시한다(미실행 검증 보고 금지).

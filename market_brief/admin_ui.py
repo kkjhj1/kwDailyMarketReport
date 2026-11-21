@@ -1587,7 +1587,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .drawer-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
       gap: 12px;
       margin-bottom: 12px;
     }
@@ -1617,8 +1617,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       margin-top: 6px;
     }
     .drawer-actions .btn {
-      min-height: 34px;
-      padding: 4px 12px;
+      min-height: 44px;
+      padding: 8px 14px;
       font-size: 12px;
       border-radius: 6px;
     }
@@ -2092,7 +2092,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       <!-- Collapsible Advanced Settings -->
       <details class="card">
         <summary style="font-size:14px; font-weight:800; cursor:pointer; user-select:none;">
-          ⚙️ 고급 시스템 설정 (긴급 알림 임계치 &amp; GitHub Actions 크론)
+          ⚙️ 고급 시스템 설정 (긴급 알림 임계치)
         </summary>
         <div style="margin-top:16px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
@@ -2100,10 +2100,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             <button class="btn btn-sm btn-primary" onclick="saveThresholds()">임계치 저장</button>
           </div>
           <div id="thresholdEditor" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin-bottom:16px;"></div>
-          <div style="padding:12px; border-radius:8px; background:var(--surface-sub); font-size:12.5px; display:flex; justify-content:space-between; align-items:center;">
-            <span id="ghSyncText">GitHub Actions 크론 수신자 동기화 확인중...</span>
-            <button class="btn btn-sm btn-dark" onclick="syncGithub()">GitHub 변수 동기화</button>
-          </div>
         </div>
       </details>
     </section>
@@ -2520,6 +2516,8 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       tierFilter: '',
       activeTab: 'users',
       thresholds: {},
+      userBotContexts: {},
+      userBotContextEpochs: {},
     };
     let searchDebounce = null;
 
@@ -2718,7 +2716,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function toggleUserAccordion(userId, forceOpen) {
-      const item = document.querySelector(`[data-user-card-id="${userId}"]`);
+      const item = findUserAccordionItem(userId);
       if (!item) return;
       if (forceOpen === true) {
         item.classList.add('is-open');
@@ -2727,6 +2725,124 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       } else {
         item.classList.toggle('is-open');
       }
+      const isOpen = item.classList.contains('is-open');
+      S.userBotContextEpochs[userId] = (S.userBotContextEpochs[userId] || 0) + 1;
+      if (isOpen) loadUserBotContext(userId, S.userBotContextEpochs[userId]);
+    }
+
+    function findUserBotContextCard(userId) {
+      return Array.from(document.querySelectorAll('.user-bot-ctx-box')).find(
+        card => String(card.dataset.ctxUid || '') === String(userId)
+      );
+    }
+
+    function findUserAccordionItem(userId) {
+      return Array.from(document.querySelectorAll('[data-user-card-id]')).find(
+        item => String(item.dataset.userCardId || '') === String(userId)
+      );
+    }
+
+    function botContextValue(value, fallback = '-') {
+      return value === null || value === undefined || value === '' ? fallback : esc(value);
+    }
+
+    function renderUserBotContext(userId, ctx) {
+      const card = findUserBotContextCard(userId);
+      if (!card) return;
+      const section = (botId, title, body) => `
+        <div class="drawer-card" data-ctx-section="${esc(botId)}">
+          <div class="drawer-card-title">${esc(title)}</div>${body}
+        </div>`;
+      const unavailable = (bot) => bot && bot.available === false
+        ? '<div style="font-size:12px; color:var(--text-muted);">sidecar DB를 사용할 수 없습니다.</div>' : '';
+      const brief = ctx.brief_bot || {};
+      const briefRows = (brief.watches || []).map(w => `
+        <div style="display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span><b>${botContextValue(w.symbol)}</b> · 기준 ${botContextValue(w.threshold_pct)}%</span>
+          <span style="display:flex; gap:5px; align-items:center;">
+            <span>${w.is_active ? '🟢 활성' : '⚪ 중지'}</span>
+            ${w.is_active ? `<button class="btn btn-sm btn-danger" data-ctx-deactivate-bot="brief_bot" data-ctx-deactivate-watch="${esc(w.watch_id ?? w.id)}" data-ctx-uid="${esc(userId)}">비활성화</button>` : ''}
+          </span>
+        </div>`).join('') || '<div style="font-size:12px; color:var(--text-muted);">등록된 시황 감시가 없습니다.</div>';
+      const travel = ctx.travel_bot || {};
+      const travelRows = (travel.watches || []).map(w => `
+        <div style="display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span><b>${botContextValue(w.destination || w.dest_code)}</b> · 목표 ${botContextValue(w.target_price || w.target_price_krw)}원</span>
+          <span style="display:flex; gap:5px; align-items:center;">
+            <span>${w.is_active ? '🟢 활성' : '⚪ 중지'}</span>
+            ${w.is_active ? `<button class="btn btn-sm btn-danger" data-ctx-deactivate-bot="travel_bot" data-ctx-deactivate-watch="${esc(w.watch_id ?? w.id)}" data-ctx-uid="${esc(userId)}">비활성화</button>` : ''}
+          </span>
+        </div>`).join('') || '<div style="font-size:12px; color:var(--text-muted);">등록된 여행 감시가 없습니다.</div>';
+      const kids = ctx.kids_bot || {};
+      const profile = kids.profile || {};
+      const children = (kids.children || []).map(child =>
+        `<div>${botContextValue(child.nickname)} · ${botContextValue(child.birth_date)} · ${botContextValue(child.weight_kg, '체중 미입력')}kg</div>`
+      ).join('') || '<div>등록된 자녀가 없습니다.</div>';
+      const pregnancy = kids.pregnancy
+        ? `${botContextValue(kids.pregnancy.nickname)} · 예정일 ${botContextValue(kids.pregnancy.due_date)}`
+        : '임신 프로필 없음';
+      const admissionRows = (ctx.admission_bot?.subscribers || []).map(s =>
+        `<div>${botContextValue(s.target_grade)} · ${botContextValue(s.target_region)} · ${s.is_active === false || s.alert_enabled === 0 ? '⚪ 중지' : '🟢 활성'}</div>`
+      ).join('') || '<div>입시 맞춤 설정이 없습니다.</div>';
+      const yolo = ctx.yolo_bot?.profile || {};
+      const parents = (ctx.silver_bot?.parents || []).map(p =>
+        `<div>${botContextValue(p.alias)} · ${botContextValue(p.sido_code)} ${botContextValue(p.sigungu_name, '')}</div>`
+      ).join('') || '<div>등록된 부모 프로필이 없습니다.</div>';
+
+      card.innerHTML = `
+        <div class="drawer-card-title">🤖 봇별 맞춤 설정 &amp; 감시 현황</div>
+        <div class="drawer-grid" style="margin-bottom:0;">
+          ${section('brief_bot', '📈 시황봇 감시', briefRows + unavailable(brief))}
+          ${section('travel_bot', '✈️ 여행봇 감시·2-Track', travelRows + `<div style="margin-top:6px; color:var(--text-muted);">정기 브리핑: <b>${travel.prefs?.weekly_enabled === false ? 'OFF' : 'ON'}</b> · 특가 감시: <b>${travel.prefs?.drop_paused ? 'PAUSE' : 'ON'}</b></div>` + unavailable(travel))}
+          ${section('kids_bot', '👶 자녀봇 설정', `<div>지역: <b>${botContextValue(profile.default_region)}</b></div><div>알림: 주말 ${profile.alert_weekend_brief === 0 ? 'OFF' : 'ON'} · D-day ${profile.alert_dday_reserve === 0 ? 'OFF' : 'ON'}</div><div>자녀: ${children}</div><div>임신: ${pregnancy}</div><div>활성 복약 타이머: <b>${botContextValue(kids.active_dose_timers, '0')}건</b></div>${unavailable(kids)}`)}
+          ${section('admission_bot', '🎓 입시봇 설정', admissionRows + unavailable(ctx.admission_bot))}
+          ${section('yolo_bot', '🏄 욜로봇 프로필', yolo.archetype ? `<div>아키타입: <b>${botContextValue(yolo.archetype)}</b></div><div>상태: ${botContextValue(yolo.profile_state)}</div>` : '<div>프로필 설정이 없습니다.</div>' + unavailable(ctx.yolo_bot))}
+          ${section('silver_bot', '👵 실버봇 부모 프로필', parents + unavailable(ctx.silver_bot))}
+        </div>`;
+    }
+
+    async function loadUserBotContext(userId, epoch) {
+      const card = findUserBotContextCard(userId);
+      if (!card || !findUserAccordionItem(userId)?.classList.contains('is-open')) return;
+      if (S.userBotContexts[userId]) {
+        renderUserBotContext(userId, S.userBotContexts[userId]);
+        return;
+      }
+      card.innerHTML = '<div class="drawer-card-title">🤖 봇별 맞춤 설정 &amp; 감시 현황</div><div style="font-size:12px; color:var(--text-muted);">불러오는 중...</div>';
+      const requestEpoch = epoch ?? (S.userBotContextEpochs[userId] || 0);
+      try {
+        const result = await req(`/api/platform/users/${encodeURIComponent(userId)}/bot-context`);
+        if (S.userBotContextEpochs[userId] !== requestEpoch) return;
+        const { user_id: _ignored, ...ctx } = result;
+        S.userBotContexts[userId] = ctx;
+        if (findUserAccordionItem(userId)?.classList.contains('is-open')) {
+          renderUserBotContext(userId, ctx);
+        }
+      } catch (e) {
+        if (S.userBotContextEpochs[userId] !== requestEpoch) return;
+        card.innerHTML = `<div class="drawer-card-title">🤖 봇별 맞춤 설정 &amp; 감시 현황</div><div style="font-size:12px; color:var(--danger);">컨텍스트 로드 실패: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function initUserBotContextDelegation() {
+      document.addEventListener('click', async event => {
+        const button = event.target.closest('[data-ctx-deactivate-bot][data-ctx-deactivate-watch][data-ctx-uid]');
+        if (!button) return;
+        event.stopPropagation();
+        const { ctxUid: userId, ctxDeactivateBot: botId, ctxDeactivateWatch: watchId } = button.dataset;
+        if (!userId || !botId || !watchId || !confirm('이 맞춤 감시를 비활성화할까요? 사용자에게 알림은 발송되지 않습니다.')) return;
+        button.disabled = true;
+        try {
+          const result = await req(`/api/platform/watches/${encodeURIComponent(botId)}/${encodeURIComponent(watchId)}/deactivate`, { method: 'POST' });
+          toast(result.deactivated ? '✅ 맞춤 감시를 비활성화했습니다.' : 'ℹ️ 이미 비활성화된 감시입니다.');
+          delete S.userBotContexts[userId];
+          S.userBotContextEpochs[userId] = (S.userBotContextEpochs[userId] || 0) + 1;
+          loadUserBotContext(userId, S.userBotContextEpochs[userId]);
+        } catch (e) {
+          button.disabled = false;
+          toast(`❌ 비활성화 실패: ${e.message}`);
+        }
+      });
     }
 
     async function loadUsers() {
@@ -2843,6 +2959,12 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
                     ${botChips || '<span style="color:var(--text-muted); font-size:12px;">구독 중인 봇이 없습니다.</span>'}
                     ${suspChips}
                   </div>
+                </div>
+
+                <!-- 봇별 맞춤 설정 및 감시 현황 (drawer open 시 lazy-load) -->
+                <div class="drawer-card user-bot-ctx-box" data-ctx-uid="${esc(u.telegram_user_id)}">
+                  <div class="drawer-card-title">🤖 봇별 맞춤 설정 &amp; 감시 현황</div>
+                  <div style="font-size:12px; color:var(--text-muted);">드로어를 열면 사용자별 설정을 불러옵니다.</div>
                 </div>
 
                 <!-- 관리자 메모 (있을 때만) -->
@@ -3232,6 +3354,13 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       return { text: '🟢 폴링 정상', color: 'var(--success)', up: true };
     }
 
+    function getBotVisibilitySpec(bot) {
+      const visibility = String((bot && bot.visibility) || 'CUSTOM').toUpperCase();
+      if (visibility === 'PUBLIC') return { code: 'PUBLIC', label: '🟢 공개 운영' };
+      if (visibility === 'WIP') return { code: 'WIP', label: '🚧 준비중·비공개' };
+      return { code: 'CUSTOM', label: '⚙️ 기타' };
+    }
+
     function renderBotMasterStrip() {
       const container = document.getElementById('botMasterStrip');
       if (!container) return;
@@ -3265,6 +3394,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         const subCount = bot ? Number(bot.active_subscribers || 0) : 0;
         const isSelected = S.selectedBotId === botId;
         const isMenu = bot && bot.bot_type === 'MENU';
+        const visibility = getBotVisibilitySpec(bot);
 
         const dotEmoji = status.up ? '🟢' : (status.text.includes('토큰') ? '🟠' : '🔴');
         const shortLabel = slot.label || (name.length > 4 ? name.slice(0, 4) : name);
@@ -3280,6 +3410,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               <span class="bot-master-tile-name">${esc(shortLabel)}</span>
             </span>
             <span class="bot-master-tile-meta">
+              <span title="${esc(visibility.code)}">${esc(visibility.label)}</span>
               <span>${dotEmoji}</span>
               <span>${isMenu ? '포털' : `${subCount}명`}</span>
             </span>
@@ -3314,6 +3445,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       const status = getBotStatusSpec(bot);
+      const visibility = getBotVisibilitySpec(bot);
       const isMenu = bot.bot_type === 'MENU';
       const uname = bot.telegram_username ? `@${esc(bot.telegram_username)}` : '토큰 미설정';
       const subBadge = isMenu
@@ -3328,6 +3460,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
               <h3 style="font-size:16px; font-weight:800; margin:0;">${esc(bot.name)}</h3>
               <span style="font-size:12px; font-weight:700; color:var(--primary);">${uname}</span>
               <span style="font-size:12px; font-weight:700; color:${status.color};">${esc(status.text)}</span>
+              <span class="badge" data-bot-visibility="${esc(visibility.code)}" style="font-size:12px; font-weight:700;">${esc(visibility.label)}</span>
               ${subBadge}
             </div>
           </div>
@@ -3876,10 +4009,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     // =========================================================================
     async function loadDashboard() {
       try {
-        const [ov, setRes, gh] = await Promise.all([
+        const [ov, setRes] = await Promise.all([
           req('/api/platform/overview'),
           req('/api/settings'),
-          req('/api/recipients/github-sync-status'),
         ]);
         S.overview = ov;
         document.getElementById('kpiUsers').textContent = `${ov.total_users}명`;
@@ -3932,9 +4064,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         `).join('');
 
-        document.getElementById('ghSyncText').textContent = gh.github_connected
-          ? (gh.is_synced ? `🟢 GitHub Actions 수신자 변수 동기화 일치 (${gh.local_count}명)` : `🟠 불일치 (로컬 ${gh.local_count} vs 깃허브 ${gh.github_count})`)
-          : '⚪ GITHUB_TOKEN 미설정';
       } catch (e) {
         toast('대시보드 로드 실패: ' + e.message);
       }
@@ -4362,16 +4491,6 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function syncGithub() {
-      try {
-        const res = await req('/api/recipients/sync-github', { method: 'POST' });
-        alert(res.message);
-        loadDashboard();
-      } catch (e) {
-        alert(e.message);
-      }
-    }
-
     // =========================================================================
     // FLOATING SIMULATOR
     // =========================================================================
@@ -4675,6 +4794,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
 
     // Initial load
     initSplashLoader();
+    initUserBotContextDelegation();
     initBotHealthStrip();
     applyDeepLink();
   </script>

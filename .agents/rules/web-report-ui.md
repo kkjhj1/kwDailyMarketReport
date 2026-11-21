@@ -6,7 +6,7 @@ globs: "**/reports/**, **/*.html, **/static/**"
 
 # 웹 리포트 UI 규격 (텔레그램 인앱 웹 연동)
 
-> 적용 대상: GitHub Pages 정적 리포트(`https://kkjhj1.github.io/kwDailyMarketReport/`), 텔레그램에서 연결되는 HTML 대시보드.
+> 적용 대상: OCI VM 자체 서빙 정적 리포트(`http://161.33.196.211:8002/reports/`), 텔레그램에서 연결되는 HTML 대시보드.
 > `reports/`는 배포 폴더이므로 데모·테스트 실행 중 기록 금지(`telegram-safety.md` [TG-06]).
 
 ## 1. 360px 뷰포트 무오버플로우

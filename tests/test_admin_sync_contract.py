@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from market_brief.admin_sync_registry import (
+    ADMIN_USER_CONTEXT_REGISTRY,
     ADMIN_EXEMPT_TABLES,
     ADMIN_SYNC_REGISTRY,
     SCHEMA_SOURCES,
@@ -33,6 +34,25 @@ def _schema_tables() -> dict[str, set[str]]:
 
 
 class AdminSyncContractTests(unittest.TestCase):
+    def test_user_context_registry_covers_new_bot_tables(self):
+        expected = {
+            "admission_subscribers",
+            "kids_user_profiles",
+            "kids_children",
+            "kids_pregnancy_profiles",
+            "kids_dose_timers",
+            "yolo_users",
+            "silver_parents",
+        }
+        self.assertEqual(expected, set(ADMIN_USER_CONTEXT_REGISTRY))
+        for table, meta in ADMIN_USER_CONTEXT_REGISTRY.items():
+            with self.subTest(table=table):
+                self.assertTrue(str(meta.get("bot_id", "")).strip())
+                self.assertTrue(str(meta.get("db_file", "")).strip())
+                self.assertEqual(meta.get("admin_api"), ["GET /api/platform/users/{user_id}/bot-context"])
+                self.assertEqual(meta.get("db_reader"), "MarketBriefDatabase.get_user_bot_context")
+                self.assertTrue(str(meta.get("description", "")).strip())
+
     def test_schema_sources_parse_non_empty(self):
         per_file = _schema_tables()
         for rel, tables in per_file.items():

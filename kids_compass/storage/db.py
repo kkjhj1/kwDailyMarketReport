@@ -304,6 +304,16 @@ def _ts(value: Optional[When]) -> str:
     return text + " 00:00:00" if len(text) == 10 else text
 
 
+def _timer_ts(value: Optional[When]) -> str:
+    """Normalise timer timestamps to the DB's sortable naive format.
+
+    Older rows use a space separator while startup cutoffs are emitted as
+    local ISO-8601 with ``T``.  SQLite string comparisons must use one format.
+    """
+    stamp = _ts(value)
+    return stamp.replace("T", " ", 1) if len(stamp) >= 11 and stamp[10] == "T" else stamp
+
+
 def _add_months(d: date, months: int) -> date:
     """Month arithmetic clamped to month end (1/31 + 1m = 2/28|29, 2/29 + 12m = 2/28)."""
     y, m = divmod(d.month - 1 + months, 12)
@@ -372,6 +382,10 @@ def _platform_active_subscriber_ids(
         if not path or path == ":memory:" or path.startswith("file:"):
             return None
         own = Path(path).resolve()
+        # A domain connection may be the kids DB itself.  If it has no platform
+        # subscription table, still inspect the sibling alerts DB for the
+        # platform SSOT; the old `conn is not None` branch accidentally skipped
+        # that lookup.
         candidates = [] if conn is not None else [own]
         sibling = own.with_name("alerts.sqlite3")
         if sibling != own:
@@ -826,23 +840,33 @@ class KidsCompassDatabase:
             self.conn.rollback()
             raise
 
-    def claim_due_dose_timers(self, now_dt: When, claim_token: str, lease_seconds: int = 60) -> list[DoseTimer]:
+    def claim_due_dose_timers(
+        self,
+        now_dt: When,
+        claim_token: str,
+        lease_seconds: int = 60,
+        *,
+        cutoff_iso: str | None = None,
+        eligible_user_ids: set[str] | None = None,
+    ) -> list[DoseTimer]:
         """Single BEGIN IMMEDIATE sweep:
-          1) PENDING past expires_at      -> EXPIRED (TTL_EXPIRED)   — a late reminder is never sent
+          1) PENDING at/past expires_at   -> EXPIRED (TTL_EXPIRED)   — a late reminder is never sent
           2) IN_FLIGHT past lease_until   -> UNKNOWN (STALE_LEASE)   — never back to PENDING (no re-send)
-          3) PENDING with due_at <= now <= expires_at -> IN_FLIGHT (claim_token, lease, attempt_count + 1)
+          3) PENDING with due_at <= now < expires_at -> IN_FLIGHT (claim_token, lease, attempt_count + 1)
         Returns only rows this call won (conditional UPDATE on status = 'PENDING')."""
         token = str(claim_token or "")
         if not token:
             raise ValueError("claim_token is required")
-        now = datetime.strptime(_ts(now_dt), TS_FMT)
+        now = datetime.strptime(_timer_ts(now_dt), TS_FMT)
         stamp = now.strftime(TS_FMT)
         lease = (now + timedelta(seconds=max(int(lease_seconds), 1))).strftime(TS_FMT)
+        cutoff = _timer_ts(cutoff_iso) if cutoff_iso is not None else None
+        eligible = None if eligible_user_ids is None else {str(uid).strip() for uid in eligible_user_ids}
         self._begin_immediate()
         try:
             self.conn.execute(
                 "UPDATE kids_dose_timers SET status = 'EXPIRED', terminal_reason = 'TTL_EXPIRED', updated_at = ? "
-                "WHERE status = 'PENDING' AND expires_at < ?",
+                "WHERE status = 'PENDING' AND replace(expires_at, 'T', ' ') <= ?",
                 (stamp, stamp),
             )
             self.conn.execute(
@@ -850,18 +874,47 @@ class KidsCompassDatabase:
                 "WHERE status = 'IN_FLIGHT' AND lease_until < ?",
                 (stamp, stamp),
             )
-            ids = [int(r[0]) for r in self.conn.execute(
-                "SELECT timer_id FROM kids_dose_timers WHERE status = 'PENDING' AND due_at <= ? AND expires_at >= ? "
-                "ORDER BY due_at, timer_id",
-                (stamp, stamp),
-            ).fetchall()]
+            ids: list[int] = []
+            if eligible != set():
+                where = [
+                    "status = 'PENDING'",
+                    "replace(due_at, 'T', ' ') <= ?",
+                    "replace(expires_at, 'T', ' ') > ?",
+                ]
+                params: list[str] = [stamp, stamp]
+                if cutoff is not None:
+                    where.append("replace(due_at, 'T', ' ') >= ?")
+                    params.append(cutoff)
+                if eligible is not None:
+                    marks = ",".join("?" * len(eligible))
+                    where.append(f"telegram_user_id IN ({marks})")
+                    params.extend(sorted(eligible))
+                ids = [int(r[0]) for r in self.conn.execute(
+                    f"SELECT timer_id FROM kids_dose_timers WHERE {' AND '.join(where)} "
+                    "ORDER BY due_at, timer_id",
+                    params,
+                ).fetchall()]
             won = []
             for tid in ids:
+                where = [
+                    "timer_id = ?",
+                    "status = 'PENDING'",
+                    "replace(due_at, 'T', ' ') <= ?",
+                    "replace(expires_at, 'T', ' ') > ?",
+                ]
+                params = [tid, stamp, stamp]
+                if cutoff is not None:
+                    where.append("replace(due_at, 'T', ' ') >= ?")
+                    params.append(cutoff)
+                if eligible is not None:
+                    marks = ",".join("?" * len(eligible))
+                    where.append(f"telegram_user_id IN ({marks})")
+                    params.extend(sorted(eligible))
                 cur = self.conn.execute(
                     "UPDATE kids_dose_timers SET status = 'IN_FLIGHT', claim_token = ?, lease_until = ?, "
                     "attempt_count = attempt_count + 1, updated_at = ? "
-                    "WHERE timer_id = ? AND status = 'PENDING' AND due_at <= ? AND expires_at >= ?",
-                    (token, lease, stamp, tid, stamp, stamp),
+                    f"WHERE {' AND '.join(where)}",
+                    (token, lease, stamp, *params),
                 )
                 if cur.rowcount == 1:
                     won.append(tid)

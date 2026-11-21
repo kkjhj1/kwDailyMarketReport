@@ -446,7 +446,7 @@ def test_v2_three_item_card_within_caps_and_has_magazine_button(
     ]
     assert "callback_data" not in first_row[0]
     # Original callback rows are preserved below the URL row
-    assert markup["inline_keyboard"][1:] == build_main_keyboard(user)["inline_keyboard"]
+    assert markup["inline_keyboard"][1:] == build_main_keyboard(user, res)["inline_keyboard"]
 
 
 def test_v2_seed_curations_carry_valid_magazine_details() -> None:
@@ -654,3 +654,517 @@ def test_v2_generate_report_writes_only_to_given_path(
     assert "나홀로 욜로 매거진" in out.read_text(encoding="utf-8")
     assert list(tmp_path.glob("*.sqlite3")) == []
     assert sorted(p.name for p in tmp_path.iterdir()) == ["yolo_latest.html"]
+
+
+# =========================================================================
+# 9. Phase A: Real-Time Weather Fail-Safe, Activity Rotation & TimeSlot
+# =========================================================================
+def test_phase_a_default_weather_is_unknown_fail_safe(memory_db: YoloDatabase) -> None:
+    # Default WeatherSnapshot must NOT assume CLEAR ([INV-02])
+    default_snap = WeatherSnapshot()
+    assert default_snap.weather_class == WeatherClass.UNKNOWN
+    is_severe, eff_class, _ = evaluate_weather_gate(default_snap)
+    assert is_severe is True
+    assert eff_class == WeatherClass.UNKNOWN
+
+    # Bot without weather_client / default_weather fails safe to UNKNOWN indoor mode
+    channel = YoloTelegramChannel(token="", dry_run=True)
+    bot = YoloInteractiveBot(db=memory_db, channel=channel)
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_fs_1",
+                "data": "yolo:set:ACTIVE_CHALLENGER",
+                "message": {"chat": {"id": "u_fs"}, "message_id": 10},
+            }
+        },
+        ref_date=date(2026, 10, 17),
+    )
+    rendered_text = channel.call_log[-1][1]["text"]
+    assert "실내 스마트 대체" in rendered_text
+    _, seen_ids = memory_db.get_last_seen_batch("u_fs")
+    assert len(seen_ids) == 3
+    by_id = {c.id: c for c in memory_db.list_active_curations()}
+    for cid in seen_ids:
+        assert by_id[cid].activity_mode == ActivityMode.INDOOR
+
+
+def test_phase_a_open_meteo_client_wmo_mapping_cache_and_failures() -> None:
+    import json
+    from yolo_brief.weather_client import OpenMeteoWeatherClient, map_wmo_code
+
+    assert map_wmo_code(0) == WeatherClass.CLEAR
+    assert map_wmo_code(45) == WeatherClass.FOG
+    assert map_wmo_code(61) == WeatherClass.RAIN
+    assert map_wmo_code(95) == WeatherClass.RAIN
+    assert map_wmo_code(73) == WeatherClass.SNOW
+    assert map_wmo_code(999) == WeatherClass.UNKNOWN
+
+    now = [100.0]
+    calls: list[str] = []
+    mode = {"state": "ok"}
+
+    def fake_opener(url: str, timeout: float) -> bytes:
+        calls.append(url)
+        if mode["state"] == "fail":
+            raise TimeoutError("simulated timeout")
+        if "air-quality" in url:
+            if mode["state"] == "aq_fail":
+                raise RuntimeError("aq down")
+            return json.dumps({"current": {"pm2_5": 10.0}}).encode("utf-8")
+        if mode["state"] == "snow":
+            return json.dumps(
+                {
+                    "current": {
+                        "time": "2026-01-15T09:00",
+                        "weather_code": 73,
+                        "apparent_temperature": -4.0,
+                        "precipitation": 1.2,
+                        "snowfall": 2.5,  # cm -> 25.0 mm
+                    },
+                    "hourly": {
+                        "time": ["2026-01-15T09:00", "2026-01-15T10:00"],
+                        "precipitation_probability": [70, 80],
+                    },
+                }
+            ).encode("utf-8")
+        return json.dumps(
+            {
+                "current": {
+                    "time": "2026-10-17T12:00",
+                    "weather_code": 1,
+                    "apparent_temperature": 20.5,
+                    "precipitation": 0.0,
+                    "snowfall": 0.0,
+                },
+                "hourly": {
+                    "time": ["2026-10-17T12:00", "2026-10-17T13:00"],
+                    "precipitation_probability": [10, 20],
+                },
+            }
+        ).encode("utf-8")
+
+    client = OpenMeteoWeatherClient(
+        opener=fake_opener,
+        ttl_seconds=900.0,
+        neg_ttl_seconds=20.0,
+        clock=lambda: now[0],
+    )
+
+    # 1. Unknown area code -> immediate UNKNOWN without network call
+    bad_area = client.get_weather("9999999999")
+    assert bad_area.weather_class == WeatherClass.UNKNOWN
+    assert calls == []
+
+    # 2. Successful lookup is cached for 900s
+    snap1 = client.get_weather("1100000000")
+    assert snap1.weather_class == WeatherClass.CLEAR
+    assert snap1.pop_percent == 20
+    assert snap1.pm_grade == "GOOD"
+    assert len(calls) == 2
+
+    now[0] += 300.0
+    snap_cached = client.get_weather("1100000000")
+    assert snap_cached == snap1
+    assert len(calls) == 2  # served from cache
+
+    # 3. After 900s expiry, upstream failure MUST NOT reuse expired cache ([INV-02])
+    now[0] += 700.0
+    mode["state"] = "fail"
+    snap_fail = client.get_weather("1100000000")
+    assert snap_fail.weather_class == WeatherClass.UNKNOWN
+    assert snap_fail.pm_grade == "UNKNOWN"
+
+    # 4. Snow cm -> mm conversion and AQ degradation to UNKNOWN (not GOOD)
+    now[0] += 30.0
+    mode["state"] = "snow"
+    snap_snow = client.get_weather("5100000000")
+    assert snap_snow.weather_class == WeatherClass.SNOW
+    assert snap_snow.snow_mm == pytest.approx(25.0)
+
+    mode["state"] = "aq_fail"
+    snap_no_aq = client.get_weather("2600000000")
+    assert snap_no_aq.weather_class == WeatherClass.CLEAR
+    assert snap_no_aq.pm_grade == "UNKNOWN"
+
+
+def test_phase_a_activity_log_dedupe_and_rotation_scoring(memory_db: YoloDatabase) -> None:
+    from yolo_brief.weather_client import StaticWeatherClient
+
+    clear = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0)
+    channel = YoloTelegramChannel(token="", dry_run=True)
+    bot = YoloInteractiveBot(
+        db=memory_db,
+        channel=channel,
+        weather_client=StaticWeatherClient(clear),
+    )
+
+    # Initial selection records 3 SEEN items
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_rot_1",
+                "data": "yolo:set:URBAN_HIPSTER",
+                "message": {"chat": {"id": "u_rot"}, "message_id": 50},
+            }
+        },
+        ref_date=date(2026, 10, 17),
+    )
+    _, first_batch = memory_db.get_last_seen_batch("u_rot")
+    assert len(first_batch) == 3
+
+    # Duplicate callback_query.id on DONE log is idempotent (`INSERT OR IGNORE`)
+    target_id = first_batch[0]
+    assert memory_db.log_curation_action("u_rot", target_id, "DONE", event_key="cb:dup_1") is True
+    assert memory_db.log_curation_action("u_rot", target_id, "DONE", event_key="cb:dup_1") is False
+
+    # Clicking `yolo:view:next` marks current batch as SKIP and rotates new items in
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_rot_next",
+                "data": "yolo:view:next",
+                "message": {"chat": {"id": "u_rot"}, "message_id": 50},
+            }
+        },
+        ref_date=date(2026, 10, 17),
+    )
+    _, second_batch = memory_db.get_last_seen_batch("u_rot")
+    assert len(second_batch) == 3
+    assert second_batch != first_batch
+
+
+def test_phase_a_time_slot_filter_and_graceful_relaxation_preserves_inv02(
+    memory_db: YoloDatabase,
+) -> None:
+    from yolo_brief.matching import TIME_SLOT_RELAXED_NOTICE
+    from yolo_brief.models import TimeSlot
+    from yolo_brief.weather_client import StaticWeatherClient
+
+    clear = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0)
+    channel = YoloTelegramChannel(token="", dry_run=True)
+    bot = YoloInteractiveBot(
+        db=memory_db,
+        channel=channel,
+        weather_client=StaticWeatherClient(clear),
+    )
+    memory_db.set_user_archetype("u_slot", SoloArchetype.URBAN_HIPSTER)
+
+    # Switch to QUICK_2H (`yolo:slot:q2`)
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_slot_q2",
+                "data": "yolo:slot:q2",
+                "message": {"chat": {"id": "u_slot"}, "message_id": 77},
+            }
+        },
+        ref_date=date(2026, 10, 17),
+    )
+    user = memory_db.get_user("u_slot")
+    assert user is not None and user.preferred_time_slot == TimeSlot.QUICK_2H
+    _, q2_ids = memory_db.get_last_seen_batch("u_slot")
+    by_id = {c.id: c for c in memory_db.list_active_curations()}
+    assert len(q2_ids) == 3
+    assert all(by_id[cid].time_slot == TimeSlot.QUICK_2H for cid in q2_ids)
+
+    # Relaxation when selected slot has <3 candidates + severe weather NEVER pulls OUTDOOR
+    user_nomad = memory_db.set_user_archetype("u_nomad", SoloArchetype.ROAD_NOMAD)
+    user_nomad = memory_db.set_preferred_time_slot("u_nomad", TimeSlot.QUICK_2H)
+    rain = WeatherSnapshot(weather_class=WeatherClass.RAIN, pop_percent=90, precip_mm=15.0)
+    res_rain = match_curations(
+        user_nomad,
+        memory_db.list_active_curations(),
+        snapshot=rain,
+        target_season=Season.AUTUMN,
+    )
+    assert res_rain.is_severe_weather is True
+    assert res_rain.time_slot_relaxed is True
+    assert len(res_rain.items) == 3
+    assert all(item.activity_mode == ActivityMode.INDOOR for item in res_rain.items)
+    card_html, _ = render_curation_card(user_nomad, res_rain)
+    assert TIME_SLOT_RELAXED_NOTICE in card_html
+
+
+def test_phase_a_area_selection_and_per_area_weekly_dispatch(memory_db: YoloDatabase) -> None:
+    channel = YoloTelegramChannel(token="", dry_run=True)
+
+    class PerAreaClient:
+        def __init__(self) -> None:
+            self.areas: list[str] = []
+
+        def get_weather(self, area_code: str) -> WeatherSnapshot:
+            self.areas.append(area_code)
+            if area_code == "2600000000":  # 부산: 우천
+                return WeatherSnapshot(
+                    area_code=area_code,
+                    weather_class=WeatherClass.RAIN,
+                    pop_percent=85,
+                    precip_mm=10.0,
+                )
+            return WeatherSnapshot(
+                area_code=area_code,
+                weather_class=WeatherClass.CLEAR,
+                pop_percent=10,
+                feels_like_c=20.0,
+            )
+
+    wx = PerAreaClient()
+    limiter = TelegramRateLimiter(
+        max_global_rate=1000.0, min_chat_interval=0.0, sleep=lambda _: None
+    )
+    dispatcher = SafeTelegramDispatcher(rate_limiter=limiter, sleep=lambda _: None)
+    bot = YoloInteractiveBot(
+        db=memory_db, channel=channel, dispatcher=dispatcher, weather_client=wx
+    )
+
+    memory_db.set_user_archetype("u_seoul", SoloArchetype.ACTIVE_CHALLENGER)
+    memory_db.set_user_archetype("u_busan", SoloArchetype.ACTIVE_CHALLENGER)
+
+    # Open area menu and switch u_busan to Busan (`yolo:area:BUS`)
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_area_menu",
+                "data": "yolo:area:menu",
+                "message": {"chat": {"id": "u_busan"}, "message_id": 88},
+            }
+        }
+    )
+    assert "날씨 기준 지역 변경" in channel.call_log[-1][1]["text"]
+
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_area_bus",
+                "data": "yolo:area:BUS",
+                "message": {"chat": {"id": "u_busan"}, "message_id": 88},
+            }
+        },
+        ref_date=date(2026, 10, 17),
+    )
+    u_busan = memory_db.get_user("u_busan")
+    assert u_busan is not None and u_busan.weather_area_code == "2600000000"
+    assert "우천 예보" in channel.call_log[-1][1]["text"]
+
+    # Weekly dispatch queries weather per area code
+    stats = bot.dispatch_weekly_briefings(ref_date=date(2026, 10, 17))
+    assert stats["sent"] == 2
+    assert "1100000000" in wx.areas and "2600000000" in wx.areas
+
+
+# =========================================================================
+# 10. Phase B: Personality/MBTI Scoring, Execution Coach & Saved/Done Locker
+# =========================================================================
+def test_phase_b_schema_roundtrip_and_seed_coaching_completeness(
+    memory_db: YoloDatabase,
+) -> None:
+    # Every seed must carry complete Phase B coaching metadata
+    for c in SEED_CURATIONS:
+        assert 1 <= c.solo_difficulty <= 5, c.id
+        assert c.social_fit in ("ALL", "I", "E"), c.id
+        assert c.pace_fit in ("ALL", "J", "P"), c.id
+        assert len(c.mbti_tags) >= 2, c.id
+        assert len(c.how_to_steps) == 3, c.id
+        assert 2 <= len(c.checklist) <= 4, c.id
+
+    # Normalized child-table round-trip (mbti_tags, how_to_steps, checklist)
+    sample = YoloCuration(
+        id="PB-RT-01",
+        title="Phase B 라운드트립",
+        summary="요약",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울",
+        cost_or_duration="2만원",
+        action_url="https://example.com",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#1인환영",),
+        solo_difficulty=4,
+        social_fit="I",
+        pace_fit="J",
+        mbti_tags=("INTJ", "INFJ"),
+        how_to_steps=("1단계 예약", "2단계 입장", "3단계 감상"),
+        checklist=("신분증", "이어폰", "노트"),
+    )
+    memory_db.upsert_curation(sample)
+    loaded = memory_db.get_curation("PB-RT-01")
+    assert loaded == sample
+
+    # Domain validation rejects invalid MBTI, >3 how_to_steps, 1-item checklist, out-of-range difficulty
+    base = dict(
+        id="PB-BAD",
+        title="검증",
+        summary="요약",
+        season=Season.AUTUMN,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울",
+        cost_or_duration="1만원",
+        action_url="https://example.com",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#1인",),
+    )
+    with pytest.raises(ValueError, match="mbti_tag"):
+        YoloCuration(**base, mbti_tags=("XXXX",))
+    with pytest.raises(ValueError, match="how_to_steps"):
+        YoloCuration(**base, how_to_steps=("1", "2", "3", "4"))
+    with pytest.raises(ValueError, match="checklist"):
+        YoloCuration(**base, checklist=("달랑하나",))
+    with pytest.raises(ValueError, match="solo_difficulty"):
+        YoloCuration(**base, solo_difficulty=6)
+
+
+def test_phase_b_mbti_and_solo_level_scoring_and_done_rotation_dominance(
+    memory_db: YoloDatabase,
+) -> None:
+    from yolo_brief.matching import difficulty_penalty, personality_bonus
+
+    user = memory_db.set_user_archetype("u_pb_score", SoloArchetype.ACTIVE_CHALLENGER)
+    user = memory_db.set_user_mbti("u_pb_score", "INFP")
+    assert user.mbti == "INFP"
+    assert user.social_energy == "I"
+    assert user.pace_style == "P"
+    assert user.secondary_archetype == SoloArchetype.ROAD_NOMAD
+
+    clear = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0)
+    curations = memory_db.list_active_curations()
+
+    # Check bounded personality bonus (<= 24) and difficulty penalty (<= 24)
+    for c in curations:
+        assert 0.0 <= personality_bonus(c, user) <= 24.0
+        assert 0.0 <= difficulty_penalty(c, user) <= 24.0
+
+    # At solo_level=1 (입문), Lv.4 marathon (`ACT-AUT-01`, priority=125) gets an 18pt penalty
+    # and drops below Lv.2 `ACT-AUT-03` (priority=112, I/P/INFP match)
+    user_lv1 = memory_db.set_user_solo_level("u_pb_score", 1)
+    res_lv1 = match_curations(
+        user_lv1, curations, snapshot=clear, target_season=Season.AUTUMN
+    )
+    assert res_lv1.items[0].id == "ACT-AUT-03"
+
+    # Even with full personality bonus (+24), a recent DONE penalty (-50) must prevent immediate re-recommendation
+    memory_db.log_curation_action("u_pb_score", "ACT-AUT-03", "DONE")
+    stats = memory_db.get_user_curation_stats("u_pb_score")
+    res_after_done = match_curations(
+        user_lv1, curations, snapshot=clear, target_season=Season.AUTUMN, user_stats=stats
+    )
+    assert "ACT-AUT-03" not in [item.id for item in res_after_done.items]
+
+
+def test_phase_b_execution_coach_guide_and_weather_gate(memory_db: YoloDatabase) -> None:
+    from yolo_brief.weather_client import StaticWeatherClient
+
+    clear = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0)
+    rain = WeatherSnapshot(weather_class=WeatherClass.RAIN, pop_percent=85, precip_mm=10.0)
+    channel = YoloTelegramChannel(token="", dry_run=True)
+    bot = YoloInteractiveBot(
+        db=memory_db, channel=channel, weather_client=StaticWeatherClient(clear)
+    )
+    memory_db.set_user_archetype("u_coach", SoloArchetype.ACTIVE_CHALLENGER)
+
+    # 1. Under CLEAR weather, opening guide for an outdoor curation renders 3-step guide & checklist
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_guide_1",
+                "data": "yolo:guide:ACT-AUT-01",
+                "message": {"chat": {"id": "u_coach"}, "message_id": 301},
+            }
+        }
+    )
+    assert channel.call_log[-2][0] == "answerCallbackQuery"
+    guide_text = channel.call_log[-1][1]["text"]
+    vis_len, html_len = measure_message(guide_text)
+    assert vis_len <= MAX_VISIBLE_CHARS and html_len <= MAX_HTML_CHARS
+    assert "1인 실행 코치" in guide_text
+    assert "혼자 처음 할 때 3단계 행동 요령" in guide_text
+    assert "출발·시작 전 준비물 체크리스트" in guide_text
+
+    # 2. [INV-02] Under RAIN or UNKNOWN weather, outdoor guide is blocked by weather safety guard
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_guide_rain",
+                "data": "yolo:guide:ACT-AUT-01",
+                "message": {"chat": {"id": "u_coach"}, "message_id": 301},
+            }
+        },
+        weather_override=rain,
+    )
+    blocked_text = channel.call_log[-1][1]["text"]
+    assert "기상 안전 가드" in blocked_text
+    assert "혼자 처음 할 때 3단계 행동 요령" not in blocked_text
+
+
+def test_phase_b_latest_state_locker_and_profile_callbacks(
+    memory_db: YoloDatabase,
+) -> None:
+    from datetime import datetime
+    from yolo_brief.models import KST
+    from yolo_brief.weather_client import StaticWeatherClient
+
+    clear = WeatherSnapshot(weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0)
+    rain = WeatherSnapshot(weather_class=WeatherClass.RAIN, pop_percent=85, precip_mm=10.0)
+    channel = YoloTelegramChannel(token="", dry_run=True)
+    bot = YoloInteractiveBot(
+        db=memory_db, channel=channel, weather_client=StaticWeatherClient(clear)
+    )
+    memory_db.set_user_archetype("u_lock", SoloArchetype.URBAN_HIPSTER)
+
+    # Save two items (one indoor URB-AUT-01, one outdoor ACT-AUT-01) at the same timestamp,
+    # then mark URB-AUT-01 as DONE at the exact same timestamp -> `log_id DESC` tie-break moves it to `done`
+    same_ts = datetime(2026, 10, 17, 12, 0, tzinfo=KST)
+    memory_db.log_curation_action("u_lock", "URB-AUT-01", "SAVED", now=same_ts)
+    memory_db.log_curation_action("u_lock", "ACT-AUT-01", "SAVED", now=same_ts)
+    memory_db.log_curation_action("u_lock", "URB-AUT-01", "DONE", now=same_ts)
+
+    locker = memory_db.get_user_locker("u_lock")
+    assert locker["saved"] == ["ACT-AUT-01"]
+    assert locker["done"] == ["URB-AUT-01"]
+
+    # Once transitioned to DONE, `has_recent_saved` bonus must be cleared
+    stats = memory_db.get_user_curation_stats("u_lock", now=same_ts)
+    assert stats["URB-AUT-01"]["has_recent_saved"] is False
+    assert stats["ACT-AUT-01"]["has_recent_saved"] is True
+
+    # Under RAIN weather, `yolo:view:saved` hides the outdoor saved item (`ACT-AUT-01`) per [INV-02]
+    bot.handle_update(
+        {
+            "callback_query": {
+                "id": "cb_locker_rain",
+                "data": "yolo:view:saved",
+                "message": {"chat": {"id": "u_lock"}, "message_id": 401},
+            }
+        },
+        weather_override=rain,
+    )
+    locker_rain_text = channel.call_log[-1][1]["text"]
+    assert "야외 찜 코스 1건은 일시 숨김" in locker_rain_text
+    assert "가을 메이저 마라톤" not in locker_rain_text
+
+    # Profile menu + MBTI + Solo Level callbacks & 64-byte validation
+    for cb_data in ("yolo:profile", "yolo:mbti:INTJ", "yolo:lvl:2"):
+        assert len(cb_data.encode("utf-8")) <= MAX_CALLBACK_BYTES
+        bot.handle_update(
+            {
+                "callback_query": {
+                    "id": f"cb_{cb_data}",
+                    "data": cb_data,
+                    "message": {"chat": {"id": "u_lock"}, "message_id": 401},
+                }
+            }
+        )
+        kb = channel.call_log[-1][1]["reply_markup"]
+        for row in kb["inline_keyboard"]:
+            for btn in row:
+                if btn.get("callback_data"):
+                    assert len(btn["callback_data"].encode("utf-8")) <= MAX_CALLBACK_BYTES
+
+    updated_user = memory_db.get_user("u_lock")
+    assert updated_user is not None
+    assert updated_user.mbti == "INTJ"
+    assert updated_user.solo_level == 2
+
+

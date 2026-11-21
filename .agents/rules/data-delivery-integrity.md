@@ -26,6 +26,7 @@ tags: ["delivery", "prod-live", "ssot", "alerts-db"]
 - 발송 여부의 단일 진실 공급원(SSOT)은 운영 DB `alerts.sqlite3`의 배달 원장(`delivery_jobs`, `delivery_job_recipients`, `briefing_logs`) 및 `portal.sqlite3` 교차 검증이다.
 - 동일 슬롯에 `SENT` 또는 네트워크 응답 불명확(`UNKNOWN`) 기록이 어느 한쪽 DB에라도 1건이라도 있으면 **발송 완료로 간주**하고 자동 재발송을 차단한다.
 - 원격 OCI VM 상태 조회 실패, 로컬 DB와의 불일치 발생 시 발송 게이트를 즉시 `BLOCKED`(Fail-Closed) 처리한다.
+- 정기 발송 및 개별 봇 기능은 `portal.sqlite3`의 활성 구독을 교차 검증하여 해지·갈아타기 사용자를 즉시 제외하고, `coming_soon` 봇은 서버에서 차단하며, 캐시 폴백 시 `⏳ 캐시` 또는 `⏳ 직전 캐시`를 명시한다.
 
 ## 4. 장중 ±3% 긴급변동 감시 일원화 (Daemon Invariant)
 - 장중(평일 09:00~15:30 KST) ±3.0% 급등락 긴급변동 감시는 외장 cron에만 의존하지 않고, 24시간 상시 가동 데몬(`multibot.service` / `InternalBriefingScheduler`) 내부에서 15분 주기로 자체 감시 루프를 실행한다.

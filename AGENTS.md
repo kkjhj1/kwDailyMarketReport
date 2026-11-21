@@ -15,6 +15,7 @@
 - `telegram-safety.md`: [TG-01]~[TG-07] 메시지 용량·escape·콜백·429·`--demo`·제로 브레이킹
 - `data-delivery-integrity.md`: [PROD-LIVE] 실발송 사전 승인, 15분 정시 윈도우, 재기동 보상 발송 금지, Dual-DB SSOT, 긴급변동 감시 일원화
 - `web-report-ui.md`: 360px 무오버플로우, 44px 터치 타깃
+- `admin-sync.md`: [ADMIN-SYNC] 봇 DB 테이블·발송 채널·스케줄 잡 변경 시 관리자 콘솔 동기화 및 레지스트리 등록
 - 해당 영역 작업 시 반드시 전문을 읽고 준수한다.
 
 ## 4. 절대 금지선

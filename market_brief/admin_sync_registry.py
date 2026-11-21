@@ -134,6 +134,58 @@ ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
     },
 }
 
+ADMIN_USER_CONTEXT_REGISTRY: dict[str, dict[str, Any]] = {
+    "admission_subscribers": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "입시봇 사용자의 대상 학년·지역 및 활성 구독 설정",
+    },
+    "kids_user_profiles": {
+        "bot_id": "kids_bot",
+        "db_file": "kids_compass.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "자녀봇 사용자 지역·주말·D-day 알림 맞춤 설정",
+    },
+    "kids_children": {
+        "bot_id": "kids_bot",
+        "db_file": "kids_compass.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "자녀봇 사용자별 등록 자녀 및 주요 자녀 정보",
+    },
+    "kids_pregnancy_profiles": {
+        "bot_id": "kids_bot",
+        "db_file": "kids_compass.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "자녀봇 임신 프로필의 태명·출산 예정일 설정",
+    },
+    "kids_dose_timers": {
+        "bot_id": "kids_bot",
+        "db_file": "kids_compass.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "자녀봇 복약 알림 중 PENDING·IN_FLIGHT 타이머 현황",
+    },
+    "yolo_users": {
+        "bot_id": "yolo_bot",
+        "db_file": "yolo_brief.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "욜로봇 사용자의 아키타입·프로필 진행 상태",
+    },
+    "silver_parents": {
+        "bot_id": "silver_bot",
+        "db_file": "silver_care.sqlite3",
+        "admin_api": ["GET /api/platform/users/{user_id}/bot-context"],
+        "db_reader": "MarketBriefDatabase.get_user_bot_context",
+        "description": "실버봇 사용자의 부모 대상자별 맞춤 프로필",
+    },
+}
+
 ADMIN_EXEMPT_TABLES: dict[str, str] = {
     "alert_reservations": "정기/긴급 발송 멱등성 예약 키(REGULAR:/URGENT:) — 결과는 delivery_jobs로 이미 노출되는 내부 락 상태",
     "delivery_audit_logs": "레거시 채널 단위 발송 로그(구 AlertStore 호환) — 신규 원장(delivery_job_recipients)으로 대체됨",

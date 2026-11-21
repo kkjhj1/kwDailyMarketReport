@@ -24,6 +24,7 @@ import io
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import urllib.error
 import urllib.request
@@ -40,6 +41,41 @@ from market_brief.bot_visibility import BOT_WIP_CODE, BOT_WIP_MESSAGE, is_wip_bo
 from market_brief.subscription_engine import SubscriptionEngine, normalize_bot_id
 
 logger = logging.getLogger(__name__)
+
+
+def run_kids_timer_tick_once(
+    bot_token: str,
+    *,
+    db_path: str | Path | None = None,
+    opener=None,
+    now: datetime | None = None,
+    startup_cutoff: str | None = None,
+) -> dict[str, Any]:
+    """Run one complete Kids timer tick on the calling worker thread.
+
+    The caller owns the thread boundary.  Keeping DB construction, dispatch,
+    Telegram I/O, and close in this function ensures sqlite's default
+    ``check_same_thread=True`` connection never crosses that boundary.
+    ``db_path=None`` is an explicit no-op so an automatic loop cannot create a
+    default database by accident.
+    """
+    if db_path is None:
+        return {"skipped": True, "reason": "missing_db_path"}
+
+    from kids_compass.channels.telegram import KidsTelegramChannel
+    from kids_compass.interactive_bot import dispatch_due_dose_timers
+    from kids_compass.storage.db import KidsCompassDatabase
+
+    kc_db = KidsCompassDatabase(str(db_path))
+    try:
+        return dispatch_due_dose_timers(
+            kc_db,
+            KidsTelegramChannel(bot_token, opener=opener),
+            now=now,
+            startup_cutoff=startup_cutoff,
+        )
+    finally:
+        kc_db.close()
 
 TIER_ICONS = {
     "WHITE": "⚪",
@@ -1848,6 +1884,7 @@ class DynamicBotManager:
         self._running = False
         self._kids_timer_task: asyncio.Task | None = None
         self._kids_timer_token: str = ""
+        self._kids_timer_startup_cutoff: str | None = None
         # bot_id -> (token, transport): one keep-alive transport per (bot_id, token) across poll iterations.
         self._transports: dict[str, tuple[str, TelegramBotTransport]] = {}
         self._transports_lock = threading.Lock()
@@ -2972,29 +3009,31 @@ class DynamicBotManager:
 
     async def _kids_timer_loop(self, bot_token: str) -> None:
         """Independent 30-second Kids Compass timer sweep with a fresh DB per tick."""
+        startup_cutoff = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        self._kids_timer_startup_cutoff = startup_cutoff
         while self._running and self._kids_timer_token == bot_token:
-            kc_db = None
             try:
-                from pathlib import Path
-                from kids_compass.channels.telegram import KidsTelegramChannel
-                from kids_compass.interactive_bot import dispatch_due_dose_timers
-                from kids_compass.storage.db import KidsCompassDatabase
-
                 base_path = getattr(self.engine.db, "db_path", None)
-                kc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") \
-                    else str(Path(str(base_path)).with_name("kids_compass.sqlite3"))
-                kc_db = KidsCompassDatabase(kc_db_path)
-                dispatch_due_dose_timers(kc_db, KidsTelegramChannel(bot_token))
+                if not base_path or str(base_path) == ":memory:":
+                    kc_db_path = None
+                else:
+                    candidate = Path(str(base_path)).with_name("kids_compass.sqlite3")
+                    kc_db_path = str(candidate) if candidate.is_file() else None
+                if kc_db_path is not None:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        self._get_poll_pool(),
+                        functools.partial(
+                            run_kids_timer_tick_once,
+                            bot_token,
+                            db_path=kc_db_path,
+                            startup_cutoff=startup_cutoff,
+                        ),
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001 - timer delivery must not affect polling
                 logger.warning("[DynamicBotManager] Kids timer warning: %s", exc)
-            finally:
-                if kc_db is not None:
-                    try:
-                        kc_db.close()
-                    except Exception:  # noqa: BLE001
-                        logger.debug("Failed to close Kids timer DB", exc_info=True)
             try:
                 await asyncio.sleep(30.0)
             except asyncio.CancelledError:

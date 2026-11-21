@@ -4,6 +4,8 @@ Every curation strictly enforces [INV-01] with verified `solo_tags` and `https:/
 v2.0: every curation carries magazine details (hero photo, timeline, 1-won budget, secret tip, maps).
 Hero/gallery photos are Wikimedia Commons 1280px thumbnails; curations without a verified
 photo render a gradient+emoji hero in the web magazine instead.
+Phase A: every seed carries an explicit `TimeSlot`, plus a QUICK_2H rotation pool of
+indoor / at-home / neighborhood 2-hour courses.
 """
 from __future__ import annotations
 
@@ -16,8 +18,10 @@ from yolo_brief.models import (
     BudgetLine,
     GalleryImage,
     Season,
+    SettingType,
     SoloArchetype,
     TimelineEntry,
+    TimeSlot,
     WeatherClass,
     YoloCuration,
 )
@@ -1092,7 +1096,553 @@ _V2_DETAILS: dict[str, dict[str, Any]] = {
 }
 
 
-SEED_CURATIONS: list[YoloCuration] = [
-    replace(c, **_V2_DETAILS[c.id]) if c.id in _V2_DETAILS else c
+# =========================================================================
+# Phase A: explicit TimeSlot for every base seed (2시간 컷 / 반나절 / 하루·1박)
+# =========================================================================
+_Q2 = TimeSlot.QUICK_2H
+_HALF = TimeSlot.HALF_DAY
+_FULL = TimeSlot.FULL_OR_TRIP
+
+_TIME_SLOTS: dict[str, TimeSlot] = {
+    "ACT-SPR-01": _HALF, "ACT-SPR-02": _HALF, "ACT-SUM-01": _Q2, "ACT-SUM-02": _FULL,
+    "ACT-AUT-01": _HALF, "ACT-AUT-02": _HALF, "ACT-AUT-03": _HALF, "ACT-WIN-01": _FULL,
+    "ACT-FB-01": _Q2, "ACT-FB-02": _Q2, "ACT-FB-03": _Q2,
+    "URB-SPR-01": _Q2, "URB-SUM-01": _Q2, "URB-AUT-01": _Q2, "URB-AUT-02": _Q2,
+    "URB-AUT-03": _HALF, "URB-WIN-01": _HALF,
+    "NOM-SPR-01": _FULL, "NOM-SUM-01": _FULL, "NOM-AUT-01": _FULL, "NOM-AUT-02": _FULL,
+    "NOM-AUT-03": _FULL, "NOM-WIN-01": _FULL,
+    "NOM-FB-01": _HALF, "NOM-FB-02": _HALF, "NOM-FB-03": _FULL,
+    "WEL-SPR-01": _Q2, "WEL-SUM-01": _HALF, "WEL-AUT-01": _Q2, "WEL-AUT-02": _Q2,
+    "WEL-AUT-03": _Q2, "WEL-WIN-01": _Q2,
+}
+assert set(_TIME_SLOTS) == {c.id for c in _BASE_SEED_CURATIONS}, "every base seed needs a TimeSlot"
+
+
+# =========================================================================
+# Phase A: QUICK_2H rotation pool (1인 실내·집콕·동네 2시간 컷 코스)
+# =========================================================================
+_QUICK_SEED_CURATIONS: list[YoloCuration] = [
+    YoloCuration(
+        id="ACT-Q2-01",
+        title="동네 하천변 5K 솔로 런 & 10분 쿨다운 스트레칭",
+        summary="집 앞 하천 산책로에서 혼자 페이스 조절하며 달리는 40분 루틴. 장비·예약 없이 바로 출발.",
+        season=Season.ALL,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.OUTDOOR,
+        location_name="우리 동네 하천 산책로",
+        cost_or_duration="무료 · 60분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.ACTIVE_CHALLENGER,),
+        solo_tags=("#1인러닝", "#예약불필요", "#동네코스"),
+        priority=105,
+        emoji="👟",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("07:00", "하천 산책로 입구", "동적 스트레칭 5분, 러닝 앱 켜고 목표 페이스 설정"),
+                ("07:10", "하천 산책로", "2.5km 반환점까지 내 페이스로 왕복 5K"),
+                ("07:45", "벤치 쉼터", "종아리·햄스트링 쿨다운 스트레칭 10분"),
+            ),
+            budget=(("이온음료", 2000, "food"),),
+            secret="반환점을 다리 하나로 정해두면 매주 같은 코스로 기록 비교가 쉬워요.",
+            map_query="하천 산책로",
+        ),
+    ),
+    YoloCuration(
+        id="ACT-Q2-02",
+        title="구립 체육센터 헬스 일일권 & 인바디 체크",
+        summary="저렴한 구립 체육센터 일일권으로 혼자 1시간 근력 루틴. 인바디로 내 몸 상태까지 기록.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="동네 구립 체육센터",
+        cost_or_duration="일일권 5천원 · 90분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.ACTIVE_CHALLENGER,),
+        solo_tags=("#1인일일권", "#개인락커", "#혼운환영"),
+        priority=100,
+        emoji="🏋️",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("19:00", "체육센터 안내데스크", "일일권 결제 후 락커 배정, 인바디 측정"),
+                ("19:15", "웨이트존", "하체·등 위주 40분 서킷 루틴"),
+                ("20:00", "샤워실", "샤워 후 단백질 음료로 마무리"),
+            ),
+            budget=(
+                ("헬스 일일권", 5000, "ticket"),
+                ("단백질 음료", 3000, "food"),
+            ),
+            secret="평일 19시 전이 가장 한산해서 기구 대기 없이 루틴을 끝낼 수 있어요.",
+            map_query="구립체육센터",
+        ),
+    ),
+    YoloCuration(
+        id="ACT-Q2-03",
+        title="실내 스피닝 원데이 클래스 45분 땀 폭발",
+        summary="음악과 조명에 맞춰 혼자 페달만 밟으면 되는 실내 사이클. 1인 예약 기본, 대화 부담 제로.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="동네 스피닝 스튜디오",
+        cost_or_duration="원데이 2만원 · 60분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.ACTIVE_CHALLENGER,),
+        solo_tags=("#1인예약", "#개인바이크", "#대화부담제로"),
+        priority=98,
+        emoji="🚲",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("12:00", "스피닝 스튜디오", "클리트 슈즈 대여 후 안장 높이 세팅"),
+                ("12:10", "바이크 존", "45분 인터벌 라이딩, 내 강도로 조절"),
+                ("13:00", "근처 샐러드 가게", "1인 샐러드로 점심 마무리"),
+            ),
+            budget=(
+                ("스피닝 원데이 클래스", 20000, "ticket"),
+                ("1인 샐러드", 9000, "food"),
+            ),
+            secret="첫 방문이면 맨 뒷줄 바이크를 고르면 강사 시선 부담 없이 따라가기 좋아요.",
+            map_query="스피닝 스튜디오",
+        ),
+    ),
+    YoloCuration(
+        id="URB-Q2-01",
+        title="국립중앙박물관 '사유의 방' 1시간 명상 관람",
+        summary="반가사유상 두 점만 놓인 어두운 전시실에서 혼자 머무는 1시간. 무료 관람, 혼자일수록 더 깊다.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울 용산 국립중앙박물관",
+        cost_or_duration="무료 관람 · 90분",
+        action_url="https://www.museum.go.kr/",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#1인관람최적", "#무료입장", "#조용한전시"),
+        priority=110,
+        emoji="🗿",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("14:00", "이촌역 박물관 연결통로", "지하 통로로 비 맞지 않고 입장"),
+                ("14:10", "사유의 방", "벽면 벤치에 앉아 반가사유상 20분 바라보기"),
+                ("15:00", "박물관 카페", "창가 1인석에서 관람 메모 정리"),
+            ),
+            budget=(
+                ("지하철 왕복", 2800, "transport"),
+                ("카페 음료", 5000, "food"),
+            ),
+            secret="평일 오후 늦게 가면 사유의 방을 거의 혼자 쓰는 시간이 생겨요.",
+            map_query="국립중앙박물관",
+        ),
+    ),
+    YoloCuration(
+        id="URB-Q2-02",
+        title="동네 독립서점 1시간 큐레이션 탐방 & 필사 한 페이지",
+        summary="사장님 큐레이션 서가를 혼자 천천히 둘러보고 고른 책 한 페이지를 필사하는 조용한 루틴.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="우리 동네 독립서점",
+        cost_or_duration="책 1.5만원 · 60분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.URBAN_HIPSTER, SoloArchetype.WELLNESS_DEEPDIVER),
+        solo_tags=("#1인방문환영", "#조용한공간", "#필사노트"),
+        priority=104,
+        emoji="📚",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("16:00", "독립서점", "주인장 추천 매대부터 한 바퀴 둘러보기"),
+                ("16:30", "서점 한켠 테이블", "고른 책의 첫 장을 필사 노트에 옮겨 적기"),
+            ),
+            budget=(("독립출판 책 1권", 15000, "etc"),),
+            secret="계산할 때 '혼자 읽기 좋은 책'을 물어보면 사장님만의 숨은 추천이 나와요.",
+            map_query="독립서점",
+        ),
+    ),
+    YoloCuration(
+        id="URB-Q2-03",
+        title="LP 청음 카페 1인석에서 앨범 한 장 완청",
+        summary="헤드폰 1인석에서 앨범 한 장을 처음부터 끝까지 듣는 90분. 혼자라서 완성되는 감상.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="동네 LP 청음 카페",
+        cost_or_duration="음료 포함 1만원 · 90분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.URBAN_HIPSTER,),
+        solo_tags=("#1인청음석", "#헤드폰완비", "#혼카페"),
+        priority=102,
+        emoji="🎧",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("20:00", "LP 카페 카운터", "음료 주문 후 오늘의 앨범 한 장 고르기"),
+                ("20:10", "1인 청음석", "A면부터 B면까지 헤드폰으로 완청"),
+                ("21:20", "카페 창가", "가장 좋았던 트랙을 메모에 기록"),
+            ),
+            budget=(("음료 포함 청음비", 10000, "ticket"),),
+            secret="신청곡 메모지에 앨범명을 적어두면 다음 방문 때 사장님이 기억해줘요.",
+            map_query="LP 카페",
+        ),
+    ),
+    YoloCuration(
+        id="NOM-Q2-01",
+        title="서울로7017 노을 산책 & 서울역 1인 라멘",
+        summary="고가 보행길 위에서 기찻길과 노을을 내려다보는 짧은 도심 여행. 끝은 1인석 라멘.",
+        season=Season.ALL,
+        weather_class=WeatherClass.CLEAR,
+        activity_mode=ActivityMode.OUTDOOR,
+        location_name="서울 중구 서울로7017",
+        cost_or_duration="식사 1.2만원 · 90분",
+        action_url="https://seoullo7017.seoul.go.kr/",
+        archetypes=(SoloArchetype.ROAD_NOMAD,),
+        solo_tags=("#혼자산책", "#1인석라멘", "#도심노을"),
+        priority=103,
+        emoji="🌇",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("17:30", "서울로7017 만리동 쪽 입구", "고가 보행길 따라 서울역 방향으로 천천히 걷기"),
+                ("18:00", "서울역 철길 전망 구간", "기차가 오가는 노을 풍경 감상"),
+                ("18:40", "서울역 인근 라멘집", "1인 카운터석에서 라멘 한 그릇"),
+            ),
+            budget=(
+                ("지하철 왕복", 2800, "transport"),
+                ("1인 라멘", 12000, "food"),
+            ),
+            secret="만리동 쪽에서 시작하면 노을을 등지지 않고 정면으로 보며 걸을 수 있어요.",
+            map_query="서울로7017",
+        ),
+    ),
+    YoloCuration(
+        id="NOM-Q2-02",
+        title="국립항공박물관 1인 비행 시뮬레이터 & 활주로 뷰",
+        summary="비 오는 날에도 조종석에 앉아 떠나는 2시간 짜리 여행. 김포공항 활주로 전망까지.",
+        season=Season.ALL,
+        weather_class=WeatherClass.RAIN,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="서울 강서구 국립항공박물관",
+        cost_or_duration="체험 1만원 · 2시간",
+        action_url="https://www.aviation.or.kr/",
+        archetypes=(SoloArchetype.ROAD_NOMAD,),
+        solo_tags=("#1인체험예약", "#실내전천후", "#여행대리만족"),
+        is_fallback=True,
+        fallback_for="RAIN,SNOW,DUST,HEAT,COLD",
+        priority=108,
+        emoji="🛫",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("13:00", "국립항공박물관 체험관", "사전 예약한 비행 시뮬레이터 1인 탑승"),
+                ("13:40", "상설 전시관", "실물 항공기 사이를 혼자 천천히 관람"),
+                ("14:30", "옥상 전망대", "김포공항 활주로 이착륙 바라보기"),
+            ),
+            budget=(
+                ("시뮬레이터 체험", 10000, "ticket"),
+                ("지하철 왕복", 2800, "transport"),
+            ),
+            secret="체험 예약은 온라인으로 미리 해두면 1인 슬롯을 놓치지 않아요.",
+            map_query="국립항공박물관",
+        ),
+    ),
+    YoloCuration(
+        id="WEL-Q2-01",
+        title="집에서 핸드드립 1인 홈카페 & 20분 파워냅",
+        summary="원두 한 봉으로 내 취향 커피를 내리고, 짧은 낮잠으로 주말 에너지를 리셋하는 집콕 루틴.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="나만의 홈카페",
+        cost_or_duration="원두 1.2만원 · 60분",
+        action_url="https://www.coupang.com/",
+        archetypes=(SoloArchetype.WELLNESS_DEEPDIVER,),
+        solo_tags=("#1인홈카페", "#집콕루틴", "#파워냅"),
+        priority=106,
+        emoji="☕",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("14:00", "주방", "원두 15g 분쇄, 93도 물로 3분 핸드드립"),
+                ("14:20", "창가", "커피와 함께 좋아하는 플레이리스트 3곡"),
+                ("14:40", "소파", "알람 20분 맞추고 파워냅"),
+            ),
+            budget=(("스페셜티 원두 200g", 12000, "food"),),
+            secret="커피를 마시고 바로 20분 낮잠을 자면 깰 때쯤 카페인이 돌아 개운해요.",
+        ),
+    ),
+    YoloCuration(
+        id="WEL-Q2-02",
+        title="동네 마사지숍 60분 발 리셋 & 따뜻한 차",
+        summary="1인 예약이 기본인 동네 발마사지로 한 주의 피로를 푸는 1시간. 대화 없이 쉬기만 하면 끝.",
+        season=Season.ALL,
+        weather_class=WeatherClass.ALL,
+        activity_mode=ActivityMode.INDOOR,
+        location_name="우리 동네 마사지숍",
+        cost_or_duration="4만원 · 60분",
+        action_url="https://map.naver.com/",
+        archetypes=(SoloArchetype.WELLNESS_DEEPDIVER,),
+        solo_tags=("#1인예약", "#대화없는휴식", "#개별룸"),
+        priority=100,
+        emoji="🦶",
+        time_slot=TimeSlot.QUICK_2H,
+        **_v2(
+            timeline=(
+                ("18:00", "마사지숍", "족욕 10분으로 발 온도 올리기"),
+                ("18:10", "개별 베드", "발·종아리 50분 마사지, 조용히 눈 감기"),
+                ("19:05", "대기 라운지", "따뜻한 보리차 한 잔으로 마무리"),
+            ),
+            budget=(("발 마사지 60분", 40000, "etc"),),
+            secret="예약할 때 '대화 없이 쉬고 싶어요'라고 남기면 조용히 케어해 줘요.",
+            map_query="발마사지",
+        ),
+    ),
+]
+
+
+def _pb(
+    diff: int,
+    social: str,
+    pace: str,
+    mbti: tuple[str, ...],
+    howto: tuple[str, str, str],
+    check: tuple[str, str, str],
+) -> dict[str, Any]:
+    return {
+        "solo_difficulty": diff,
+        "social_fit": social,
+        "pace_fit": pace,
+        "mbti_tags": mbti,
+        "how_to_steps": howto,
+        "checklist": check,
+    }
+
+
+_PHASE_B_DETAILS: dict[str, dict[str, Any]] = {
+    # 1. ACTIVE_CHALLENGER
+    "ACT-SPR-01": _pb(
+        3, "E", "J", ("ESTP", "ENTJ", "ESFP"),
+        ("대회 공식 사이트에서 10K 또는 하프 1인 참가 접수 및 배번호 수령", "출발 1시간 전 여의도 탈의·물품보관소에 짐 맡기고 워밍업", "내 페이스 그룹 풍선을 따라 달리고 완주 후 기록증·간식 수령"),
+        ("배번호·기록칩", "러닝화·러닝벨트", "보관용 여벌 겉옷"),
+    ),
+    "ACT-SPR-02": _pb(
+        2, "I", "P", ("ISTP", "ESTP", "ISFP"),
+        ("광나루 자전거공원 또는 따릉이 대여소에서 안장 높이·브레이크 점검", "한강 남단·북단 자전거도로를 따라 팔당대교 인증센터까지 주행", "팔당 초계국수집 1인 테이블에서 점심 식사 후 복귀"),
+        ("자전거 또는 따릉이 앱", "헬멧·장갑", "생수 500ml·선글라스"),
+    ),
+    "ACT-SUM-01": _pb(
+        2, "E", "P", ("ESFP", "ESTP", "ENFP"),
+        ("반포 한강공원 지하철역 물품보관함에 가방을 맡기고 가볍게 스트레칭", "러닝 앱을 켜고 잠수교~한남대교 야경 코스를 7K 페이스로 러닝", "달빛광장 계단에서 강바람 맞으며 쿨다운 및 무알콜 맥주 한 캔"),
+        ("야간 반사 러닝복", "무선 이어폰", "물품보관함용 교통카드"),
+    ),
+    "ACT-SUM-02": _pb(
+        4, "E", "J", ("ESTP", "ENFP", "ESFP"),
+        ("양양 죽도해변 서핑샵에 '1인 입문 강습+렌탈 패키지' 사전 예약", "이론·모래사장 패들링 30분 교육 후 강사와 함께 입수해 테이크오프 연습", "남은 2시간 동안 혼자 파도를 타며 프리서핑 후 개인 부스 샤워"),
+        ("수영복·래시가드", "선크림·세면도구", "방수팩·슬리퍼"),
+    ),
+    "ACT-AUT-01": _pb(
+        4, "E", "J", ("ENTJ", "ESTJ", "ESTP"),
+        ("사전 수령한 기록칩을 신발끈에 단단히 고정하고 출발 C~D그룹 대기", "전반 5km는 목표 페이스보다 10초 천천히 달리며 오버페이스 방지", "피니시 통과 후 메달 각인 부스에서 내 완주 기록 각인"),
+        ("기록칩·배번호", "에너지젤 2개", "완주 후 갈아입을 상의"),
+    ),
+    "ACT-AUT-02": _pb(
+        3, "I", "J", ("ISTP", "INTJ", "ISTJ"),
+        ("구파발역에서 버스로 밤골탐방지원센터 하차 후 스틱·등산화 끈 조절", "숨은벽 능선 이정표를 따라 조망 바위까지 일정한 호흡으로 등반", "백운대 갈림길에서 하산 후 효자동 해장국집 1인석에서 식사"),
+        ("접지력 좋은 등산화", "생수 1L·행동식", "바람막이 자켓"),
+    ),
+    "ACT-AUT-03": _pb(
+        2, "I", "P", ("ISFP", "ISTJ", "INFP"),
+        ("당고개역 3번 출구 앞 빨간 우체통 스탬프함에서 첫 스탬프 날인", "주황색 서울둘레길 리본만 따라 완만한 불암산 숲길 트레킹", "화랑대 철도공원 도착 후 종점 스탬프 찍고 인근 칼국수 1인 식사"),
+        ("서울둘레길 스탬프북/앱", "트레킹화", "보온병·가벼운 간식"),
+    ),
+    "ACT-WIN-01": _pb(
+        4, "I", "J", ("ISTP", "INTJ", "ESTJ"),
+        ("진부역 도착 후 오대산 선재길 입구에서 아이젠과 스패츠 착용", "얼어붙은 계곡과 눈 덮인 전나무 숲 평지 트레킹 코스를 따라 산행", "월정사 찻집에서 따뜻한 전통차로 언 몸 녹이기"),
+        ("등산용 아이젠·스패츠", "방한 장갑·핫팩", "보온병 따뜻한 물"),
+    ),
+    "ACT-FB-01": _pb(
+        3, "I", "J", ("ISTP", "ESTP", "INTP"),
+        ("편한 반팔·긴바지(또는 레깅스) 차림으로 방문해 '1인 일일체험+암벽화 대여' 신청", "강사에게 15분 기초 낙법과 홀드 색상 규칙 배우기", "가장 쉬운 초보 테이프(V0~V1) 문제부터 혼자 루트를 풀며 완등 도전"),
+        ("움직임 편한 운동복", "양말(대여화 착용용)", "손톱깎이·개인 텀블러"),
+    ),
+    "ACT-FB-02": _pb(
+        2, "I", "J", ("ENTJ", "ESTJ", "INTJ"),
+        ("러닝스튜디오 앱에서 1인 트레드밀 슬롯과 러닝화 렌탈 예약", "워밍업 10분 후 화면 가이드에 맞춰 30분 고강도 인터벌 질주", "1인 독립 샤워부스에서 샤워 후 리커버리 라운지 휴식"),
+        ("실내 러닝복", "스포츠 타월", "무선 이어폰"),
+    ),
+    "ACT-FB-03": _pb(
+        2, "I", "P", ("ISTJ", "ISTP", "INTJ"),
+        ("올림픽수영장 매표소 키오스크에서 '일일 자유수영 1인권' 발권", "초급·중급·상급 레인 중 내 속도에 맞는 레인에 들어가 50분 랩 스윔", "온수 샤워 및 체온유지실에서 근육 이완 후 귀가"),
+        ("실내용 수영복·수경", "실리콘 수모(필수)", "세면도구·수건"),
+    ),
+    # 2. URBAN_HIPSTER
+    "URB-SPR-01": _pb(
+        1, "E", "P", ("ENFP", "ENTP", "ISFP"),
+        ("성수역 3번 출구에서 시작해 연무장길 팝업스토어 현장 웨이팅 등록", "대기 시간 동안 인근 로스터리 카페 테라스 1인석에서 봄 시즌 커피 시음", "팝업 전시 관람 및 1인 굿즈 수령 후 서울숲 산책"),
+        ("보조배터리", "가벼운 에코백", "선글라스"),
+    ),
+    "URB-SUM-01": _pb(
+        1, "I", "J", ("INTJ", "INFJ", "INTP"),
+        ("미술관 앱에서 1인 관람권 예매 및 오디오 도슨트 다운로드", "이어폰을 끼고 시원한 전시실을 내 속도대로 90분간 천천히 감상", "저녁엔 인근 독립영화관 심야 1인 좌석에서 영화 한 편 관람"),
+        ("이어폰(오디오가이드용)", "얇은 가디건(냉방 대비)", "모바일 예매권"),
+    ),
+    "URB-AUT-01": _pb(
+        3, "I", "P", ("INFJ", "INTJ", "INFP"),
+        ("덕수궁 대한문에서 야간 관람 입장 후 석조전 정원 산책", "정동길을 거쳐 서촌 바이닐 LP바로 이동해 바텐더 카운터 1인석 착석", "위스키나 하이볼 1잔 주문 후 메모지에 듣고 싶은 LP 신청곡 작성"),
+        ("신분증(LP바 입장용)", "가을 코트·자켓", "신청할 좋아하는 곡 제목 2개"),
+    ),
+    "URB-AUT-02": _pb(
+        1, "I", "P", ("INTP", "INFJ", "INFP"),
+        ("이촌역 지하 연결통로로 국립중앙박물관 상설전시관 무료 입장", "2층 '사유의 방' 어두운 통로를 지나 반가사유상 앞 벤치에서 20분 침묵 명상", "이촌동 1인 바 테이블 돈카츠 식당에서 조용히 식사"),
+        ("무음 카메라/스마트폰", "작은 메모 수첩", "편한 단화"),
+    ),
+    "URB-AUT-03": _pb(
+        2, "E", "P", ("ENTP", "ESTP", "ENFP"),
+        ("을지로3가역 골목의 숨은 독립 갤러리와 레트로 인쇄소 골목 산책", "일몰 30분 전 세운상가 옥상 데크에 올라 종묘 방향 노을 감상", "인근 1인 바 좌석이 있는 하이볼 바에서 가볍게 혼술 한 잔"),
+        ("필름카메라 또는 스마트폰", "가벼운 겉옷", "신분증"),
+    ),
+    "URB-WIN-01": _pb(
+        2, "E", "J", ("ENFJ", "ESFJ", "ENTP"),
+        ("더현대 서울 크리스마스 마켓 1인 사전예약 또는 현장 QR 대기 등록", "트리 포토존과 마켓 오너먼트 부스를 혼자 여유롭게 구경", "지하 푸드코트 1인 카운터에서 따뜻한 뱅쇼와 타파스 시식"),
+        ("사전예약 확인 문자", "보조배터리", "코트 보관용 가벼운 차림"),
+    ),
+    # 3. ROAD_NOMAD
+    "NOM-SPR-01": _pb(
+        3, "I", "J", ("INFP", "ISFP", "INFJ"),
+        ("코레일톡 앱에서 경주행 KTX 창측 1인석(또는 특실 1인 단독석) 예매", "경주역 도착 후 황리단길 대릉원 돌담길과 벚꽃 산책로 도보 투어", "1인 반상 한정식 식당에서 식사 후 저녁 KTX로 복귀"),
+        ("코레일톡 승차권", "보조배터리", "편한 워킹화"),
+    ),
+    "NOM-SUM-01": _pb(
+        3, "I", "J", ("INFP", "ENFP", "ISFP"),
+        ("강릉·동해행 KTX와 바다열차 1인 창가 전망석을 연동 예매", "바다를 정면으로 바라보는 좌석에서 해안선 감상 후 정동진역 산책", "묵호항 1인 물회 식당에서 점심 식사 후 해변 카페 휴식"),
+        ("기차 승차권", "선글라스·모자", "유선/무선 이어폰"),
+    ),
+    "NOM-AUT-01": _pb(
+        4, "I", "J", ("INFJ", "INFP", "INTJ"),
+        ("청량리역에서 민둥산역행 열차 탑승 후 오후 역광 시간대에 맞춰 억새 능선 산행", "하산 후 정선 시장에서 1인 곤드레밥 정식 식사", "사전 예약한 1인 전용 고택 북스테이에 체크인해 심야 독서"),
+        ("트레킹화·바람막이", "1박 세면도구", "읽고 싶었던 책 1권"),
+    ),
+    "NOM-AUT-02": _pb(
+        3, "I", "J", ("ISFP", "INFP", "ESFP"),
+        ("용산역에서 아침 KTX 창측 좌석으로 전주역 이동", "오전 일찍 전주향교 노란 은행나무길을 혼자 산책하며 사진 촬영", "1인 상차림이 기본인 콩나물국밥·비빔밥 맛집 투어 후 귀경"),
+        ("KTX 왕복 승차권", "카메라/보조배터리", "가벼운 크로스백"),
+    ),
+    "NOM-AUT-03": _pb(
+        2, "I", "P", ("ISFP", "INFP", "ENFP"),
+        ("용산역 또는 청량리역에서 ITX-청춘 2층 창가 좌석 탑승 후 가평역 하차", "자라섬 가을 꽃정원과 남이섬 메타세쿼이아 단풍길을 평지 산책", "남이섬 내 1인 주문 가능한 잣칼국수 식사 후 귀경"),
+        ("ITX-청춘 승차권", "편한 운동화", "가벼운 겉옷"),
+    ),
+    "NOM-WIN-01": _pb(
+        3, "I", "J", ("ISTP", "INFP", "INFJ"),
+        ("청량리역에서 태백행 열차 탑승해 설경 감상", "눈꽃 트레킹 또는 스파 리조트 1인 노천온천 입욕으로 피로 해소", "따뜻한 황태해장국 1인 식사 후 저녁 열차로 복귀"),
+        ("방한화·장갑", "수영복(스파용)", "보조배터리"),
+    ),
+    "NOM-FB-01": _pb(
+        2, "I", "P", ("INFP", "INTP", "ISFP"),
+        ("고양·파주 대형 복합몰 북카페 라운지 또는 아쿠아리움 실내 입장", "비 오는 창밖을 보며 1인 리클라이너 좌석에서 여행 에세이 독서", "푸드홀 1인 철판요리 카운터에서 늦은 점심 식사"),
+        ("교통카드/자차키", "에세이 도서 또는 태블릿", "이어폰"),
+    ),
+    "NOM-FB-02": _pb(
+        2, "I", "J", ("ISFJ", "ISTJ", "INFJ"),
+        ("도심 프리미엄 스파(씨메르/아쿠아필드 등) 1인 찜질·스파권 온라인 예매", "릴렉스룸 1인 리클라이너 베드에서 개인 모니터와 함께 반나절 휴식", "풋스파와 편백나무방에서 땀을 뺀 뒤 식혜와 구운 계란으로 마무리"),
+        ("모바일 입장 바우처", "개인 세면도구", "편한 슬리퍼/양말"),
+    ),
+    "NOM-FB-03": _pb(
+        3, "I", "J", ("INTJ", "INFJ", "ISTJ"),
+        ("인천공항 자기부상열차 노선 인근 호텔 또는 공항 전망 라운지 방문", "통유리 너머 비 내리는 활주로와 이착륙하는 비행기를 보며 커피 한 잔", "공항 지하 1인 식사 전문 식당가에서 세계 미식 투어"),
+        ("공항철도 교통카드", "노이즈캔슬링 헤드폰", "여권 느낌의 여행 노트"),
+    ),
+    # 4. WELLNESS_DEEPDIVER
+    "WEL-SPR-01": _pb(
+        1, "I", "P", ("ISFJ", "INFP", "ISFP"),
+        ("동네 화원에서 키우기 쉬운 반려식물(몬스테라/테이블야자) 1포트와 토분 구매", "베란다나 창가 테이블에 분갈이 후 햇살이 드는 코너에 배치", "봄 제철 바질·방울토마토로 1인 콜드 파스타를 만들어 브런치"),
+        ("분갈이용 작은 모종삽", "바질·파스타면", "좋아하는 플레이리스트"),
+    ),
+    "WEL-SUM-01": _pb(
+        1, "I", "P", ("INTP", "ISTP", "INTJ"),
+        ("에어컨을 24도로 맞추고 하이볼 글라스에 얼음과 위스키·탄산수·레몬 조각 세팅", "스마트폰을 방해금지 모드로 바꾸고 암막 커튼 닫기", "벼르고 있던 명작 미니시리즈 4부작을 끊김 없이 정주행"),
+        ("하이볼용 얼음·레몬", "OTT 구독 계정", "가벼운 핑거푸드 안주"),
+    ),
+    "WEL-AUT-01": _pb(
+        1, "I", "J", ("INFJ", "INTJ", "INFP"),
+        ("방 조명을 스탠드 하나만 남기고 빗소리·재즈 배경음악 재생", "375ml 하프보틀 피노누아 와인을 오픈해 브리치즈·크래커와 세팅", "2시간 동안 스마트폰을 멀리 두고 장편소설 한 권에 몰입"),
+        ("하프보틀 와인·오프너", "브리치즈·크래커", "가을 장편소설 1권"),
+    ),
+    "WEL-AUT-02": _pb(
+        1, "I", "P", ("ISFP", "ISFJ", "INFP"),
+        ("생밤에 열십자 칼집을 내어 물에 10분 불린 뒤 꿀고구마와 에어프라이어 200도 15분 조리", "드립 커피 또는 따뜻한 우유 라떼를 내려 창가 테이블에 세팅", "LP 재즈 채널을 틀어두고 갓 구운 군밤·고구마 디저트 타임"),
+        ("생밤·꿀고구마", "에어프라이어 종이호일", "드립백·우유"),
+    ),
+    "WEL-AUT-03": _pb(
+        1, "I", "J", ("ISFJ", "INFJ", "ISTJ"),
+        ("거실에 요가 매트를 깔고 30분 모닝 스트레칭·호흡 루틴 따라 하기", "대추와 생강을 달여 따뜻한 한방차 한 잔 우리기", "몸이 이완된 상태에서 오늘의 감정과 컨디션을 5줄 일기로 기록"),
+        ("요가 매트", "대추·생강차 티백/재료", "개인 저널 노트"),
+    ),
+    "WEL-WIN-01": _pb(
+        1, "I", "J", ("ISTJ", "ISFJ", "INTJ"),
+        ("욕조에 39도 따뜻한 물을 받고 유자 또는 히노끼 입욕제 투입", "욕실 조명을 낮추고 20분간 반신욕으로 체온과 혈액순환 회복", "보송한 타월로 닦은 뒤 디카페인 드립 커피와 함께 침대 속 휴식"),
+        ("입욕제(배스밤/솔트)", "미온수 한 컵(수분보충)", "디카페인 드립백"),
+    ),
+    # 5. QUICK_2H Pool (10 items)
+    "ACT-Q2-01": _pb(
+        1, "I", "P", ("ISTP", "ESTP", "ISTJ"),
+        ("러닝화를 신고 집 앞 하천 산책로 입구에서 5분간 발목·무릎 동적 스트레칭", "러닝 앱을 켜고 2.5km 반환점까지 대화 가능한 편안한 페이스로 왕복 5K 달리기", "벤치에서 이온음료를 마시며 10분간 종아리·햄스트링 쿨다운"),
+        ("러닝화", "스마트폰/워치", "이온음료 또는 생수"),
+    ),
+    "ACT-Q2-02": _pb(
+        2, "I", "P", ("ISTJ", "ESTJ", "ENTJ"),
+        ("동네 구립 체육센터 일일권 키오스크에서 1인 헬스 일일권 발권", "탈의 후 인바디 기기에서 체성분 측정 및 결과지 출력", "대근육(하체·등·가슴) 위주로 45분간 집중 웨이트 후 샤워"),
+        ("실내용 운동화(필수)", "운동복·개인 수건", "단백질 보충 음료"),
+    ),
+    "ACT-Q2-03": _pb(
+        2, "E", "J", ("ESFP", "ESTP", "ENFJ"),
+        ("스피닝 스튜디오 원데이 클래스를 예약하고 수업 15분 전 도착해 전용 슈즈 대여", "강사에게 초보자임을 알리고 뒷줄 바이크의 안장 높이를 내 골반 높이에 세팅", "신나는 비트와 암전 조명 속에서 눈치 보지 않고 45분간 페달링"),
+        ("땀 흡수 잘되는 운동복", "생수 500ml 이상", "개인 스포츠 타월"),
+    ),
+    "URB-Q2-01": _pb(
+        1, "I", "P", ("INTJ", "INFJ", "INTP"),
+        ("이촌역 박물관 나들길을 통해 상설전시관으로 무료 입장", "다른 전시실을 건너뛰고 2층 '사유의 방'으로 바로 직행해 30분간 고요히 감상", "관람 후 박물관 거울못 산책로를 한 바퀴 걸으며 생각 정리"),
+        ("편한 신발", "무음 설정 스마트폰", "작은 메모장"),
+    ),
+    "URB-Q2-02": _pb(
+        1, "I", "P", ("INFP", "INFJ", "ISFP"),
+        ("동네 독립서점에 들어가 사장님이 손글씨로 적어둔 추천 코너부터 천천히 구경", "마음에 와닿는 문장이 있는 독립출판물 1권 구매", "서점 한켠이나 인근 조용한 카페에서 첫 페이지를 필사 노트에 기록"),
+        ("필사 노트와 펜", "독서용 안경", "에코백"),
+    ),
+    "URB-Q2-03": _pb(
+        2, "I", "P", ("INTP", "INFP", "ISFP"),
+        ("LP 청음 카페 카운터에서 음료를 주문하고 벽면 레코드 중 오늘의 앨범 1장 선택", "1인 전용 턴테이블·헤드폰 좌석에 앉아 바늘을 올리고 A면부터 B면까지 완청", "가장 좋았던 트랙 번호와 감상을 휴대폰 메모에 남기기"),
+        ("읽을거리 한 권", "충전된 스마트폰", "여유로운 90분"),
+    ),
+    "NOM-Q2-01": _pb(
+        1, "I", "P", ("ISFP", "INFP", "ENFP"),
+        ("일몰 40분 전 만리동 광장 쪽에서 서울로7017 고가 산책로 진입", "서울역 기찻길 위로 넘어가는 붉은 노을을 감상하며 천천히 도보 이동", "서울역 인근 1인 바 좌석 라멘집에서 따뜻한 라멘 한 그릇으로 마무리"),
+        ("편한 운동화", "가벼운 겉옷", "스마트폰 카메라"),
+    ),
+    "NOM-Q2-02": _pb(
+        2, "I", "J", ("ISTP", "INTP", "ENFP"),
+        ("국립항공박물관 홈페이지에서 1인 조종·관제 시뮬레이터 체험 슬롯 예약", "비 오는 날에도 쾌적한 실내 전시관에서 실물 항공기 역사 관람", "3층 야외/실내 전망대에서 김포공항 활주로 비행기 이착륙 감상"),
+        ("사전 체험 예약 내역", "신분증", "지하철 교통카드"),
+    ),
+    "WEL-Q2-01": _pb(
+        1, "I", "P", ("ISTJ", "INTJ", "ISFJ"),
+        ("원두 15g을 갈아 92~94도 물로 3분간 천천히 핸드드립 커피 추출", "창가 의자에 앉아 좋아하는 음악 3곡을 들으며 커피 완음", "타이머를 정확히 20분 맞추고 소파나 침대에서 카페인 파워냅"),
+        ("드립백 또는 원두·드리퍼", "가장 아끼는 머그컵", "안대 또는 담요"),
+    ),
+    "WEL-Q2-02": _pb(
+        2, "I", "J", ("ISFJ", "ISTJ", "INFJ"),
+        ("네이버 예약으로 동네 마사지숍 '1인 발·아로마 60분 코스' 예약 시 '조용한 휴식 희망' 체크", "따뜻한 아로마 족욕 10분으로 발 끝 온도를 높인 뒤 개별 베드에 눕기", "50분간 눈을 감고 종아리·발바닥 지압을 받으며 무념무상 휴식"),
+        ("사전 예약 확인", "걷기 편한 양말/신발", "머리끈(긴 머리)"),
+    ),
+}
+
+
+_RAW_CURATIONS: list[YoloCuration] = [
+    replace(c, **_V2_DETAILS.get(c.id, {}), time_slot=_TIME_SLOTS[c.id])
     for c in _BASE_SEED_CURATIONS
+] + _QUICK_SEED_CURATIONS
+assert set(_PHASE_B_DETAILS) == {c.id for c in _RAW_CURATIONS}, "every seed needs Phase B details"
+
+SEED_CURATIONS: list[YoloCuration] = [
+    replace(c, **_PHASE_B_DETAILS[c.id]) for c in _RAW_CURATIONS
 ]

@@ -93,6 +93,11 @@ table.budget .amt{width:88px;text-align:right;font-variant-numeric:tabular-nums;
 table.budget tfoot td{font-weight:800;border-bottom:0;font-size:14.5px;color:#0f172a;padding-top:10px}
 .secret{background:#fffbeb;border:1px solid #fef08a;border-radius:14px;padding:12px 14px;font-size:13.5px;color:#78350f;margin:0;line-height:1.55}
 .secret strong{color:#92400e}
+.coach-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:14px;padding:12px 14px;font-size:13px;color:#14532d}
+.coach-box h3{color:#166534;margin:0 0 8px;font-size:13.5px}
+.howto{margin:0;padding:0 0 0 18px;display:flex;flex-direction:column;gap:4px;line-height:1.5}
+.checklist{list-style:none;margin:8px 0 0;padding:8px 0 0;border-top:1px dashed #bbf7d0;display:flex;flex-wrap:wrap;gap:6px}
+.checklist li{background:#dcfce7;color:#166534;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700}
 .gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .gallery img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px}
 .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:auto;padding-top:8px}
@@ -247,6 +252,10 @@ class YoloWebReportGenerator:
                 f'style="background:{gradient}">{_e(c.emoji)}</div>'
             )
 
+        tag_items = [f"<li>{_e(t)}</li>" for t in c.solo_tags]
+        for m in c.mbti_tags:
+            tag_items.append(f"<li>🧩 #{_e(m)}</li>")
+
         parts: list[str] = [
             f'<article class="card" data-arcs="{_e(arcs_attr)}" id="{_e(c.id)}">',
             f'<div class="hero">{hero_inner}<div class="badges">{badges}</div></div>',
@@ -256,10 +265,22 @@ class YoloWebReportGenerator:
             '<ul class="chips">'
             f"<li>📍 {_e(c.location_name)}</li>"
             f"<li>⏱ {_e(c.cost_or_duration)}</li>"
+            f"<li>🎚 {_e(c.difficulty_label)}</li>"
             f"<li>{_e(c.season.label)} · {mode_label}</li>"
             "</ul>",
-            '<ul class="chips tags">' + "".join(f"<li>{_e(t)}</li>" for t in c.solo_tags) + "</ul>",
+            '<ul class="chips tags">' + "".join(tag_items) + "</ul>",
         ]
+
+        if c.how_to_steps or c.checklist:
+            coach_inner: list[str] = ['<div class="coach-box"><h3>📘 처음 혼자 갈 때 3단계 실행 가이드</h3>']
+            if c.how_to_steps:
+                steps_html = "".join(f"<li>{_e(s)}</li>" for s in c.how_to_steps[:3])
+                coach_inner.append(f'<ol class="howto">{steps_html}</ol>')
+            if c.checklist:
+                chk_html = "".join(f"<li>☑️ {_e(chk)}</li>" for chk in c.checklist[:4])
+                coach_inner.append(f'<ul class="checklist">{chk_html}</ul>')
+            coach_inner.append("</div>")
+            parts.append("".join(coach_inner))
 
         if c.timeline:
             rows = "".join(

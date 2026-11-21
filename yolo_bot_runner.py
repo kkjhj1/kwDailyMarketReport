@@ -60,6 +60,7 @@ from yolo_brief.models import (
     WeatherSnapshot,
 )
 from yolo_brief.storage.db import YoloDatabase
+from yolo_brief.weather_client import StaticWeatherClient
 from yolo_brief.web_report import DEFAULT_REPORT_PATH, YoloWebReportGenerator
 
 DEFAULT_REPORT_OUTPUT = BASE_DIR / DEFAULT_REPORT_PATH
@@ -91,7 +92,15 @@ def run_demo(ref_date: date = date(2026, 10, 17)) -> int:
         max_global_rate=1000.0, min_chat_interval=0.0, sleep=lambda _: None
     )
     dispatcher = SafeTelegramDispatcher(rate_limiter=limiter, sleep=lambda _: None)
-    bot = YoloInteractiveBot(db=db, channel=channel, dispatcher=dispatcher)
+    clear_snap = WeatherSnapshot(
+        weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0
+    )
+    bot = YoloInteractiveBot(
+        db=db,
+        channel=channel,
+        dispatcher=dispatcher,
+        weather_client=StaticWeatherClient(clear_snap),
+    )
 
     print("=" * 72)
     print(f"🎯 [YOLO Bot Demo] Seeded {seeded} solo-certified curations in :memory:")
@@ -108,9 +117,6 @@ def run_demo(ref_date: date = date(2026, 10, 17)) -> int:
     print(onboard_text)
 
     # 2. Walk through all 4 Solo Archetypes under CLEAR weather
-    clear_snap = WeatherSnapshot(
-        weather_class=WeatherClass.CLEAR, pop_percent=10, feels_like_c=19.0
-    )
     for idx, arc in enumerate(SoloArchetype, start=1):
         chat_id = f"demo_arc_{idx}"
         bot.handle_update(

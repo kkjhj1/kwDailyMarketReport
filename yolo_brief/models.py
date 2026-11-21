@@ -1,6 +1,6 @@
 """Domain models for YOLO Bot (욜로봇).
 Defines 4 Solo Archetypes, multi-dimensional metadata (activity_mode, mobility_scope, setting),
-ProfileState, Season, WeatherClass, WeatherSnapshot, YoloCuration, and YoloUserProfile.
+ProfileState, Season, WeatherClass, WeatherSnapshot, TimeSlot, YoloCuration, and YoloUserProfile.
 """
 from __future__ import annotations
 
@@ -157,6 +157,32 @@ class WeatherClass(str, Enum):
         }[self]
 
 
+class TimeSlot(str, Enum):
+    """가용 시간대 필터 (2시간 컷 / 반나절 / 하루·1박)."""
+    ALL = "ALL"
+    QUICK_2H = "QUICK_2H"
+    HALF_DAY = "HALF_DAY"
+    FULL_OR_TRIP = "FULL_OR_TRIP"
+
+    @property
+    def label(self) -> str:
+        return {
+            TimeSlot.ALL: "전체",
+            TimeSlot.QUICK_2H: "⚡ 2시간 컷",
+            TimeSlot.HALF_DAY: "🌤 반나절",
+            TimeSlot.FULL_OR_TRIP: "🧳 하루·1박",
+        }[self]
+
+    @property
+    def callback_code(self) -> str:
+        return {
+            TimeSlot.ALL: "all",
+            TimeSlot.QUICK_2H: "q2",
+            TimeSlot.HALF_DAY: "half",
+            TimeSlot.FULL_OR_TRIP: "full",
+        }[self]
+
+
 AREA_NAMES: dict[str, str] = {
     "1100000000": "서울·수도권",
     "2600000000": "부산·경남",
@@ -167,12 +193,73 @@ AREA_NAMES: dict[str, str] = {
     "5100000000": "강원",
 }
 
+# [TG-04] 64-byte callback short codes (`yolo:area:<CODE>`) <-> weather area codes
+AREA_SHORT_CODES: dict[str, str] = {
+    "SEO": "1100000000",
+    "BUS": "2600000000",
+    "DGU": "2700000000",
+    "GWJ": "2900000000",
+    "DJN": "3000000000",
+    "JEJ": "5000000000",
+    "GWN": "5100000000",
+}
+
+VALID_MBTI_TYPES: tuple[str, ...] = (
+    "ISTJ", "ISFJ", "INFJ", "INTJ",
+    "ISTP", "ISFP", "INFP", "INTP",
+    "ESTP", "ESFP", "ENFP", "ENTP",
+    "ESTJ", "ESFJ", "ENFJ", "ENTJ",
+)
+
+SOLO_LEVEL_LABELS: dict[int, str] = {
+    1: "Lv.1 입문",
+    2: "Lv.2 초급",
+    3: "Lv.3 중급",
+    4: "Lv.4 숙련",
+    5: "Lv.5 마스터",
+}
+
+# MBTI별 기본 성향 친화도 (1순위, 2순위) - 보조 성향 도출용
+MBTI_ARCHETYPE_AFFINITY: dict[str, tuple[SoloArchetype, SoloArchetype]] = {
+    "ESTP": (SoloArchetype.ACTIVE_CHALLENGER, SoloArchetype.ROAD_NOMAD),
+    "ESFP": (SoloArchetype.ACTIVE_CHALLENGER, SoloArchetype.URBAN_HIPSTER),
+    "ENTJ": (SoloArchetype.ACTIVE_CHALLENGER, SoloArchetype.URBAN_HIPSTER),
+    "ISTP": (SoloArchetype.ACTIVE_CHALLENGER, SoloArchetype.ROAD_NOMAD),
+    "ENTP": (SoloArchetype.URBAN_HIPSTER, SoloArchetype.ROAD_NOMAD),
+    "INTJ": (SoloArchetype.URBAN_HIPSTER, SoloArchetype.WELLNESS_DEEPDIVER),
+    "ENFJ": (SoloArchetype.URBAN_HIPSTER, SoloArchetype.ACTIVE_CHALLENGER),
+    "ESTJ": (SoloArchetype.ACTIVE_CHALLENGER, SoloArchetype.WELLNESS_DEEPDIVER),
+    "INFP": (SoloArchetype.ROAD_NOMAD, SoloArchetype.WELLNESS_DEEPDIVER),
+    "ENFP": (SoloArchetype.ROAD_NOMAD, SoloArchetype.URBAN_HIPSTER),
+    "INFJ": (SoloArchetype.ROAD_NOMAD, SoloArchetype.URBAN_HIPSTER),
+    "ISFP": (SoloArchetype.ROAD_NOMAD, SoloArchetype.WELLNESS_DEEPDIVER),
+    "ISTJ": (SoloArchetype.WELLNESS_DEEPDIVER, SoloArchetype.ACTIVE_CHALLENGER),
+    "ISFJ": (SoloArchetype.WELLNESS_DEEPDIVER, SoloArchetype.URBAN_HIPSTER),
+    "INTP": (SoloArchetype.WELLNESS_DEEPDIVER, SoloArchetype.URBAN_HIPSTER),
+    "ESFJ": (SoloArchetype.URBAN_HIPSTER, SoloArchetype.WELLNESS_DEEPDIVER),
+}
+
+
+def derive_mbti_traits(
+    mbti: Optional[str], primary_archetype: Optional[SoloArchetype] = None
+) -> tuple[Optional[str], Optional[str], Optional[SoloArchetype]]:
+    """Derives `(social_energy, pace_style, suggested_secondary_archetype)` from a 4-letter MBTI."""
+    if not mbti:
+        return None, None, None
+    code = str(mbti).strip().upper()
+    if code not in VALID_MBTI_TYPES:
+        raise ValueError(f"Invalid MBTI type: {mbti!r}")
+    first_arc, second_arc = MBTI_ARCHETYPE_AFFINITY[code]
+    secondary = second_arc if primary_archetype == first_arc else first_arc
+    return code[0], code[3], secondary
+
 
 @dataclass(frozen=True)
 class WeatherSnapshot:
-    """특정 관측 지역(area_code)의 실시간 기상 스냅샷."""
+    """특정 관측 지역(area_code)의 실시간 기상 스냅샷.
+    [INV-02] Fail-Safe: 기본값은 `UNKNOWN` (명시 없는 스냅샷을 맑음으로 간주하지 않는다)."""
     area_code: str = "1100000000"
-    weather_class: WeatherClass = WeatherClass.CLEAR
+    weather_class: WeatherClass = WeatherClass.UNKNOWN
     pop_percent: int = 0
     precip_mm: float = 0.0
     snow_mm: float = 0.0
@@ -228,6 +315,7 @@ class YoloCuration:
     action_url: str
     archetypes: tuple[SoloArchetype, ...]
     solo_tags: tuple[str, ...]
+    setting: SettingType = SettingType.HOME
     is_fallback: bool = False
     fallback_for: Optional[str] = None
     priority: int = 100
@@ -243,18 +331,46 @@ class YoloCuration:
     solo_secrets: str = ""
     map_naver_url: str = ""
     map_kakao_url: str = ""
+    time_slot: TimeSlot = TimeSlot.ALL
+    # === Phase B: 입체 성향 & 1인 실행 코치 필드 ===
+    solo_difficulty: int = 2
+    social_fit: str = "ALL"  # "ALL" | "I" | "E"
+    pace_fit: str = "ALL"    # "ALL" | "J" | "P"
+    mbti_tags: tuple[str, ...] = ()
+    how_to_steps: tuple[str, ...] = ()
+    checklist: tuple[str, ...] = ()
 
     @property
     def total_budget_krw(self) -> int:
         return sum(b.cost_krw for b in self.budget_breakdown)
 
+    @property
+    def budget_known(self) -> bool:
+        """Whether this curation carries an explicit budget breakdown.
+
+        An explicit zero-cost line is known to be free; an empty breakdown is
+        deliberately kept distinct as an unknown budget ([DATA-01]).
+        """
+        return bool(self.budget_breakdown)
+
+    @property
+    def known_budget_krw(self) -> Optional[int]:
+        return self.total_budget_krw if self.budget_breakdown else None
+
+    @property
+    def difficulty_label(self) -> str:
+        return SOLO_LEVEL_LABELS.get(self.solo_difficulty, f"Lv.{self.solo_difficulty}")
+
     def __post_init__(self) -> None:
         if not self.id or not self.id.strip():
             raise ValueError("Curation id must not be empty")
+        if len(str(self.id).encode("utf-8")) > 53:
+            raise ValueError(f"Curation id exceeds 53 bytes for 64-byte callback safety: {self.id!r}")
         if not self.title or not self.title.strip():
             raise ValueError("Curation title must not be empty")
         if not self.archetypes:
             raise ValueError(f"Curation {self.id} must have at least one SoloArchetype")
+        object.__setattr__(self, "setting", SettingType(self.setting))
         # [INV-01] 1인 완전성 보장: solo_tags가 없거나 공백이면 절대 생성 불가
         cleaned_tags = tuple(t.strip() for t in self.solo_tags if t and t.strip())
         if not cleaned_tags:
@@ -270,6 +386,44 @@ class YoloCuration:
         object.__setattr__(self, "gallery_images", tuple(self.gallery_images))
         object.__setattr__(self, "timeline", tuple(self.timeline))
         object.__setattr__(self, "budget_breakdown", tuple(self.budget_breakdown))
+        object.__setattr__(self, "time_slot", TimeSlot(self.time_slot))
+
+        # Phase B validations
+        diff = int(self.solo_difficulty)
+        if not 1 <= diff <= 5:
+            raise ValueError(f"Curation {self.id} solo_difficulty must be 1..5, got {diff}")
+        object.__setattr__(self, "solo_difficulty", diff)
+
+        s_fit = str(self.social_fit or "ALL").strip().upper()
+        if s_fit not in ("ALL", "I", "E"):
+            raise ValueError(f"Curation {self.id} social_fit must be ALL/I/E, got {self.social_fit!r}")
+        object.__setattr__(self, "social_fit", s_fit)
+
+        p_fit = str(self.pace_fit or "ALL").strip().upper()
+        if p_fit not in ("ALL", "J", "P"):
+            raise ValueError(f"Curation {self.id} pace_fit must be ALL/J/P, got {self.pace_fit!r}")
+        object.__setattr__(self, "pace_fit", p_fit)
+
+        cleaned_mbti: list[str] = []
+        for m in self.mbti_tags:
+            mc = str(m).strip().upper().lstrip("#")
+            if not mc:
+                continue
+            if mc not in VALID_MBTI_TYPES:
+                raise ValueError(f"Curation {self.id} has invalid mbti_tag: {m!r}")
+            if mc not in cleaned_mbti:
+                cleaned_mbti.append(mc)
+        object.__setattr__(self, "mbti_tags", tuple(cleaned_mbti))
+
+        cleaned_howto = tuple(str(s).strip() for s in self.how_to_steps if s and str(s).strip())
+        if len(cleaned_howto) > 3:
+            raise ValueError(f"Curation {self.id} how_to_steps must have at most 3 items")
+        object.__setattr__(self, "how_to_steps", cleaned_howto)
+
+        cleaned_check = tuple(str(c).strip() for c in self.checklist if c and str(c).strip())
+        if cleaned_check and not (2 <= len(cleaned_check) <= 4):
+            raise ValueError(f"Curation {self.id} checklist must have 2..4 items when provided")
+        object.__setattr__(self, "checklist", cleaned_check)
 
 
 @dataclass
@@ -280,10 +434,49 @@ class YoloUserProfile:
     archetype: Optional[SoloArchetype] = None
     weather_area_code: str = "1100000000"
     weather_fallback_enabled: bool = True
+    preferred_time_slot: TimeSlot = TimeSlot.ALL
+    mbti: Optional[str] = None
+    solo_level: int = 3
+    secondary_archetype: Optional[SoloArchetype] = None
+    social_energy: Optional[str] = None
+    pace_style: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(KST).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(KST).isoformat())
 
+    @property
+    def solo_level_label(self) -> str:
+        return SOLO_LEVEL_LABELS.get(self.solo_level, f"Lv.{self.solo_level}")
+
     def __post_init__(self) -> None:
+        self.preferred_time_slot = TimeSlot(self.preferred_time_slot)
+        if self.secondary_archetype is not None:
+            self.secondary_archetype = SoloArchetype(self.secondary_archetype)
+        lvl = int(self.solo_level)
+        if not 1 <= lvl <= 5:
+            raise ValueError(f"solo_level must be 1..5, got {lvl}")
+        self.solo_level = lvl
+
+        if self.mbti is not None and str(self.mbti).strip():
+            code = str(self.mbti).strip().upper()
+            if code not in VALID_MBTI_TYPES:
+                raise ValueError(f"Invalid user mbti: {self.mbti!r}")
+            self.mbti = code
+            # Anti-drift: when MBTI is set, E/I and J/P are always synchronized with it.
+            self.social_energy = code[0]
+            self.pace_style = code[3]
+        else:
+            self.mbti = None
+            if self.social_energy is not None:
+                se = str(self.social_energy).strip().upper()
+                if se not in ("I", "E"):
+                    raise ValueError(f"Invalid social_energy: {self.social_energy!r}")
+                self.social_energy = se
+            if self.pace_style is not None:
+                ps = str(self.pace_style).strip().upper()
+                if ps not in ("J", "P"):
+                    raise ValueError(f"Invalid pace_style: {self.pace_style!r}")
+                self.pace_style = ps
+
         if self.profile_state == ProfileState.ONBOARDING and self.archetype is not None:
             raise ValueError("ONBOARDING profile cannot have an active archetype")
         if self.profile_state == ProfileState.ACTIVE and self.archetype is None:

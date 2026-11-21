@@ -53,18 +53,28 @@ class MarketBriefDatabase:
     def __init__(self, db_path: str = "alerts.sqlite3", env_path: Path | None = None):
         self.db_path = str(db_path)
         self.env_path = env_path
+        self._memory_connection: sqlite3.Connection | None = None
+        if self.db_path.strip() == ":memory:" or self.db_path.strip().startswith("file::memory:"):
+            self._memory_connection = sqlite3.connect(
+                self.db_path,
+                uri=self.db_path.strip().startswith("file::memory:"),
+                timeout=15.0,
+            )
+            self._memory_connection.row_factory = sqlite3.Row
         self._init_schema()
         self._seed_initial_data()
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, timeout=15.0)
+        shared_memory = self._memory_connection
+        conn = shared_memory or sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         try:
             with conn:
                 yield conn
         finally:
-            conn.close()
+            if shared_memory is None:
+                conn.close()
 
     def _init_schema(self) -> None:
         with self._connect() as db:
@@ -1435,6 +1445,220 @@ class MarketBriefDatabase:
         if not dec.is_finite():
             return raw
         return format(dec, "f")
+
+    def _open_readonly_sidecar(self, filename: str) -> sqlite3.Connection | None:
+        """Open a sibling bot database without creating it or bypassing its WAL."""
+        db_path = str(self.db_path).strip()
+        if db_path == ":memory:" or db_path.startswith("file::memory:"):
+            return None
+        sidecar = Path(self.db_path).resolve().with_name(filename)
+        if not sidecar.is_file():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(f"{sidecar.as_uri()}?mode=ro", uri=True, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            return conn
+        except (sqlite3.Error, OSError):
+            if conn is not None:
+                conn.close()
+            return None
+
+    def get_user_bot_context(self, user_id: str) -> dict[str, Any]:
+        """Return an admin-safe, cross-bot snapshot for one platform user.
+
+        The Admin process owns only the market database. Other bot databases are
+        optional sibling sidecars and are therefore read-only and best-effort.
+        Missing tables/files produce an empty section rather than creating schema
+        or turning a user drawer request into a 500 response.
+        """
+        uid = str(user_id).strip()
+        context: dict[str, Any] = {
+            "brief_bot": {"available": True, "watches": []},
+            "travel_bot": {
+                "available": True,
+                "watches": [],
+                "prefs": {"weekly_enabled": True, "drop_paused": False},
+            },
+            "admission_bot": {"available": True, "subscribers": [], "subscriptions": []},
+            "kids_bot": {
+                "available": False,
+                "profile": None,
+                "children": [],
+                "pregnancy": None,
+                "active_dose_timers": 0,
+            },
+            "yolo_bot": {"available": False, "profile": None},
+            "silver_bot": {"available": False, "parents": []},
+        }
+
+        def rows_for_user(db: sqlite3.Connection, table: str, preferred_keys: tuple[str, ...]) -> list[dict[str, Any]]:
+            if not self._table_exists(db, table):
+                return []
+            columns = self._table_columns(db, table)
+            key = next((candidate for candidate in preferred_keys if candidate in columns), None)
+            if not key:
+                return []
+            return [dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE {key} = ?", (uid,)).fetchall()]
+
+        with self._connect() as db:
+            if self._table_exists(db, "market_volatility_watches"):
+                try:
+                    for row in rows_for_user(db, "market_volatility_watches", ("user_id", "telegram_user_id", "chat_id")):
+                        context["brief_bot"]["watches"].append(
+                            {
+                                "id": row.get("id", row.get("watch_id")),
+                                "watch_id": row.get("watch_id", row.get("id")),
+                                "symbol": row.get("symbol"),
+                                "display_name": row.get("display_name") or row.get("symbol"),
+                                "threshold_pct": self._fmt_decimal_text(
+                                    row.get("threshold_pct", row.get("threshold_value"))
+                                ),
+                                "is_active": bool(row.get("is_active")),
+                                "last_triggered_at": row.get("last_triggered_at"),
+                            }
+                        )
+                except sqlite3.Error:
+                    context["brief_bot"] = {"available": False, "watches": []}
+
+            if self._table_exists(db, "travel_price_watches"):
+                try:
+                    travel_cols = self._table_columns(db, "travel_price_watches")
+                    travel_rows = rows_for_user(db, "travel_price_watches", ("chat_id", "telegram_user_id"))
+                    for row in travel_rows:
+                        destination = row.get("destination", row.get("dest_code"))
+                        target_price = row.get("target_price", row.get("target_price_krw"))
+                        context["travel_bot"]["watches"].append(
+                            {
+                                "id": row.get("id", row.get("watch_id")),
+                                "watch_id": row.get("watch_id", row.get("id")),
+                                "destination": destination,
+                                "dest_code": row.get("dest_code", destination),
+                                "target_price": target_price,
+                                "target_price_krw": row.get("target_price_krw", target_price),
+                                "theme": row.get("theme", row.get("preset_kind")),
+                                "is_active": bool(row.get("is_active")),
+                                "last_alert_at": row.get("last_alert_at", row.get("last_seen_at")),
+                                **{
+                                    key: row.get(key)
+                                    for key in (
+                                        "preset_kind", "day_pattern", "include_peak", "last_seen_price_krw",
+                                        "last_seen_slot", "last_seen_at", "created_at", "updated_at",
+                                    )
+                                    if key in travel_cols
+                                },
+                            }
+                        )
+                except sqlite3.Error:
+                    context["travel_bot"]["available"] = False
+
+            if self._table_exists(db, "travel_user_prefs"):
+                try:
+                    prefs = rows_for_user(db, "travel_user_prefs", ("chat_id", "telegram_user_id"))
+                    if prefs:
+                        pref = prefs[0]
+                        weekly = pref.get("weekly_enabled", pref.get("weekly_brief_enabled", True))
+                        paused = pref.get("drop_paused", pref.get("watches_paused", False))
+                        context["travel_bot"]["prefs"] = {
+                            "weekly_enabled": bool(weekly),
+                            "drop_paused": bool(paused),
+                        }
+                except sqlite3.Error:
+                    context["travel_bot"]["available"] = False
+
+            if self._table_exists(db, "admission_subscribers"):
+                try:
+                    subscribers = rows_for_user(
+                        db, "admission_subscribers", ("telegram_user_id", "chat_id")
+                    )
+                    context["admission_bot"]["subscribers"] = subscribers
+                    context["admission_bot"]["subscriptions"] = subscribers
+                except sqlite3.Error:
+                    context["admission_bot"] = {"available": False, "subscribers": [], "subscriptions": []}
+
+        def sidecar_failure(defaults: dict[str, Any]) -> dict[str, Any]:
+            return {**defaults, "available": False}
+
+        sidecars_enabled = not (
+            str(self.db_path).strip() == ":memory:"
+            or str(self.db_path).strip().startswith("file::memory:")
+        )
+        kids_conn = self._open_readonly_sidecar("kids_compass.sqlite3") if sidecars_enabled else None
+        if kids_conn is not None:
+            try:
+                profile_rows = rows_for_user(
+                    kids_conn, "kids_user_profiles", ("telegram_user_id", "chat_id")
+                )
+                child_rows = rows_for_user(kids_conn, "kids_children", ("telegram_user_id", "chat_id"))
+                pregnancy_rows = rows_for_user(
+                    kids_conn, "kids_pregnancy_profiles", ("telegram_user_id", "chat_id")
+                )
+                timer_count = 0
+                if self._table_exists(kids_conn, "kids_dose_timers"):
+                    timer_cols = self._table_columns(kids_conn, "kids_dose_timers")
+                    if "telegram_user_id" in timer_cols and "status" in timer_cols:
+                        timer_count = int(
+                            kids_conn.execute(
+                                "SELECT COUNT(*) FROM kids_dose_timers WHERE telegram_user_id = ? "
+                                "AND status IN ('PENDING', 'IN_FLIGHT')",
+                                (uid,),
+                            ).fetchone()[0]
+                        )
+                profile = profile_rows[0] if profile_rows else None
+                if profile:
+                    allowed = (
+                        "default_region", "alert_weekend_brief", "alert_dday_reserve",
+                        "alert_health_dday", "alert_weekend_mode",
+                    )
+                    profile = {key: profile.get(key) for key in allowed if key in profile}
+                children = []
+                for child in child_rows:
+                    children.append(
+                        {key: child.get(key) for key in ("child_id", "nickname", "birth_date", "weight_kg", "is_primary") if key in child}
+                    )
+                pregnancy = None
+                if pregnancy_rows:
+                    pregnancy = {
+                        key: pregnancy_rows[0].get(key)
+                        for key in ("nickname", "due_date")
+                        if key in pregnancy_rows[0]
+                    }
+                context["kids_bot"] = {
+                    "available": True,
+                    "profile": profile,
+                    "children": children,
+                    "pregnancy": pregnancy,
+                    "active_dose_timers": timer_count,
+                }
+            except (sqlite3.Error, OSError):
+                context["kids_bot"] = sidecar_failure(
+                    {"profile": None, "children": [], "pregnancy": None, "active_dose_timers": 0}
+                )
+            finally:
+                kids_conn.close()
+
+        yolo_conn = self._open_readonly_sidecar("yolo_brief.sqlite3") if sidecars_enabled else None
+        if yolo_conn is not None:
+            try:
+                rows = rows_for_user(yolo_conn, "yolo_users", ("telegram_user_id", "chat_id"))
+                context["yolo_bot"] = {"available": True, "profile": rows[0] if rows else None}
+            except (sqlite3.Error, OSError):
+                context["yolo_bot"] = sidecar_failure({"profile": None})
+            finally:
+                yolo_conn.close()
+
+        silver_conn = self._open_readonly_sidecar("silver_care.sqlite3") if sidecars_enabled else None
+        if silver_conn is not None:
+            try:
+                rows = rows_for_user(silver_conn, "silver_parents", ("telegram_user_id", "chat_id"))
+                context["silver_bot"] = {"available": True, "parents": rows}
+            except (sqlite3.Error, OSError):
+                context["silver_bot"] = sidecar_failure({"parents": []})
+            finally:
+                silver_conn.close()
+
+        return context
 
     @staticmethod
     def _fmt_krw(value: Any) -> str | None:
