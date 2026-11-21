@@ -126,3 +126,45 @@ def test_phase_c_plan_card_and_interactive_routes_are_safe() -> None:
     assert "맞춤 플랜" in channel.call_log[-1][1]["text"]
     bot.handle_update({"callback_query": {"id": "phase-c-cb", "data": "yolo:plan:home", "message": {"chat": {"id": "phase-c-chat"}, "message_id": 1}}})
     assert channel.call_log[-2][0] == "answerCallbackQuery"
+
+
+def test_dynamic_bot_manager_yolo_routes_callbacks_and_plan_command() -> None:
+    import json
+    from market_brief.multi_bot_manager import DynamicBotManager
+    from market_brief.storage.db import MarketBriefDatabase
+    from market_brief.subscription_engine import SubscriptionEngine
+
+    class _FakeResp:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+        def __enter__(self) -> "_FakeResp":
+            return self
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    mgr = DynamicBotManager(SubscriptionEngine(MarketBriefDatabase(":memory:")))
+    opener = lambda req, timeout=10: _FakeResp({"ok": True, "result": {"message_id": 1}})
+
+    for cb in ("yolo:set:ACTIVE_CHALLENGER", "yolo:profile", "yolo:mbti:INFP", "yolo:plan:all"):
+        handled, reason = mgr._dispatch_yolo_bot_update(
+            "dummy_token",
+            {
+                "callback_query": {
+                    "id": f"cb_{cb}",
+                    "from": {"id": 7820975792},
+                    "data": cb,
+                    "message": {"chat": {"id": 7820975792}, "message_id": 1},
+                }
+            },
+            opener=opener,
+        )
+        assert handled is True and reason == "yolo_callback_handled"
+
+    handled_plan, reason_plan = mgr._dispatch_yolo_bot_update(
+        "dummy_token",
+        {"message": {"chat": {"id": 7820975792}, "text": "/plan 2시간 1만원 집"}},
+        opener=opener,
+    )
+    assert handled_plan is True and reason_plan == "yolo_message_handled"

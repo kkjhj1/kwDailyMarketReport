@@ -2611,15 +2611,18 @@ class DynamicBotManager:
                     msg = cq.get("message", {}) or {}
                     chat = msg.get("chat", {}) or sender
                     chat_id = str(chat.get("id") or sender.get("id") or "")
-                    if chat_id:
-                        sel_arc = self.router._selected_targets.get((chat_id, "yolo_bot"))
-                        if sel_arc and sel_arc != "ALL":
-                            try:
-                                yolo_db.set_user_archetype(chat_id, SoloArchetype(sel_arc))
-                            except ValueError:
-                                pass
-                        elif yolo_db.get_user(chat_id) is None or yolo_db.get_user(chat_id).archetype is None:
-                            yolo_db.set_user_archetype(chat_id, SoloArchetype.URBAN_HIPSTER)
+                    if chat_id and not cb_data.startswith("yolo:set:"):
+                        yolo_user = yolo_db.get_user(chat_id)
+                        if yolo_user is None or yolo_user.archetype is None:
+                            selected_targets = getattr(self.router, "_selected_targets", None) or {}
+                            sel_arc = selected_targets.get((chat_id, "yolo_bot"))
+                            if sel_arc and sel_arc != "ALL":
+                                try:
+                                    yolo_db.set_user_archetype(chat_id, SoloArchetype(sel_arc))
+                                except ValueError:
+                                    yolo_db.set_user_archetype(chat_id, SoloArchetype.URBAN_HIPSTER)
+                            else:
+                                yolo_db.set_user_archetype(chat_id, SoloArchetype.URBAN_HIPSTER)
                     yolo_channel = YoloTelegramChannel(token=bot_token, opener=opener)
                     yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
                     yolo_bot.handle_update(item)
@@ -2630,7 +2633,7 @@ class DynamicBotManager:
                 msg = item["message"]
                 text = (msg.get("text") or "").strip()
                 cmd = text.split()[0].lower().split("@")[0] if text else ""
-                if cmd in ("/weekend", "/yolo", "/help"):
+                if cmd in ("/weekend", "/yolo", "/plan", "/help"):
                     yolo_channel = YoloTelegramChannel(token=bot_token, opener=opener)
                     yolo_bot = YoloInteractiveBot(db=yolo_db, channel=yolo_channel)
                     yolo_bot.handle_update(item)
