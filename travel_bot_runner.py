@@ -225,11 +225,12 @@ def format_telegram_briefing(
         city_name = html.escape(_clip(single_city_meta.name, 24))
         city_code = html.escape(single_city_meta.code)
         hero = recommendations[0].best_deal if recommendations else None
+        hero_stale = " · ⏳ 캐시" if (hero is not None and getattr(hero, "is_stale", False)) else ""
         if hero is not None and hero.data_source == "LIVE_SSE":
-            source_tag = " (네이버 실시간 관측)"
+            source_tag = f" (네이버 실시간 관측{hero_stale})"
             fare_note = "💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>"
         elif hero is not None and hero.data_source == "LIVE_PG":
-            source_tag = " (네이버 가격그래프)"
+            source_tag = f" (네이버 가격그래프{hero_stale})"
             fare_note = "💡 <i>항공권: 네이버 가격그래프 최근값 (실시간 요금 링크 확인)</i>"
         else:
             source_tag = ""
@@ -242,9 +243,20 @@ def format_telegram_briefing(
             notes.append("ℹ️ <i>기본 메타 기준: 계절·입국 조건·숙소는 링크에서 확인 필요</i>")
         top_title = f"🔥 <b>{city_name} ({city_code}) 추천 최저가 일정 TOP {min(len(recommendations), 3)}</b>"
     elif is_live_mode:
-        title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측)]</b>"
+        top3 = recommendations[:3]
+        has_sse = any(r.best_deal.data_source == "LIVE_SSE" for r in top3)
+        all_stale = bool(top3) and all(
+            getattr(r.best_deal, "is_stale", False) for r in top3 if r.best_deal.is_live
+        )
+        stale_suffix = " · ⏳ 캐시" if all_stale else ""
+        if has_sse:
+            title_line = f"✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 실시간 관측{stale_suffix})]</b>"
+            fare_note = "💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>"
+        else:
+            title_line = f"✈️ <b>[주말 해외여행 6개월 특가 나침반 (네이버 가격그래프{stale_suffix})]</b>"
+            fare_note = "💡 <i>항공권: 네이버 가격그래프 최근값 (실시간 요금 링크 확인)</i>"
         basis_line = f"📅 기준: {now_str} KST · 인천 직항 {trip_basis} (유류·제세 포함)"
-        notes = ["💡 <i>항공권: '가격 낮은 순' 1위 실시간 관측가 (상단 배너 제외)</i>", hotel_note]
+        notes = [fare_note, hotel_note]
         top_title = "🔥 <b>이번 주 실시간 가성비 BEST TOP 3</b>"
     else:
         title_line = "✈️ <b>[주말 해외여행 6개월 특가 나침반]</b>"
@@ -321,10 +333,11 @@ def format_telegram_briefing(
             tip_str = f" · {html.escape(_clip(tip_clean, 40))}" if tip_clean else ""
             safe_airline = html.escape(_clip(deal.airline, 20))
 
+            stale_tag = " · ⏳ 직전 캐시" if getattr(deal, "is_stale", False) else ""
             if deal.data_source == "LIVE_SSE":
-                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · {html.escape(deal.live_payment_note)})"
+                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · {html.escape(deal.live_payment_note)}{stale_tag})"
             elif deal.data_source == "LIVE_PG":
-                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · 최근 가격그래프)"
+                fare_line = f"  • 항공: <b>{html.escape(deal.exact_price_str)}</b> ({safe_airline} 직항 · 최근 가격그래프{stale_tag})"
             else:
                 airline_disp_off = safe_airline if "직항" in safe_airline else f"{safe_airline} 직항"
                 fare_line = f"  • 항공: <b>{html.escape(deal.price_band_str)}</b> ({airline_disp_off} · 유류세 포함)"

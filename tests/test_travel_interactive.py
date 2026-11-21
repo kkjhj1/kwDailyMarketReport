@@ -691,6 +691,64 @@ class TestTravelCacheAndSequenceGuards(unittest.TestCase):
             self.assertLessEqual(len(re.sub(r"<[^>]+>", "", msg)), 1800)
 
 
+class TestHonestPriceSourceDisclosure(unittest.TestCase):
+    """Header/card must name the real price source (SSE vs price-graph) and disclose STALE cache fallbacks."""
+
+    def setUp(self):
+        self.engine = FlightEngine(live_naver=False)
+
+    def _recs(self, source: str, freshness: str = "FRESH"):
+        import dataclasses
+        from datetime import date
+        from travel_brief.budget_calculator import BudgetCalculator
+
+        deals = self.engine.search_deals(months_ahead=6, ref_date=date(2026, 11, 20))
+        recs = BudgetCalculator.rank_recommendations(self.engine.destinations, deals, top_n=3)
+        self.assertTrue(recs)
+        return [
+            dataclasses.replace(r, best_deal=dataclasses.replace(r.best_deal, data_source=source, freshness=freshness))
+            for r in recs
+        ]
+
+    def _fmt(self, recs, target):
+        from travel_bot_runner import format_telegram_briefing
+
+        return format_telegram_briefing(recs, engine=self.engine, target_city=target)
+
+    def test_multi_city_pg_only_header_names_price_graph(self):
+        recs = self._recs("LIVE_PG")
+        for target in ("ALL", None):
+            msg = self._fmt(recs, target)
+            title = msg.split("\n")[0]
+            self.assertIn("네이버 가격그래프", title)
+            self.assertNotIn("네이버 실시간 관측", msg)
+            self.assertIn("네이버 가격그래프 최근값", msg)
+            self.assertNotIn("⏳", msg)
+
+    def test_multi_city_sse_header_keeps_live_observation(self):
+        msg = self._fmt(self._recs("LIVE_SSE"), "ALL")
+        self.assertIn("네이버 실시간 관측", msg.split("\n")[0])
+        self.assertNotIn("⏳", msg.split("\n")[0])
+
+    def test_stale_deals_disclosed_on_header_and_cards(self):
+        recs = self._recs("LIVE_PG", freshness="STALE")
+        msg = self._fmt(recs, "ALL")
+        title = msg.split("\n")[0]
+        self.assertIn("네이버 가격그래프 · ⏳ 캐시", title)
+        self.assertIn("최근 가격그래프 · ⏳ 직전 캐시", msg)
+
+        sse_msg = self._fmt(self._recs("LIVE_SSE", freshness="STALE"), "ALL")
+        self.assertIn("네이버 실시간 관측 · ⏳ 캐시", sse_msg.split("\n")[0])
+        self.assertIn("⏳ 직전 캐시)", sse_msg)
+
+    def test_single_city_stale_header(self):
+        recs = self._recs("LIVE_PG", freshness="STALE")
+        code = recs[0].destination.code
+        msg = self._fmt(recs, code)
+        self.assertIn("(네이버 가격그래프 · ⏳ 캐시)", msg.split("\n")[0])
+        self.assertIn("⏳ 직전 캐시", msg)
+
+
 # ----------------------------------------------------------------------
 # v2.3 integration: CityCatalog / scope cache / FX / TG-01 / Zero-Stuck / routing
 # ----------------------------------------------------------------------
