@@ -337,6 +337,7 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "todo", "description": "📋 학년별 To-Do 체크리스트"},
         {"command": "events", "description": "🎪 설명회·박람회 일정"},
         {"command": "glossary", "description": "📖 1초 입시용어 사전"},
+        {"command": "guide", "description": "📚 학습 가이드"},
         {"command": "settings", "description": "⚙️ 자녀 및 맞춤 설정"},
         {"command": "help", "description": "❓ 이용 가이드"},
     ],
@@ -1845,6 +1846,8 @@ class DynamicBotManager:
         self.router = router or MultiBotInteractionRouter(engine)
         self._tasks: dict[str, tuple[str, asyncio.Task]] = {}  # bot_id -> (token, task)
         self._running = False
+        self._kids_timer_task: asyncio.Task | None = None
+        self._kids_timer_token: str = ""
         # bot_id -> (token, transport): one keep-alive transport per (bot_id, token) across poll iterations.
         self._transports: dict[str, tuple[str, TelegramBotTransport]] = {}
         self._transports_lock = threading.Lock()
@@ -2523,7 +2526,7 @@ class DynamicBotManager:
                 text = (msg.get("text") or "").strip()
                 cmd = text.split()[0].lower().split("@")[0] if text else ""
                 # `/start` is intentionally NOT intercepted (portal subscription router owns it).
-                if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help", "/preg", "/cancel", "/settings"):
+                if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help", "/preg", "/food", "/cancel", "/settings"):
                     kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
                     kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)
                     kc_bot.handle_update(item)
@@ -2967,6 +2970,36 @@ class DynamicBotManager:
                 await asyncio.sleep(3.0)
                 continue
 
+    async def _kids_timer_loop(self, bot_token: str) -> None:
+        """Independent 30-second Kids Compass timer sweep with a fresh DB per tick."""
+        while self._running and self._kids_timer_token == bot_token:
+            kc_db = None
+            try:
+                from pathlib import Path
+                from kids_compass.channels.telegram import KidsTelegramChannel
+                from kids_compass.interactive_bot import dispatch_due_dose_timers
+                from kids_compass.storage.db import KidsCompassDatabase
+
+                base_path = getattr(self.engine.db, "db_path", None)
+                kc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") \
+                    else str(Path(str(base_path)).with_name("kids_compass.sqlite3"))
+                kc_db = KidsCompassDatabase(kc_db_path)
+                dispatch_due_dose_timers(kc_db, KidsTelegramChannel(bot_token))
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # noqa: BLE001 - timer delivery must not affect polling
+                logger.warning("[DynamicBotManager] Kids timer warning: %s", exc)
+            finally:
+                if kc_db is not None:
+                    try:
+                        kc_db.close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("Failed to close Kids timer DB", exc_info=True)
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                break
+
     async def start(self) -> None:
         self._running = True
         await self.reload_bots()
@@ -2978,6 +3011,11 @@ class DynamicBotManager:
         if self._tasks:
             await asyncio.gather(*(t for _, t in self._tasks.values()), return_exceptions=True)
         self._tasks.clear()
+        if self._kids_timer_task is not None:
+            self._kids_timer_task.cancel()
+            await asyncio.gather(self._kids_timer_task, return_exceptions=True)
+            self._kids_timer_task = None
+            self._kids_timer_token = ""
         # Drain callback lanes + offloaded acks BEFORE closing the sessions they use.
         await asyncio.to_thread(self._shutdown_pools)
         self._close_transports()
@@ -3001,6 +3039,11 @@ class DynamicBotManager:
             if bid not in desired or desired[bid] != old_token or old_task.done():
                 old_task.cancel()
                 self._tasks.pop(bid, None)
+                if bid == "kids_bot" and self._kids_timer_task is not None:
+                    self._kids_timer_task.cancel()
+                    await asyncio.gather(self._kids_timer_task, return_exceptions=True)
+                    self._kids_timer_task = None
+                    self._kids_timer_token = ""
         # Removed / deactivated / token-changed bots release their keep-alive sessions.
         self._close_transports(keep=desired)
 
@@ -3017,5 +3060,26 @@ class DynamicBotManager:
                         logger.debug("set_my_commands failed on %s: %s", bid, exc)
                 task = asyncio.create_task(self._poll_loop_for_bot(bid), name=f"bot_worker_{bid}")
                 self._tasks[bid] = (tok, task)
+                if bid == "kids_bot":
+                    self._kids_timer_token = tok
+                    self._kids_timer_task = asyncio.create_task(
+                        self._kids_timer_loop(tok), name="_kids_timer_loop"
+                    )
+
+        if "kids_bot" in desired and (
+            self._kids_timer_task is None or self._kids_timer_task.done()
+        ):
+            if self._kids_timer_task is not None:
+                await asyncio.gather(self._kids_timer_task, return_exceptions=True)
+            self._kids_timer_token = desired["kids_bot"]
+            self._kids_timer_task = asyncio.create_task(
+                self._kids_timer_loop(self._kids_timer_token), name="_kids_timer_loop"
+            )
+
+        if "kids_bot" not in desired and self._kids_timer_task is not None:
+            self._kids_timer_task.cancel()
+            await asyncio.gather(self._kids_timer_task, return_exceptions=True)
+            self._kids_timer_task = None
+            self._kids_timer_token = ""
 
         return {"active_workers": list(self._tasks.keys())}

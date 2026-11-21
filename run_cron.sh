@@ -39,7 +39,16 @@ case "$TASK" in
         ;;
     admission_weekly)
         "$APP_DIR/venv/bin/python" admission_bot_runner.py --collect >> "$LOG_FILE" 2>&1
-        "$APP_DIR/venv/bin/python" admission_bot_runner.py --dispatch --grade ALL >> "$LOG_FILE" 2>&1
+        "$APP_DIR/venv/bin/python" admission_bot_runner.py --dispatch --grade ALL --confirm-live >> "$LOG_FILE" 2>&1
+        ;;
+    kids_milestone)
+        "$APP_DIR/venv/bin/python" kids_bot_runner.py --dispatch-milestone >> "$LOG_FILE" 2>&1
+        ;;
+    kids_weekend)
+        "$APP_DIR/venv/bin/python" kids_bot_runner.py --dispatch-weekend >> "$LOG_FILE" 2>&1
+        ;;
+    kids_dday)
+        "$APP_DIR/venv/bin/python" kids_bot_runner.py --dispatch-dday >> "$LOG_FILE" 2>&1
         ;;
     *)
         echo "Unknown task: $TASK" >> "$LOG_FILE"

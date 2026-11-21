@@ -18,19 +18,29 @@ from typing import Any, Callable, Iterable, Optional
 
 from market_brief.channels.http_keepalive import open_request
 from kids_compass.collector import WALK_IN_TIPS
+from kids_compass.food_safety import (
+    FOOD_DISCLAIMER,
+    FoodItem,
+    evaluate_food_for_child,
+)
 from kids_compass.fever_engine import (
     CROSS_ALLOWED_WITH_CAUTION,
     CROSS_BLOCKED_SAME_NSAID,
     CROSS_DOSING_GUIDE,
     CROSS_SAME_INGREDIENT,
+    CROSS_TIMER_NOTICE,
     DISCLAIMER,
     STATUS_BLOCKED_INFANT,
     WARN_INFANT_UNDER_3M,
+    cross_dosing_candidates,
 )
+from kids_compass.hospitals_importer import is_open_now
+from kids_compass.home_play import DEV_DISCLAIMER, DevGuideItem, HomePlayItem
 from kids_compass.models import (
     AgeGroup,
     BookingEvent,
     ChildProfile,
+    DoseTimer,
     ExperienceCategory,
     ExperienceItem,
     FeverCalculationResult,
@@ -62,6 +72,7 @@ KIDS_COMMANDS = [
     {"command": "hospital", "description": "달빛어린이병원 찾기"},
     {"command": "weekend", "description": "주말 나들이 3-Pick"},
     {"command": "preg", "description": "임신기 태교·바우처"},
+    {"command": "food", "description": "이유식·음식 안전 사전"},
 ]
 
 WALK_IN_HEADER = "⚡ 예약 없이 바로 출발 3-Pick"
@@ -90,6 +101,64 @@ def measure_message(html_text: str) -> tuple[int, int]:
 def fits_limits(html_text: str) -> bool:
     html_len, visible_len = measure_message(html_text)
     return html_len <= MAX_HTML_CHARS and visible_len <= MAX_VISIBLE_CHARS
+
+
+def format_food_hub_html(subject_label: str, age_months: Optional[int],
+                         is_pregnancy: bool = False) -> str:
+    """Compact Pull-only entry card for the food-safety catalogue."""
+    if is_pregnancy:
+        summary = "🤰 임신 중에는 날것·생선회·카페인을 주의하고 식재료를 충분히 익혀 드세요."
+    elif age_months is None:
+        summary = "👶 월령을 등록하면 꿀·생우유·질식 위험 음식의 시작 시기를 맞춰 안내해요."
+    else:
+        cautions = []
+        if age_months < 12:
+            cautions.append("꿀·생우유 금지")
+        if age_months < 48:
+            cautions.append("통견과류·방울토마토·포도 질식 주의")
+        summary = "⚠️ 지금 주의: " + (" · ".join(cautions) if cautions else "질식·알레르기 주의")
+    return "\n".join([
+        "🥣 <b>먹거리·이유식·음식 안전 사전</b>",
+        f"👧 기준: <b>{esc(subject_label)}</b>",
+        summary,
+        "",
+        "카테고리를 고르거나 음식 이름으로 검색해 보세요 👇",
+    ])
+
+
+def format_food_list_html(title: str, items: list[FoodItem], age_months: Optional[int],
+                         is_pregnancy: bool = False) -> str:
+    """Render a short list with an evaluated status for every food."""
+    lines = [f"🥣 <b>{esc(title)}</b>", ""]
+    if not items:
+        lines.append("조건에 맞는 음식이 없어요. 다른 이름으로 검색해 보세요.")
+    for item in items[:8]:
+        status, guidance = evaluate_food_for_child(item, age_months, is_pregnancy)
+        icon = {"OK": "✅", "BLOCKED": "🚫", "INFO": "ℹ️"}.get(status, "ℹ️")
+        lines.append(f"{icon} <b>{esc(item.name)}</b> · {esc(guidance)}")
+        if item.risk_level != "SAFE":
+            lines.append(f"   ⚠️ {esc(item.safety_warning)}")
+    return "\n".join(lines)
+
+
+def format_food_detail_html(food: FoodItem, subject_label: str, age_months: Optional[int],
+                            is_pregnancy: bool = False) -> str:
+    """Render one food card, including preparation and safety notes."""
+    status, guidance = evaluate_food_for_child(food, age_months, is_pregnancy)
+    banner = {"OK": "✅", "BLOCKED": "🚫", "INFO": "ℹ️"}.get(status, "ℹ️")
+    age_label = "임신기" if is_pregnancy else (f"생후 {age_months}개월" if age_months is not None else "월령 미등록")
+    lines = [
+        f"🥣 <b>{esc(food.name)}</b>",
+        f"👧 {esc(subject_label)} · {esc(age_label)}",
+        f"{banner} <b>{esc(guidance)}</b>",
+        "",
+        f"🍳 <b>조리·손질</b>\n{esc(food.prep_tip)}",
+        f"🧡 <b>알레르기</b>\n{esc(food.allergy_note)}",
+        f"⚠️ <b>안전 경고</b>\n{esc(food.safety_warning)}",
+        "",
+        f"<i>{esc(FOOD_DISCLAIMER)}</i>",
+    ]
+    return "\n".join(lines)
 
 
 # ── Cards ─────────────────────────────────────────────────────
@@ -132,6 +201,49 @@ def format_home_html(children: list[ChildProfile], profile: Optional[dict] = Non
         ]
     lines += ["", "아래 버튼을 눌러 주세요 👇"]
     return "\n".join(lines)
+
+
+def format_home_play_html(subject_label: str, stage_label: str, items: list[HomePlayItem]) -> str:
+    """Compact Pull card for two home activities; all catalogue values are escaped.
+
+    The slice is intentional: callers can safely pass a catalogue or a stage
+    list without creating a Telegram over-limit message.  The bot's normal
+    picker already supplies two items.
+    """
+    lines = [f"🏠 <b>집콕놀이·발달</b>", f"👧 {esc(subject_label)} · {esc(stage_label)}", ""]
+    shown_items = items[:2]
+    if not shown_items:
+        lines.append("이 시기에 맞춘 놀이를 준비 중이에요.")
+    for number, item in enumerate(shown_items, 1):
+        lines.extend([
+            f"<b>{number}. {esc(item.title)}</b> · ⏱ {int(item.duration_min)}분",
+            f"🧺 준비물: {esc(item.materials)}",
+            f"▶ {esc(item.how_to)}",
+            f"🌱 {esc(item.dev_benefit)}",
+            f"⚠️ {esc(item.safety_note)}",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def format_dev_guide_html(subject_label: str, stage_label: str,
+                          guides: list[DevGuideItem]) -> str:
+    """Render development checkpoints, parent tips, consult signs and disclaimer."""
+    lines = ["🌱 <b>이 시기 발달·훈육 가이드</b>",
+             f"👧 {esc(subject_label)} · {esc(stage_label)}", ""]
+    if not guides:
+        lines.append("이 시기 가이드를 준비 중이에요.")
+    for guide in guides:
+        lines.append(f"<b>{esc(guide.title)}</b>")
+        lines.append("✅ 체크포인트")
+        lines.extend(f"• {esc(point)}" for point in guide.checkpoints)
+        lines.append("🧡 부모 대처 팁")
+        lines.extend(f"• {esc(tip)}" for tip in guide.parent_tips)
+        lines.append("🩺 소아과 상담 권장 신호")
+        lines.extend(f"• {esc(sign)}" for sign in guide.consult_signs)
+        lines.append("")
+    lines.append(f"<i>{esc(DEV_DISCLAIMER)}</i>")
+    return "\n".join(lines).rstrip()
 
 
 def _exp_line(n: int, e: ExperienceItem, walk_in: bool = False) -> list[str]:
@@ -271,6 +383,34 @@ def format_milestone_push_html(items: list[dict], today: date, subtitle: str = "
     return "\n".join(lines)
 
 
+def format_d14_milestone_push_html(items: list[dict], today: date) -> str:
+    """검진·접종 마감 14일 전 리마인드 카드."""
+    lines = ["🩺 <b>검진·접종 마감 D-14 알림</b>",
+             "마감일이 가까운 항목이에요. 이미 했다면 아래 확인 완료를 눌러 주세요.", ""]
+    shown = items[:MILESTONE_PUSH_MAX_ITEMS]
+    for n, item in enumerate(shown, 1):
+        due_to = str(item.get("due_to") or "")
+        try:
+            days_left = (date.fromisoformat(due_to) - today).days
+            dday = "D-DAY" if days_left <= 0 else f"D-{days_left}"
+        except ValueError:
+            dday = "D-day 확인 필요"
+        icon = MILESTONE_KIND_ICONS.get(str(item.get("kind")), "📌")
+        lines += [
+            f"{n}. {icon} <b>{esc(item.get('title', '검진·접종'))}</b>",
+            f"   👧 {esc(item.get('subject', '아이'))} · 마감 <b>{esc(due_to or '확인 필요')}</b> ({esc(dday)})",
+        ]
+        if item.get("description"):
+            lines.append(f"   {esc(item['description'])}")
+        lines.append("")
+    if len(items) > len(shown):
+        lines += [f"➕ 그 외 {len(items) - len(shown)}건이 더 있어요.", ""]
+    if shown:
+        lines += ["✅ 아래 [확인 완료]를 누르면 이 항목은 다시 알리지 않아요.", ""]
+    lines.append(f"<i>{esc(MILESTONE_DISCLAIMER)}</i>")
+    return "\n".join(lines)
+
+
 def dday_label(open_dt: datetime, now: datetime) -> str:
     days = (open_dt.date() - now.date()).days
     return "D-DAY" if days <= 0 else f"D-{days}"
@@ -374,6 +514,34 @@ def format_fever_result_html(
     return "\n".join(lines)
 
 
+def format_dose_timer_push_html(child_name: str, timer: DoseTimer, given_at_str: str = "") -> str:
+    """Render a conservative cross-dosing reminder from a timer snapshot."""
+    raw_given_value = getattr(timer, "given_ingredient", "") or ""
+    raw_given = raw_given_value.value if isinstance(raw_given_value, IngredientType) else str(raw_given_value)
+    try:
+        given = IngredientType(raw_given)
+        given_label = given.label
+        candidates = cross_dosing_candidates(given, 6)
+        candidate_text = ", ".join(c.label for c in candidates) if candidates else "없음"
+    except (TypeError, ValueError):
+        given_label = raw_given or "확인 필요"
+        candidate_text = "의료진·약사 확인"
+    lines = [
+        "⏰ <b>교차복용 확인 알림</b>",
+        f"👧 <b>{esc(child_name or '아이')}</b> · 방금 기록한 성분: <b>{esc(given_label)}</b>",
+    ]
+    if given_at_str:
+        lines.append(f"🕘 기록 시각: {esc(given_at_str)}")
+    lines += [
+        f"🔁 교차 고려 후보: <b>{esc(candidate_text)}</b>",
+        "   후보는 생후 6개월 이상에서만 검토하며, 제품 설명서·의료진 지시를 먼저 확인하세요.",
+        "⛔ 이부프로펜 ↔ 덱시부프로펜은 같은 NSAID 계열이라 교차복용하지 않습니다.",
+        "",
+        f"<i>{esc(CROSS_TIMER_NOTICE)}</i>",
+    ]
+    return "\n".join(lines)
+
+
 def format_cross_dosing_html() -> str:
     return "\n".join([
         "🔥 <b>열이 안 떨어질 때</b>",
@@ -396,14 +564,21 @@ def format_cross_dosing_html() -> str:
     ])
 
 
-def format_hospital_list_html(hospitals: list[MoonlightHospital], region_label: str, limit: int = 8) -> str:
+def format_hospital_list_html(hospitals: list[MoonlightHospital], region_label: str, limit: int = 8,
+                              hours_by_hospital: Optional[dict[str, list[Any]]] = None,
+                              now_dt: Optional[datetime] = None) -> str:
     lines = [f"🌙 <b>{esc(region_label)} 달빛어린이병원</b>", f"<b>{HOSPITAL_PHONE_WARNING}</b>", ""]
     if not hospitals:
         lines.append("등록된 병원이 없어요.")
     for h in hospitals[:limit]:
         tel = f"📞 <code>{esc(h.tel)}</code>" if h.tel else "📞 번호 확인: 119 안내"
+        if hours_by_hospital is not None and not getattr(h, "is_placeholder", False):
+            state = is_open_now(hours_by_hospital.get(h.hospital_id, []), now_dt or datetime.now())
+            open_label = {"OPEN": "🟢 영업 중", "CLOSED": "🔴 영업 종료"}.get(state, "⚪ 전화 확인 필수")
+        else:
+            open_label = "⚪ 전화 확인 필수"
         lines += [
-            f"🏥 <b>{esc(h.name)}</b> · {esc(h.region_sigungu)}",
+            f"🏥 <b>{esc(h.name)}</b> · {esc(h.region_sigungu)} · {open_label}",
             f"   🕘 평일 {esc(h.weekday_hours)} · 주말 {esc(h.weekend_hours)}",
             f"   {tel} · {link('지도', h.map_url)}",
             f"   💊 {esc(h.paired_pharmacy)}" + (f" <code>{esc(h.paired_pharmacy_tel)}</code>" if h.paired_pharmacy_tel else ""),

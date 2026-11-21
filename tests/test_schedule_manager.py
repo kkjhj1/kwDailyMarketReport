@@ -85,6 +85,20 @@ class CronCompilerTests(unittest.TestCase):
         wk = next_runs_kst(["53 7 * * 1-5"], datetime(2026, 11, 13, 8, 0, tzinfo=KST), 1)  # Fri after slot
         self.assertEqual(wk[0], "2026-11-16 (Mon) 07:53 KST")
 
+    def test_kids_task_defaults_and_commands(self):
+        expected = {
+            "kids_milestone": ((1,), ("09:30",)),
+            "kids_weekend": ((3,), ("17:00",)),
+            "kids_dday": ((0,), ("09:00",)),
+        }
+        for task_id, (weekdays, times) in expected.items():
+            spec = TASK_CATALOG[task_id]
+            self.assertEqual(spec.bot_id, "kids_bot")
+            self.assertEqual(spec.days_mode, "CUSTOM")
+            self.assertEqual(spec.weekdays, weekdays)
+            self.assertEqual(spec.default_times, times)
+            self.assertEqual(command_for(task_id, APP_DIR), f"{APP_DIR}/run_cron.sh {task_id}")
+
     def test_next_runs_strictly_future_no_compensation(self):
         runs = next_runs_kst(["30 7,12,18 * * *"], datetime(2026, 11, 11, 12, 30, tzinfo=KST), 3)
         self.assertEqual(
@@ -216,6 +230,22 @@ class MigrationTests(_ManagerCase):
         self.assertIn("15:52", joined)
         self.assertTrue(ov["migration_preview_diff"])
         self.assertIsNone(self.db.get_setting("bot_schedules"))
+
+    def test_get_overview_exposes_kids_tasks(self):
+        tasks = {task["task_id"]: task for task in self.mgr.get_overview()["tasks"]}
+        expected = {
+            "kids_milestone": ((1,), ["09:30"]),
+            "kids_weekend": ((3,), ["17:00"]),
+            "kids_dday": ((0,), ["09:00"]),
+        }
+        for task_id, (weekdays, times) in expected.items():
+            self.assertIn(task_id, tasks)
+            task = tasks[task_id]
+            self.assertEqual(task["bot_id"], "kids_bot")
+            self.assertEqual(task["default_weekdays"], list(weekdays))
+            self.assertEqual(task["default_times"], times)
+            self.assertEqual(task["config"]["weekdays"], list(weekdays))
+            self.assertEqual(task["config"]["times_kst"], times)
 
     def test_put_requires_confirm_migration(self):
         res = self.mgr.apply("travel_watches", _payload(["08:00", "13:00", "19:00"]))

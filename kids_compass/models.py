@@ -209,18 +209,64 @@ class MoonlightHospital:
     paired_pharmacy_tel: str
     map_url: str
     last_verified_at: str
+    is_placeholder: bool = False  # True = seed/search placeholder; never overwrites an official (False) row
+    source: str = "SEED"          # SEED | EGEN | ...
 
 
-MILESTONE_KINDS = ("CHECKUP", "VACCINE", "PREGNANCY")
+@dataclass
+class HospitalHourSlot:
+    """One opening-hours slot. day_of_week 0=Mon..6=Sun, 7 = 공휴일 (is_holiday=True).
+    Minutes since midnight; close_minute may be 1440 (24:00). crosses_midnight=True -> closes next day.
+    parse_status: OK | MISSING | INVALID | AMBIGUOUS — anything but OK means 'unknown', never open/closed."""
+    hospital_id: str
+    day_of_week: int
+    is_holiday: bool
+    open_minute: int
+    close_minute: int
+    crosses_midnight: bool
+    raw_open: str
+    raw_close: str
+    parse_status: str
+
+
+DOSE_TIMER_STATUSES = ("PENDING", "IN_FLIGHT", "SENT", "FAILED", "UNKNOWN", "BLOCKED",
+                       "EXPIRED", "SUPERSEDED", "CANCELLED")
+
+
+@dataclass
+class DoseTimer:
+    """Cross-dosing reminder timer. Only PENDING rows may be claimed; every other status is terminal
+    except IN_FLIGHT (which ends as SENT/FAILED/UNKNOWN/BLOCKED — never back to PENDING)."""
+    timer_id: int
+    dose_event_id: int
+    telegram_user_id: str
+    child_id: int
+    given_ingredient: str
+    suggested_ingredient: str
+    due_at: str
+    expires_at: str
+    status: str
+    claim_token: str = ""
+    lease_until: str = ""
+    attempt_count: int = 0
+    terminal_reason: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    sent_at: str = ""
+
+
+MILESTONE_KINDS = ("CHECKUP", "VACCINE", "PREGNANCY", "DENTAL", "BENEFIT")
 MILESTONE_STATUSES = ("DUE", "USER_CONFIRMED", "DEFERRED", "NOT_APPLICABLE", "UNKNOWN")
+MILESTONE_WINDOW_TYPES = ("MONTHS", "DAYS", "SCHOOL_YEAR")
 
 
 @dataclass
 class MilestoneDefinition:
-    """Catalogue row: 영유아 건강검진 / 국가필수예방접종 / 임신 주차 체크포인트.
-    Child items use age_min/max_months (inclusive months); PREGNANCY items use pregnancy_week."""
+    """Catalogue row: 영유아 건강검진 / 구강검진 / 국가필수예방접종 / 지원금 / 임신 주차 체크포인트.
+    Child items use age_min/max_months (inclusive months); PREGNANCY items use pregnancy_week.
+    window_type DAYS uses age_min/max_days; SCHOOL_YEAR = 만 3세 도래 학년도(3월 1일) 기준."""
     definition_id: str
-    kind: str  # CHECKUP | VACCINE | PREGNANCY
+    kind: str  # CHECKUP | VACCINE | PREGNANCY | DENTAL | BENEFIT
     code: str
     schedule_version: str
     age_min_months: Optional[int]
@@ -229,6 +275,9 @@ class MilestoneDefinition:
     title: str
     description: str
     source_url: str
+    window_type: str = "MONTHS"  # MONTHS | DAYS | SCHOOL_YEAR
+    age_min_days: int = 0
+    age_max_days: int = 0
 
 
 @dataclass

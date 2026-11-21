@@ -19,6 +19,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 if sys.platform == "win32":
     try:
@@ -45,10 +46,12 @@ from kids_compass.collector import SEED_EXPERIENCES, seed_all
 from kids_compass.channels.telegram import PUSH_MESSAGE_SENTINEL
 from kids_compass.interactive_bot import (
     KidsCompassInteractiveBot,
+    build_d14_milestone_push_messages,
     build_dday_push_messages,
     build_milestone_push_messages,
     build_weekend_push_messages,
     cb,
+    dispatch_due_dose_timers,
     iter_push_preview,
     offline_weather,
     push_window,
@@ -138,15 +141,19 @@ def run_demo() -> None:
     say("복덩이")
     say((today + timedelta(days=120)).strftime("%Y%m%d"))
     tap(cb("ob", "r", "SEL"), 6)
+    tap(cb("hp"), 7)                              # Step 2: 월령 자동 매칭 집콕놀이 Pull preview
 
     star = db.list_children(1)[1]
     steps = [
-        cb("ch", "p", star.child_id), cb("hub", "pl"), cb("hub", "out", "t"), cb("hub", "med"), cb("ms", "l"),
+        cb("ch", "p", star.child_id), cb("hub", "pl"), cb("hub", "out", "t"), cb("hub", "med"), cb("fd"),
+        cb("fd", "c", "FORBIDDEN"), cb("fd", "i", "honey"), cb("fd", "q"),
+        cb("ms", "l"),
         cb("fvr"), cb("fvr", "c", star.child_id), cb("fvr", "cw", star.child_id, 7),
         cb("set"), cb("set", "m"), cb("exp", "a", "PRESCHOOL", "sunny", "walk"), cb("dday"), cb("hsp", "r", "SEL"),
     ]
     for n, data in enumerate(steps, start=10):
         tap(data, n)
+    say("꿀")  # FOOD_SEARCH remains Pull-only and accepts a second query as plain text.
 
     # Push previews (in-memory, offline weather → indoor-only + no weather wording, nothing sent)
     window = push_window(today)
@@ -168,9 +175,16 @@ def run_poll(db: KidsCompassDatabase, channel: KidsTelegramChannel) -> None:
     bot = KidsCompassInteractiveBot(channel=channel, db=db)
     logger.info("Starting Kids Compass bot (long polling)... Ctrl+C to stop.")
     offset = 0
+    last_timer_dispatch = time.monotonic()
     while True:
         try:
             offset = bot.poll_once(offset)
+            if time.monotonic() - last_timer_dispatch >= 30.0:
+                try:
+                    dispatch_due_dose_timers(db, channel)
+                except Exception:  # noqa: BLE001 - timer delivery must not kill polling
+                    logger.exception("Due dose timer dispatch failed inside poll loop")
+                last_timer_dispatch = time.monotonic()
         except KeyboardInterrupt:
             logger.info("Polling stopped by user.")
             break
@@ -195,12 +209,50 @@ def run_dispatch(db: KidsCompassDatabase, token: str, dry_run: bool, kind: str) 
         print("❌ KIDS_TELEGRAM_BOT_TOKEN is not configured.")
         return 1
     messages = build_push_messages(db, kind, dry_run=dry_run)
+    d14_messages = build_d14_milestone_push_messages(db, date.today()) if kind == "milestone" else []
     if dry_run:
         _print_push_preview(db, f"DRY-RUN {kind}", messages, window)
+        if d14_messages:
+            _print_push_preview(db, "DRY-RUN milestone_d14", d14_messages, "D14")
         return 0
-    stats = SafeTelegramDispatcher().dispatch_push_messages(KidsTelegramChannel(token), db, messages, window)
+    dispatcher = SafeTelegramDispatcher()
+    channel = KidsTelegramChannel(token)
+    stats = dispatcher.dispatch_push_messages(channel, db, messages, window)
+    if d14_messages:
+        d14_stats = dispatcher.dispatch_push_messages(channel, db, d14_messages, "D14")
+        for key in ("total", "sent", "skipped", "unknown", "blocked", "failed", "invalid"):
+            stats[key] = stats.get(key, 0) + d14_stats.get(key, 0)
+        stats["errors"].update(d14_stats.get("errors", {}))
     print(f"📊 kids_{kind}:{window}: total={stats['total']} sent={stats['sent']} skipped={stats['skipped']} "
           f"unknown={stats['unknown']} blocked={stats['blocked']} failed={stats['failed']} invalid={stats['invalid']}")
+    if stats["errors"]:
+        print(f"  - errors: {stats['errors']}")
+    return 0
+
+
+def _print_timer_preview(db: KidsCompassDatabase, now: Optional[datetime] = None) -> None:
+    """Read-only timer preview used by --dispatch-timers --dry-run."""
+    now = now or datetime.now()
+    rows = db.conn.execute(
+        "SELECT timer_id, telegram_user_id, child_id, given_ingredient, suggested_ingredient, due_at, expires_at "
+        "FROM kids_dose_timers WHERE status = 'PENDING' ORDER BY due_at, timer_id"
+    ).fetchall()
+    print(f"🔎 TIMER DRY-RUN: pending={len(rows)} now={now:%Y-%m-%d %H:%M:%S}")
+    for row in rows:
+        print(f"  timer={row['timer_id']} chat={row['telegram_user_id']} child={row['child_id']} "
+              f"{row['given_ingredient']}→{row['suggested_ingredient']} due={row['due_at']} expires={row['expires_at']}")
+
+
+def run_timer_dispatch(db: KidsCompassDatabase, token: str, dry_run: bool) -> int:
+    if dry_run:
+        _print_timer_preview(db)
+        return 0
+    if not token:
+        print("❌ KIDS_TELEGRAM_BOT_TOKEN is not configured.")
+        return 1
+    stats = dispatch_due_dose_timers(db, KidsTelegramChannel(token))
+    print(f"📊 kids_timers: total={stats['total']} sent={stats['sent']} unknown={stats['unknown']} "
+          f"blocked={stats['blocked']} failed={stats['failed']}")
     if stats["errors"]:
         print(f"  - errors: {stats['errors']}")
     return 0
@@ -215,6 +267,10 @@ def main() -> None:
     parser.add_argument("--dispatch-dday", action="store_true", help="Send the booking-open D-Day alert (Mon 09:00)")
     parser.add_argument("--dispatch-milestone", action="store_true",
                         help="Send the 검진·예방접종·임신 checkpoint push (one message per user)")
+    parser.add_argument("--dispatch-timers", action="store_true",
+                        help="Send due fever cross-dosing timers")
+    parser.add_argument("--import-hospitals", metavar="PATH",
+                        help="Import E-gen hospital XML/JSON/CSV and opening hours")
     parser.add_argument("--dry-run", action="store_true", help="With --dispatch-*: preview without sending")
     parser.add_argument("--db-path", default=os.environ.get("KIDS_DB_PATH", DEFAULT_DB_PATH), help="SQLite path")
     args = parser.parse_args()
@@ -222,12 +278,19 @@ def main() -> None:
     if args.demo:
         run_demo()
         return
-    dispatching = args.dispatch_weekend or args.dispatch_dday or args.dispatch_milestone
-    if not (args.seed_sample or args.poll or dispatching):
+    dispatching = args.dispatch_weekend or args.dispatch_dday or args.dispatch_milestone or args.dispatch_timers
+    if not (args.seed_sample or args.poll or dispatching or args.import_hospitals):
         parser.print_help()
         return
 
     db = KidsCompassDatabase(args.db_path)
+    if args.import_hospitals:
+        from kids_compass.hospitals_importer import import_hospitals_file
+        result = import_hospitals_file(db, args.import_hospitals)
+        print(f"✅ Imported hospitals from {args.import_hospitals} → {result}")
+        if not (args.seed_sample or args.poll or dispatching):
+            db.close()
+            return
     if args.seed_sample:
         print(f"✅ Seeded into {args.db_path} → {seed_all(db)}")
         if not (args.poll or dispatching):
@@ -249,6 +312,8 @@ def main() -> None:
         sys.exit(run_dispatch(db, token, args.dry_run, "dday"))
     if args.dispatch_milestone:
         sys.exit(run_dispatch(db, token, args.dry_run, "milestone"))
+    if args.dispatch_timers:
+        sys.exit(run_timer_dispatch(db, token, args.dry_run))
     if args.poll:
         if not token:
             print("❌ KIDS_TELEGRAM_BOT_TOKEN is not configured.")

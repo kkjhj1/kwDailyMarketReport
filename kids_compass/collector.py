@@ -21,6 +21,7 @@ from kids_compass.models import (
     MoonlightHospital,
     PregnancyBenefit,
 )
+from kids_compass.storage.db import milestone_window as _child_milestone_window
 
 UNVERIFIED = "미검증(운영 전 E-gen 확인 필요)"
 EGEN_URL = "https://www.e-gen.or.kr/"
@@ -296,7 +297,7 @@ def _hosp(hid: str, name: str, sido: str, sigungu: str) -> MoonlightHospital:
         hospital_id=hid, name=name, region_sido=sido, region_sigungu=sigungu, address=f"{sido} {sigungu}",
         tel="", weekday_hours="야간 (기관별 상이)", weekend_hours="기관별 상이",
         holiday_hours="기관별 상이", paired_pharmacy=NIGHT_PHARMACY_LABEL, paired_pharmacy_tel="",
-        map_url=naver_map(name), last_verified_at=UNVERIFIED,
+        map_url=naver_map(name), last_verified_at=UNVERIFIED, is_placeholder=True, source="SEED",
     )
 
 
@@ -320,13 +321,24 @@ _CHECKUP_URL = naver_search("영유아 건강검진 시기 국민건강보험공
 _PREG_URL = naver_search("임신 주차별 산전검사 일정")
 
 
+_DENTAL_URL = naver_search("영유아 구강검진 시기 국민건강보험공단")
+_BENEFIT_URL = naver_search("복지로 첫만남이용권 부모급여 아동수당 신청")
+_PRESCHOOL_URL = naver_search("만3세 유아학비 보육료 전환 아이사랑")
+# 공식 신청 창구 (금액은 해마다 바뀌므로 카드에 하드코딩하지 않는다)
+BOKJIRO_URL = "https://www.bokjiro.go.kr/"
+GOV24_URL = "https://www.gov.kr/"
+CHILDCARE_PORTAL_URL = "https://www.childcare.go.kr/"
+
+
 def _ms(code: str, kind: str, title: str, description: str, source_url: str,
-        months: Optional[tuple[int, int]] = None, week: Optional[int] = None) -> MilestoneDefinition:
+        months: Optional[tuple[int, int]] = None, week: Optional[int] = None,
+        window_type: str = "MONTHS", days: tuple[int, int] = (0, 0)) -> MilestoneDefinition:
     return MilestoneDefinition(
         definition_id=f"{code}@{MILESTONE_SCHEDULE_VERSION}", kind=kind, code=code,
         schedule_version=MILESTONE_SCHEDULE_VERSION,
         age_min_months=months[0] if months else None, age_max_months=months[1] if months else None,
         pregnancy_week=week, title=title, description=description, source_url=source_url,
+        window_type=window_type, age_min_days=days[0], age_max_days=days[1],
     )
 
 
@@ -334,7 +346,9 @@ def _ms(code: str, kind: str, title: str, description: str, source_url: str,
 # "정확한 일정은 소아청소년과·보건소/예방접종도우미에서 확인". Months are inclusive (4~6 = 4개월 ~ 7개월 전날).
 SEED_MILESTONES: list[MilestoneDefinition] = [
     # ── 영유아 건강검진 1~8차 ──
-    _ms("CHECKUP_1", "CHECKUP", "영유아 건강검진 1차", "생후 14~35일 · 성장·발달 확인", _CHECKUP_URL, months=(0, 1)),
+    # 1차는 일(day) 단위 — months=(0, 1)은 하위호환 표시용, 실제 창은 생후 14~35일
+    _ms("CHECKUP_1", "CHECKUP", "영유아 건강검진 1차", "생후 14~35일 · 성장·발달 확인", _CHECKUP_URL, months=(0, 1),
+        window_type="DAYS", days=(14, 35)),
     _ms("CHECKUP_2", "CHECKUP", "영유아 건강검진 2차", "생후 4~6개월", _CHECKUP_URL, months=(4, 6)),
     _ms("CHECKUP_3", "CHECKUP", "영유아 건강검진 3차", "생후 9~12개월", _CHECKUP_URL, months=(9, 12)),
     _ms("CHECKUP_4", "CHECKUP", "영유아 건강검진 4차", "생후 18~24개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(18, 24)),
@@ -342,6 +356,18 @@ SEED_MILESTONES: list[MilestoneDefinition] = [
     _ms("CHECKUP_6", "CHECKUP", "영유아 건강검진 6차", "생후 42~48개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(42, 48)),
     _ms("CHECKUP_7", "CHECKUP", "영유아 건강검진 7차", "생후 54~60개월 (구강검진 병행 시기)", _CHECKUP_URL, months=(54, 60)),
     _ms("CHECKUP_8", "CHECKUP", "영유아 건강검진 8차", "생후 66~71개월", _CHECKUP_URL, months=(66, 71)),
+    # ── 영유아 구강검진 1~4차 ──
+    _ms("DENTAL_1", "DENTAL", "영유아 구강검진 1차", "생후 18~29개월 · 치과 검진기관 확인", _DENTAL_URL, months=(18, 29)),
+    _ms("DENTAL_2", "DENTAL", "영유아 구강검진 2차", "생후 30~41개월 · 치과 검진기관 확인", _DENTAL_URL, months=(30, 41)),
+    _ms("DENTAL_3", "DENTAL", "영유아 구강검진 3차", "생후 42~53개월 · 치과 검진기관 확인", _DENTAL_URL, months=(42, 53)),
+    _ms("DENTAL_4", "DENTAL", "영유아 구강검진 4차", "생후 54~65개월 · 치과 검진기관 확인", _DENTAL_URL, months=(54, 65)),
+    # ── 지원금·전환 체크 (금액 하드코딩 금지 — 공식 창구 안내만) ──
+    _ms("BENEFIT_POSTBIRTH", "BENEFIT", "출생 후 지원금 신청 (첫만남이용권·부모급여·아동수당)",
+        f"출생신고 후 신청 · 지원 금액·기준은 공식 공지 확인 · 복지로 {BOKJIRO_URL} / 정부24 {GOV24_URL}",
+        _BENEFIT_URL, months=(0, 1)),
+    _ms("BENEFIT_AGE3_PRESCHOOL", "BENEFIT", "만 3세 학년도 전환 확인 (보육료 → 유아학비)",
+        f"만 3세가 되는 해 3월 1일 학년도 전환 · 어린이집·유치원 지원 변경 확인 · 아이사랑 {CHILDCARE_PORTAL_URL}",
+        _PRESCHOOL_URL, months=(36, 47), window_type="SCHOOL_YEAR"),
     # ── 국가필수예방접종(NIP) 주요 시점 ──
     _ms("VAC_BCG", "VACCINE", "BCG(결핵) 접종", "생후 4주 이내 권장", _NIP_URL, months=(0, 1)),
     _ms("VAC_HEPB_2", "VACCINE", "B형간염 2차 접종", "생후 1개월 (1차는 출생 시)", _NIP_URL, months=(1, 1)),
@@ -367,28 +393,19 @@ SEED_MILESTONES: list[MilestoneDefinition] = [
 ]
 
 
-def _add_months(d: date, months: int) -> date:
-    y, m = divmod(d.month - 1 + months, 12)
-    y, m = d.year + y, m + 1
-    return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
-
-
 def milestone_window(defn: MilestoneDefinition, birth_date: Optional[str] = None,
                      due_date: Optional[str] = None) -> tuple[str, str]:
-    """(due_from, due_to) ISO dates. Child: [birth + min months, birth + (max+1) months - 1 day].
-    Pregnancy: LMP = due - 280 days; window = week w ~ end of week w+1 (2 weeks)."""
+    """(due_from, due_to) ISO dates. Child items delegate to storage.db.milestone_window
+    (DAYS / MONTHS month-end safe / SCHOOL_YEAR). Pregnancy: LMP = due - 280 days; window = week w ~ +13 days."""
     if defn.kind == "PREGNANCY":
         if not due_date or defn.pregnancy_week is None:
             raise ValueError("pregnancy milestone needs due_date")
         lmp = date.fromisoformat(due_date) - timedelta(days=280)
         start = lmp + timedelta(weeks=defn.pregnancy_week)
         return start.isoformat(), (start + timedelta(days=13)).isoformat()
-    if not birth_date or defn.age_min_months is None or defn.age_max_months is None:
-        raise ValueError("child milestone needs birth_date and an age range")
-    birth = date.fromisoformat(birth_date)
-    start = _add_months(birth, defn.age_min_months)
-    end = _add_months(birth, defn.age_max_months + 1) - timedelta(days=1)
-    return start.isoformat(), end.isoformat()
+    if not birth_date:
+        raise ValueError("child milestone needs birth_date")
+    return _child_milestone_window(birth_date, defn)
 
 
 def sync_user_milestones(db, telegram_user_id) -> int:

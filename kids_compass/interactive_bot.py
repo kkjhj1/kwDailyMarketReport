@@ -19,8 +19,11 @@ build_milestone_push_messages / build_weekend_push_messages / build_dday_push_me
 from __future__ import annotations
 import hashlib
 import logging
+import math
 import re
 import secrets
+import socket
+import urllib.error
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Optional
@@ -32,12 +35,19 @@ from kids_compass.channels.telegram import (
     esc,
     format_category_html,
     format_cross_dosing_html,
+    format_d14_milestone_push_html,
+    format_dose_timer_push_html,
     format_dday_alert_html,
     format_fever_emergency_html,
     format_fever_menu_html,
     format_fever_result_html,
     format_fever_weight_pick_html,
     format_home_html,
+    format_home_play_html,
+    format_dev_guide_html,
+    format_food_detail_html,
+    format_food_hub_html,
+    format_food_list_html,
     format_hospital_list_html,
     format_hub_picks_html,
     format_milestone_push_html,
@@ -45,6 +55,7 @@ from kids_compass.channels.telegram import (
     format_weekend_briefing_html,
     format_weekend_push_html,
     kg_text,
+    TelegramAPIError,
 )
 from kids_compass.collector import (
     MILESTONE_SCHEDULE_VERSION,
@@ -53,8 +64,31 @@ from kids_compass.collector import (
     recommend_by_category,
     recommend_weekend_picks,
 )
-from kids_compass.fever_engine import DEFAULT_MEDICINES, INFANT_BLOCK_MONTHS, NSAID_MIN_MONTHS, calculate_all
-from kids_compass.models import AgeGroup, ExperienceCategory, ExperienceItem, PushMessage, WeatherSnapshot
+from kids_compass.fever_engine import (
+    DEFAULT_MEDICINES,
+    INFANT_BLOCK_MONTHS,
+    NSAID_MIN_MONTHS,
+    calculate_all,
+    check_24h_dose_limit,
+    cross_dosing_candidates,
+)
+from kids_compass.food_safety import (
+    FoodItem,
+    get_food,
+    list_foods_by_category,
+    search_foods,
+)
+from kids_compass.home_play import (
+    DEV_STAGE_LABELS,
+    PLAY_STAGE_LABELS,
+    DevStage,
+    PlayStage,
+    dev_stage_for_months,
+    get_dev_guides,
+    pick_home_plays,
+    play_stage_for_months,
+)
+from kids_compass.models import AgeGroup, ExperienceCategory, ExperienceItem, IngredientType, PushMessage, WeatherSnapshot
 from kids_compass.storage.db import SENT_BLOCKING_STATES, KidsCompassDatabase
 from kids_compass.weather import fetch_weekend_weather, weekend_outlook
 
@@ -82,6 +116,7 @@ CHILD_MAX_AGE_YEARS = 14
 ONBOARDING_TTL = timedelta(minutes=30)
 ST_CHILD_NICKNAME, ST_CHILD_BIRTH, ST_CHILD_REGION = "CHILD_NICKNAME", "CHILD_BIRTH_DATE", "CHILD_REGION"
 ST_PREG_NICKNAME, ST_PREG_DUE, ST_PREG_REGION = "PREGNANCY_NICKNAME", "PREGNANCY_DUE_DATE", "PREGNANCY_REGION"
+ST_FOOD_SEARCH = "FOOD_SEARCH"
 REGION_STEPS = (ST_CHILD_REGION, ST_PREG_REGION)
 
 # Push policy
@@ -92,6 +127,7 @@ MILESTONE_PULL_LOOKAHEAD_DAYS = 30
 REC_TOKEN_TTL = timedelta(days=14)
 FEEDBACK_ACTIONS = {"v": "VISITED", "x": "NOT_INTERESTED"}
 STREAM_WEEKEND, STREAM_DDAY, STREAM_MILESTONE = "weekend", "dday", "milestone"
+STREAM_MILESTONE_D14 = "milestone_d14"
 
 # Pull hub: code -> (title, categories | None for 야외·나들이)
 HUB_MENUS: dict[str, tuple[str, Optional[tuple[ExperienceCategory, ...]]]] = {
@@ -190,6 +226,8 @@ def build_home_keyboard(children: Optional[list] = None, has_profile: bool = Fal
     if not has_profile and not children:
         return _kb([
             [_btn("➕ 아이 등록", cb("ob", "c")), _btn("🤰 임신 중이에요", cb("ob", "p"))],
+            [_btn("🏠 집콕놀이·발달", cb("hp"))],
+            [_btn("🥣 먹거리·이유식", cb("fd"))],
             [_btn("🌡 해열제 계산", cb("fvr")), _btn("🌙 달빛병원", cb("hsp"))],
             [_btn("🎈 주말 나들이", cb("exp")), _btn("⏰ 예약 D-Day", cb("dday"))],
             [_btn("🤰 임신기 태교·바우처", cb("preg")), _btn("🔔 알림 설정", cb("set"))],
@@ -200,12 +238,68 @@ def build_home_keyboard(children: Optional[list] = None, has_profile: bool = Fal
                          for c in children[:4]], 3)
         rows.append([_btn("👨‍👩‍👧 형제 함께 보기", cb("hub", "out", "t"))])
     rows += [
+        [_btn("🏠 집콕놀이·발달", cb("hp")), _btn("🎈 나들이·예약", cb("exp"))],
+        [_btn("🥣 먹거리·이유식", cb("fd"))],
         [_btn("🎨 놀이·체험", cb("hub", "pl")), _btn("🔬 학습·과학·경제", cb("hub", "ln"))],
         [_btn("🌳 야외·나들이", cb("hub", "out")), _btn("🏥 병원·해열제·검진", cb("hub", "med"))],
         [_btn("🤰 지원금·임신", cb("preg")), _btn("⚙️ 아이·알림 설정", cb("set"))],
         [_btn("⏰ 예약 D-Day", cb("dday")), _btn("🎈 연령별 나들이", cb("exp"))],
     ]
     return _kb(rows)
+
+
+FOOD_CATEGORY_BUTTONS: tuple[tuple[str, str, str], ...] = (
+    ("🚫 금지·질식 주의", "FORBIDDEN", "금지·질식 주의"),
+    ("🥩 단백질", "PROTEIN", "단백질"),
+    ("🥕 과일·채소", "PRODUCE", "과일·채소"),
+    ("🥣 유제품·곡물", "DAIRY_GRAIN", "유제품·곡물"),
+)
+
+
+def build_food_hub_keyboard() -> dict[str, Any]:
+    rows = [[_btn(label, cb("fd", "c", category)) for label, category, _ in FOOD_CATEGORY_BUTTONS[:2]],
+            [_btn(label, cb("fd", "c", category)) for label, category, _ in FOOD_CATEGORY_BUTTONS[2:]],
+            [_btn("🔍 음식 이름 검색", cb("fd", "q"))],
+            HOME_ROW]
+    return _kb(rows)
+
+
+def build_food_list_keyboard(items: list[FoodItem]) -> dict[str, Any]:
+    rows = [[_btn(f"🥣 {item.name}", cb("fd", "i", item.food_id))] for item in items[:8]]
+    rows += [[_btn("🔍 음식 이름 검색", cb("fd", "q"))], [_btn("◀ 먹거리 사전", cb("fd")), *HOME_ROW]]
+    return _kb(rows)
+
+
+def build_food_detail_keyboard() -> dict[str, Any]:
+    return _kb([[_btn("◀ 먹거리 사전", cb("fd")), _btn("🔍 다시 검색", cb("fd", "q"))], HOME_ROW])
+
+
+def build_home_play_stage_keyboard() -> dict[str, Any]:
+    """All manual play buckets, including pregnancy, for unregistered users."""
+    rows = [[_btn(PLAY_STAGE_LABELS[stage], cb("hp", "p", stage))]
+            for stage in (PlayStage.M0_11.value, PlayStage.M12_23.value, PlayStage.M24_47.value,
+                          PlayStage.Y4_7.value, PlayStage.Y8_13.value, PlayStage.PREG.value)]
+    rows.append(HOME_ROW)
+    return _kb(rows)
+
+
+def build_home_play_keyboard(stage: str, offset: int = 0) -> dict[str, Any]:
+    """Navigation for a home-play card.  Callback payloads stay ASCII and short."""
+    items = pick_home_plays(stage, offset=offset, limit=2)
+    next_offset = (int(offset) + len(items)) % 3
+    return _kb([
+        [_btn("🎲 다른 놀이", cb("hp", "n", stage, next_offset)),
+         _btn("🌱 이 시기 발달·훈육 가이드", cb("hp", "d", stage))],
+        [_btn("🔄 다른 연령 보기", cb("hp", "s"))],
+        HOME_ROW,
+    ])
+
+
+def build_dev_guide_keyboard(stage: str) -> dict[str, Any]:
+    return _kb([
+        [_btn("🏠 놀이 보기", cb("hp", "p", stage)), _btn("🔄 다른 연령 보기", cb("hp", "s"))],
+        HOME_ROW,
+    ])
 
 
 def build_fever_keyboard(children: list) -> dict[str, Any]:
@@ -457,6 +551,110 @@ def build_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[
     return out
 
 
+def build_d14_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[PushMessage]:
+    """Build one D-14 reminder per opted-in user, with a fixed D14 dispatch window."""
+    targets = _push_targets(db, "health")
+    for prof in targets:
+        sync_relevant_milestones(db, str(prof["telegram_user_id"]), today, DDAY_WINDOW_DAYS)
+    rows = db.list_d14_milestones(today)
+    if not rows:
+        return []
+    children_by_user = {}
+    pregnancy_by_user = {}
+    definitions = {d.definition_id: d for d in db.list_milestone_definitions()}
+    for prof in targets:
+        uid = str(prof["telegram_user_id"])
+        if _push_already_claimed(db, uid, STREAM_MILESTONE_D14, "MILESTONE", "D14"):
+            continue
+        children_by_user[uid] = {str(c.child_id): c.nickname for c in db.list_children(uid)}
+        pregnancy_by_user[uid] = db.get_pregnancy(uid)
+        sent = _sent_entity_ids(db, uid, STREAM_MILESTONE_D14, "MILESTONE")
+        items = []
+        for row in rows:
+            if str(row.get("telegram_user_id")) != uid or str(row.get("milestone_id")) in sent:
+                continue
+            status = str(row.get("status") or "")
+            if status in ("USER_CONFIRMED", "NOT_APPLICABLE"):
+                continue
+            if row.get("subject_kind") == "CHILD":
+                subject = children_by_user[uid].get(str(row.get("subject_id")))
+            else:
+                preg = pregnancy_by_user[uid]
+                subject = f"{preg.nickname} (임신)" if preg is not None else None
+            if not subject or str(row.get("definition_id")) not in definitions:
+                continue
+            item = dict(row)
+            item["subject"] = subject
+            item["kind"] = item.get("kind") or definitions[str(row["definition_id"])].kind
+            item["title"] = item.get("title") or definitions[str(row["definition_id"])].title
+            item["description"] = item.get("description") or definitions[str(row["definition_id"])].description
+            items.append(item)
+        items.sort(key=lambda it: (str(it.get("due_to") or ""), int(it.get("milestone_id") or 0)))
+        if not items:
+            continue
+        shown = items[:6]
+        text = format_d14_milestone_push_html(items, today)
+        message = PushMessage(
+            chat_id=uid,
+            text=text,
+            reply_markup=build_milestone_keyboard(shown),
+            stream=STREAM_MILESTONE_D14,
+            entity_type="MILESTONE",
+            entity_ids=[str(it["milestone_id"]) for it in shown],
+            content_hash=_content_hash(text),
+        )
+        # PushMessage is intentionally kept backward-compatible; runners can use this
+        # additive marker to select the D14 dispatch window.
+        message.dispatch_window = "D14"
+        out.append(message)
+    return out
+
+
+def dispatch_due_dose_timers(db: KidsCompassDatabase, channel: Any,
+                             now_dt: Optional[datetime] = None) -> dict[str, Any]:
+    """Claim and deliver due dose timers exactly once.
+
+    A timeout is deliberately finalized as UNKNOWN: Telegram may have accepted the
+    request, so the timer must never be returned to PENDING or sent again.
+    """
+    now = now_dt or datetime.now()
+    claim_token = secrets.token_hex(16)
+    timers = db.claim_due_dose_timers(now, claim_token)
+    stats: dict[str, Any] = {
+        "total": len(timers), "claimed": len(timers), "sent": 0,
+        "unknown": 0, "blocked": 0, "failed": 0, "errors": {},
+    }
+    for timer in timers:
+        child = db.get_child(timer.child_id, timer.telegram_user_id)
+        child_name = child.nickname if child is not None else "아이"
+        text = format_dose_timer_push_html(child_name, timer, timer.created_at or "")
+        markup = _kb([[
+            _btn("🌙 지금 문 연 달빛병원", cb("hsp")),
+            _btn("✅ 열 내렸어요(종료)", cb("fvr", "tc", timer.child_id)),
+        ]])
+        status, error = "SENT", None
+        try:
+            channel.send_message(timer.telegram_user_id, text, reply_markup=markup)
+        except TelegramAPIError as exc:
+            status = "BLOCKED" if exc.code in (400, 403) else "FAILED"
+            error = str(exc)
+        except urllib.error.HTTPError as exc:
+            status = "BLOCKED" if exc.code in (400, 403) else "FAILED"
+            error = str(exc)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+            status, error = "UNKNOWN", str(exc)
+        except Exception as exc:  # noqa: BLE001 - one timer must not stop the sweep
+            status, error = "FAILED", str(exc)
+        try:
+            db.finalize_dose_timer(timer.timer_id, claim_token, status, error or "", now=now)
+        except Exception:  # noqa: BLE001 - leave the row terminally guarded by its lease
+            logger.exception("Failed to finalize dose timer %s", timer.timer_id)
+        stats[status.lower()] += 1
+        if error:
+            stats["errors"][str(timer.timer_id)] = error
+    return stats
+
+
 def build_weekend_push_messages(db: KidsCompassDatabase, today: date, weather_fetcher: Optional[WeatherFetcher] = None,
                                 now: Optional[datetime] = None, issue_tokens: bool = True) -> list[PushMessage]:
     """1~2 places per registered user, own region only (no back-fill), feedback/cooldown exclusions applied.
@@ -625,9 +823,17 @@ class KidsCompassInteractiveBot:
         if cmd == "/preg" and len(text.split()) > 1:
             self._set_pregnancy(chat_id, text)
             return
+        if cmd == "/food":
+            query = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+            if query:
+                self._show_food_search(chat_id, None, query)
+            else:
+                self._show_food(chat_id, None)
+            return
         self.db.ensure_user(chat_id)
         screens = {"/fever": self._show_fever_menu, "/hospital": self._show_hospital_regions,
-                   "/weekend": self._show_exp_menu, "/dday": self._show_dday, "/preg": self._show_pregnancy}
+                   "/weekend": self._show_exp_menu, "/dday": self._show_dday, "/preg": self._show_pregnancy,
+                   "/food": self._show_food}
         screens.get(cmd, self._show_home)(chat_id, None)
 
     def _add_child(self, chat_id: int, text: str) -> None:
@@ -705,7 +911,9 @@ class KidsCompassInteractiveBot:
 
     def _onboarding_input(self, chat_id: int, state: dict, text: str) -> None:
         step, payload = state.get("step"), dict(state.get("payload") or {})
-        if step in (ST_CHILD_NICKNAME, ST_PREG_NICKNAME):
+        if step == ST_FOOD_SEARCH:
+            self._show_food_search(chat_id, None, text)
+        elif step in (ST_CHILD_NICKNAME, ST_PREG_NICKNAME):
             if not _NICK_RE.match(text):
                 self._prompt_step(chat_id, None, step, "한글·영문·숫자 10자 이내로 입력해 주세요 (기호·띄어쓰기 불가).")
                 return
@@ -785,8 +993,7 @@ class KidsCompassInteractiveBot:
         elif domain == "hsp":
             if action == "r":
                 region = REGION_CODES[args[1]]
-                self._safe_edit_or_send(chat_id, mid, format_hospital_list_html(self.db.list_hospitals(region), region),
-                                        build_hospital_list_keyboard())
+                self._show_hospital_list(chat_id, mid, region)
             else:
                 self._show_hospital_regions(chat_id, mid)
         elif domain == "exp":
@@ -854,12 +1061,71 @@ class KidsCompassInteractiveBot:
             self._route_onboarding(chat_id, mid, action, args)
         elif domain == "hub":
             self._route_hub(chat_id, mid, action, args)
+        elif domain == "hp":
+            self._route_home_play(chat_id, mid, action, args)
+        elif domain == "fd":
+            self._route_food(chat_id, mid, action, args)
         elif domain == "fb":
             self._route_feedback(chat_id, action, args)
         elif domain == "ms":
             self._route_milestone(chat_id, mid, action, args)
         else:
             self._show_home(chat_id, mid)
+
+    # ---------- food catalogue (Pull only) ----------
+    def _food_context(self, chat_id: int) -> tuple[str, Optional[int], bool]:
+        children = self.db.list_children(chat_id)
+        if children:
+            child = children[0]  # DB order keeps the primary child first.
+            return child.nickname, child.age_months(self._clock().date()), False
+        pregnancy = self.db.get_pregnancy(chat_id)
+        if pregnancy is not None:
+            return f"{pregnancy.nickname} 태교", None, True
+        return "우리 아이", None, False
+
+    def _route_food(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
+        subject_label, age_months, is_pregnancy = self._food_context(chat_id)
+        if action == "":
+            self.db.clear_onboarding_state(chat_id)
+            self._show_food(chat_id, mid)
+        elif action == "c":
+            category = args[1] if len(args) > 1 else ""
+            items = list_foods_by_category(category)
+            title = next((label for _, code, label in FOOD_CATEGORY_BUTTONS if code == category), category)
+            self._safe_edit_or_send(chat_id, mid, format_food_list_html(title, items, age_months, is_pregnancy),
+                                    build_food_list_keyboard(items))
+        elif action == "i":
+            item = get_food(args[1]) if len(args) > 1 else None
+            if item is None:
+                self._show_food(chat_id, mid)
+                return
+            self._safe_edit_or_send(chat_id, mid,
+                                    format_food_detail_html(item, subject_label, age_months, is_pregnancy),
+                                    build_food_detail_keyboard())
+        elif action == "q":
+            self.db.set_onboarding_state(chat_id, secrets.token_hex(4), "FOOD", ST_FOOD_SEARCH, {},
+                                         self._clock() + ONBOARDING_TTL)
+            self._safe_edit_or_send(chat_id, mid,
+                                    "🔍 <b>음식 이름 검색</b>\n궁금한 음식 이름을 입력해 주세요\n(예: 꿀, 복숭아, 소고기)",
+                                    _kb([[_btn("❌ 취소", cb("fd"))]]))
+        else:
+            raise ValueError(action)
+
+    def _show_food(self, chat_id: int, mid: Optional[int]) -> None:
+        subject_label, age_months, is_pregnancy = self._food_context(chat_id)
+        self._safe_edit_or_send(chat_id, mid, format_food_hub_html(subject_label, age_months, is_pregnancy),
+                                build_food_hub_keyboard())
+
+    def _show_food_search(self, chat_id: int, mid: Optional[int], query: str) -> None:
+        subject_label, age_months, is_pregnancy = self._food_context(chat_id)
+        items = search_foods(query)
+        # Keep the state open so a miss or a second plain-text query remains useful;
+        # /cancel or the hub button explicitly exits the search mode.
+        self.db.set_onboarding_state(chat_id, secrets.token_hex(4), "FOOD", ST_FOOD_SEARCH, {},
+                                     self._clock() + ONBOARDING_TTL)
+        title = f"'{query}' 검색 결과"
+        self._safe_edit_or_send(chat_id, mid, format_food_list_html(title, items, age_months, is_pregnancy),
+                                build_food_list_keyboard(items))
 
     def _route_fever(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
         if action == "":
@@ -893,6 +1159,60 @@ class KidsCompassInteractiveBot:
             self._show_fever_result(chat_id, mid, weight, months, child)
         elif action == "x":
             self._safe_edit_or_send(chat_id, mid, format_cross_dosing_html(), build_fever_result_keyboard())
+        elif action == "log":
+            if len(args) < 2:
+                return
+            now = self._clock()
+            token_row = self.db.consume_fever_token(chat_id, args[1], now)
+            if token_row is None:
+                self.channel.send_message(chat_id, "⚠️ 만료되었거나 이미 처리된 투약 기록 버튼이에요.")
+                return
+            try:
+                ingredient = IngredientType(str(token_row["ingredient"]))
+                product = (self.db.list_medicines() or DEFAULT_MEDICINES).get(str(token_row["product_id"]))
+                if product is None:
+                    raise ValueError("medicine snapshot is missing")
+                recent = self.db.list_recent_dose_events(
+                    int(token_row["child_id"]), now - timedelta(hours=24)
+                )
+                allowed, reason = check_24h_dose_limit(
+                    recent, ingredient, float(token_row["weight_kg"]), product, now
+                )
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                logger.warning("Invalid fever token snapshot: %s", exc)
+                self.channel.send_message(chat_id, "⚠️ 투약 정보를 확인할 수 없어 기록하지 않았어요.")
+                return
+            if not allowed:
+                self.channel.send_message(chat_id, esc(reason))
+                return
+            age_months = int(token_row["age_months"])
+            candidates = cross_dosing_candidates(ingredient, age_months)
+            suggested = candidates[0].value if candidates else ""
+            try:
+                result = self.db.record_dose_and_start_timer(
+                    chat_id, int(token_row["child_id"]), str(token_row["product_id"]), ingredient.value,
+                    float(token_row["dose_ml"]), float(token_row["dose_mg"]),
+                    float(token_row["concentration_mg_ml"]), float(token_row["weight_kg"]), age_months,
+                    idempotency_key=f"fvr:{chat_id}:{args[1]}", suggested_ingredient=suggested,
+                    now=now, given_at=now,
+                )
+            except (PermissionError, KeyError, TypeError, ValueError) as exc:
+                logger.info("Dose record rejected: %s", exc)
+                self.channel.send_message(chat_id, "⚠️ 아이 정보를 확인할 수 없어 투약을 기록하지 않았어요.")
+                return
+            child_id = int(token_row["child_id"])
+            timer_note = "2시간 30분 뒤 교차복용 확인 타이머를 설정했어요." if result.get("timer_id") else "교차복용 후보가 없어 복용 기록만 남겼어요."
+            markup = _kb([[
+                _btn("🔕 타이머 취소", cb("fvr", "tc", child_id)),
+                _btn("🌙 달빛병원", cb("hsp")),
+            ]])
+            self.channel.send_message(chat_id, f"✅ 투약 기록을 저장했어요.\n{timer_note}", reply_markup=markup)
+        elif action == "tc":
+            if len(args) < 2:
+                return
+            child_id = int(args[1])
+            count = self.db.cancel_child_dose_timers(chat_id, child_id, self._clock())
+            self.channel.send_message(chat_id, f"🔕 교차복용 타이머를 취소했어요 ({count}건).")
         else:
             raise ValueError(action)
 
@@ -943,6 +1263,92 @@ class KidsCompassInteractiveBot:
         self._safe_edit_or_send(chat_id, mid, format_hub_picks_html(title, label, region, picks),
                                 build_hub_result_keyboard(code, together, multi))
 
+    def _route_home_play(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
+        """Pull-only home-play router; it never touches push settings or sent history."""
+        if action == "":
+            self._show_home_play_auto(chat_id, mid)
+        elif action == "n":
+            stage = args[1]
+            offset = int(args[2])
+            self._show_home_play(chat_id, mid, stage, offset, self._home_play_subject_label(chat_id, stage))
+        elif action == "d":
+            stage = args[1]
+            self._show_dev_guide(chat_id, mid, stage, self._home_play_subject_label(chat_id, stage))
+        elif action == "s":
+            self._safe_edit_or_send(chat_id, mid, "🏠 <b>다른 연령의 집콕놀이</b>\n연령대를 골라 주세요 👇",
+                                    build_home_play_stage_keyboard())
+        elif action == "p":
+            stage = args[1]
+            self._show_home_play(chat_id, mid, stage, 0, "선택한 연령")
+        else:
+            raise ValueError(action)
+
+    def _home_play_subject_label(self, chat_id: int, stage: str) -> str:
+        children = self.db.list_children(chat_id)
+        if children:
+            return children[0].nickname
+        pregnancy = self.db.get_pregnancy(chat_id)
+        if pregnancy is not None and stage == PlayStage.PREG.value:
+            return pregnancy.nickname
+        return "선택한 연령"
+
+    def _show_home_play_auto(self, chat_id: int, mid: Optional[int]) -> None:
+        children = self.db.list_children(chat_id)
+        if children:
+            child = children[0]
+            stage = play_stage_for_months(child.age_months(self._clock().date()))
+            self._show_home_play(chat_id, mid, stage, 0, child.nickname)
+            return
+        pregnancy = self.db.get_pregnancy(chat_id)
+        if pregnancy is not None:
+            self._show_home_play(chat_id, mid, PlayStage.PREG.value, 0, pregnancy.nickname)
+            return
+        self._safe_edit_or_send(chat_id, mid, "🏠 <b>집콕놀이·발달</b>\n연령대를 골라 바로 확인해 보세요 👇",
+                                build_home_play_stage_keyboard())
+
+    def _show_home_play(self, chat_id: int, mid: Optional[int], stage: str, offset: int,
+                        subject_label: str) -> None:
+        # Validate before rendering stale/forged callbacks; malformed callbacks are harmless.
+        if stage not in PLAY_STAGE_LABELS:
+            raise ValueError(stage)
+        items = pick_home_plays(stage, offset=offset, limit=2)
+        text = format_home_play_html(subject_label, PLAY_STAGE_LABELS[stage], items)
+        self._safe_edit_or_send(chat_id, mid, text, build_home_play_keyboard(stage, offset))
+
+    def _show_dev_guide(self, chat_id: int, mid: Optional[int], play_stage: str,
+                        subject_label: str) -> None:
+        if play_stage not in PLAY_STAGE_LABELS and play_stage not in DEV_STAGE_LABELS:
+            raise ValueError(play_stage)
+        if play_stage in DEV_STAGE_LABELS:
+            dev_stage = play_stage
+            back_stage = {
+                DevStage.D0_3.value: PlayStage.M0_11.value,
+                DevStage.D4_6.value: PlayStage.M0_11.value,
+                DevStage.D7_12.value: PlayStage.M0_11.value,
+                DevStage.D13_24.value: PlayStage.M12_23.value,
+                DevStage.D25_36.value: PlayStage.M24_47.value,
+                DevStage.DY4_7.value: PlayStage.Y4_7.value,
+                DevStage.DY8_13.value: PlayStage.Y8_13.value,
+                DevStage.DPREG.value: PlayStage.PREG.value,
+            }[dev_stage]
+        else:
+            back_stage = play_stage
+            children = self.db.list_children(chat_id)
+            if children and play_stage != PlayStage.PREG.value:
+                dev_stage = dev_stage_for_months(children[0].age_months(self._clock().date()))
+            elif self.db.get_pregnancy(chat_id) is not None and play_stage == PlayStage.PREG.value:
+                dev_stage = DevStage.DPREG.value
+            else:
+                dev_stage = DevStage.DPREG.value if play_stage == PlayStage.PREG.value else {
+                    PlayStage.M0_11.value: DevStage.D0_3.value,
+                    PlayStage.M12_23.value: DevStage.D13_24.value,
+                    PlayStage.M24_47.value: DevStage.D25_36.value,
+                    PlayStage.Y4_7.value: DevStage.DY4_7.value,
+                    PlayStage.Y8_13.value: DevStage.DY8_13.value,
+                }[play_stage]
+        text = format_dev_guide_html(subject_label, DEV_STAGE_LABELS[dev_stage], get_dev_guides(dev_stage))
+        self._safe_edit_or_send(chat_id, mid, text, build_dev_guide_keyboard(back_stage))
+
     def _route_feedback(self, chat_id: int, action: str, args: list[str]) -> None:
         """Forged / expired / other user's token → harmless no-op (nothing recorded, nothing rendered)."""
         if action not in FEEDBACK_ACTIONS or len(args) < 2:
@@ -989,12 +1395,38 @@ class KidsCompassInteractiveBot:
                            age_label: Optional[str] = None) -> None:
         products = self.db.list_medicines() or DEFAULT_MEDICINES
         results = calculate_all(weight, months, products)
-        self._safe_edit_or_send(chat_id, mid, format_fever_result_html(results, child, age_label), build_fever_result_keyboard())
+        rows = []
+        valid_weight = False
+        try:
+            valid_weight = float(weight) > 0 and math.isfinite(float(weight))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        if child is not None and valid_weight:
+            now = self._clock()
+            for ingredient, result in results.items():
+                if result.status != "OK" or result.product is None:
+                    continue
+                token = self.db.create_fever_token(
+                    chat_id, child.child_id, result.product.product_id, ingredient.value,
+                    result.recommended_ml, result.recommended_mg, float(weight), months,
+                    result.product.concentration_mg_ml, now=now,
+                )
+                rows.append([_btn(f"💊 {ingredient.label} 방금 먹였어요", cb("fvr", "log", token))])
+        keyboard = _kb(rows + build_fever_result_keyboard()["inline_keyboard"])
+        self._safe_edit_or_send(chat_id, mid, format_fever_result_html(results, child, age_label), keyboard)
 
     def _show_hospital_regions(self, chat_id: int, mid: Optional[int]) -> None:
         text = ("🌙 <b>달빛어린이병원 찾기</b>\n밤·주말·공휴일 소아 진료 병원\n\n"
                 "지역을 골라 주세요 👇\n\n📞 위급하면 <b>119</b>")
         self._safe_edit_or_send(chat_id, mid, text, build_hospital_region_keyboard())
+
+    def _show_hospital_list(self, chat_id: int, mid: Optional[int], region: str) -> None:
+        hospitals = self.db.list_hospitals(region)
+        hours = {h.hospital_id: self.db.list_hospital_hours(h.hospital_id) for h in hospitals}
+        text = format_hospital_list_html(
+            hospitals, region, hours_by_hospital=hours, now_dt=self._clock()
+        )
+        self._safe_edit_or_send(chat_id, mid, text, build_hospital_list_keyboard())
 
     def _show_exp_menu(self, chat_id: int, mid: Optional[int]) -> None:
         text = "🎈 <b>주말 나들이</b>\n연령과 날씨(☀️/☔)를 고르거나 테마를 눌러 주세요 👇"
