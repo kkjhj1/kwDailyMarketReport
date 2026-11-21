@@ -12,9 +12,13 @@ from admission_brief.models import (
     AdmissionBriefing,
     AdmissionEvent,
     BriefingType,
+    EducationStage,
     EventCategory,
+    GradeLevel,
     TargetGrade,
+    legacy_target_grade_to_stage_level,
 )
+from admission_brief.catalog import KnowledgeCatalog, KnowledgeCard
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +38,26 @@ SPAM_BUZZWORDS = [
 class AICurator:
     """Evaluates raw admission notices and produces parent-optimized briefings."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, catalog: Optional[KnowledgeCatalog] = None):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        # Invalid/empty content must never prevent the bot from serving its
+        # established deterministic fallback briefings.
+        self.catalog = catalog if catalog is not None else KnowledgeCatalog(strict=False)
+
+    @staticmethod
+    def _catalog_briefing(card: KnowledgeCard, grade: TargetGrade, briefing_id: str) -> AdmissionBriefing:
+        return AdmissionBriefing(
+            briefing_id=briefing_id,
+            briefing_type=BriefingType.WEEKLY_TODO if card.card_type == "WEEKLY_TODO" else BriefingType.POLICY_TRANSLATE,
+            target_grade=grade,
+            headline=card.headline,
+            summary_3lines=list(card.summary_3lines),
+            so_what=card.so_what,
+            action_todos=list(card.action_todos),
+            source_name=card.source_name,
+            source_url=card.source_url,
+            urgency="HIGH" if card.card_type == "POLICY" else "NORMAL",
+        )
 
     def score_credibility(self, organizer: str, content: str, has_official_source: bool = True) -> int:
         """Scores credibility (0 ~ 100) based on organizer tier and data substance."""
@@ -139,6 +161,8 @@ class AICurator:
         grade: TargetGrade,
         month: Optional[int] = None,
         dt: Optional[datetime] = None,
+        education_stage: Optional[EducationStage] = None,
+        grade_level: Optional[GradeLevel] = None,
     ) -> AdmissionBriefing:
         """Generates the weekly Sunday night briefing for the given grade, dynamically adapting to academic calendar.
 
@@ -147,6 +171,19 @@ class AICurator:
         ref_dt = dt or datetime.now()
         current_month = month if month is not None else ref_dt.month
         iso_year, iso_week, _ = ref_dt.isocalendar()
+
+        if education_stage is None or grade_level is None:
+            education_stage, grade_level = legacy_target_grade_to_stage_level(grade)
+        try:
+            cards = self.catalog.filter(
+                education_stage, grade_level, month=current_month,
+                today=ref_dt.date(), card_type="WEEKLY_TODO",
+            )
+        except Exception as exc:
+            logger.warning("Knowledge catalog unavailable; using weekly fallback: %s", exc)
+            cards = ()
+        if cards:
+            return self._catalog_briefing(cards[0], grade, f"weekly_{grade.value}_{cards[0].content_id}_{iso_year}W{iso_week:02d}")
 
         if grade == TargetGrade.HIGH_3_N:
             if current_month == 11:
@@ -274,89 +311,30 @@ class AICurator:
             events = db.get_hot_events(grade=grade, region=reg, limit=3)
             if events:
                 return [self.curate_event_briefing(e) for e in events]
+        # No database-backed event means no fabricated or stale fallback content.
+        return []
 
-        # Verified fallback hot events (100% verified timing & sources)
-        sample_events = [
-            AdmissionEvent(
-                event_id="hot_evt_mega_live",
-                title="수능 가채점 분석 및 2027 정시 합격 전략 라이브 설명회",
-                organizer="메가스터디 입시전략연구소",
-                target_grade=TargetGrade.HIGH_3_N,
-                event_type=BriefingType.TICKETING_ALERT,
-                event_date_str="2026-11-12 19:30",
-                is_online_live=True,
-                is_first_come=False,
-                booking_url="https://megastudy.net/live/admission",
-                summary_3lines=[
-                    "수능 직후 메가스터디 입시연구소 온라인 실시간 라이브 생중계",
-                    "실시간 가채점 등급컷 분석 및 2027 정시 대학별 환산점수 유불리 배치표 공개",
-                    "수능 직후 주말 수시 논술/면접 고사 응시 가부 결정 가이드",
-                ],
-                so_what="가채점 점수를 바탕으로 수시 수능 최저 충족 여부를 확인하고, 정시 유불리를 정밀 계산해야 합니다.",
-                action_todos=[
-                    "온라인 라이브 설명회 사전 알림 신청 완료",
-                    "수능 당일 가채점 표준점수 및 백분위 실시간 입력",
-                ],
-                source_name="메가스터디 입시전략연구소",
-                source_url="https://megastudy.net",
-                urgency="HIGH",
-            ),
-            AdmissionEvent(
-                event_id="hot_evt_sdij_winter",
-                title="2028 대입 개편 대비 예비고1 윈터스쿨 입시설명회",
-                organizer="시대인재 대치 본원",
-                target_grade=TargetGrade.MIDDLE,
-                event_type=BriefingType.TICKETING_ALERT,
-                event_date_str="2026-11-15 14:00",
-                is_online_live=False,
-                is_first_come=True,
-                booking_url="https://sdij.com/admission/winter_open",
-                summary_3lines=[
-                    "고교 진학 전 중3 겨울방학 통합사회·통합과학 1회독 로드맵",
-                    "대치동 주요 자사고(외대부고·하나고·상산고) 합격생 주간 학습 시간표",
-                    "고1 1학기 첫 중간고사 1등급 선점을 위한 수학(상/하) 심화 전략",
-                ],
-                so_what="고등학교 첫 중간고사 성적이 대입 수시의 70%를 결정하므로 겨울방학 결손 방지가 필수입니다.",
-                action_todos=[
-                    "오늘 선착순 예약 오픈 시 1분 내 신청 완료",
-                    "자녀의 현재 수학 심화 성취도 자가진단",
-                ],
-                source_name="시대인재 대치 본원",
-                source_url="https://sdij.com",
-                urgency="HIGH",
-            ),
-            AdmissionEvent(
-                event_id="hot_evt_sen_admission",
-                title="서울시교육청 2026 고교 진학 및 대입 전략 진로진학 설명회",
-                organizer="서울시교육청",
-                target_grade=TargetGrade.MIDDLE,
-                event_type=BriefingType.BRIEFING_RECAP,
-                event_date_str="2026-11-18 19:00",
-                is_online_live=True,
-                booking_url="https://sen.go.kr/admission/seminar",
-                summary_3lines=[
-                    "서울시 관내 중3 학부모 대상 일반고 및 자사고·외고 진학 로드맵 안내",
-                    "유튜브 서울시교육청 채널 생중계 동시 송출 및 설명회 자료집 무료 배포",
-                    "학생부종합전형 대비 중등 교과 연계 독서 및 세특 작성 가이드",
-                ],
-                so_what="교육청 공인 진학 가이드북을 통해 내 아이에게 가장 유리한 고교 유형을 객관적으로 선택할 수 있습니다.",
-                action_todos=[
-                    "유튜브 생중계 사전 알림 설정 및 설명회 자료집 PDF 다운로드",
-                    "관내 지망 고등학교 1·2지망 전년도 경쟁률 확인",
-                ],
-                source_name="서울시교육청 교육연구정보원",
-                source_url="https://sen.go.kr",
-                urgency="NORMAL",
-            ),
-        ]
-        return [self.curate_event_briefing(e) for e in sample_events[:3]]
-
-    def get_latest_factcheck(self, grade: Optional[TargetGrade] = None) -> AdmissionBriefing:
+    def get_latest_factcheck(
+        self,
+        grade: Optional[TargetGrade] = None,
+        education_stage: Optional[EducationStage] = None,
+        grade_level: Optional[GradeLevel] = None,
+    ) -> AdmissionBriefing:
         """Synthesizes the hottest official policy change/mock exam analysis with 100% official grounding."""
+        target_grade = grade or TargetGrade.ALL
+        if education_stage is None or grade_level is None:
+            education_stage, grade_level = legacy_target_grade_to_stage_level(target_grade)
+        try:
+            cards = self.catalog.filter(education_stage, grade_level, card_type="POLICY")
+        except Exception as exc:
+            logger.warning("Knowledge catalog unavailable; using factcheck fallback: %s", exc)
+            cards = ()
+        if cards:
+            return self._catalog_briefing(cards[0], target_grade, f"factcheck_{cards[0].content_id}")
         return AdmissionBriefing(
             briefing_id="factcheck_2028_reform",
             briefing_type=BriefingType.POLICY_TRANSLATE,
-            target_grade=grade or TargetGrade.ALL,
+            target_grade=target_grade,
             headline="2028 수능 개편 확정: 심화수학 제외와 통합과목 출제 핵심 득실 분석",
             summary_3lines=[
                 "2028학년도 대입부터 문·이과 구분 없이 '통합사회·통합과학' 필수 응시 확정",

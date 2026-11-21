@@ -2,14 +2,13 @@
 Protects against 429 Too Many Requests, implements per-chat interval and global throughput controls.
 """
 from __future__ import annotations
-import json
 import logging
-import re
+import socket
 import time
 import urllib.error
 from typing import Any, Optional
 
-from admission_brief.channels.telegram import TelegramChannel
+from admission_brief.channels.telegram import TelegramChannel, TelegramRateLimitError
 from admission_brief.models import AdmissionBriefing
 from admission_brief.storage.db import AdmissionDatabase
 
@@ -65,6 +64,7 @@ class SafeTelegramDispatcher:
         briefing: AdmissionBriefing,
         db: AdmissionDatabase,
         recipients: Optional[list[str]] = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Dispatches an admission briefing to matching subscribers in the database."""
         stats = {
@@ -72,8 +72,10 @@ class SafeTelegramDispatcher:
             "success": 0,
             "skipped": 0,
             "failed": 0,
+            "unknown": 0,
             "deactivated": 0,
             "errors": {},
+            "dry_run": dry_run,
         }
 
         # Target recipients resolution
@@ -91,8 +93,23 @@ class SafeTelegramDispatcher:
         stats["total"] = len(target_chat_ids)
 
         for chat_id in target_chat_ids:
-            # Check duplicate dispatch
+            # Explicit recipient lists still pass the platform SSOT authorization gate.
+            platform_authorized = db.is_active_platform_subscriber(chat_id)
+            if not dry_run and platform_authorized is False:
+                stats["skipped"] += 1
+                stats["errors"][chat_id] = "NOT_SUBSCRIBED"
+                continue
+
+            if dry_run:
+                stats["skipped"] += 1
+                continue
+
+            # Check duplicate dispatch before claiming the atomic send slot.
             if db.has_dispatched(briefing.briefing_id, chat_id):
+                stats["skipped"] += 1
+                continue
+
+            if not db.claim_dispatch_slot(briefing.briefing_id, chat_id):
                 stats["skipped"] += 1
                 continue
 
@@ -118,37 +135,45 @@ class SafeTelegramDispatcher:
                     db.log_dispatch(briefing.briefing_id, chat_id, "SUCCESS")
                     stats["success"] += 1
                     break
+                except TelegramRateLimitError as exc:
+                    attempt += 1
+                    if attempt > self.max_429_retries:
+                        stats["failed"] += 1
+                        stats["errors"][chat_id] = "429_EXCEEDED"
+                        db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
+                        break
+                    time.sleep(exc.retry_after)
+                    continue
                 except urllib.error.HTTPError as exc:
                     if exc.code == 429:
                         attempt += 1
                         if attempt > self.max_429_retries:
                             stats["failed"] += 1
                             stats["errors"][chat_id] = "429_EXCEEDED"
-                            db.log_dispatch(briefing.briefing_id, chat_id, "FAILED_429")
+                            db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
                             break
-                        # Parse retry_after
-                        retry_sec = 2.0
-                        try:
-                            err_body = json.loads(exc.read().decode("utf-8", errors="ignore"))
-                            retry_sec = float(err_body.get("parameters", {}).get("retry_after", 2.0))
-                        except Exception:
-                            pass
-                        time.sleep(retry_sec)
+                        time.sleep(float(exc.headers.get("Retry-After", "1")) if exc.headers else 1.0)
                         continue
                     elif exc.code in {400, 403}:
                         # Blocked or deactivated user
                         stats["deactivated"] += 1
-                        db.log_dispatch(briefing.briefing_id, chat_id, f"HTTP_{exc.code}")
+                        db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
                         break
                     else:
                         stats["failed"] += 1
                         stats["errors"][chat_id] = f"HTTP_{exc.code}"
-                        db.log_dispatch(briefing.briefing_id, chat_id, f"HTTP_{exc.code}")
+                        db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
                         break
+                except (TimeoutError, socket.timeout, urllib.error.URLError, ConnectionError) as exc:
+                    # The provider may have accepted the message; never retry an ambiguous send.
+                    stats["unknown"] += 1
+                    stats["errors"][chat_id] = str(exc)
+                    db.update_dispatch_status(briefing.briefing_id, chat_id, "UNKNOWN")
+                    break
                 except Exception as exc:
                     stats["failed"] += 1
                     stats["errors"][chat_id] = str(exc)
-                    db.log_dispatch(briefing.briefing_id, chat_id, "FAILED_ERROR")
+                    db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
                     break
 
         return stats

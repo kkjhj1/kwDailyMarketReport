@@ -3,9 +3,105 @@ Handles target grades, regions, briefing types, event metadata, and parent subsc
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+class EducationStage(str, Enum):
+    """Broad education stage used by the additive grade model."""
+    ELEMENTARY = "ELEMENTARY"
+    MIDDLE = "MIDDLE"
+    HIGH = "HIGH"
+    POST_HIGH = "POST_HIGH"
+    ALL = "ALL"
+
+    @property
+    def label(self) -> str:
+        return {
+            "ELEMENTARY": "초등",
+            "MIDDLE": "중등",
+            "HIGH": "고등",
+            "POST_HIGH": "고등 이후",
+            "ALL": "전 학년",
+        }[self.value]
+
+
+class GradeLevel(str, Enum):
+    """Specific school grade, or an explicit unknown/any-grade marker."""
+    E1 = "E1"
+    E2 = "E2"
+    E3 = "E3"
+    E4 = "E4"
+    E5 = "E5"
+    E6 = "E6"
+    M1 = "M1"
+    M2 = "M2"
+    M3 = "M3"
+    H1 = "H1"
+    H2 = "H2"
+    H3 = "H3"
+    N = "N"
+    ALL = "ALL"
+    LEGACY = "LEGACY"
+
+    @property
+    def label(self) -> str:
+        labels = {
+            **{f"E{i}": f"초{i}학년" for i in range(1, 7)},
+            **{f"M{i}": f"중{i}학년" for i in range(1, 4)},
+            **{f"H{i}": f"고{i}학년" for i in range(1, 4)},
+            "N": "N수생",
+            "ALL": "전 학년",
+            "LEGACY": "기존 학년 분류",
+        }
+        return labels[self.value]
+
+
+class GradeMode(str, Enum):
+    MANUAL = "MANUAL"
+    AUTO = "AUTO"
+
+
+def legacy_target_grade_to_stage_level(grade: TargetGrade) -> tuple[EducationStage, GradeLevel]:
+    """Maps the four legacy buckets without guessing a specific school grade."""
+    mapping = {
+        TargetGrade.MIDDLE: (EducationStage.MIDDLE, GradeLevel.LEGACY),
+        TargetGrade.HIGH_1_2: (EducationStage.HIGH, GradeLevel.LEGACY),
+        TargetGrade.HIGH_3_N: (EducationStage.HIGH, GradeLevel.LEGACY),
+        TargetGrade.ALL: (EducationStage.ALL, GradeLevel.ALL),
+    }
+    return mapping[grade]
+
+
+def stage_level_to_legacy_target_grade(stage: EducationStage, level: GradeLevel) -> TargetGrade:
+    """Returns the closest legacy delivery bucket for additive profiles."""
+    if stage == EducationStage.MIDDLE or level in (GradeLevel.M1, GradeLevel.M2, GradeLevel.M3):
+        return TargetGrade.MIDDLE
+    if stage == EducationStage.HIGH:
+        if level in (GradeLevel.H3, GradeLevel.N):
+            return TargetGrade.HIGH_3_N
+        if level in (GradeLevel.H1, GradeLevel.H2):
+            return TargetGrade.HIGH_1_2
+        return TargetGrade.HIGH_1_2
+    if stage == EducationStage.POST_HIGH or level == GradeLevel.N:
+        return TargetGrade.HIGH_3_N
+    return TargetGrade.ALL
+
+
+def academic_year_kst(value: Optional[datetime | date] = None) -> int:
+    """Returns the Korean academic year; it rolls over on March 1 in KST."""
+    current = value or datetime.now(KST)
+    if isinstance(current, datetime):
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=KST)
+        current = current.astimezone(KST)
+        return current.year if (current.month, current.day) >= (3, 1) else current.year - 1
+    return current.year if (current.month, current.day) >= (3, 1) else current.year - 1
 
 
 class TargetGrade(str, Enum):
@@ -238,25 +334,157 @@ class ChildProfile:
     alias: str = "첫째"
     grade: TargetGrade = TargetGrade.ALL
     region: TargetRegion = TargetRegion.ALL
+    education_stage: EducationStage | None = None
+    grade_level: GradeLevel | None = None
+    school_entry_year: Optional[int] = None
+    grade_mode: GradeMode = GradeMode.MANUAL
+    last_promoted_academic_year: Optional[int] = None
+    _extended: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._extended = (
+            self.education_stage is not None or self.grade_level is not None
+            or self.school_entry_year is not None or self.grade_mode != GradeMode.MANUAL
+            or self.last_promoted_academic_year is not None
+        )
+        try:
+            self.grade = self.grade if isinstance(self.grade, TargetGrade) else TargetGrade(self.grade)
+        except (TypeError, ValueError):
+            self.grade = TargetGrade.ALL
+        try:
+            self.region = self.region if isinstance(self.region, TargetRegion) else TargetRegion(self.region)
+        except (TypeError, ValueError):
+            self.region = TargetRegion.ALL
+        if self.education_stage is None or self.grade_level is None:
+            self.education_stage, self.grade_level = legacy_target_grade_to_stage_level(self.grade)
+        else:
+            try:
+                self.education_stage = EducationStage(self.education_stage)
+            except (TypeError, ValueError):
+                self.education_stage = EducationStage.ALL
+            try:
+                self.grade_level = GradeLevel(self.grade_level)
+            except (TypeError, ValueError):
+                self.grade_level = GradeLevel.ALL
+            # Explicit additive values are authoritative, while retaining the legacy
+            # bucket for old delivery and filtering code.
+            if self.grade == TargetGrade.ALL:
+                self.grade = stage_level_to_legacy_target_grade(self.education_stage, self.grade_level)
+        try:
+            self.grade_mode = self.grade_mode if isinstance(self.grade_mode, GradeMode) else GradeMode(self.grade_mode)
+        except (TypeError, ValueError):
+            self.grade_mode = GradeMode.MANUAL
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "alias": self.alias,
             "grade": self.grade.value,
             "region": self.region.value,
         }
+        if self._extended:
+            data.update({
+                "education_stage": self.education_stage.value,
+                "grade_level": self.grade_level.value,
+                "school_entry_year": self.school_entry_year,
+                "grade_mode": self.grade_mode.value,
+                "last_promoted_academic_year": self.last_promoted_academic_year,
+            })
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ChildProfile:
         try:
             grade = TargetGrade(data.get("grade", "ALL"))
-        except ValueError:
+        except (TypeError, ValueError):
             grade = TargetGrade.ALL
         try:
             region = TargetRegion(data.get("region", "ALL"))
-        except ValueError:
+        except (TypeError, ValueError):
             region = TargetRegion.ALL
-        return cls(alias=str(data.get("alias") or "자녀"), grade=grade, region=region)
+        stage_raw = data.get("education_stage")
+        level_raw = data.get("grade_level")
+        try:
+            stage = EducationStage(stage_raw) if stage_raw is not None else None
+        except (TypeError, ValueError):
+            stage = None
+        try:
+            level = GradeLevel(level_raw) if level_raw is not None else None
+        except (TypeError, ValueError):
+            level = None
+        try:
+            mode = GradeMode(data.get("grade_mode", GradeMode.MANUAL.value))
+        except (TypeError, ValueError):
+            mode = GradeMode.MANUAL
+        entry_year = data.get("school_entry_year")
+        try:
+            entry_year = int(entry_year) if entry_year is not None else None
+        except (TypeError, ValueError):
+            entry_year = None
+        promoted = data.get("last_promoted_academic_year")
+        try:
+            promoted = int(promoted) if promoted is not None else None
+        except (TypeError, ValueError):
+            promoted = None
+        result = cls(
+            alias=str(data.get("alias") or "자녀"), grade=grade, region=region,
+            education_stage=stage, grade_level=level, school_entry_year=entry_year,
+            grade_mode=mode, last_promoted_academic_year=promoted,
+        )
+        result._extended = any(key in data for key in (
+            "education_stage", "grade_level", "school_entry_year", "grade_mode", "last_promoted_academic_year"
+        ))
+        return result
+
+    def promote_if_due(self, now: Optional[datetime | date] = None) -> bool:
+        """Promotes an AUTO child once per KST academic year.
+
+        ``school_entry_year`` is the academic year in which the child entered E1.
+        The method is intentionally idempotent so repeated reads or scheduler runs
+        cannot promote the child twice in one academic year.
+        """
+        if self.grade_mode != GradeMode.AUTO or self.school_entry_year is None:
+            return False
+        academic_year = academic_year_kst(now)
+        if self.last_promoted_academic_year is not None and academic_year <= self.last_promoted_academic_year:
+            return False
+        offset = academic_year - int(self.school_entry_year)
+        if offset < 0:
+            return False
+        if offset <= 5:
+            level = GradeLevel(f"E{offset + 1}")
+        elif offset <= 8:
+            level = GradeLevel(f"M{offset - 5}")
+        elif offset <= 11:
+            level = GradeLevel(f"H{offset - 8}")
+        else:
+            level = GradeLevel.N
+        stage = (
+            EducationStage.ELEMENTARY if level.value.startswith("E")
+            else EducationStage.MIDDLE if level.value.startswith("M")
+            else EducationStage.HIGH if level.value.startswith("H")
+            else EducationStage.POST_HIGH
+        )
+        changed = (self.education_stage != stage or self.grade_level != level)
+        self.education_stage = stage
+        self.grade_level = level
+        self.grade = stage_level_to_legacy_target_grade(stage, level)
+        self.last_promoted_academic_year = academic_year
+        self._extended = True
+        return changed
+
+    # Friendly aliases for callers that describe the same operation differently.
+    auto_promote = promote_if_due
+    apply_auto_promotion = promote_if_due
+    promote_if_needed = promote_if_due
+
+    @property
+    def legacy_target_grade(self) -> TargetGrade:
+        return self.grade
+
+    def set_legacy_target_grade(self, grade: TargetGrade) -> None:
+        self.grade = grade if isinstance(grade, TargetGrade) else TargetGrade(grade)
+        self.education_stage, self.grade_level = legacy_target_grade_to_stage_level(self.grade)
+        self._extended = True
 
 
 @dataclass
@@ -276,12 +504,37 @@ class ParentUserProfile:
     last_active_at: datetime = field(default_factory=datetime.now)
     children: list[ChildProfile] = field(default_factory=list)
     active_child_index: int = 0
+    education_stage: EducationStage | None = None
+    grade_level: GradeLevel | None = None
+
+    def __post_init__(self) -> None:
+        if self.children and 0 <= self.active_child_index < len(self.children):
+            active = self.children[self.active_child_index]
+            self.education_stage = active.education_stage
+            self.grade_level = active.grade_level
+            self.target_grade = active.grade
+            self.target_region = active.region
+        else:
+            try:
+                self.target_grade = self.target_grade if isinstance(self.target_grade, TargetGrade) else TargetGrade(self.target_grade)
+                if self.education_stage is None or self.grade_level is None:
+                    self.education_stage, self.grade_level = legacy_target_grade_to_stage_level(self.target_grade)
+                else:
+                    self.education_stage = EducationStage(self.education_stage)
+                    self.grade_level = GradeLevel(self.grade_level)
+                    if self.grade_level not in (GradeLevel.LEGACY, GradeLevel.ALL):
+                        self.target_grade = stage_level_to_legacy_target_grade(self.education_stage, self.grade_level)
+            except (TypeError, ValueError, KeyError):
+                self.target_grade = TargetGrade.ALL
+                self.education_stage, self.grade_level = legacy_target_grade_to_stage_level(TargetGrade.ALL)
 
     def get_active_child(self) -> ChildProfile:
         if self.children and 0 <= self.active_child_index < len(self.children):
             return self.children[self.active_child_index]
-        return ChildProfile(alias="자녀", grade=self.target_grade, region=self.target_region)
-
+        return ChildProfile(
+            alias="자녀", grade=self.target_grade, region=self.target_region,
+            education_stage=self.education_stage, grade_level=self.grade_level,
+        )
     def get_all_grades(self) -> set[TargetGrade]:
         if not self.children:
             return {self.target_grade}
@@ -299,4 +552,35 @@ class ParentUserProfile:
             "last_active_at": self.last_active_at.isoformat(),
             "children": [c.to_dict() for c in self.children],
             "active_child_index": self.active_child_index,
+            "education_stage": self.education_stage.value,
+            "grade_level": self.grade_level.value,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ParentUserProfile":
+        """Tolerant deserializer for API/session callers using profile dictionaries."""
+        try:
+            target_grade = TargetGrade(data.get("target_grade", "ALL"))
+        except (TypeError, ValueError):
+            target_grade = TargetGrade.ALL
+        try:
+            target_region = TargetRegion(data.get("target_region", "ALL"))
+        except (TypeError, ValueError):
+            target_region = TargetRegion.ALL
+        children_raw = data.get("children", [])
+        children = [ChildProfile.from_dict(item) for item in children_raw if isinstance(item, dict)] if isinstance(children_raw, list) else []
+        try:
+            stage = EducationStage(data["education_stage"]) if data.get("education_stage") is not None else None
+        except ValueError:
+            stage = None
+        try:
+            level = GradeLevel(data["grade_level"]) if data.get("grade_level") is not None else None
+        except ValueError:
+            level = None
+        return cls(
+            chat_id=str(data.get("chat_id", "")), target_grade=target_grade, target_region=target_region,
+            username=str(data.get("username") or ""), first_name=str(data.get("first_name") or ""),
+            alert_enabled=bool(data.get("alert_enabled", True)), children=children,
+            active_child_index=int(data.get("active_child_index", 0) or 0),
+            education_stage=stage, grade_level=level,
+        )

@@ -3,22 +3,38 @@ Manages parent subscribers, target grades, regions, admission events, and dispat
 """
 from __future__ import annotations
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from admission_brief.models import (
     MAX_CHILDREN,
     AdmissionEvent,
     BriefingType,
     ChildProfile,
+    EducationStage,
     EventCategory,
+    GradeLevel,
+    GradeMode,
     ParentUserProfile,
     TargetGrade,
     TargetRegion,
+    legacy_target_grade_to_stage_level,
+    stage_level_to_legacy_target_grade,
 )
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def resolve_admission_db_path(db_path: str | Path | None = None) -> str:
+    """Resolve the admission database without overriding explicit test/temporary paths."""
+    if db_path is not None:
+        return str(db_path)
+    return os.environ.get("ADMISSION_DB_PATH", "").strip() or "alerts.sqlite3"
 
 
 def _platform_active_subscriber_ids(
@@ -38,7 +54,7 @@ def _platform_active_subscriber_ids(
         if "subscriptions" not in tables:
             return None
         marks = ",".join("?" * len(bot_ids))
-        sql = f"SELECT DISTINCT s.telegram_user_id FROM subscriptions s WHERE s.status = 'ACTIVE' AND s.bot_id IN ({marks})"
+        sql = f"SELECT DISTINCT s.telegram_user_id FROM subscriptions s WHERE s.status IN ('ACTIVE', 'GRACE_PERIOD') AND s.bot_id IN ({marks})"
         if "users" in tables:
             sql += (
                 " AND EXISTS (SELECT 1 FROM users u"
@@ -55,10 +71,13 @@ def _platform_active_subscriber_ids(
         if not path or path == ":memory:" or path.startswith("file:"):
             return None
         own = Path(path).resolve()
+        # An explicit admission DB used by tests or isolated tools must not inherit a
+        # sibling platform DB; unified production deployments use the same alerts DB.
         candidates = [] if conn is not None else [own]
-        sibling = own.with_name("alerts.sqlite3")
-        if sibling != own:
-            candidates.append(sibling)
+        if conn is None:
+            sibling = own.with_name("alerts.sqlite3")
+            if sibling != own:
+                candidates.append(sibling)
         for cand in candidates:
             if not cand.is_file():
                 continue
@@ -77,8 +96,9 @@ def _platform_active_subscriber_ids(
 class AdmissionDatabase:
     """Thread-safe SQLite storage for Admission Briefing."""
 
-    def __init__(self, db_path: str | Path = "data/admission_brief.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        resolved_path = resolve_admission_db_path(db_path)
+        self.db_path = Path(resolved_path)
         self._is_memory = str(self.db_path) == ":memory:"
         self._shared_conn: Optional[sqlite3.Connection] = None
         if not self._is_memory:
@@ -105,6 +125,8 @@ class AdmissionDatabase:
                     chat_id TEXT PRIMARY KEY,
                     target_grade TEXT NOT NULL DEFAULT 'ALL',
                     target_region TEXT NOT NULL DEFAULT 'ALL',
+                    education_stage TEXT NOT NULL DEFAULT 'ALL',
+                    grade_level TEXT NOT NULL DEFAULT 'ALL',
                     username TEXT,
                     first_name TEXT,
                     alert_enabled INTEGER NOT NULL DEFAULT 1,
@@ -124,6 +146,14 @@ class AdmissionDatabase:
                 pass
             try:
                 cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN active_child_index INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN education_stage TEXT NOT NULL DEFAULT 'ALL'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN grade_level TEXT NOT NULL DEFAULT 'ALL'")
             except sqlite3.OperationalError:
                 pass
 
@@ -199,24 +229,34 @@ class AdmissionDatabase:
     # --- Subscriber Methods ---
 
     def upsert_subscriber(self, profile: ParentUserProfile) -> None:
-        """Inserts or updates parent profile."""
+        """Full profile upsert, including preferences and child data."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO admission_subscribers (
-                    chat_id, target_grade, target_region, username, first_name, alert_enabled, registered_at, last_active_at,
+                    chat_id, target_grade, target_region, education_stage, grade_level, username, first_name, alert_enabled, registered_at, last_active_at,
                     children_json, active_child_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
+                    target_grade = excluded.target_grade,
+                    target_region = excluded.target_region,
+                    education_stage = excluded.education_stage,
+                    grade_level = excluded.grade_level,
                     username = excluded.username,
                     first_name = excluded.first_name,
-                    last_active_at = excluded.last_active_at
+                    alert_enabled = excluded.alert_enabled,
+                    registered_at = excluded.registered_at,
+                    last_active_at = excluded.last_active_at,
+                    children_json = excluded.children_json,
+                    active_child_index = excluded.active_child_index
                 """,
                 (
                     str(profile.chat_id),
                     profile.target_grade.value,
                     profile.target_region.value,
+                    profile.education_stage.value,
+                    profile.grade_level.value,
                     profile.username,
                     profile.first_name,
                     1 if profile.alert_enabled else 0,
@@ -228,9 +268,117 @@ class AdmissionDatabase:
             )
             conn.commit()
 
+    def create_subscriber_if_absent(self, profile: ParentUserProfile) -> bool:
+        """Create a subscriber without overwriting an existing profile."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO admission_subscribers (
+                    chat_id, target_grade, target_region, education_stage, grade_level, username, first_name, alert_enabled,
+                    registered_at, last_active_at, children_json, active_child_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(profile.chat_id),
+                    profile.target_grade.value,
+                    profile.target_region.value,
+                    profile.education_stage.value,
+                    profile.grade_level.value,
+                    profile.username,
+                    profile.first_name,
+                    1 if profile.alert_enabled else 0,
+                    profile.registered_at.isoformat(),
+                    profile.last_active_at.isoformat(),
+                    json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
+                    profile.active_child_index,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def touch_subscriber_metadata(
+        self,
+        chat_id: str,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Refresh Telegram metadata only; preferences and child data are immutable here."""
+        stamp = (now or datetime.now()).isoformat()
+        clean_username = (username or "").strip()
+        clean_first_name = (first_name or "").strip()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE admission_subscribers
+                SET username = CASE WHEN ? <> '' THEN ? ELSE username END,
+                    first_name = CASE WHEN ? <> '' THEN ? ELSE first_name END,
+                    last_active_at = ?
+                WHERE chat_id = ?
+                """,
+                (
+                    clean_username, clean_username,
+                    clean_first_name, clean_first_name,
+                    stamp, str(chat_id),
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def update_subscriber_grade(self, chat_id: str, grade: TargetGrade) -> bool:
         """Updates target grade for a parent (mirrored into the active child when multi-child)."""
         return self._update_active_target(chat_id, grade=grade)
+
+    def update_subscriber_stage_level(
+        self,
+        chat_id: str,
+        stage: EducationStage,
+        level: GradeLevel,
+        grade_mode: GradeMode = GradeMode.MANUAL,
+        school_entry_year: Optional[int] = None,
+    ) -> bool:
+        """Updates additive stage/level fields and their legacy delivery bucket."""
+        try:
+            stage = stage if isinstance(stage, EducationStage) else EducationStage(stage)
+            level = level if isinstance(level, GradeLevel) else GradeLevel(level)
+            grade_mode = grade_mode if isinstance(grade_mode, GradeMode) else GradeMode(grade_mode)
+        except (TypeError, ValueError):
+            return False
+        target_grade = stage_level_to_legacy_target_grade(stage, level)
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM admission_subscribers WHERE chat_id = ?", (str(chat_id),))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            profile = self._row_to_subscriber(row)
+            profile.target_grade = target_grade
+            profile.education_stage = stage
+            profile.grade_level = level
+            child = profile.get_active_child()
+            child.grade = target_grade
+            child.education_stage = stage
+            child.grade_level = level
+            child.grade_mode = grade_mode
+            child.school_entry_year = school_entry_year
+            child._extended = True
+            if profile.children:
+                profile.children[profile.active_child_index] = child
+            cursor.execute(
+                """UPDATE admission_subscribers
+                   SET target_grade = ?, education_stage = ?, grade_level = ?, children_json = ?, last_active_at = ?
+                   WHERE chat_id = ?""",
+                (
+                    target_grade.value, stage.value, level.value,
+                    json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
+                    now, str(chat_id),
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def update_subscriber_region(self, chat_id: str, region: TargetRegion) -> bool:
         """Updates target region for a parent (mirrored into the active child when multi-child)."""
@@ -253,21 +401,26 @@ class AdmissionDatabase:
             profile = self._row_to_subscriber(row)
             if grade is not None:
                 profile.target_grade = grade
+                profile.education_stage, profile.grade_level = legacy_target_grade_to_stage_level(grade)
             if region is not None:
                 profile.target_region = region
             if profile.children:
                 child = profile.get_active_child()
                 child.grade = profile.target_grade
                 child.region = profile.target_region
+                child.education_stage = profile.education_stage
+                child.grade_level = profile.grade_level
             cursor.execute(
                 """
                 UPDATE admission_subscribers
-                SET target_grade = ?, target_region = ?, children_json = ?, last_active_at = ?
+                SET target_grade = ?, target_region = ?, education_stage = ?, grade_level = ?, children_json = ?, last_active_at = ?
                 WHERE chat_id = ?
                 """,
                 (
                     profile.target_grade.value,
                     profile.target_region.value,
+                    profile.education_stage.value,
+                    profile.grade_level.value,
                     json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
                     now,
                     str(chat_id),
@@ -292,10 +445,11 @@ class AdmissionDatabase:
             cursor.execute(
                 """
                 UPDATE admission_subscribers
-                SET active_child_index = ?, target_grade = ?, target_region = ?, last_active_at = ?
+                SET active_child_index = ?, target_grade = ?, target_region = ?, education_stage = ?, grade_level = ?, children_json = ?, last_active_at = ?
                 WHERE chat_id = ?
                 """,
-                (index, child.grade.value, child.region.value, now, str(chat_id)),
+                (index, child.grade.value, child.region.value, child.education_stage.value, child.grade_level.value,
+                 json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False), now, str(chat_id)),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -353,9 +507,26 @@ class AdmissionDatabase:
             active_index = int(r["active_child_index"])
         if children and not (0 <= active_index < len(children)):
             active_index = 0
+        try:
+            row_grade = TargetGrade(r["target_grade"])
+        except (ValueError, TypeError):
+            row_grade = TargetGrade.ALL
+        try:
+            row_stage = EducationStage(r["education_stage"]) if "education_stage" in keys else None
+        except (ValueError, TypeError):
+            row_stage = None
+        try:
+            row_level = GradeLevel(r["grade_level"]) if "grade_level" in keys else None
+        except (ValueError, TypeError):
+            row_level = None
+        if children:
+            row_stage = children[active_index].education_stage
+            row_level = children[active_index].grade_level
+        elif row_stage is None or row_level is None or (row_stage == EducationStage.ALL and row_level == GradeLevel.ALL and row_grade != TargetGrade.ALL):
+            row_stage, row_level = legacy_target_grade_to_stage_level(row_grade)
         return ParentUserProfile(
             chat_id=r["chat_id"],
-            target_grade=TargetGrade(r["target_grade"]),
+            target_grade=row_grade,
             target_region=TargetRegion(r["target_region"] if "target_region" in keys else "ALL"),
             username=r["username"] or "",
             first_name=r["first_name"] or "",
@@ -364,6 +535,8 @@ class AdmissionDatabase:
             last_active_at=datetime.fromisoformat(r["last_active_at"]),
             children=children,
             active_child_index=active_index,
+            education_stage=row_stage,
+            grade_level=row_level,
         )
 
     def get_subscriber(self, chat_id: str) -> Optional[ParentUserProfile]:
@@ -422,6 +595,14 @@ class AdmissionDatabase:
                     results.append(profile)
 
             return results
+
+    def is_active_platform_subscriber(self, chat_id: str) -> Optional[bool]:
+        """Return platform authorization; None means no platform subscriptions table exists."""
+        with self._get_connection() as conn:
+            ids = _platform_active_subscriber_ids(str(self.db_path), ("admission_bot", "edu_bot"), conn=conn)
+        if ids is None:
+            return None
+        return str(chat_id).strip() in ids
 
     @staticmethod
     def _target_matches(
@@ -549,7 +730,7 @@ class AdmissionDatabase:
                 return None
             return self._row_to_event(row)
 
-    def list_upcoming_ticketing(self) -> list[AdmissionEvent]:
+    def list_upcoming_ticketing(self, now: Optional[datetime] = None) -> list[AdmissionEvent]:
         """Lists active ticketing events whose booking opens soon and is first-come."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -561,7 +742,11 @@ class AdmissionDatabase:
                 """
             )
             rows = cursor.fetchall()
-            return [self._row_to_event(r) for r in rows]
+            now_kst = self._to_kst(now or datetime.now(KST))
+            return [
+                event for event in (self._row_to_event(r) for r in rows)
+                if not self._is_expired(event, now_kst)
+            ]
 
     def list_all_events(self) -> list[AdmissionEvent]:
         """Lists all registered admission events."""
@@ -576,10 +761,15 @@ class AdmissionDatabase:
         grade: TargetGrade = TargetGrade.ALL,
         region: TargetRegion = TargetRegion.ALL,
         limit: int = 3,
+        now: Optional[datetime] = None,
     ) -> list[AdmissionEvent]:
         """Returns top N urgent or upcoming admission events matching grade & region."""
         all_events = self.list_all_events()
-        matched = [ev for ev in all_events if self._matches_profile(ev, grade, region)]
+        now_kst = self._to_kst(now or datetime.now(KST))
+        matched = [
+            ev for ev in all_events
+            if not self._is_expired(ev, now_kst) and self._matches_profile(ev, grade, region)
+        ]
 
         def sort_key(e: AdmissionEvent):
             urgency_rank = 0 if e.urgency == "BREAKING" else (1 if e.urgency == "HIGH" else 2)
@@ -608,13 +798,21 @@ class AdmissionDatabase:
         except ValueError:
             return None
 
+    @staticmethod
+    def _to_kst(value: datetime) -> datetime:
+        """Normalize naive and aware datetimes to KST for safe comparisons."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=KST)
+        return value.astimezone(KST)
+
     @classmethod
     def _is_expired(cls, ev: AdmissionEvent, now: datetime) -> bool:
         """expires_at takes precedence; otherwise an event dated before today is expired."""
+        now_kst = cls._to_kst(now)
         if ev.expires_at is not None:
-            return ev.expires_at < now
+            return cls._to_kst(ev.expires_at) < now_kst
         ev_date = cls._parse_event_date(ev.event_date_str)
-        return ev_date is not None and ev_date.date() < now.date()
+        return ev_date is not None and ev_date.date() < now_kst.date()
 
     def get_events_by_category(
         self,
@@ -629,7 +827,7 @@ class AdmissionDatabase:
 
         Policy notices / breaking news / weekly digests are not attendable events and are excluded.
         """
-        now = now or datetime.now()
+        now = self._to_kst(now or datetime.now(KST))
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -665,6 +863,36 @@ class AdmissionDatabase:
 
     # --- Dispatch Log Methods ---
 
+    def claim_dispatch_slot(self, briefing_id: str, chat_id: str) -> bool:
+        """Atomically claim one recipient slot before any network send."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO admission_dispatch_logs (
+                    log_id, briefing_id, chat_id, dispatched_at, status
+                ) VALUES (?, ?, ?, ?, 'CLAIMED')
+                """,
+                (str(uuid.uuid4()), briefing_id, str(chat_id), datetime.now(KST).isoformat()),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_dispatch_status(self, briefing_id: str, chat_id: str, status: str) -> bool:
+        """Advance a claimed slot to SENT/UNKNOWN/FAILED without replacing its claim."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE admission_dispatch_logs
+                SET dispatched_at = ?, status = ?
+                WHERE briefing_id = ? AND chat_id = ? AND status = 'CLAIMED'
+                """,
+                (datetime.now(KST).isoformat(), status, briefing_id, str(chat_id)),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def log_dispatch(self, briefing_id: str, chat_id: str, status: str = "SUCCESS") -> None:
         """Records successful or failed dispatch to prevent re-sending."""
         with self._get_connection() as conn:
@@ -679,7 +907,7 @@ class AdmissionDatabase:
                     str(uuid.uuid4()),
                     briefing_id,
                     str(chat_id),
-                    datetime.now().isoformat(),
+                    datetime.now(KST).isoformat(),
                     status,
                 ),
             )
@@ -690,7 +918,7 @@ class AdmissionDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT 1 FROM admission_dispatch_logs WHERE briefing_id = ? AND chat_id = ? AND status = 'SUCCESS'",
+                "SELECT 1 FROM admission_dispatch_logs WHERE briefing_id = ? AND chat_id = ? AND status IN ('SUCCESS', 'SENT')",
                 (briefing_id, str(chat_id)),
             )
             return cursor.fetchone() is not None

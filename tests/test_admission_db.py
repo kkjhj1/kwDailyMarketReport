@@ -1,6 +1,7 @@
 """Unit tests for AdmissionDatabase with isolated in-memory SQLite."""
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from admission_brief.models import (
     AdmissionEvent,
     BriefingType,
@@ -87,7 +88,7 @@ def test_event_save_and_ticketing_query():
         organizer="시대인재",
         target_grade=TargetGrade.MIDDLE,
         event_type=BriefingType.TICKETING_ALERT,
-        event_date_str="2026-11-20 19:00",
+        event_date_str=(datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d 19:00"),
         is_first_come=True,
         booking_url="https://sdij.com/test",
         summary_3lines=["A", "B", "C"],
@@ -207,8 +208,10 @@ def test_get_events_by_category_paging():
     assert p3 == []
 
 
-def test_additive_migration_on_legacy_events_table(tmp_path):
-    legacy = tmp_path / "legacy_admission.db"
+def test_additive_migration_on_legacy_events_table():
+    legacy = Path.cwd() / "legacy_admission_events_test.db"
+    if legacy.exists():
+        legacy.unlink()
     conn = sqlite3.connect(str(legacy))
     conn.execute(
         """
@@ -236,3 +239,8 @@ def test_additive_migration_on_legacy_events_table(tmp_path):
     assert old.expires_at is None
     events, total = db.get_events_by_category(EventCategory.BRIEFING, now=_NOW)
     assert total == 1 and events[0].event_id == "old1"
+    del db
+    try:
+        legacy.unlink(missing_ok=True)
+    except PermissionError:
+        pass

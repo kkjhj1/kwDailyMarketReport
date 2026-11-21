@@ -7,11 +7,12 @@ import html
 import logging
 import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from market_brief.channels.http_keepalive import answer_callback_once, callback_ack_scope
 
 from admission_brief.ai_curator import AICurator
+from admission_brief.catalog import KnowledgeCatalog, KnowledgeCard
 from admission_brief.channels.telegram import (
     TelegramChannel,
     _is_valid_url,
@@ -30,6 +31,8 @@ from admission_brief.models import (
     BriefingType,
     ChildProfile,
     EventCategory,
+    EducationStage,
+    GradeLevel,
     ParentUserProfile,
     TargetGrade,
     TargetRegion,
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 EVENTS_PAGE_SIZE = 3
 GLOSSARY_COLUMNS = 3
 CALLBACK_MAX_BYTES = 64
+GUIDE_MENU_TEXT = "📚 학습 가이드"
 GLOSSARY_MENU_TEXT = "📖 1초 입시용어 사전"
 SETTINGS_MENU_TEXT = "⚙️ 자녀 및 맞춤 설정"
 SHARE_TOAST = "📋 아래 박스를 터치하면 복사됩니다!"
@@ -54,6 +58,15 @@ CATEGORY_CODES: dict[str, EventCategory] = {
 CATEGORY_TO_CODE: dict[EventCategory, str] = {v: k for k, v in CATEGORY_CODES.items()}
 
 
+def cb(raw: str) -> str:
+    """Validate Telegram callback_data without silently truncating it."""
+    if not isinstance(raw, str) or not raw or not raw.isascii() or any(ord(char) < 0x21 or ord(char) >= 0x7F for char in raw):
+        raise ValueError("callback_data must be non-empty ASCII")
+    if len(raw.encode("utf-8")) > CALLBACK_MAX_BYTES:
+        raise ValueError("callback_data must be at most 64 UTF-8 bytes")
+    return raw
+
+
 # Legacy bottom reply-keyboard texts; still matched as text aliases by the message handler.
 LEGACY_REPLY_KEYBOARD_TEXTS: tuple[str, ...] = (
     "📋 이번 주 필수 To-Do",
@@ -63,6 +76,7 @@ LEGACY_REPLY_KEYBOARD_TEXTS: tuple[str, ...] = (
     "🎓 학년/지역 설정",
     "❓ 이용 도움말",
     GLOSSARY_MENU_TEXT,
+    GUIDE_MENU_TEXT,
     SETTINGS_MENU_TEXT,
 )
 
@@ -82,31 +96,37 @@ def build_main_menu_inline_keyboard() -> dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "📋 이번 주 To-Do", "callback_data": "adm:todo"},
-                {"text": "⚡ 핫 행사 TOP 3", "callback_data": "adm:hot"},
+                {"text": "📋 이번 주 To-Do", "callback_data": cb("adm:todo")},
+                {"text": "⚡ 핫 행사 TOP 3", "callback_data": cb("adm:hot")},
             ],
             [
-                {"text": "💡 입시 팩트체크", "callback_data": "adm:fact"},
-                {"text": "🎪 설명회·박람회", "callback_data": "adm:menu"},
+                {"text": "💡 입시 팩트체크", "callback_data": cb("adm:fact")},
+                {"text": "🎪 설명회·박람회", "callback_data": cb("adm:menu")},
             ],
             [
-                {"text": "📖 입시용어 사전", "callback_data": "adm:gl:menu"},
-                {"text": "⚙️ 자녀·맞춤 설정", "callback_data": "adm:settings"},
+                {"text": "📖 입시용어 사전", "callback_data": cb("adm:gl:menu")},
+                {"text": "⚙️ 자녀·맞춤 설정", "callback_data": cb("adm:settings")},
             ],
-            [{"text": "❓ 이용 도움말", "callback_data": "adm:help"}],
+            [{"text": GUIDE_MENU_TEXT, "callback_data": cb("adm:guide:menu")}],
+            [{"text": "❓ 이용 도움말", "callback_data": cb("adm:help")}],
         ]
     }
 
 
-def build_events_category_keyboard() -> dict[str, Any]:
-    """Builds inline keyboard for the three event categories."""
+def build_events_category_keyboard(include_back: bool = False) -> dict[str, Any]:
+    """Build inline category buttons, optionally including a callback to the main menu."""
+    rows = [
+            [{"text": f"{EventCategory.EXPO.icon} {EventCategory.EXPO.title}", "callback_data": cb("adm:cat:EXPO:0")}],
+            [{"text": f"{EventCategory.BRIEFING.icon} {EventCategory.BRIEFING.title}", "callback_data": cb("adm:cat:BRIEF:0")}],
+            [{"text": f"{EventCategory.SEMINAR.icon} {EventCategory.SEMINAR.title}", "callback_data": cb("adm:cat:SEMI:0")}],
+    ]
+    rows.append(
+        [{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]
+        if include_back
+        else [{"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"}]
+    )
     return {
-        "inline_keyboard": [
-            [{"text": f"{EventCategory.EXPO.icon} {EventCategory.EXPO.title}", "callback_data": "adm:cat:EXPO:0"}],
-            [{"text": f"{EventCategory.BRIEFING.icon} {EventCategory.BRIEFING.title}", "callback_data": "adm:cat:BRIEF:0"}],
-            [{"text": f"{EventCategory.SEMINAR.icon} {EventCategory.SEMINAR.title}", "callback_data": "adm:cat:SEMI:0"}],
-            [{"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"}],
-        ]
+        "inline_keyboard": rows
     }
 
 
@@ -128,15 +148,15 @@ def build_events_page_keyboard(
         if include_share:
             share_cb = f"adm:sh:ev:{ev.event_id}"
             if len(share_cb.encode("utf-8")) <= CALLBACK_MAX_BYTES:
-                rows.append([{"text": f"📲 {idx}번 카톡 공유", "callback_data": share_cb}])
+                rows.append([{"text": f"📲 {idx}번 카톡 공유", "callback_data": cb(share_cb)}])
     nav_row = []
     if page > 0:
-        nav_row.append({"text": "◀ 이전", "callback_data": f"adm:cat:{code}:{page - 1}"})
+        nav_row.append({"text": "◀ 이전", "callback_data": cb(f"adm:cat:{code}:{page - 1}")})
     if page < last_page:
-        nav_row.append({"text": "다음 ▶", "callback_data": f"adm:cat:{code}:{page + 1}"})
+        nav_row.append({"text": "다음 ▶", "callback_data": cb(f"adm:cat:{code}:{page + 1}")})
     if nav_row:
         rows.append(nav_row)
-    rows.append([{"text": "🏛 카테고리 목록", "callback_data": "adm:menu"}])
+    rows.append([{"text": "🏛 카테고리 목록", "callback_data": cb("adm:menu")}])
     return {"inline_keyboard": rows}
 
 
@@ -190,20 +210,20 @@ def build_glossary_menu_keyboard() -> dict[str, Any]:
     """15 terms as a 3-column grid (adm:gl:<CODE>) plus a back-to-categories row."""
     entries = list_glossary_entries()
     rows: list[list[dict[str, Any]]] = [
-        [{"text": e.short_name, "callback_data": f"adm:gl:{e.code}"} for e in entries[i:i + GLOSSARY_COLUMNS]]
+        [{"text": e.short_name, "callback_data": cb(f"adm:gl:{e.code}")} for e in entries[i:i + GLOSSARY_COLUMNS]]
         for i in range(0, len(entries), GLOSSARY_COLUMNS)
     ]
-    rows.append([{"text": "🏛 카테고리 목록", "callback_data": "adm:menu"}])
+    rows.append([{"text": "🏛 카테고리 목록", "callback_data": cb("adm:menu")}])
     return {"inline_keyboard": rows}
 
 
 def build_glossary_detail_keyboard(entry: GlossaryEntry) -> dict[str, Any]:
     return {
         "inline_keyboard": [
-            [{"text": "📲 카톡 공유용 요약", "callback_data": f"adm:sh:gl:{entry.code}"}],
+            [{"text": "📲 카톡 공유용 요약", "callback_data": cb(f"adm:sh:gl:{entry.code}")}],
             [
-                {"text": "📚 다른 용어 보기", "callback_data": "adm:gl:menu"},
-                {"text": "🏛 카테고리 목록", "callback_data": "adm:menu"},
+                {"text": "📚 다른 용어 보기", "callback_data": cb("adm:gl:menu")},
+                {"text": "🏛 카테고리 목록", "callback_data": cb("adm:menu")},
             ],
         ]
     }
@@ -238,21 +258,81 @@ def build_grade_inline_keyboard(include_back: bool = False) -> dict[str, Any]:
     """Builds inline keyboard markup for grade selection."""
     rows = [
         [
-            {"text": "📘 중등 / 예비고1", "callback_data": "grade:MIDDLE"},
+            {"text": "📘 중등 / 예비고1", "callback_data": cb("grade:MIDDLE")},
         ],
         [
-            {"text": "📗 고1 ~ 고2", "callback_data": "grade:HIGH_1_2"},
+            {"text": "📗 고1 ~ 고2", "callback_data": cb("grade:HIGH_1_2")},
         ],
         [
-            {"text": "📕 고3 / N수생", "callback_data": "grade:HIGH_3_N"},
+            {"text": "📕 고3 / N수생", "callback_data": cb("grade:HIGH_3_N")},
         ],
         [
-            {"text": "🌐 전학년 공통 알림", "callback_data": "grade:ALL"},
+            {"text": "🌐 전학년 공통 알림", "callback_data": cb("grade:ALL")},
         ],
     ]
     if include_back:
-        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}])
+        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": cb("adm:settings")}])
     return {"inline_keyboard": rows}
+
+
+def build_stage_inline_keyboard(include_back: bool = False) -> dict[str, Any]:
+    """First step of the additive stage -> exact grade picker."""
+    rows = [
+        [{"text": "🌱 초등", "callback_data": cb("adm:stage:ELEMENTARY")}],
+        [{"text": "📘 중등", "callback_data": cb("adm:stage:MIDDLE")}],
+        [{"text": "📗 고등", "callback_data": cb("adm:stage:HIGH")}],
+        [{"text": "🎓 고등 이후 / N수", "callback_data": cb("adm:stage:POST_HIGH")}],
+        [{"text": "🌐 전 학년 공통", "callback_data": cb("adm:stage:ALL")}],
+        # The legacy choices remain visible and routable for existing subscribers.
+        [
+            {"text": "기존 분류: 중등", "callback_data": cb("grade:MIDDLE")},
+            {"text": "고1~고2", "callback_data": cb("grade:HIGH_1_2")},
+            {"text": "고3/N수", "callback_data": cb("grade:HIGH_3_N")},
+        ],
+        [{"text": "기존 분류: 전체", "callback_data": cb("grade:ALL")}],
+    ]
+    if include_back:
+        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": cb("adm:settings")}])
+    return {"inline_keyboard": rows}
+
+
+def build_level_inline_keyboard(stage: EducationStage, include_back: bool = False) -> dict[str, Any]:
+    """Second step of stage selection; values are short ASCII callback tokens."""
+    stage = stage if isinstance(stage, EducationStage) else EducationStage(stage)
+    levels = {
+        EducationStage.ELEMENTARY: [GradeLevel.E1, GradeLevel.E2, GradeLevel.E3, GradeLevel.E4, GradeLevel.E5, GradeLevel.E6],
+        EducationStage.MIDDLE: [GradeLevel.M1, GradeLevel.M2, GradeLevel.M3],
+        EducationStage.HIGH: [GradeLevel.H1, GradeLevel.H2, GradeLevel.H3, GradeLevel.N],
+        EducationStage.POST_HIGH: [GradeLevel.N],
+        EducationStage.ALL: [GradeLevel.ALL],
+    }[stage]
+    rows = [[{"text": level.label, "callback_data": cb(f"adm:level:{level.value}")}] for level in levels]
+    if include_back:
+        rows.append([{"text": "◀ 단계 다시 선택", "callback_data": cb("menu:grade")}])
+    return {"inline_keyboard": rows}
+
+
+def build_guide_menu_keyboard(cards: Iterable[KnowledgeCard]) -> dict[str, Any]:
+    rows = [[{"text": card.headline[:40], "callback_data": cb(f"adm:guide:{card.content_id}")}] for card in cards]
+    rows.append([{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}])
+    return {"inline_keyboard": rows}
+
+
+def format_guide_card_html(card: KnowledgeCard) -> str:
+    lines = [
+        f"📚 <b>{html.escape(card.headline)}</b>",
+        f"<i>{html.escape(card.topic)}</i>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        *[f"• {html.escape(line)}" for line in card.summary_3lines],
+        "",
+        f"🎯 <b>그래서 중요한 점</b>\n{html.escape(card.so_what)}",
+        "",
+        "✅ <b>이번 주 해볼 일</b>",
+        *[f"• {html.escape(todo)}" for todo in card.action_todos],
+        "",
+        f"출처: <a href=\"{html.escape(card.source_url)}\">{html.escape(card.source_name)}</a>",
+    ]
+    return "\n".join(lines)
 
 
 REGION_SHORT: dict[TargetRegion, str] = {
@@ -275,10 +355,10 @@ def build_child_add_keyboard(slot: int) -> dict[str, Any]:
     """Grade picker for a new child; slot (new child's index) guards against double-tap duplicates."""
     return {
         "inline_keyboard": [
-            [{"text": "📘 중등 / 예비고1", "callback_data": f"adm:cadd:MIDDLE:{slot}"}],
-            [{"text": "📗 고1 ~ 고2", "callback_data": f"adm:cadd:HIGH_1_2:{slot}"}],
-            [{"text": "📕 고3 / N수생", "callback_data": f"adm:cadd:HIGH_3_N:{slot}"}],
-            [{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}],
+            [{"text": "📘 중등 / 예비고1", "callback_data": cb(f"adm:cadd:MIDDLE:{slot}")}],
+            [{"text": "📗 고1 ~ 고2", "callback_data": cb(f"adm:cadd:HIGH_1_2:{slot}")}],
+            [{"text": "📕 고3 / N수생", "callback_data": cb(f"adm:cadd:HIGH_3_N:{slot}")}],
+            [{"text": "⚙️ 설정으로 돌아가기", "callback_data": cb("adm:settings")}],
         ]
     }
 
@@ -287,23 +367,23 @@ def build_region_inline_keyboard(include_back: bool = False) -> dict[str, Any]:
     """Builds inline keyboard markup for region selection."""
     rows = [
         [
-            {"text": "🌐 온라인/유튜브 라이브만", "callback_data": "region:ONLINE"},
+            {"text": "🌐 온라인/유튜브 라이브만", "callback_data": cb("region:ONLINE")},
         ],
         [
-            {"text": "📍 서울 (대치·목동·중계)", "callback_data": "region:SEOUL"},
+            {"text": "📍 서울 (대치·목동·중계)", "callback_data": cb("region:SEOUL")},
         ],
         [
-            {"text": "📍 경기·인천 (분당·일산·평촌)", "callback_data": "region:GYEONGGI"},
+            {"text": "📍 경기·인천 (분당·일산·평촌)", "callback_data": cb("region:GYEONGGI")},
         ],
         [
-            {"text": "📍 비수도권 / 지방 거점", "callback_data": "region:LOCAL"},
+            {"text": "📍 비수도권 / 지방 거점", "callback_data": cb("region:LOCAL")},
         ],
         [
-            {"text": "🏢 전국 전체 (온·오프라인)", "callback_data": "region:ALL"},
+            {"text": "🏢 전국 전체 (온·오프라인)", "callback_data": cb("region:ALL")},
         ],
     ]
     if include_back:
-        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": "adm:settings"}])
+        rows.append([{"text": "⚙️ 설정으로 돌아가기", "callback_data": cb("adm:settings")}])
     return {"inline_keyboard": rows}
 
 
@@ -319,6 +399,7 @@ class AdmissionInteractiveBot:
         self.channel = channel
         self.db = db
         self.curator = curator or AICurator()
+        self._pending_stages: dict[str, EducationStage] = {}
 
     def handle_update(self, update: dict[str, Any]) -> None:
         """Processes a single incoming Telegram update (Message or CallbackQuery)."""
@@ -338,7 +419,7 @@ class AdmissionInteractiveBot:
         username = chat.get("username", "")
         first_name = chat.get("first_name", "")
 
-        # Upsert subscriber on any interaction
+        # Create once, then refresh metadata without overwriting preferences.
         profile = self.db.get_subscriber(chat_id)
         if not profile:
             profile = ParentUserProfile(
@@ -348,7 +429,9 @@ class AdmissionInteractiveBot:
                 registered_at=datetime.now(),
                 last_active_at=datetime.now(),
             )
-            self.db.upsert_subscriber(profile)
+            self.db.create_subscriber_if_absent(profile)
+        else:
+            self.db.touch_subscriber_metadata(chat_id, username=username, first_name=first_name)
 
         # Route commands & friendly Korean natural text touch buttons
         clean_text = text.strip()
@@ -356,6 +439,8 @@ class AdmissionInteractiveBot:
             self._cmd_start(chat_id, first_name)
         elif clean_text == GLOSSARY_MENU_TEXT or clean_text.startswith("/glossary") or "용어" in clean_text:
             self._cmd_glossary_menu(chat_id)
+        elif clean_text == GUIDE_MENU_TEXT or clean_text.startswith("/guide") or "학습가이드" in clean_text or clean_text == "가이드":
+            self._cmd_guide_menu(chat_id)
         elif clean_text == SETTINGS_MENU_TEXT:
             self._cmd_settings(chat_id)
         elif (
@@ -382,7 +467,7 @@ class AdmissionInteractiveBot:
             self.channel.send_message(
                 chat_id,
                 "안녕하세요! 에듀브리프(EduBrief) 입시 비서입니다.\n"
-                "타자를 치실 필요 없이, **아래 메뉴 버튼**을 손가락으로 탭해 주세요! 👇",
+                "타자를 치실 필요 없이, 아래 메뉴 버튼을 손가락으로 탭해 주세요! 👇",
                 reply_markup=build_main_menu_inline_keyboard(),
             )
 
@@ -403,9 +488,9 @@ class AdmissionInteractiveBot:
         )
 
     def _cmd_grade(self, chat_id: str, message_id: Optional[int] = None) -> None:
-        """Presents grade selection inline keyboard."""
+        """Presents additive stage -> grade selection, with legacy choices retained."""
         text = "변경하실 <b>자녀분의 현재 학년</b>을 선택해 주세요:"
-        markup = build_grade_inline_keyboard(include_back=bool(message_id))
+        markup = build_stage_inline_keyboard(include_back=bool(message_id))
         if message_id:
             self._safe_edit_or_send(chat_id, message_id, text, markup)
         else:
@@ -442,8 +527,8 @@ class AdmissionInteractiveBot:
         ])
         rows: list[list[dict[str, Any]]] = [
             [
-                {"text": "🎓 학년 변경하기", "callback_data": "menu:grade"},
-                {"text": "📍 지역/온라인 변경하기", "callback_data": "menu:region"},
+                {"text": "🎓 학년 변경하기", "callback_data": cb("menu:grade")},
+                {"text": "📍 지역/온라인 변경하기", "callback_data": cb("menu:region")},
             ]
         ]
         children = profile.children if profile else []
@@ -451,16 +536,65 @@ class AdmissionInteractiveBot:
             nxt_idx = (profile.active_child_index + 1) % len(children)
             rows.append([{
                 "text": f"👦 {active.alias} ⇄ 👧 {children[nxt_idx].alias} 전환",
-                "callback_data": f"adm:child:toggle:{nxt_idx}:{children[nxt_idx].grade.value}",
+                "callback_data": cb(f"adm:child:toggle:{nxt_idx}:{children[nxt_idx].grade.value}"),
             }])
         if len(children) < MAX_CHILDREN:
-            rows.append([{"text": "➕ 자녀 추가하기", "callback_data": "adm:child:add"}])
+            rows.append([{"text": "➕ 자녀 추가하기", "callback_data": cb("adm:child:add")}])
         markup = {"inline_keyboard": rows}
         text = "\n".join(lines)
         if message_id:
             self._safe_edit_or_send(chat_id, message_id, text, markup)
         else:
             self.channel.send_message(chat_id, text, reply_markup=markup)
+
+    def _cmd_guide_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
+        """Shows pull-based, profile-matched guide cards from the read-only catalog."""
+        profile = self.db.get_subscriber(chat_id)
+        active = profile.get_active_child() if profile else ChildProfile()
+        try:
+            cards = self.curator.catalog.filter(
+                active.education_stage, active.grade_level, card_type="STUDY_GUIDE"
+            )
+        except Exception as exc:
+            logger.warning("Guide catalog unavailable: %s", exc)
+            cards = ()
+        if not cards:
+            text = "📚 <b>학습 가이드</b>\n\n현재 자녀 설정에 맞는 가이드가 없습니다. 설정에서 학년을 확인해 주세요."
+            markup = {"inline_keyboard": [[{"text": "⚙️ 자녀·맞춤 설정", "callback_data": cb("adm:settings")}]]}
+        else:
+            text = (
+                "📚 <b>학습 가이드</b>\n\n"
+                f"현재 설정: <b>{html.escape(active.education_stage.label)} · {html.escape(active.grade_level.label)}</b>\n"
+                "광고 없이, 지금 시기에 필요한 카드만 골라 보세요."
+            )
+            markup = build_guide_menu_keyboard(cards)
+        if message_id:
+            self._safe_edit_or_send(chat_id, message_id, text, markup)
+        else:
+            self.channel.send_message(chat_id, text, reply_markup=markup)
+
+    def _show_guide_card(self, chat_id: str, message_id: Optional[int], content_id: str) -> None:
+        card = self.curator.catalog.get(content_id)
+        profile = self.db.get_subscriber(chat_id)
+        active = profile.get_active_child() if profile else ChildProfile()
+        try:
+            visible = card is not None and any(
+                item.content_id == content_id for item in self.curator.catalog.filter(
+                    active.education_stage, active.grade_level, card_type=card.card_type if card else None
+                )
+            )
+        except Exception:
+            visible = False
+        if card is None or card.status != "PUBLISHED" or not visible:
+            self._cmd_guide_menu(chat_id, message_id)
+            return
+        self._safe_edit_or_send(
+            chat_id, message_id, format_guide_card_html(card),
+            {"inline_keyboard": [
+                [{"text": "📚 다른 가이드 보기", "callback_data": cb("adm:guide:menu")}],
+                [{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}],
+            ]},
+        )
 
     def _toggle_child(self, chat_id: str, message_id: Optional[int], data: str) -> None:
         """adm:child:toggle[:<IDX>:<GRADE>] — switches to the encoded child (idempotent on double-tap),
@@ -528,11 +662,14 @@ class AdmissionInteractiveBot:
         """Sends the active child's grade-specific weekly action To-Do list."""
         profile = self.db.get_subscriber(chat_id)
         grade = profile.get_active_child().grade if profile else TargetGrade.MIDDLE
-        briefing = self.curator.generate_weekly_todo_briefing(grade)
+        active = profile.get_active_child() if profile else ChildProfile(grade=grade)
+        briefing = self.curator.generate_weekly_todo_briefing(
+            grade, education_stage=active.education_stage, grade_level=active.grade_level
+        )
         if profile and len(profile.children) >= 2:
             briefing.headline = f"[{profile.get_active_child().alias}] {briefing.headline}"
         briefing.silent = True  # Silent push for regular digests
-        share_markup = {"inline_keyboard": [[{"text": "📲 카톡 공유", "callback_data": "adm:sh:todo"}]]}
+        share_markup = {"inline_keyboard": [[{"text": "📲 카톡 공유", "callback_data": cb("adm:sh:todo")}]]}
         self.channel.send(chat_id, briefing, reply_markup=share_markup)
 
     def _cmd_glossary_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
@@ -584,8 +721,8 @@ class AdmissionInteractiveBot:
         welcome_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "⚡ 핫 행사 TOP 3", "callback_data": "adm:hot"},
-                    {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
+                    {"text": "⚡ 핫 행사 TOP 3", "callback_data": cb("adm:hot")},
+                    {"text": "🎪 설명회·박람회 전체보기", "callback_data": cb("adm:menu")},
                 ]
             ]
         }
@@ -617,7 +754,10 @@ class AdmissionInteractiveBot:
         """Presents the latest verified 1-minute admission policy factcheck."""
         profile = self.db.get_subscriber(chat_id)
         grade = profile.get_active_child().grade if profile else TargetGrade.ALL
-        briefing = self.curator.get_latest_factcheck(grade)
+        active = profile.get_active_child() if profile else ChildProfile(grade=grade)
+        briefing = self.curator.get_latest_factcheck(
+            grade, education_stage=active.education_stage, grade_level=active.grade_level
+        )
         briefing.silent = True
         self.channel.send(chat_id, briefing)
 
@@ -632,32 +772,18 @@ class AdmissionInteractiveBot:
             briefing.silent = True
             self.channel.send(chat_id, briefing)
         else:
-            sample_briefing = AdmissionBriefing(
-                briefing_id="recap_sample",
-                briefing_type=BriefingType.BRIEFING_RECAP,
-                target_grade=grade,
-                headline="2028 대입 개편 대비 대치동 주요 설명회 핵심 총정리",
-                summary_3lines=[
-                    "고교학점제 시행 후 상위권 대학은 '세특' 실질 반영률 40% 이상 확대",
-                    "일반고 1등급보다 주요 전국 자사고 2등급이 서울대/연고대 지원에 유리",
-                    "이번 겨울방학 '통합사회·통합과학' 1회독 안 끝내면 고1 내신 방어 불가",
-                ],
-                so_what="내신 등급제가 9등급에서 5등급으로 완화되면서, 심화과목 이수와 세특 영향력이 절대적입니다.",
-                action_todos=[
-                    "이번 주말 관내 고등학교 진학 실적 및 교육과정 편제표 비교",
-                    "대치동 예비고1 단과반 레벨테스트 신청 마감 확인",
-                ],
-                source_name="대치동 주요 입시센터 분석 자료",
-                source_url="https://www.adiga.kr",
-                silent=True,
+            self.channel.send_message(
+                chat_id,
+                "📭 현재 등록된 최신 설명회·티켓팅 정보가 없습니다.\n"
+                "공식 행사 정보가 수집되면 이 메뉴에서 바로 확인하실 수 있습니다.",
+                reply_markup=build_main_menu_inline_keyboard(),
             )
-            self.channel.send(chat_id, sample_briefing)
 
     def _cmd_help(self, chat_id: str) -> None:
         """Presents help and official channel links with the inline main menu card."""
         help_text = (
             "📌 <b>에듀브리프 (EduBrief) 간편 사용 안내</b>\n\n"
-            "타자를 치실 필요 없이, **아래 메뉴 버튼**을 손가락으로 누르시면 됩니다!\n\n"
+            "타자를 치실 필요 없이, 아래 메뉴 버튼을 손가락으로 누르시면 됩니다!\n\n"
             "▪ <b>📋 이번 주 필수 To-Do</b>: 내 아이 학년별 이번 주 꼭 실천해야 할 3가지\n"
             "▪ <b>⚡ 긴급 속보 & 핫 행사 TOP 3</b>: 실시간 정책 발표 및 선착순 마감 임박 행사\n"
             "▪ <b>💡 1분 입시 팩트체크</b>: 교육부 발표 및 대입 개편안의 실질 득실 (So-What)\n"
@@ -681,7 +807,7 @@ class AdmissionInteractiveBot:
             f"🎯 맞춤 필터: <b>{html.escape(grade.label)}</b> · {html.escape(region.label)}\n\n"
             "👇 보고 싶은 행사 유형을 탭해 주세요:"
         )
-        markup = build_events_category_keyboard()
+        markup = build_events_category_keyboard(include_back=True)
         if message_id:
             self._safe_edit_or_send(chat_id, message_id, text, markup)
         else:
@@ -738,6 +864,14 @@ class AdmissionInteractiveBot:
                 return f"✅ {TargetGrade(data.split(':', 1)[1]).label} 설정 완료!"
             if data.startswith("region:"):
                 return f"✅ {TargetRegion(data.split(':', 1)[1]).label} 설정 완료!"
+            if data.startswith("adm:stage:"):
+                return "🎓 학년 단계를 선택했습니다. 세부 학년을 골라 주세요."
+            if data.startswith("adm:level:"):
+                return "✅ 세부 학년을 선택했습니다. 지역을 골라 주세요."
+            if data == "adm:guide:menu":
+                return "📚 학습 가이드를 불러옵니다."
+            if data.startswith("adm:guide:"):
+                return "📚 학습 가이드를 엽니다."
             if data.startswith("adm:sh:"):
                 return SHARE_TOAST
             if data.startswith("adm:child:toggle:"):
@@ -762,9 +896,9 @@ class AdmissionInteractiveBot:
         with callback_ack_scope(cb.get("id", "")):
             self._handle_callback_query_scoped(cb)
 
-    def _handle_callback_query_scoped(self, cb: dict[str, Any]) -> None:
-        cb_id = cb["id"]
-        data = cb.get("data", "")
+    def _handle_callback_query_scoped(self, callback: dict[str, Any]) -> None:
+        cb_id = callback["id"]
+        data = callback.get("data", "")
 
         # [TG-04] Acknowledge first to clear the loading spinner before any DB work (exactly once)
         toast = self._callback_toast(data)
@@ -773,15 +907,15 @@ class AdmissionInteractiveBot:
         else:
             answer_callback_once(cb_id, lambda: self.channel.answer_callback_query(cb_id))
 
-        msg = cb.get("message") or {}
+        msg = callback.get("message") or {}
         chat = msg.get("chat") or {}
-        chat_id = str(chat.get("id") or cb.get("from", {}).get("id") or "")
+        chat_id = str(chat.get("id") or callback.get("from", {}).get("id") or "")
         message_id = msg.get("message_id")
 
         # Ensure subscriber profile exists in DB before updating preferences
         profile = self.db.get_subscriber(chat_id)
         if not profile:
-            from_u = cb.get("from") or {}
+            from_u = callback.get("from") or {}
             profile = ParentUserProfile(
                 chat_id=chat_id,
                 username=from_u.get("username", "") or chat.get("username", ""),
@@ -789,10 +923,48 @@ class AdmissionInteractiveBot:
                 registered_at=datetime.now(),
                 last_active_at=datetime.now(),
             )
-            self.db.upsert_subscriber(profile)
+            self.db.create_subscriber_if_absent(profile)
 
-        # 1. Grade selection
-        if data.startswith("grade:"):
+        # 1. Additive stage -> exact grade selection. Pending stage is local and
+        # short-lived; level callbacks also infer their stage for stateless clients.
+        if data.startswith("adm:stage:"):
+            try:
+                stage = EducationStage(data.split(":", 2)[2])
+                self._pending_stages[chat_id] = stage
+                self._safe_edit_or_send(
+                    chat_id, message_id,
+                    f"🎓 <b>{html.escape(stage.label)}</b> 세부 학년을 선택해 주세요:",
+                    build_level_inline_keyboard(stage, include_back=True),
+                )
+            except (ValueError, IndexError):
+                self._cmd_grade(chat_id, message_id)
+
+        elif data.startswith("adm:level:"):
+            try:
+                level = GradeLevel(data.split(":", 2)[2])
+                stage = self._pending_stages.pop(chat_id, None)
+                if stage is None:
+                    stage = (
+                        EducationStage.ELEMENTARY if level.value.startswith("E")
+                        else EducationStage.MIDDLE if level.value.startswith("M")
+                        else EducationStage.HIGH if level in (GradeLevel.H1, GradeLevel.H2, GradeLevel.H3)
+                        else EducationStage.POST_HIGH if level == GradeLevel.N
+                        else EducationStage.ALL
+                    )
+                if not self.db.update_subscriber_stage_level(chat_id, stage, level):
+                    raise ValueError("subscriber stage update failed")
+                next_step_text = (
+                    f"✅ <b>{html.escape(stage.label)} · {html.escape(level.label)}</b> 설정 완료!\n\n"
+                    "👇 희망하시는 설명회 지역 또는 온라인 전용 여부를 선택해 주세요:"
+                )
+                markup = build_region_inline_keyboard()
+                markup["inline_keyboard"].append([{"text": "📋 변경된 학년 To-Do 바로보기", "callback_data": cb("adm:todo")}])
+                self._safe_edit_or_send(chat_id, message_id, next_step_text, markup)
+            except (ValueError, IndexError):
+                self._cmd_grade(chat_id, message_id)
+
+        # 2. Legacy grade selection
+        elif data.startswith("grade:"):
             grade_val = data.split(":", 1)[1]
             try:
                 target_grade = TargetGrade(grade_val)
@@ -804,7 +976,7 @@ class AdmissionInteractiveBot:
                 )
                 markup = build_region_inline_keyboard()
                 markup["inline_keyboard"].append(
-                    [{"text": "📋 변경된 학년 To-Do 바로보기", "callback_data": "adm:todo"}]
+                    [{"text": "📋 변경된 학년 To-Do 바로보기", "callback_data": cb("adm:todo")}]
                 )
                 if message_id:
                     self.channel.edit_message_text(
@@ -817,7 +989,7 @@ class AdmissionInteractiveBot:
                 logger.error("Failed to update grade: %s", e)
                 self.channel.send_message(chat_id, "⚠️ 학년 설정 처리 중 오류가 발생했습니다. 다시 시도해 주세요.")
 
-        # 2. Region selection
+        # 3. Region selection
         elif data.startswith("region:"):
             region_val = data.split(":", 1)[1]
             try:
@@ -834,10 +1006,10 @@ class AdmissionInteractiveBot:
                 )
                 region_done_markup = {
                     "inline_keyboard": [
-                        [{"text": "📋 직전 발송 맞춤 브리핑(To-Do) 정보보기", "callback_data": "adm:todo"}],
+                        [{"text": "📋 직전 발송 맞춤 브리핑(To-Do) 정보보기", "callback_data": cb("adm:todo")}],
                         [
-                            {"text": "⚡ 핫 행사 TOP 3 보기", "callback_data": "adm:hot"},
-                            {"text": "🎪 설명회·박람회 전체보기", "callback_data": "adm:menu"},
+                            {"text": "⚡ 핫 행사 TOP 3 보기", "callback_data": cb("adm:hot")},
+                            {"text": "🎪 설명회·박람회 전체보기", "callback_data": cb("adm:menu")},
                         ],
                     ]
                 }
@@ -859,7 +1031,7 @@ class AdmissionInteractiveBot:
                     reply_markup=build_remove_reply_keyboard(),
                 )
 
-        # 3. Settings Menu Navigation
+        # 4. Settings Menu Navigation
         elif data == "menu:grade" or data.startswith("info:retarget"):
             self._cmd_grade(chat_id, message_id)
         elif data == "menu:region":
@@ -867,7 +1039,7 @@ class AdmissionInteractiveBot:
         elif data == "adm:settings":
             self._cmd_settings(chat_id, message_id)
 
-        # 3-1. Multi-child switch / add (adm:child:toggle[:<IDX>:<GRADE>], adm:child:add, adm:cadd:<GRADE>[:<SLOT>])
+        # 4-1. Multi-child switch / add (adm:child:toggle[:<IDX>:<GRADE>], adm:child:add, adm:cadd:<GRADE>[:<SLOT>])
         elif data.startswith("adm:child:toggle"):
             self._toggle_child(chat_id, message_id, data)
         elif data == "adm:child:add":
@@ -875,7 +1047,7 @@ class AdmissionInteractiveBot:
         elif data.startswith("adm:cadd:"):
             self._add_child(chat_id, message_id, data)
 
-        # 4. Welcome / preview shortcuts (manual requests are not logged as dispatches)
+        # 5. Welcome / preview shortcuts (manual requests are not logged as dispatches)
         elif data == "adm:hot":
             self._cmd_hot_events(chat_id)
         elif data == "adm:todo":
@@ -884,17 +1056,23 @@ class AdmissionInteractiveBot:
             self._cmd_factcheck(chat_id)
         elif data == "adm:help":
             self._cmd_help(chat_id)
+        elif data == "adm:guide:menu":
+            self._cmd_guide_menu(chat_id, message_id)
+        elif data.startswith("adm:guide:"):
+            self._show_guide_card(chat_id, message_id, data.split(":", 2)[2])
 
-        # 5. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
+        # 6. Event category browsing (adm:menu / adm:cat:<CODE>:<PAGE>)
         elif data == "adm:menu":
             self._cmd_events_menu(chat_id, message_id)
+        elif data == "adm:main":
+            self._safe_edit_or_send(chat_id, message_id, "🎓 에듀브리프 메인 메뉴입니다.", build_main_menu_inline_keyboard())
         elif data.startswith("adm:cat:"):
             parts = data.split(":")
             code = parts[2] if len(parts) > 2 else ""
             page_str = parts[3] if len(parts) > 3 else "0"
             self._show_events_page(chat_id, message_id, code, page_str)
 
-        # 6. Glossary (adm:gl:menu / adm:gl:<CODE>) and one-tap Kakao share cards (adm:sh:...)
+        # 7. Glossary (adm:gl:menu / adm:gl:<CODE>) and one-tap Kakao share cards (adm:sh:...)
         elif data == "adm:gl:menu":
             self._cmd_glossary_menu(chat_id, message_id)
         elif data.startswith("adm:gl:"):

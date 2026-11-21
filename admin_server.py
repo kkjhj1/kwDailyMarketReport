@@ -20,7 +20,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,7 @@ from market_brief.schedule_manager import (
 )
 from market_brief.storage.db import DEFAULT_THRESHOLDS, MarketBriefDatabase
 from market_brief.storage.models import JobFinalStatus, Recipient
+from market_brief.bot_visibility import is_public_bot_id, is_wip_bot_id
 from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
 from market_brief.briefing_service import generate_bot_briefing, send_bot_test_message
 from market_brief.subscription_engine import SubscriptionEngine
@@ -88,6 +89,18 @@ def verify_admin_token(request: Request) -> None:
     expected = os.environ.get("ADMIN_API_TOKEN", "").strip()
     if not expected:
         return
+    token = request.headers.get("X-Admin-Token", "").strip()
+    if not token:
+        token = request.query_params.get("admin_token", "").strip()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="유효한 관리자 인증 토큰(X-Admin-Token)이 필요합니다.")
+
+
+def verify_admission_admin_token(request: Request) -> None:
+    """Fail-closed auth dependency for all Admission admin API routes."""
+    expected = os.environ.get("ADMIN_API_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="입시 관리자 API 토큰이 설정되지 않았습니다.")
     token = request.headers.get("X-Admin-Token", "").strip()
     if not token:
         token = request.query_params.get("admin_token", "").strip()
@@ -172,6 +185,7 @@ class AdmissionDispatchRequest(BaseModel):
     target_region: str = "ALL"
     dry_run: bool = False
     silent: bool | None = None
+    confirm_live: bool = False
 
 
 class ThresholdRequest(BaseModel):
@@ -506,6 +520,11 @@ def create_admin_app(
         worker_statuses = bot_manager.get_worker_statuses()
         for b in bots:
             b["worker_running"] = bool(worker_statuses.get(b["bot_id"], {}).get("worker_running"))
+            b["visibility"] = (
+                "PUBLIC" if is_public_bot_id(b["bot_id"])
+                else "WIP" if is_wip_bot_id(b["bot_id"])
+                else "CUSTOM"
+            )
         return {"bots": bots}
 
     @app.post("/api/platform/bots")
@@ -688,6 +707,12 @@ def create_admin_app(
             "audit_logs": sub_engine.list_audit_logs(user_id=uid, limit=30)["logs"],
             "delivery_history": sub_engine.get_user_delivery_history(chat_id=uid, limit=20),
         }
+
+    @app.get("/api/platform/users/{user_id}/bot-context")
+    def get_platform_user_bot_context(user_id: str, request: Request):
+        verify_admin_token(request)
+        uid = str(user_id).strip()
+        return {"user_id": uid, **db.get_user_bot_context(uid)}
 
     @app.get("/api/platform/audit-logs")
     def list_platform_audit_logs(
@@ -1656,7 +1681,7 @@ def create_admin_app(
 
     if _HAS_ADMISSION_MODULE and adm_db and adm_curator:
         @app.get("/api/admission/status")
-        def get_admission_status():
+        def get_admission_status(_auth: None = Depends(verify_admission_admin_token)):
             subscribers = adm_db.list_subscribers(active_only=True)
             events = adm_db.list_all_events()
             token = os.environ.get("ADMISSION_TELEGRAM_BOT_TOKEN") or get_bot_token()
@@ -1681,15 +1706,15 @@ def create_admin_app(
             }
 
         @app.get("/api/admission/subscribers")
-        def list_admission_subscribers():
+        def list_admission_subscribers(_auth: None = Depends(verify_admission_admin_token)):
             return {"subscribers": [s.to_dict() for s in adm_db.list_subscribers(active_only=False)]}
 
         @app.get("/api/admission/events")
-        def list_admission_events():
+        def list_admission_events(_auth: None = Depends(verify_admission_admin_token)):
             return {"events": [e.to_dict() for e in adm_db.list_all_events()]}
 
         @app.post("/api/admission/events")
-        def create_admission_event(req: AdmissionEventCreateRequest):
+        def create_admission_event(req: AdmissionEventCreateRequest, _auth: None = Depends(verify_admission_admin_token)):
             event = AdmissionEvent(
                 event_id=f"evt_adm_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                 title=req.title,
@@ -1710,13 +1735,15 @@ def create_admin_app(
             return {"success": True, "event": event.to_dict()}
 
         @app.post("/api/admission/collect")
-        def collect_admission_events():
+        def collect_admission_events(_auth: None = Depends(verify_admission_admin_token)):
             collector = AdmissionCollector(db=adm_db, curator=adm_curator)
             results = collector.run_collection()
             return {"success": True, **results}
 
         @app.post("/api/admission/dispatch")
-        def dispatch_admission_briefing(req: AdmissionDispatchRequest):
+        def dispatch_admission_briefing(req: AdmissionDispatchRequest, _auth: None = Depends(verify_admission_admin_token)):
+            if not req.dry_run and req.confirm_live is not True:
+                raise HTTPException(status_code=400, detail="실사용자 발송에는 confirm_live=true가 필요합니다.")
             target_grade = TargetGrade(req.target_grade)
             target_region = TargetRegion(req.target_region)
             if req.event_id:

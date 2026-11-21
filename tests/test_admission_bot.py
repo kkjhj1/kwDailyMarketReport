@@ -1,6 +1,7 @@
 """Unit tests for Admission Telegram Bot transport and interactive handlers."""
 import io
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 from admission_brief.ai_curator import AICurator
 from admission_brief.channels.telegram import (
@@ -188,7 +189,7 @@ def test_main_menu_inline_keyboard_routes_to_known_callbacks():
     kb = build_main_menu_inline_keyboard()
     assert "keyboard" not in kb
     cbs = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
-    assert set(cbs) == {"adm:todo", "adm:hot", "adm:fact", "adm:menu", "adm:gl:menu", "adm:settings", "adm:help"}
+    assert set(cbs) == {"adm:todo", "adm:hot", "adm:fact", "adm:menu", "adm:gl:menu", "adm:settings", "adm:guide:menu", "adm:help"}
     assert all(len(row) <= 2 for row in kb["inline_keyboard"])
     assert all(len(cb.encode("utf-8")) <= 64 for cb in cbs)
 
@@ -220,20 +221,20 @@ def test_interactive_bot_korean_text_touch_buttons():
     assert chat_id == "777"
     assert briefing.target_grade == TargetGrade.HIGH_1_2
 
-    # 2. Tap "⚡ 긴급 속보 & 핫 행사 TOP 3" (fetches top 3 events)
+    # 2. Tap "⚡ 긴급 속보 & 핫 행사 TOP 3" (empty state when DB has no current events)
     bot.handle_update({
         "update_id": 202,
         "message": {"message_id": 11, "chat": {"id": 777}, "text": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
     })
-    # 1 (todo) + 3 (top3 events) = 4 sends
-    assert mock_channel.send.call_count == 4
+    assert mock_channel.send.call_count == 1
+    mock_channel.send_message.assert_called_once()
 
     # 3. Tap "💡 1분 입시 팩트체크 (So-What)"
     bot.handle_update({
         "update_id": 203,
         "message": {"message_id": 12, "chat": {"id": 777}, "text": "💡 1분 입시 팩트체크 (So-What)"},
     })
-    assert mock_channel.send.call_count == 5
+    assert mock_channel.send.call_count == 2
     last_chat_id, last_briefing = mock_channel.send.call_args[0]
     assert last_chat_id == "777"
     assert last_briefing.briefing_type == BriefingType.POLICY_TRANSLATE
@@ -291,13 +292,13 @@ def test_events_menu_text_routing():
         bot.handle_update({"update_id": 1, "message": {"chat": {"id": 888}, "text": text}})
         mock_channel.send_message.assert_called_once()
         _, kwargs = mock_channel.send_message.call_args
-        assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+        assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:main"]
 
-    # Existing hot-events button still routes to TOP 3 (channel.send), not the events menu
+    # Existing hot-events button still routes to TOP 3; with no current data it returns a clean empty state.
     mock_channel.reset_mock()
     bot.handle_update({"update_id": 2, "message": {"chat": {"id": 888}, "text": "⚡ 긴급 속보 & 핫 행사 TOP 3"}})
-    mock_channel.send_message.assert_not_called()
-    assert mock_channel.send.call_count >= 1
+    mock_channel.send.assert_not_called()
+    mock_channel.send_message.assert_called_once()
 
 
 def test_callback_answer_precedes_db_access():
@@ -356,7 +357,7 @@ def test_category_page_navigation_in_place():
     # Back to category list
     bot.handle_update(_cb("adm:menu"))
     _, kwargs = mock_channel.edit_message_text.call_args
-    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:main"]
 
 
 def test_category_page_empty_and_edit_fallback():
@@ -601,13 +602,16 @@ def test_grade_change_messages_and_touch_keyboard():
     assert args[0] == "888" and "자녀분의 현재 학년" in args[1]
 
 
-def test_multi_bot_manager_dispatches_admission_message_and_callbacks(tmp_path):
+def test_multi_bot_manager_dispatches_admission_message_and_callbacks():
     """MultiBotManager must dispatch both messages and callbacks to AdmissionInteractiveBot."""
     from market_brief.multi_bot_manager import DynamicBotManager
     from market_brief.storage.db import MarketBriefDatabase
     from market_brief.subscription_engine import SubscriptionEngine
 
-    db = MarketBriefDatabase(db_path=str(tmp_path / "test.sqlite3"))
+    db_path = Path.cwd() / "admission_manager_test.db"
+    if db_path.exists():
+        db_path.unlink()
+    db = MarketBriefDatabase(db_path=str(db_path))
     engine = SubscriptionEngine(db)
     manager = DynamicBotManager(engine)
 
@@ -644,4 +648,9 @@ def test_multi_bot_manager_dispatches_admission_message_and_callbacks(tmp_path):
     handled, reason = manager._dispatch_admission_bot_update("fake_token", msg_item, opener=mock_opener)
     assert handled is True
     assert reason == "admission_message_handled"
+    del manager, engine, db
+    import gc
+    gc.collect()
+    if db_path.exists():
+        db_path.unlink()
 

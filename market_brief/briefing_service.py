@@ -374,14 +374,10 @@ def _generate_bot_briefing_uncached(bot_id: str, preset: Optional[str] = None, d
             from admission_brief.ai_curator import AICurator
             from admission_brief.models import TargetGrade, BriefingType
             from admission_brief.channels.telegram import format_admission_html
-            from admission_brief.storage.db import AdmissionDatabase
+            from admission_brief.storage.db import AdmissionDatabase, resolve_admission_db_path
 
             curator = AICurator()
-            adm_db_path = getattr(db, "db_path", None)
-            if not adm_db_path or str(adm_db_path) == ":memory:":
-                adm_db_path = ":memory:"
-            elif not Path(adm_db_path).exists() and (ROOT_DIR / "data/admission_brief.db").exists():
-                adm_db_path = str(ROOT_DIR / "data/admission_brief.db")
+            adm_db_path = resolve_admission_db_path(getattr(db, "db_path", None))
             adm_db = AdmissionDatabase(db_path=adm_db_path)
 
             if preset_id == "ticketing":

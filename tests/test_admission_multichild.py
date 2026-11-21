@@ -2,6 +2,7 @@
 import sqlite3
 import urllib.parse
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from admission_brief.channels.telegram import GCAL_MAX_URL_BYTES, TelegramChannel, build_google_calendar_url
@@ -89,8 +90,10 @@ def test_parent_profile_legacy_fallback_and_multi_child():
 
 # --- storage ---
 
-def test_additive_migration_on_legacy_subscribers_table(tmp_path):
-    path = tmp_path / "legacy.db"
+def test_additive_migration_on_legacy_subscribers_table():
+    path = Path.cwd() / "legacy_admission_subscribers_test.db"
+    if path.exists():
+        path.unlink()
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE admission_subscribers (chat_id TEXT PRIMARY KEY, target_grade TEXT NOT NULL DEFAULT 'ALL',"
@@ -109,6 +112,11 @@ def test_additive_migration_on_legacy_subscribers_table(tmp_path):
     assert p.target_grade == TargetGrade.MIDDLE and p.children == [] and p.active_child_index == 0
     assert [s.chat_id for s in db.list_subscribers(grade=TargetGrade.MIDDLE)] == ["7"]
     AdmissionDatabase(db_path=path)  # re-running migration is a no-op
+    del db
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        pass
 
 
 def test_add_child_seeds_first_child_and_caps_at_three():

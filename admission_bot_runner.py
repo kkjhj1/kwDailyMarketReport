@@ -49,7 +49,7 @@ from admission_brief.models import (
     ParentUserProfile,
     TargetGrade,
 )
-from admission_brief.storage.db import AdmissionDatabase
+from admission_brief.storage.db import AdmissionDatabase, resolve_admission_db_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,17 +65,6 @@ def get_admission_bot_token() -> str:
         or os.environ.get("ADMISSION_BOT_TOKEN")
         or os.environ.get("EDU_TELEGRAM_BOT_TOKEN")
         or os.environ.get("TELEGRAM_BOT_TOKEN")
-        or ""
-    ).strip()
-
-
-def get_admission_chat_id() -> str:
-    """Retrieves target chat ID or default recipient."""
-    return (
-        os.environ.get("ADMISSION_TELEGRAM_CHAT_ID")
-        or os.environ.get("ADMISSION_CHAT_ID")
-        or os.environ.get("EDU_TELEGRAM_CHAT_ID")
-        or os.environ.get("TELEGRAM_CHAT_ID")
         or ""
     ).strip()
 
@@ -232,9 +221,11 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Preview output without making Telegram API calls")
     parser.add_argument("--seed-sample", action="store_true", help="Seed sample admission events into database")
     parser.add_argument("--collect", action="store_true", help="Run automated crawler for public & academy notices")
+    parser.add_argument("--recipients", type=str, default="", help="Comma-separated explicit chat IDs (preview or subscribed live targets)")
+    parser.add_argument("--confirm-live", action="store_true", help="Explicitly authorize a live Telegram dispatch")
     parser.add_argument("--grade", type=str, default="MIDDLE", choices=["MIDDLE", "HIGH_1_2", "HIGH_3_N", "ALL"],
                         help="Target student grade for weekly briefing")
-    parser.add_argument("--db-path", type=str, default="data/admission_brief.db", help="SQLite database path")
+    parser.add_argument("--db-path", type=str, default=None, help="SQLite database path (defaults to ADMISSION_DB_PATH or alerts.sqlite3)")
     parser.add_argument("--demo", action="store_true",
                         help="Token-free console demo of the events menu (in-memory DB, no file writes)")
     args = parser.parse_args()
@@ -244,7 +235,7 @@ def main() -> None:
         return
 
     token = get_admission_bot_token()
-    db = AdmissionDatabase(db_path=args.db_path)
+    db = AdmissionDatabase(db_path=resolve_admission_db_path(args.db_path))
     curator = AICurator()
     channel = TelegramChannel(bot_token=token)
 
@@ -279,30 +270,33 @@ def main() -> None:
         print(format_admission_html(briefing))
         print("=" * 50)
 
+        explicit_recipients = [x.strip() for x in args.recipients.split(",") if x.strip()]
         subscribers = db.list_subscribers(grade=target_grade, active_only=True)
-        print(f"👥 Matched subscribers for [{target_grade.label}]: {len(subscribers)} parent(s)")
-        for sub in subscribers:
-            print(f"  ▪ Chat ID: {sub.chat_id} | Grade: {sub.target_grade.value} | User: {sub.username}")
+        if explicit_recipients:
+            print(f"👥 Explicit preview recipients: {len(explicit_recipients)}")
+            for chat_id in explicit_recipients:
+                print(f"  ▪ Chat ID: {chat_id}")
+        else:
+            print(f"👥 Matched subscribers for [{target_grade.label}]: {len(subscribers)} parent(s)")
+            for sub in subscribers:
+                print(f"  ▪ Chat ID: {sub.chat_id} | Grade: {sub.target_grade.value} | User: {sub.username}")
         print("=" * 50 + "\n")
         return
 
     if args.dispatch:
+        if not args.confirm_live:
+            print("❌ Live dispatch requires --confirm-live; no message was sent.")
+            sys.exit(2)
         if not token:
             print("❌ Error: ADMISSION_TELEGRAM_BOT_TOKEN is not configured.")
             sys.exit(1)
 
-        env_chat_ids_str = get_admission_chat_id()
-        env_recipients = [x.strip() for x in env_chat_ids_str.split(",") if x.strip()]
+        explicit_recipients = [x.strip() for x in args.recipients.split(",") if x.strip()]
 
         subscribers = db.list_subscribers(grade=target_grade, active_only=True)
         db_recipients = [s.chat_id for s in subscribers]
 
-        # If explicit GitHub Actions variable (EDU_TELEGRAM_CHAT_ID) is provided, prioritize it; else use DB
-        if env_recipients:
-            recipients = env_recipients
-            print(f"📡 Using {len(recipients)} recipient(s) from GitHub Actions environment variable.")
-        else:
-            recipients = db_recipients
+        recipients = explicit_recipients or db_recipients
 
         if not recipients:
             print(f"⚠️ No active subscribers found for {target_grade.label}.")
@@ -317,6 +311,7 @@ def main() -> None:
         print(f"  - Success: {stats['success']}")
         print(f"  - Skipped (Duplicated): {stats['skipped']}")
         print(f"  - Failed: {stats['failed']}")
+        print(f"  - Unknown: {stats['unknown']}")
         if stats["errors"]:
             print(f"  - Error details: {stats['errors']}")
         return

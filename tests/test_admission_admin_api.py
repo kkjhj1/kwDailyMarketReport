@@ -1,16 +1,47 @@
 """Integration tests for Admission Briefing Admin API routes in admin_server.py."""
 import unittest
+import os
+import gc
+from pathlib import Path
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from admin_server import create_admin_app
 
 
 class AdmissionAdminApiTests(unittest.TestCase):
     def setUp(self):
-        self.app = create_admin_app(enable_bot_workers=False)
+        self.db_path = str(Path.cwd() / "admission_admin_test.db")
+        db_file = Path(self.db_path)
+        if db_file.exists():
+            db_file.unlink()
+        self.token_patcher = patch.dict(os.environ, {"ADMIN_API_TOKEN": "admission-test-token"})
+        self.token_patcher.start()
+        self.app = create_admin_app(db_path=self.db_path, enable_bot_workers=False)
         self.client = TestClient(self.app)
 
+    def tearDown(self):
+        self.token_patcher.stop()
+        self.client.close()
+        del self.app
+        gc.collect()
+        db_file = Path(self.db_path)
+        if db_file.exists():
+            db_file.unlink()
+
+    def auth_headers(self):
+        return {"X-Admin-Token": "admission-test-token"}
+
+    def test_admission_auth_is_fail_closed_when_token_unset(self):
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": ""}):
+            res = self.client.get("/api/admission/status")
+        self.assertEqual(res.status_code, 503)
+
+    def test_admission_auth_rejects_bad_token(self):
+        res = self.client.get("/api/admission/status", headers={"X-Admin-Token": "wrong"})
+        self.assertEqual(res.status_code, 401)
+
     def test_admission_status_endpoint(self):
-        res = self.client.get("/api/admission/status")
+        res = self.client.get("/api/admission/status", headers=self.auth_headers())
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["status"], "ONLINE")
@@ -18,7 +49,7 @@ class AdmissionAdminApiTests(unittest.TestCase):
         self.assertIn("region_breakdown", data)
 
     def test_admission_subscribers_endpoint(self):
-        res = self.client.get("/api/admission/subscribers")
+        res = self.client.get("/api/admission/subscribers", headers=self.auth_headers())
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("subscribers", data)
@@ -39,21 +70,21 @@ class AdmissionAdminApiTests(unittest.TestCase):
             "so_what": "고교 선택이 중요합니다.",
             "action_todos": ["학교알리미 비교"],
         }
-        create_res = self.client.post("/api/admission/events", json=payload)
+        create_res = self.client.post("/api/admission/events", json=payload, headers=self.auth_headers())
         self.assertEqual(create_res.status_code, 200)
         created_event = create_res.json()["event"]
         self.assertEqual(created_event["title"], "대치동 2028 수능 개편 심층 세미나")
         self.assertTrue(created_event["is_online_live"])
 
         # 2. List events
-        list_res = self.client.get("/api/admission/events")
+        list_res = self.client.get("/api/admission/events", headers=self.auth_headers())
         self.assertEqual(list_res.status_code, 200)
         events = list_res.json()["events"]
         titles = [e["title"] for e in events]
         self.assertIn("대치동 2028 수능 개편 심층 세미나", titles)
 
     def test_admission_collect_endpoint(self):
-        res = self.client.post("/api/admission/collect")
+        res = self.client.post("/api/admission/collect", headers=self.auth_headers())
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(data["success"])
@@ -66,13 +97,21 @@ class AdmissionAdminApiTests(unittest.TestCase):
             "dry_run": True,
             "silent": True,
         }
-        res = self.client.post("/api/admission/dispatch", json=payload)
+        res = self.client.post("/api/admission/dispatch", json=payload, headers=self.auth_headers())
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(data["success"])
         self.assertTrue(data["dry_run"])
         self.assertIn("formatted_html", data)
         self.assertTrue(data["briefing"]["silent"])
+
+    def test_admission_live_dispatch_requires_confirmation(self):
+        res = self.client.post(
+            "/api/admission/dispatch",
+            json={"target_grade": "MIDDLE", "dry_run": False},
+            headers=self.auth_headers(),
+        )
+        self.assertEqual(res.status_code, 400)
 
     def test_github_sync_status_all(self):
         res = self.client.get("/api/recipients/github-sync-status-all")

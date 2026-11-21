@@ -95,6 +95,104 @@ TG_MAX_HTML_LEN = 3500       # [TG-01] HTML 원문 상한
 TG_MAX_VISIBLE_LEN = 1800    # [TG-01] 태그 제외 가시 텍스트 상한
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_HTML_TOKEN_RE = re.compile(r"(<[^>]+>|&(?:#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);|.)", re.DOTALL)
+_SUPPORTED_TAG_RE = re.compile(r"^<(\/)?(b|i|a|code)(?:\s[^>]*)?>$", re.IGNORECASE)
+
+
+class TelegramRateLimitError(RuntimeError):
+    """Telegram HTTP/API 429 with the server-provided retry delay preserved."""
+
+    def __init__(self, retry_after: float = 1.0, message: str = "Telegram rate limit exceeded"):
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after))
+        self.code = 429
+
+
+def _tag_state(tag: str) -> tuple[str, bool] | None:
+    match = _SUPPORTED_TAG_RE.match(tag)
+    if not match:
+        return None
+    return match.group(2).lower(), bool(match.group(1))
+
+
+def split_admission_html(
+    html_text: str,
+    max_visible: int = TG_MAX_VISIBLE_LEN,
+    max_raw: int = TG_MAX_HTML_LEN,
+) -> list[str]:
+    """Split Telegram HTML without breaking supported tags or entities."""
+    if not html_text:
+        return [""]
+    if measure_message(html_text)[0] <= max_raw and measure_message(html_text)[1] <= max_visible:
+        return [html_text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    visible_len = 0
+    active: list[tuple[str, str]] = []
+
+    def closing_tags() -> str:
+        return "".join(f"</{name}>" for name, _ in reversed(active))
+
+    def opening_tags() -> str:
+        return "".join(tag for _, tag in active)
+
+    def flush() -> None:
+        nonlocal current, visible_len
+        if not current:
+            return
+        chunk = "".join(current) + closing_tags()
+        if measure_message(chunk)[0] > max_raw or measure_message(chunk)[1] > max_visible:
+            raise ValueError("Admission HTML token cannot fit Telegram chunk limits")
+        chunks.append(chunk)
+        current = [opening_tags()] if active else []
+        visible_len = 0
+
+    for token in _HTML_TOKEN_RE.findall(html_text):
+        state = _tag_state(token) if token.startswith("<") else None
+        if state:
+            name, is_close = state
+            if is_close:
+                # The source is expected to be balanced; preserve malformed input verbatim.
+                if any(open_name == name for open_name, _ in active):
+                    while active:
+                        open_name, _ = active.pop()
+                        if open_name == name:
+                            break
+                current.append(token)
+            else:
+                projected_open_raw = len("".join(current)) + len(token) + len(closing_tags()) + len(f"</{name}>")
+                if current and projected_open_raw > max_raw:
+                    flush()
+                current.append(token)
+                active.append((name, token))
+            if measure_message("".join(current) + closing_tags())[0] > max_raw:
+                flush()
+            continue
+
+        token_visible = len(html.unescape(token))
+        projected_raw = len("".join(current)) + len(token) + len(closing_tags())
+        if (
+            current
+            and (visible_len + token_visible > max_visible or projected_raw > max_raw)
+        ):
+            flush()
+            projected_raw = len("".join(current)) + len(token) + len(closing_tags())
+
+        # Split very long text/entities one token at a time; entity tokens stay intact.
+        if token_visible > max_visible:
+            for char in token:
+                char_visible = len(html.unescape(char))
+                if current and (visible_len + char_visible > max_visible or len("".join(current)) + len(char) + len(closing_tags()) > max_raw):
+                    flush()
+                current.append(char)
+                visible_len += char_visible
+        else:
+            current.append(token)
+            visible_len += token_visible
+
+    flush()
+    return chunks or [html_text]
 
 
 def measure_message(html_text: str) -> tuple[int, int]:
@@ -251,14 +349,27 @@ class TelegramChannel:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             err_body = ""
+            err_data: dict[str, Any] = {}
             try:
-                err_json = json.loads(exc.read().decode("utf-8", errors="ignore"))
-                err_body = err_json.get("description", "")
+                err_data = json.loads(exc.read().decode("utf-8", errors="ignore"))
+                err_body = err_data.get("description", "")
             except Exception:
                 err_body = str(exc)
+            if exc.code == 429:
+                retry_after = (err_data.get("parameters") or {}).get("retry_after")
+                if retry_after is None:
+                    retry_after = exc.headers.get("Retry-After", "1") if exc.headers else "1"
+                try:
+                    retry_after = float(retry_after)
+                except (TypeError, ValueError):
+                    retry_after = 1.0
+                raise TelegramRateLimitError(retry_after, err_body or "Telegram HTTP 429") from exc
             raise RuntimeError(f"Telegram API {method} HTTP {exc.code}: {err_body}") from exc
 
         if not data.get("ok"):
+            if data.get("error_code") == 429:
+                retry_after = (data.get("parameters") or {}).get("retry_after", 1)
+                raise TelegramRateLimitError(retry_after, data.get("description", "Telegram API 429"))
             raise RuntimeError(f"Telegram API error ({method}): {data.get('description', 'unknown')}")
         return data
 
@@ -312,8 +423,38 @@ class TelegramChannel:
                 ]
             }
 
-        res = self._api_call("sendMessage", body)
-        return str(res["result"]["message_id"])
+        return self._send_message_chunks(
+            recipient=str(recipient).strip(),
+            text=text,
+            reply_markup=body.get("reply_markup"),
+            parse_mode="HTML",
+            disable_notification=bool(body.get("disable_notification", False)),
+        )
+
+    def _send_message_chunks(
+        self,
+        recipient: str,
+        text: str,
+        reply_markup: Optional[dict[str, Any]],
+        parse_mode: str,
+        disable_notification: bool = False,
+    ) -> str:
+        chunks = split_admission_html(text) if parse_mode.upper() == "HTML" else [text]
+        last_message_id = ""
+        for index, chunk in enumerate(chunks):
+            payload: dict[str, Any] = {
+                "chat_id": recipient,
+                "text": chunk,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            }
+            if disable_notification:
+                payload["disable_notification"] = True
+            if index == len(chunks) - 1 and reply_markup:
+                payload["reply_markup"] = reply_markup
+            res = self._api_call("sendMessage", payload)
+            last_message_id = str(res["result"]["message_id"])
+        return last_message_id
 
     def send_message(
         self,
@@ -324,18 +465,13 @@ class TelegramChannel:
         disable_notification: bool = False,
     ) -> str:
         """Sends arbitrary text message with optional reply_markup."""
-        body: dict[str, Any] = {
-            "chat_id": str(recipient).strip(),
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": True,
-        }
-        if disable_notification:
-            body["disable_notification"] = True
-        if reply_markup:
-            body["reply_markup"] = reply_markup
-        res = self._api_call("sendMessage", body)
-        return str(res["result"]["message_id"])
+        return self._send_message_chunks(
+            recipient=str(recipient).strip(),
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_notification=disable_notification,
+        )
 
     def edit_message_text(
         self,
@@ -346,6 +482,12 @@ class TelegramChannel:
         parse_mode: str = "HTML",
     ) -> bool:
         """Edits an existing message (used for inline button callbacks)."""
+        if parse_mode.upper() == "HTML":
+            raw_len, visible_len = measure_message(text)
+            if raw_len > TG_MAX_HTML_LEN or visible_len > TG_MAX_VISIBLE_LEN:
+                raise ValueError(
+                    f"Admission HTML exceeds Telegram chunk limits (html={raw_len}, visible={visible_len})"
+                )
         body: dict[str, Any] = {
             "chat_id": str(chat_id).strip(),
             "message_id": message_id,
