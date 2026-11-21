@@ -1,6 +1,7 @@
 """Telegram transport; supports rich HTML formatting, clickable hyperlinks, inline buttons, and file attachment."""
 import html
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,28 +21,112 @@ def _is_public_button_url(url: str) -> bool:
     return "." in host
 
 
+TG_MAX_VISIBLE_CHARS = 1800
+TG_MAX_HTML_CHARS = 3500
+_SEP = "━━━━━━━━━━━━━━━━━━"
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _esc(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = str(text or "").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
+
+
+def telegram_visible_len(html_text: str) -> int:
+    """Approximate Telegram-rendered length: strip tags, unescape entities."""
+    return len(html.unescape(_TAG_RE.sub("", html_text)))
+
+
+def _within_tg_limits(html_text: str) -> bool:
+    return len(html_text) <= TG_MAX_HTML_CHARS and telegram_visible_len(html_text) <= TG_MAX_VISIBLE_CHARS
+
+
 def format_telegram_html(briefing: Briefing) -> str:
-    """Formats a Briefing into an intuitive, mobile-optimized 4-category Telegram HTML message."""
-    kind_meta = {
+    """Formats a Briefing into a mobile-optimized Telegram HTML message within [TG-01] limits.
+
+    Bounded degradation (only when limits are exceeded): drop news → drop extras
+    (events / investor trend / sectors) → truncate one-line summary → fixed slim fallback.
+    """
+    attempts = (
+        dict(include_news=True, include_extras=True, summary_limit=None),
+        dict(include_news=False, include_extras=True, summary_limit=None),
+        dict(include_news=False, include_extras=False, summary_limit=None),
+        dict(include_news=False, include_extras=False, summary_limit=60),
+    )
+    for opts in attempts:
+        text = _render_telegram_html(briefing, **opts)
+        if _within_tg_limits(text):
+            return text
+    return _render_slim_fallback(briefing)
+
+
+def _kind_meta(briefing: Briefing) -> tuple[str, str]:
+    kind = str(briefing.kind or "").lower()
+    return {
         "morning": ("🌅", "07:50 장전 모닝 브리핑"),
-        "closing": ("📊", "15:40 장마감 시황 브리핑"),
+        "closing": ("📊", "장마감 시황 브리핑"),
         "urgent": ("🚨", "±3% 급변동 긴급 경보"),
-    }.get(briefing.kind.lower(), ("📢", f"{briefing.kind.upper()} 시황 브리핑"))
+    }.get(kind, ("📢", f"{_clip(str(briefing.kind).upper(), 20)} 시황 브리핑"))
+
+
+def _render_slim_fallback(briefing: Briefing) -> str:
+    """Fixed slim template guaranteed to fit: header + clipped summary + report link."""
+    icon, title = _kind_meta(briefing)
+    lines = [
+        f"{icon} <b>[{_esc(title)}]</b>",
+        f"🕒 기준: <code>{_esc(_clip(briefing.as_of, 40))}</code>",
+    ]
+    if briefing.one_line_summary:
+        lines.append(f"<i>{_esc(_clip(briefing.one_line_summary, 120))}</i>")
+    lines.append(_SEP)
+    if _is_public_button_url(briefing.report_url) and len(briefing.report_url) <= 1000:
+        lines.append(f"👉 <a href=\"{_esc(briefing.report_url)}\">[📊 일일 상세 웹 리포트 보기]</a>")
+    else:
+        lines.append("💡 <i>상세 지표는 웹 리포트에서 확인하세요.</i>")
+    return "\n".join(lines)
+
+
+def _render_telegram_html(
+    briefing: Briefing,
+    *,
+    include_news: bool,
+    include_extras: bool,
+    summary_limit: int | None,
+) -> str:
+    kind = str(briefing.kind or "").lower()
+    kind_meta = _kind_meta(briefing)
 
     lines = [
-        f"{kind_meta[0]} <b>[{html.escape(kind_meta[1])}]</b>",
-        f"🕒 기준: <code>{html.escape(briefing.as_of)}</code> (전 지표 종가 기준)",
+        f"{kind_meta[0]} <b>[{_esc(kind_meta[1])}]</b>",
+        f"🕒 기준: <code>{_esc(_clip(briefing.as_of, 40))}</code> (전 지표 종가 기준)",
     ]
+
+    session_notice = getattr(briefing, "session_notice", "") or ""
+    if session_notice:
+        lines.append(f"<b>{_esc(_clip(session_notice, 80))}</b>")
 
     # 1. One-line executive summary
     if briefing.one_line_summary:
+        summary = briefing.one_line_summary if summary_limit is None else _clip(briefing.one_line_summary, summary_limit)
         lines.extend([
             "",
             "📌 <b>【오늘의 한 줄 요약】</b>",
-            f"<i>{html.escape(briefing.one_line_summary)}</i>",
+            f"<i>{_esc(summary)}</i>",
         ])
 
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(_SEP)
+
+    # 1-1. Morning: today's economic events
+    events = tuple(getattr(briefing, "economic_events", ()) or ())
+    if include_extras and kind == "morning" and events:
+        lines.append("📅 <b>【오늘의 주요 일정 & 변동성 이벤트】</b>")
+        for ev in events[:5]:
+            lines.append(f"• {_esc(_clip(ev, 60))}")
+        lines.append(_SEP)
 
     # 2. Group assets into 4 primary investor categories
     kr_equities = [a for a in briefing.assets if a.category == "KR_EQUITY"]
@@ -55,7 +140,8 @@ def format_telegram_html(briefing: Briefing) -> str:
         is_down = chg.startswith("-") and chg not in {"-0.00%", "-0.0bp"}
         icon = "🔴" if is_up else ("🔵" if is_down else "⚪")
 
-        ind_name = html.escape(a.indicator)
+        ind_name = _esc(_clip(a.indicator, 24))
+        chg = _clip(chg, 16)
 
         if a.unit == "PERCENT_YIELD":
             val_txt = f"<b>{a.value:.3f}%</b>" if a.value is not None else "-"
@@ -95,23 +181,42 @@ def format_telegram_html(briefing: Briefing) -> str:
         for a in alternatives:
             lines.append(_fmt_quote_line(a))
 
+    # 2-1. Closing: investor flows & leading sectors
+    trend = getattr(briefing, "investor_trend", None)
+    sectors = tuple(getattr(briefing, "leading_sectors", ()) or ())[:3]
+    if include_extras and kind == "closing" and (trend or sectors):
+        lines.append(_SEP)
+        lines.append("📊 <b>【오늘의 수급 & 주도 업종】</b>")
+        if trend:
+            lines.append(
+                "• <b>코스피 수급</b>: "
+                f"개인 {_esc(_clip(trend.personal, 16))} | "
+                f"외인 {_esc(_clip(trend.foreign, 16))} | "
+                f"기관 {_esc(_clip(trend.institutional, 16))}"
+            )
+        if sectors:
+            sector_txt = ", ".join(
+                f"{_esc(_clip(s.name, 20))} ({_esc(_clip(s.change_rate, 10))})" for s in sectors
+            )
+            lines.append(f"• <b>주도 업종</b>: {sector_txt}")
+
     # 3. Live headlines with direct clickable article hyperlinks
-    if briefing.news:
-        lines.append("━━━━━━━━━━━━━━━━━━")
+    if include_news and briefing.news:
+        lines.append(_SEP)
         lines.append("📰 <b>[주요 시황 뉴스 & 변동 요인]</b>")
         for idx, n in enumerate(briefing.news[:3], start=1):
-            title_escaped = html.escape(getattr(n, "title", str(n)))
-            src_escaped = html.escape(getattr(n, "source", "네이버금융"))
+            title_escaped = _esc(_clip(getattr(n, "title", str(n)), 80))
+            src_escaped = _esc(_clip(getattr(n, "source", "네이버금융"), 20))
             url = getattr(n, "url", "")
-            if url and url.startswith(("http://", "https://")):
+            if url and url.startswith(("http://", "https://")) and len(url) <= 500:
                 safe_url = html.escape(url, quote=True)
                 lines.append(f"{idx}. <a href=\"{safe_url}\">{title_escaped}</a> ({src_escaped})")
             else:
                 lines.append(f"{idx}. {title_escaped} ({src_escaped})")
 
     # 4. Standalone Report Link
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    if _is_public_button_url(briefing.report_url):
+    lines.append(_SEP)
+    if _is_public_button_url(briefing.report_url) and len(briefing.report_url) <= 1000:
         safe_url = html.escape(briefing.report_url, quote=True)
         lines.append(f"👉 <a href=\"{safe_url}\">[📊 일일 상세 웹 리포트 보기]</a>")
     else:

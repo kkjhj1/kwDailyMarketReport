@@ -18,6 +18,21 @@ class AssetSummary:
     category: str = "KR_EQUITY"
 
 @dataclass(frozen=True)
+class InvestorTrend:
+    """KOSPI investor net-buy summary (display strings; unit as reported by source)."""
+    personal: str = ""
+    foreign: str = ""
+    institutional: str = ""
+    bizdate: str = ""
+
+
+@dataclass(frozen=True)
+class LeadingSector:
+    name: str = ""
+    change_rate: str = ""  # formatted e.g. "+4.40%"
+
+
+@dataclass(frozen=True)
 class Briefing:
     kind: str  # morning, closing, urgent
     headline: str
@@ -28,6 +43,10 @@ class Briefing:
     three_line_summary: tuple[str, str, str] | None = None
     category_groups: dict | None = None
     news: tuple = ()
+    investor_trend: InvestorTrend | None = None
+    leading_sectors: tuple[LeadingSector, ...] = ()
+    economic_events: tuple[str, ...] = ()
+    session_notice: str = ""
 
 class DeliveryChannel(Protocol):
     def send(self, recipient: str, briefing: Briefing) -> str: ...

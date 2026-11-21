@@ -17,7 +17,39 @@ DEFAULT_KR_HOLIDAYS = frozenset({
     date(2026, 9, 24), date(2026, 9, 25),
     date(2026, 10, 5), date(2026, 10, 9),
     date(2026, 12, 25),
+    date(2026, 12, 31),  # KRX 연말 휴장일 (year-end settlement holiday)
 })
+
+# 대학수학능력시험일: KRX 개장 1시간 지연 (10:00~16:30 KST)
+CSAT_DATES_KR = frozenset({date(2026, 11, 19)})
+# 신년 증시 개장식: KRX 개장 1시간 지연 (10:00~15:30 KST)
+NEW_YEAR_OPENING_DATES_KR = frozenset({date(2026, 1, 2)})
+
+_FOMC = "🇺🇸 미 FOMC 기준금리 발표 (새벽 04:00 KST)"
+_BOK = "🇰🇷 한국은행 금융통화위원회 기준금리 결정"
+_WITCHING = "⚡ 국내 선물·옵션 동시 만기일 (변동성 유의)"
+_CSAT = "⏰ 대학수학능력시험일: 증시 개장 지연 (10:00~16:30)"
+
+
+def _build_economic_events_2026() -> dict[date, tuple[str, ...]]:
+    # Curated static calendar (sources: Fed FOMC 2026 schedule — announcement day in KST,
+    # 한국은행 2026 통화정책방향 결정회의 일정, KRX 파생상품 만기일, 교육부 수능 시행일).
+    events: dict[date, list[str]] = {}
+    groups = (
+        ((date(2026, 1, 29), date(2026, 3, 19), date(2026, 5, 7), date(2026, 6, 18),
+          date(2026, 7, 30), date(2026, 9, 17), date(2026, 11, 5), date(2026, 12, 17)), _FOMC),
+        ((date(2026, 1, 15), date(2026, 2, 26), date(2026, 4, 16), date(2026, 5, 28),
+          date(2026, 7, 9), date(2026, 8, 27), date(2026, 10, 15), date(2026, 11, 26)), _BOK),
+        ((date(2026, 3, 12), date(2026, 6, 11), date(2026, 9, 10), date(2026, 12, 10)), _WITCHING),
+        ((date(2026, 11, 19),), _CSAT),
+    )
+    for dates, label in groups:
+        for d in dates:
+            events.setdefault(d, []).append(label)
+    return {d: tuple(v) for d, v in events.items()}
+
+
+ECONOMIC_EVENTS_2026: dict[date, tuple[str, ...]] = _build_economic_events_2026()
 
 DEFAULT_US_HOLIDAYS = frozenset({
     date(2026, 1, 1),
@@ -66,15 +98,22 @@ class MarketCalendar:
         if market == "KR":
             kst_now = now.astimezone(KST)
             d = kst_now.date()
+            open_t, close_t = self.get_kr_session_window(d)
             is_open = (
                 self.is_trading_day("KR", d)
-                and time(9, 0) <= kst_now.time() <= time(15, 30)
+                and open_t <= kst_now.time() <= close_t
             )
+            if d in CSAT_DATES_KR:
+                open_label = "KRX 정규장 (10:00~16:30 KST - 수능일)"
+            elif d in NEW_YEAR_OPENING_DATES_KR:
+                open_label = "KRX 정규장 (10:00~15:30 KST - 증시 개장식)"
+            else:
+                open_label = "KRX 정규장 (09:00~15:30 KST)"
             return SessionInfo(
                 market="KR",
                 trade_date=d,
                 is_open=is_open,
-                session_label="KRX 정규장 (09:00~15:30 KST)" if is_open else "KRX 장외/마감",
+                session_label=open_label if is_open else "KRX 장외/마감",
                 is_dst=False,
             )
 
@@ -110,13 +149,46 @@ class MarketCalendar:
 
         raise ValueError(f"Unsupported market: {market}")
 
-    def should_run_regular_briefing(self, kind: str, now: datetime) -> bool:
-        """Checks if 07:50 morning or 15:40 closing briefing should run on KST business day."""
-        kst_now = now.astimezone(KST)
-        if not self.is_trading_day("KR", kst_now.date()):
-            return False
+    @staticmethod
+    def get_kr_session_window(d: date) -> tuple[time, time]:
+        """Canonical KRX regular session (open, close) in KST, incl. CSAT/New Year delayed opens."""
+        if d in CSAT_DATES_KR:
+            return time(10, 0), time(16, 30)
+        if d in NEW_YEAR_OPENING_DATES_KR:
+            return time(10, 0), time(15, 30)
+        return time(9, 0), time(15, 30)
+
+    @staticmethod
+    def get_regular_briefing_window(kind: str, d: date) -> tuple[time, time, time]:
+        """Returns (start, window_end, hard_cutoff) KST for a regular briefing.
+
+        Start window is half-open [start, window_end). Closing shifts +1h on CSAT day.
+        """
         if kind == "morning":
-            return time(7, 50) <= kst_now.time() < time(8, 5)
+            return time(7, 50), time(8, 5), time(8, 50)
         if kind == "closing":
-            return time(15, 40) <= kst_now.time() < time(15, 55)
-        return False
+            if d in CSAT_DATES_KR:
+                return time(16, 40), time(16, 55), time(19, 0)
+            return time(15, 40), time(15, 55), time(18, 0)
+        raise ValueError(f"Unsupported regular briefing kind: {kind}")
+
+    def should_run_regular_briefing(self, kind: str, now: datetime) -> bool:
+        """Checks if the morning/closing briefing start window [start, window_end) is active on a KR business day."""
+        kst_now = now.astimezone(KST)
+        d = kst_now.date()
+        if not self.is_trading_day("KR", d):
+            return False
+        if kind not in ("morning", "closing"):
+            return False
+        start, window_end, _ = self.get_regular_briefing_window(kind, d)
+        return start <= kst_now.time() < window_end
+
+    def get_economic_events(self, d: date) -> list[str]:
+        return list(ECONOMIC_EVENTS_2026.get(d, ()))
+
+    def get_session_notice(self, d: date) -> str:
+        if d in CSAT_DATES_KR:
+            return "⏰ [증시 개장 안내] 오늘은 대학수학능력시험일로 정규장이 10:00~16:30에 운영됩니다."
+        if d in NEW_YEAR_OPENING_DATES_KR:
+            return "⏰ [증시 개장 안내] 오늘은 증시 개장식으로 정규장이 10:00~15:30에 운영됩니다."
+        return ""

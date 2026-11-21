@@ -2,7 +2,9 @@
 from dataclasses import dataclass
 from decimal import Decimal
 import re
-from market_brief.core import AssetSummary, Briefing
+from datetime import date
+from typing import Callable
+from market_brief.core import AssetSummary, Briefing, InvestorTrend, LeadingSector
 from market_brief.market_data.models import Quote
 from market_brief.market_data.naver_provider import NewsItem
 
@@ -110,6 +112,58 @@ def verify_numeric_fidelity(narrative: str, quotes: list[Quote]) -> bool:
     return True
 
 
+def collect_briefing_extras(
+    kind: str,
+    trade_date: date,
+    calendar,
+    *,
+    investor_fetcher: Callable[..., InvestorTrend | None] | None = None,
+    sector_fetcher: Callable[..., list[LeadingSector]] | None = None,
+) -> dict:
+    """Common content assembler shared by the internal scheduler and the cron runner.
+
+    - closing: KOSPI investor trend + top-3 leading sectors (network; fail-safe)
+    - morning: local-calendar economic events (no network)
+    - all regular kinds: special-session notice (CSAT / New Year opening)
+    Fetchers are injectable so --demo/tests stay network-free; any fetch error degrades to empty.
+    """
+    extras: dict = {
+        "investor_trend": None,
+        "leading_sectors": [],
+        "economic_events": [],
+        "session_notice": "",
+    }
+    if kind not in ("morning", "closing"):
+        return extras
+    try:
+        extras["session_notice"] = calendar.get_session_notice(trade_date)
+    except Exception:
+        pass
+    if kind == "morning":
+        try:
+            extras["economic_events"] = list(calendar.get_economic_events(trade_date))
+        except Exception:
+            pass
+        return extras
+
+    if investor_fetcher is None or sector_fetcher is None:
+        from market_brief.market_data.naver_provider import (
+            fetch_naver_investor_trend,
+            fetch_naver_leading_sectors,
+        )
+        investor_fetcher = investor_fetcher or (lambda: fetch_naver_investor_trend(trade_date=trade_date))
+        sector_fetcher = sector_fetcher or (lambda: fetch_naver_leading_sectors(3))
+    try:
+        extras["investor_trend"] = investor_fetcher()
+    except Exception:
+        extras["investor_trend"] = None
+    try:
+        extras["leading_sectors"] = list(sector_fetcher() or [])[:3]
+    except Exception:
+        extras["leading_sectors"] = []
+    return extras
+
+
 class BriefingBuilder:
     """Builds channel-neutral Briefing and detailed commentary with deterministic fallback."""
 
@@ -124,6 +178,10 @@ class BriefingBuilder:
         report_url: str = "http://localhost:8080/reports/latest",
         news: list[NewsItem] | None = None,
         ai_headline: str | None = None,
+        investor_trend: InvestorTrend | None = None,
+        leading_sectors: list[LeadingSector] | None = None,
+        economic_events: list[str] | None = None,
+        session_notice: str = "",
     ) -> Briefing:
         by_symbol = {q.symbol: q for q in quotes}
         summaries: list[AssetSummary] = []
@@ -179,6 +237,10 @@ class BriefingBuilder:
             one_line_summary=one_line,
             three_line_summary=three_lines,
             news=tuple(news or []),
+            investor_trend=investor_trend,
+            leading_sectors=tuple(leading_sectors or ())[:3],
+            economic_events=tuple(economic_events or ()),
+            session_notice=session_notice or "",
         )
 
     @staticmethod

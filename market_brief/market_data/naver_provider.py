@@ -3,12 +3,14 @@ from dataclasses import dataclass
 from datetime import datetime, date, timezone
 from decimal import Decimal
 import json
+import logging
 import re
 import urllib.request
 from zoneinfo import ZoneInfo
 from .models import Quote, parse_decimal, DataValidationError
 
 KST = ZoneInfo("Asia/Seoul")
+logger = logging.getLogger("naver_provider")
 
 
 @dataclass(frozen=True)
@@ -184,6 +186,104 @@ class CompositeMarketDataProvider:
 
         self.last_used_source = "FALLBACK" if len(quotes_by_sym) == len(missing) else ("COMPOSITE" if missing else "PRIMARY")
         return [quotes_by_sym[s] for s in symbols if s in quotes_by_sym]
+
+
+_NAVER_JSON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+    "Accept": "application/json",
+}
+_TREND_VALUE_RE = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?$|^[+-]?\d+(?:\.\d+)?$")
+_MAX_SECTOR_NAME_LEN = 20
+
+
+def _get_json(url: str, opener, timeout: int):
+    _opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(url, headers=_NAVER_JSON_HEADERS)
+    with _opener(req, timeout=timeout) as resp:
+        return json.load(resp)
+
+
+def _format_trend_value(raw) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if s.endswith("억"):
+        s = s[:-1].strip()
+    if not s or not _TREND_VALUE_RE.match(s):
+        return None
+    if s[0] not in "+-":
+        s = "+" + s if s.replace(",", "").strip("0.") else s
+    return f"{s}억"
+
+
+def fetch_naver_investor_trend(
+    timeout: int = 5, *, opener=None, trade_date: date | None = None
+) -> "InvestorTrend | None":
+    """Fetches KOSPI investor (개인/외국인/기관) net-buy trend. Fail-safe: returns None on any error."""
+    from market_brief.core import InvestorTrend
+
+    try:
+        data = _get_json("https://m.stock.naver.com/api/index/KOSPI/trend", opener, timeout)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            data = data[0]
+        if not isinstance(data, dict):
+            return None
+        required = ("bizdate", "personalValue", "foreignValue", "institutionalValue")
+        if any(k not in data for k in required):
+            return None
+        bizdate = re.sub(r"\D", "", str(data["bizdate"]))
+        if len(bizdate) != 8:
+            return None
+        if trade_date is not None and bizdate != trade_date.strftime("%Y%m%d"):
+            logger.debug("Naver investor trend bizdate %s != target %s", bizdate, trade_date)
+            return None
+        personal = _format_trend_value(data["personalValue"])
+        foreign = _format_trend_value(data["foreignValue"])
+        institutional = _format_trend_value(data["institutionalValue"])
+        if personal is None or foreign is None or institutional is None:
+            return None
+        return InvestorTrend(personal=personal, foreign=foreign, institutional=institutional, bizdate=bizdate)
+    except Exception as exc:
+        logger.debug("Naver investor trend fetch failed: %s", exc)
+        return None
+
+
+def fetch_naver_leading_sectors(
+    limit: int = 3, timeout: int = 5, *, opener=None
+) -> "list[LeadingSector]":
+    """Fetches top rising industry groups (changeRate > 0, max 3). Fail-safe: returns [] on any error."""
+    from market_brief.core import LeadingSector
+
+    limit = max(0, min(int(limit), 3))
+    if limit == 0:
+        return []
+    try:
+        data = _get_json("https://m.stock.naver.com/api/stocks/industry", opener, timeout)
+        groups = data.get("groups") if isinstance(data, dict) else None
+        if not isinstance(groups, list):
+            return []
+        ranked: list[tuple[Decimal, str]] = []
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            name = str(g.get("name") or "").strip()
+            raw_rate = g.get("changeRate")
+            if not name or raw_rate is None:
+                continue
+            try:
+                rate = Decimal(str(raw_rate).replace(",", "").replace("%", "").strip())
+            except Exception:
+                continue
+            if not rate.is_finite() or rate <= 0:
+                continue
+            if len(name) > _MAX_SECTOR_NAME_LEN:
+                name = name[: _MAX_SECTOR_NAME_LEN - 1] + "…"
+            ranked.append((rate, name))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return [LeadingSector(name=n, change_rate=f"+{float(r):.2f}%") for r, n in ranked[:limit]]
+    except Exception as exc:
+        logger.debug("Naver leading sectors fetch failed: %s", exc)
+        return []
 
 
 def fetch_naver_market_news(limit: int = 5, opener=None, timeout: int = 6) -> list[NewsItem]:
