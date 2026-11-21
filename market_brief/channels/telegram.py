@@ -66,9 +66,11 @@ def format_telegram_html(briefing: Briefing) -> str:
 
 def _kind_meta(briefing: Briefing) -> tuple[str, str]:
     kind = str(briefing.kind or "").lower()
+    if kind == "closing":
+        title = "16:40 장마감 시황 브리핑" if "수능" in getattr(briefing, "session_notice", "") else "15:40 장마감 시황 브리핑"
+        return ("📊", title)
     return {
         "morning": ("🌅", "07:50 장전 모닝 브리핑"),
-        "closing": ("📊", "장마감 시황 브리핑"),
         "urgent": ("🚨", "±3% 급변동 긴급 경보"),
     }.get(kind, ("📢", f"{_clip(str(briefing.kind).upper(), 20)} 시황 브리핑"))
 

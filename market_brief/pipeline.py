@@ -13,7 +13,7 @@ from market_brief.market_data.models import Quote
 from market_brief.market_data.naver_provider import NewsItem
 from market_brief.market_data.storage import QuoteStore
 from market_brief.market_data.validation import SanityChecker, validate_urgent_quote
-from market_brief.report_engine import BriefingBuilder
+from market_brief.report_engine import BriefingBuilder, collect_briefing_extras
 from market_brief.web_report import HTMLReportRenderer, generate_signed_report_url
 
 KST = ZoneInfo("Asia/Seoul")
@@ -79,6 +79,7 @@ class MarketBriefingPipeline:
         report_id = f"briefing_{ref_now.strftime('%Y%m%d_%H%M')}_{kind}"
         report_url = generate_signed_report_url(self.base_report_url, report_id, self.report_secret)
         as_of_label = f"{ref_now.strftime('%Y-%m-%d %H:%M')} KST"
+        extras = collect_briefing_extras(kind, ref_now.date(), self.calendar)
 
         briefing = self.builder.build(
             quotes,
@@ -86,6 +87,7 @@ class MarketBriefingPipeline:
             as_of_label=as_of_label,
             report_url=report_url,
             news=news,
+            **extras,
         )
         report_path = self._save_report_with_latest_aliases(briefing, quotes, news, report_id)
 

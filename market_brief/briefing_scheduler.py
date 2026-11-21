@@ -35,9 +35,15 @@ KST = ZoneInfo("Asia/Seoul")
 class MarketBriefingDeliverer:
     """Production deliverer: fetches live quotes, renders reports, and dispatches via Telegram."""
 
-    def __init__(self, root_dir: Path, get_report_base_url: Callable[[], str]):
+    def __init__(
+        self,
+        root_dir: Path,
+        get_report_base_url: Callable[[], str],
+        calendar: Optional[MarketCalendar] = None,
+    ):
         self.root_dir = root_dir
         self.get_report_base_url = get_report_base_url
+        self.calendar = calendar or MarketCalendar()
 
     def deliver(
         self,
@@ -55,7 +61,7 @@ class MarketBriefingDeliverer:
         from market_brief.market_data import CompositeMarketDataProvider, FixtureProvider, NaverFinanceProvider
         from market_brief.market_data.naver_provider import fetch_naver_market_news
         from market_brief.pipeline import DEFAULT_SYMBOLS
-        from market_brief.report_engine import BriefingBuilder
+        from market_brief.report_engine import BriefingBuilder, collect_briefing_extras
         from market_brief.channels.telegram import TelegramChannel
         from market_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
         from market_brief.web_report import HTMLReportRenderer, generate_signed_report_url
@@ -77,6 +83,7 @@ class MarketBriefingDeliverer:
         report_base_url = self.get_report_base_url()
         report_url = generate_signed_report_url(report_base_url, report_id, "market-brief-secret-2026")
         as_of_label = f"{now_kst.strftime('%Y-%m-%d %H:%M')} KST"
+        extras = collect_briefing_extras(kind, now_kst.date(), self.calendar)
 
         builder = BriefingBuilder()
         briefing = builder.build(
@@ -85,6 +92,7 @@ class MarketBriefingDeliverer:
             as_of_label=as_of_label,
             report_url=report_url,
             news=news,
+            **extras,
         )
 
         # 4. Render HTML Report
@@ -158,7 +166,9 @@ class InternalBriefingScheduler:
         self.get_bot_token = get_bot_token
         self.get_report_base_url = get_report_base_url
         self.calendar = calendar or MarketCalendar()
-        self.deliverer = deliverer or MarketBriefingDeliverer(root_dir, get_report_base_url)
+        self.deliverer = deliverer or MarketBriefingDeliverer(
+            root_dir, get_report_base_url, calendar=self.calendar
+        )
         self.poll_interval = poll_interval
         self.alert_store = AlertStore(root_dir / "alerts.sqlite3")
 
@@ -301,10 +311,12 @@ class InternalBriefingScheduler:
 
         for _ in range(14):  # Check up to 14 days ahead
             if self.calendar.is_trading_day("KR", target_date):
-                m_time = datetime.combine(target_date, self.MORNING_START, tzinfo=KST)
+                m_start, _, _ = self.calendar.get_regular_briefing_window("morning", target_date)
+                m_time = datetime.combine(target_date, m_start, tzinfo=KST)
                 if now_kst < m_time:
                     return m_time
-                c_time = datetime.combine(target_date, self.CLOSING_START, tzinfo=KST)
+                c_start, _, _ = self.calendar.get_regular_briefing_window("closing", target_date)
+                c_time = datetime.combine(target_date, c_start, tzinfo=KST)
                 if now_kst < c_time:
                     return c_time
             target_date += timedelta(days=1)
@@ -360,19 +372,19 @@ class InternalBriefingScheduler:
 
         current_time = now_kst.time()
 
-        # Morning Briefing: Only trigger within strict 15-minute start window (07:50 ~ 08:05 KST)
-        if self.MORNING_START <= current_time <= self.MORNING_WINDOW_END:
+        m_start, m_win_end, m_cutoff = self.calendar.get_regular_briefing_window("morning", today)
+        if m_start <= current_time < m_win_end:
             if not await asyncio.to_thread(self.is_briefing_already_sent, "morning", today):
                 await self._run_briefing_job("morning", now_kst)
-        elif self.MORNING_WINDOW_END < current_time <= self.MORNING_CUTOFF:
+        elif m_win_end <= current_time <= m_cutoff:
             # Server restart after 08:05: strictly block compensatory auto-redelivery
             pass
 
-        # Closing Briefing: Only trigger within strict 15-minute start window (15:40 ~ 15:55 KST)
-        elif self.CLOSING_START <= current_time <= self.CLOSING_WINDOW_END:
+        c_start, c_win_end, c_cutoff = self.calendar.get_regular_briefing_window("closing", today)
+        if c_start <= current_time < c_win_end:
             if not await asyncio.to_thread(self.is_briefing_already_sent, "closing", today):
                 await self._run_briefing_job("closing", now_kst)
-        elif self.CLOSING_WINDOW_END < current_time <= self.CLOSING_CUTOFF:
+        elif c_win_end <= current_time <= c_cutoff:
             # Server restart after 15:55: strictly block compensatory auto-redelivery
             pass
 
@@ -382,6 +394,8 @@ class InternalBriefingScheduler:
             return
         today = now_kst.date()
         if not self.calendar.is_trading_day("KR", today):
+            return
+        if not self.calendar.get_session_info("KR", now_kst).is_open:
             return
 
         current_time = now_kst.time()
@@ -504,7 +518,7 @@ class InternalBriefingScheduler:
         await asyncio.to_thread(self.db.snapshot_job_recipients, job.job_id, recipients)
 
         # 5. Check cutoff again right before delivery
-        cutoff = self.MORNING_CUTOFF if kind == "morning" else self.CLOSING_CUTOFF
+        _, _, cutoff = self.calendar.get_regular_briefing_window(kind, now_kst.date())
         if now_kst.time() > cutoff:
             logger.warning(f"[Scheduler] Hard cutoff exceeded before delivery for {batch_key}")
             await asyncio.to_thread(self.db.fail_job, job.job_id, "CUTOFF_EXPIRED")
