@@ -649,5 +649,341 @@ class BriefingCacheTests(unittest.TestCase):
         briefing_service.clear_briefing_cache()
 
 
+# ---------------------------------------------------------------------------
+# 17-20: production latency fixes v2 (dedicated poll pool, shared adapter + stale retry,
+#        offset prime once, domain DB wrapper cache)
+# ---------------------------------------------------------------------------
+try:  # optional dependency in the Oracle venv; the shared-adapter tests need it
+    import requests as _requests  # noqa: E402
+    from urllib3.exceptions import ProtocolError as _ProtocolError  # noqa: E402
+except ImportError:  # pragma: no cover
+    _requests = None
+    _ProtocolError = None
+
+import http.client  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+
+def _stale_exc():
+    """What requests raises when Telegram's edge dropped an idle keep-alive socket."""
+    inner = http.client.RemoteDisconnected("Remote end closed connection without response")
+    return _requests.exceptions.ConnectionError(_ProtocolError("Connection aborted.", inner))
+
+
+class PollPoolTests(unittest.TestCase):
+    def test_17_seven_bots_poll_concurrently_on_dedicated_pool(self):
+        mgr, _bot = _fake_manager()
+        self.assertGreaterEqual(DynamicBotManager.POLL_WORKERS, 16)
+        bots = [f"bot{i}" for i in range(7)]
+        barrier = threading.Barrier(len(bots), timeout=5)  # breaks unless all 7 polls run at the same time
+        threads: list[str] = []
+        lock = threading.Lock()
+
+        def fake_sync(bot_id, timeout=1, parallel_callbacks=False, opener=None):
+            self.assertEqual((timeout, parallel_callbacks), (25, True))
+            with lock:
+                threads.append(threading.current_thread().name)
+            barrier.wait()
+            mgr._running = False
+            return {}
+
+        async def run():
+            # a 1-worker default executor: the old `asyncio.to_thread` path would deadlock the barrier
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+            mgr._running = True
+            await asyncio.wait_for(asyncio.gather(*(mgr._poll_loop_for_bot(b) for b in bots)), timeout=10)
+
+        with patch.object(mgr, "sync_bot_updates_once", side_effect=fake_sync):
+            asyncio.run(run())
+        self.assertFalse(barrier.broken)
+        self.assertEqual(len(threads), 7)
+        self.assertTrue(all(name.startswith("tg-poll") for name in threads), threads)
+        pool = mgr._poll_pool
+        self.assertIsNotNone(pool)
+        mgr._shutdown_pools()
+        self.assertIsNone(mgr._poll_pool)
+        with self.assertRaises(RuntimeError):
+            pool.submit(lambda: None)
+
+
+@unittest.skipIf(_requests is None, "requests not installed")
+class SharedAdapterAndStaleRetryTests(unittest.TestCase):
+    def _req(self, method="answerCallbackQuery"):
+        return urllib.request.Request(
+            f"https://api.telegram.org/bot1:A/{method}", data=b"{}",
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+
+    def test_18_registry_sessions_share_one_adapter_across_threads(self):
+        reg = SessionRegistry()
+        sessions: list = []
+        t = threading.Thread(target=lambda: sessions.append(reg.get()))
+        t.start()
+        t.join(5)
+        sessions.append(reg.get())
+        a, b = sessions
+        self.assertIsNot(a, b)  # sessions stay thread-local
+        ad_a = a.get_adapter("https://api.telegram.org/x")
+        self.assertIs(ad_a, b.get_adapter("https://api.telegram.org/x"))  # one warm socket pool
+        self.assertEqual((ad_a._pool_connections, ad_a._pool_maxsize), (8, 24))
+        self.assertEqual(ad_a.max_retries.total, 0)
+        with patch.object(type(ad_a), "shutdown", autospec=True) as shutdown:
+            a.close()  # one thread's session close must not drop the shared pool
+            shutdown.assert_not_called()
+            self.assertEqual(reg.close(), 2)
+            shutdown.assert_called_once_with(ad_a)
+        self.assertIsNot(reg.get().get_adapter("https://api.telegram.org/x"), ad_a)  # fresh after close
+        reg.close()
+
+    def test_18b_stale_connection_retried_once_then_succeeds(self):
+        sess = _FakeSession()
+        real = sess.request
+        calls: list[int] = []
+
+        def flaky(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise _stale_exc()
+            return real(*a, **k)
+
+        sess.request = flaky
+        reg = SessionRegistry(factory=lambda: sess)
+        with open_request(self._req(), 5, registry=reg) as resp:
+            self.assertTrue(json.loads(resp.read())["ok"])
+        self.assertEqual(len(calls), 2)
+
+    def test_18c_retry_is_bounded_and_timeouts_are_never_retried(self):
+        calls: list[str] = []
+
+        def always_stale(*a, **k):
+            calls.append("stale")
+            raise _stale_exc()
+
+        sess = SimpleNamespace(request=always_stale, close=lambda: None)
+        with self.assertRaises(urllib.error.URLError):
+            open_request(self._req(), 5, registry=SessionRegistry(factory=lambda: sess))
+        self.assertEqual(len(calls), 2)  # 1 try + exactly 1 retry
+
+        calls.clear()
+
+        def timeout(*a, **k):
+            calls.append("timeout")
+            raise _requests.exceptions.ConnectTimeout("connect timed out")
+
+        sess = SimpleNamespace(request=timeout, close=lambda: None)
+        with self.assertRaises(TimeoutError):
+            open_request(self._req(), 5, registry=SessionRegistry(factory=lambda: sess))
+        self.assertEqual(calls, ["timeout"])
+        self.assertFalse(http_keepalive.is_stale_connection_error(_requests.exceptions.ReadTimeout("t")))
+        self.assertTrue(http_keepalive.is_stale_connection_error(ConnectionResetError(104, "reset")))
+
+    def test_18d_manager_transport_retries_stale_socket_once(self):
+        posts: list[str] = []
+
+        def post(url, data=None, headers=None, timeout=None):
+            posts.append(url)
+            if len(posts) == 1:
+                raise _stale_exc()
+            return SimpleNamespace(status_code=200, headers={}, reason="OK",
+                                   content=json.dumps({"ok": True, "result": True}).encode("utf-8"))
+
+        sess = SimpleNamespace(post=post, get=None, close=lambda: None)
+        tr = TelegramBotTransport("1:A")
+        with patch.object(TelegramBotTransport, "_new_session", return_value=sess):
+            self.assertTrue(tr.api_call("answerCallbackQuery", {"callback_query_id": "q"})["ok"])
+        self.assertEqual(len(posts), 2)
+
+
+class _FakePooledResp:
+    def __init__(self, body=b'{"ok": true, "result": true}', status=200, will_close=False):
+        self._body, self.status, self.reason, self.headers, self.will_close = body, status, "OK", {}, will_close
+
+    def read(self):
+        return self._body
+
+
+class _FakeConn:
+    def __init__(self, script=()):
+        self.script = list(script)
+        self.requests: list[tuple[str, str]] = []
+        self.closed = 0
+        self.sock = None
+        self.timeout = None
+
+    def request(self, method, path, body=None, headers=None):
+        self.requests.append((method, path))
+
+    def getresponse(self):
+        action = self.script.pop(0) if self.script else _FakePooledResp()
+        if isinstance(action, BaseException):
+            raise action
+        return action
+
+    def close(self):
+        self.closed += 1
+
+
+class StdlibKeepAliveFallbackTests(unittest.TestCase):
+    def _req(self):
+        return urllib.request.Request("https://api.telegram.org/bot1:A/sendMessage", data=b"{}",
+                                      headers={"Content-Type": "application/json"}, method="POST")
+
+    def test_19_reuses_connection_and_retries_stale_socket_once(self):
+        first = _FakeConn([_FakePooledResp(), http.client.RemoteDisconnected("closed")])
+        second = _FakeConn()
+        made = [first, second]
+        factory = MagicMock(side_effect=lambda *a: made.pop(0))
+        pool = http_keepalive.StdlibKeepAlivePool(connection_factory=factory)
+        pool.request(self._req(), 5).read()
+        self.assertEqual(pool.idle_count(), 1)  # kept alive, not closed
+        with pool.request(self._req(), 5) as resp:  # reused socket is stale -> one retry on a fresh one
+            self.assertTrue(json.loads(resp.read())["ok"])
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(len(first.requests), 2)
+        self.assertEqual(first.closed, 1)
+        self.assertEqual(second.requests, [("POST", "/bot1:A/sendMessage")])
+        self.assertEqual(pool.close(), 1)
+
+    def test_19b_fresh_connection_failure_and_http_errors_keep_urllib_taxonomy(self):
+        pool = http_keepalive.StdlibKeepAlivePool(
+            connection_factory=lambda *a: _FakeConn([ConnectionRefusedError(111, "refused")]))
+        with self.assertRaises(urllib.error.URLError):
+            pool.request(self._req(), 5)  # fresh (not reused) socket -> no retry
+        pool = http_keepalive.StdlibKeepAlivePool(
+            connection_factory=lambda *a: _FakeConn([_FakePooledResp(b'{"ok":false}', status=409)]))
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            pool.request(self._req(), 5)
+        self.assertEqual(ctx.exception.code, 409)
+        self.assertEqual(json.loads(ctx.exception.read())["ok"], False)
+        pool = http_keepalive.StdlibKeepAlivePool(connection_factory=lambda *a: _FakeConn([TimeoutError("t")]))
+        with self.assertRaises(TimeoutError):
+            pool.request(self._req(), 5)
+
+    def test_19c_open_request_without_requests_uses_stdlib_pool(self):
+        pool = http_keepalive.StdlibKeepAlivePool(connection_factory=lambda *a: _FakeConn())
+        with patch.object(http_keepalive, "_STDLIB_POOL", pool), \
+             patch("urllib.request.getproxies", return_value={}):
+            # (no `requests` session) -> pooled stdlib connection, never a one-shot urlopen
+            open_request(self._req(), 5, registry=SessionRegistry(factory=lambda: None)).read()
+            # an injected opener is still honoured exactly
+            opener = _RecordingOpener()
+            open_request(self._req(), 5, opener=opener).read()
+        self.assertEqual(pool.idle_count(), 1)
+        self.assertEqual(len(opener.calls), 1)
+
+
+class OffsetPrimeOnceTests(unittest.TestCase):
+    def test_20_idle_bot_primes_offset_only_once(self):
+        mgr, bot = _fake_manager(last_offset=0)
+        opener = _RecordingOpener(updates=[])
+        for _ in range(4):
+            mgr.sync_bot_updates_once("trend_bot", opener=opener)
+        primes = [c for c in opener.methods("getUpdates") if c[1]["offset"] == -1]
+        self.assertEqual(len(primes), 1)
+        self.assertEqual(len(opener.methods("getUpdates")), 5)  # 1 prime + 4 polls
+        self.assertEqual(bot.last_offset, 0)
+
+    def test_20b_failed_prime_is_retried_and_positive_offset_never_primes(self):
+        mgr, _bot = _fake_manager(last_offset=0)
+        opener = _RecordingOpener(updates=[])
+        fails = {"n": 1}
+
+        def flaky(req, timeout=10):
+            payload = json.loads(req.data.decode("utf-8"))
+            if payload["offset"] == -1 and fails["n"]:
+                fails["n"] -= 1
+                raise urllib.error.URLError("down")
+            return opener(req, timeout)
+
+        for _ in range(3):
+            mgr.sync_bot_updates_once("trend_bot", opener=flaky)
+        self.assertEqual(len([c for c in opener.methods("getUpdates") if c[1]["offset"] == -1]), 1)
+
+        mgr2, _ = _fake_manager(last_offset=7)
+        opener2 = _RecordingOpener(updates=[])
+        mgr2.sync_bot_updates_once("trend_bot", opener=opener2)
+        self.assertEqual([c[1]["offset"] for c in opener2.methods("getUpdates")], [8])
+
+
+class DomainDbCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.platform_db = str(Path(self.tmp.name) / "alerts.sqlite3")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _mgr(self, path):
+        engine = MagicMock()
+        engine.db.db_path = path
+        return DynamicBotManager(engine, router=MagicMock())
+
+    def test_21_portal_wrapper_cached_on_physical_path_only(self):
+        from portal_hub.db import PortalDatabase
+
+        cq = {"update_id": 1, "callback_query": {"id": "q", "data": "menu:home",
+                                                  "message": {"chat": {"id": 5}}, "from": {"id": 5}}}
+        seen: list = []
+        with patch("portal_hub.db.DEFAULT_DB_PATH", Path(self.platform_db)), \
+             patch.object(PortalDatabase, "_ensure_schema") as ddl, \
+             patch("portal_hub.handle_callback_query", side_effect=lambda c, db, cl: seen.append(db)), \
+             patch("portal_hub.TelegramPortalClient"):
+            mgr = self._mgr(self.platform_db)
+            Path(self.platform_db).touch()
+            for _ in range(3):
+                self.assertEqual(mgr._dispatch_portal_menu_update("1:A", cq), (True, "portal_callback_handled"))
+            self.assertEqual(ddl.call_count, 1)
+            self.assertTrue(all(db is seen[0] for db in seen))
+            self.assertEqual(str(seen[0].db_path), self.platform_db)
+        with patch("portal_hub.db.DEFAULT_DB_PATH", ":memory:"), \
+             patch.object(PortalDatabase, "_ensure_schema") as ddl, \
+             patch("portal_hub.handle_callback_query"), patch("portal_hub.TelegramPortalClient"):
+            mgr = self._mgr(":memory:")
+            for _ in range(2):
+                mgr._dispatch_portal_menu_update("1:A", cq)
+            self.assertEqual(ddl.call_count, 2)  # :memory: -> never cached
+
+    def test_21b_admission_and_yolo_init_db_once_per_physical_path(self):
+        msg = {"update_id": 1, "message": {"message_id": 1, "chat": {"id": 5, "type": "private"}, "text": "hello"}}
+        cq = {"update_id": 2, "callback_query": {"id": "q", "data": "adm:home",
+                                                  "message": {"chat": {"id": 5}}, "from": {"id": 5}}}
+        with patch("admission_brief.storage.db.AdmissionDatabase._init_db") as adm_ddl, \
+             patch("admission_brief.interactive_bot.AdmissionInteractiveBot.handle_update") as adm_handle, \
+             patch("yolo_brief.storage.db.YoloDatabase.init_db") as yolo_ddl, \
+             patch("yolo_brief.storage.db.YoloDatabase.seed_curations"):
+            mgr = self._mgr(self.platform_db)
+            Path(self.platform_db).touch()
+            Path(self.platform_db).with_name("yolo_brief.sqlite3").touch()
+            for _ in range(3):
+                mgr._dispatch_admission_bot_update("1:A", cq)
+                mgr._dispatch_yolo_bot_update("1:A", msg)
+            self.assertEqual((adm_ddl.call_count, yolo_ddl.call_count), (1, 1))
+            self.assertEqual(adm_handle.call_count, 3)
+
+            mem = self._mgr(":memory:")
+            for _ in range(2):
+                mem._dispatch_admission_bot_update("1:A", cq)
+                mem._dispatch_yolo_bot_update("1:A", msg)
+            self.assertEqual((adm_ddl.call_count, yolo_ddl.call_count), (3, 3))
+            self.assertEqual(mem._domain_dbs, {})
+
+    def test_21c_missing_file_rebuilds_wrapper(self):
+        mgr = self._mgr(self.platform_db)
+        built: list[int] = []
+
+        class _Db:
+            def __init__(self, path):
+                built.append(1)
+                Path(path).touch()
+
+        target = str(Path(self.tmp.name) / "x.sqlite3")
+        a, cached = mgr._domain_db(_Db, target)
+        self.assertTrue(cached)
+        self.assertIs(mgr._domain_db(_Db, target)[0], a)
+        Path(target).unlink()
+        self.assertIsNot(mgr._domain_db(_Db, target)[0], a)
+        self.assertEqual(len(built), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

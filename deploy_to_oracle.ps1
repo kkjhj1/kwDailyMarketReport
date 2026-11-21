@@ -178,6 +178,11 @@ chmod +x run_cron.sh || die "chmod +x run_cron.sh failed"
 grep -q '^REPORT_BASE_URL=' .env || die "REPORT_BASE_URL not found in .env"
 sed -i 's|^REPORT_BASE_URL=.*|REPORT_BASE_URL=http://161.33.196.211:8002|' .env || die "sed on .env failed"
 
+echo "[deps] pip install -r requirements.txt (requests keep-alive transport)"
+[ -f requirements.txt ] || die "requirements.txt not found"
+./venv/bin/pip install -q --disable-pip-version-check -r requirements.txt || die "pip install -r requirements.txt failed"
+./venv/bin/python -c "import requests; print('[deps] requests', requests.__version__)" || die "requests is not importable in venv"
+
 echo "[compile] full repository py_compile"
 find . \( -path './venv' -o -path './.git' -o -path './backups' -o -path './scratch' -o -path '*/__pycache__' -o -path './.pytest_cache' \) -prune -o -type f -name '*.py' -print0 \
   | sort -z > "$BAK/.pyfiles" || die "collecting python files failed"

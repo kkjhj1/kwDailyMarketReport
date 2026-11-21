@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import functools
 import html
 import io
 import json
@@ -88,7 +89,8 @@ class TelegramBotTransport:
 
     def _new_session(self) -> Any:
         """Session factory (patch point for tests); None when `requests` is unavailable.
-        Shared config SSOT: `http_keepalive.new_session` (pool 4/8, max_retries=0)."""
+        Shared config SSOT: `http_keepalive.new_session` (process-wide shared adapter 8/24, max_retries=0):
+        every bot's poll / lane / ack thread reuses the same warm TLS sockets to api.telegram.org."""
         if _import_requests()[0] is None:
             return None
         return http_keepalive.new_session("MultiBotPlatform/2.0")
@@ -124,16 +126,21 @@ class TelegramBotTransport:
 
     def _session_call(self, sess: Any, url: str, payload: dict[str, Any] | None, timeout: int) -> dict[str, Any]:
         requests_mod, _ = _import_requests()
-        try:
+
+        def _send() -> Any:
             if payload is None:
-                resp = sess.get(url, timeout=timeout)
-            else:
-                resp = sess.post(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    timeout=timeout,
-                )
+                return sess.get(url, timeout=timeout)
+            return sess.post(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+
+        try:
+            # A keep-alive socket dropped by Telegram's edge after idling is retried exactly once
+            # (timeouts are never retried -> no duplicate delivery on an ambiguous send).
+            resp = http_keepalive.call_with_stale_retry(_send, label=url.rsplit("/", 1)[-1])
         except Exception as exc:
             # Keep the urllib error taxonomy: a timeout stays an ambiguous delivery (`TimeoutError` ->
             # dispatcher UNKNOWN, never a duplicate resend); connection failures surface as `URLError`.
@@ -171,7 +178,13 @@ class TelegramBotTransport:
                 method="POST",
             )
         # Resolve urlopen at call time: a long-lived (reused) transport still honours a later monkeypatch.
-        opener = self._opener if self._has_custom_opener else urllib.request.urlopen
+        if self._has_custom_opener:
+            opener = self._opener
+        elif self._use_session_path():
+            # production without `requests`: stdlib keep-alive pool instead of a one-shot TLS handshake
+            opener = http_keepalive.stdlib_open
+        else:
+            opener = urllib.request.urlopen
         with opener(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         if not data.get("ok"):
@@ -1803,7 +1816,14 @@ class DynamicBotManager:
         self._pools_lock = threading.Lock()
         self._worker_pool: ThreadPoolExecutor | None = None
         self._ack_pool: ThreadPoolExecutor | None = None
+        # Dedicated long-poll pool: every bot blocks ~25s in getUpdates, so the loop's default executor
+        # (min(32, cpu+4) = 6 on a 2-vCPU VM) would starve the 7th+ bot. Never shared with other work.
+        self._poll_pool: ThreadPoolExecutor | None = None
         self._ack_slots = threading.BoundedSemaphore(self.ACK_POOL_CAPACITY)
+        # bot_ids whose `getUpdates(offset=-1)` backlog prime already ran (idle bots never re-prime per poll).
+        self._offset_primed: set[str] = set()
+        # (db class, normalized physical path) -> domain DB wrapper (schema/DDL runs once per process).
+        self._domain_dbs: dict[tuple[Any, str], Any] = {}
         # Seed-once registry: (bot_id, normalized db path) whose fixtures were already seeded.
         self._seeded: set[tuple[str, str]] = set()
         self._seed_lock = threading.Lock()
@@ -1817,6 +1837,7 @@ class DynamicBotManager:
     # Bounded pools: ack pool saturation -> the ack runs inline BEFORE any DB/render work ([TG-04]).
     CALLBACK_WORKERS = 8
     ACK_WORKERS = 4
+    POLL_WORKERS = 16  # >= active bots (7 today) with headroom; long-poll threads are mostly idle-waiting
     ACK_POOL_CAPACITY = 16  # in-flight + queued acks
     ACK_WAIT_SEC = 10.0
     MAX_UPDATE_ATTEMPTS = 3  # a deterministically failing update is quarantined after this many tries
@@ -1844,6 +1865,12 @@ class DynamicBotManager:
                 self._ack_pool = ThreadPoolExecutor(max_workers=self.ACK_WORKERS, thread_name_prefix="tg-ack")
             return self._ack_pool
 
+    def _get_poll_pool(self) -> ThreadPoolExecutor:
+        with self._pools_lock:
+            if self._poll_pool is None:
+                self._poll_pool = ThreadPoolExecutor(max_workers=self.POLL_WORKERS, thread_name_prefix="tg-poll")
+            return self._poll_pool
+
     def _offload_ack(self, send) -> Any:
         """Hands `send` to the bounded ack pool; returns its Future, or None when saturated/closed so the
         caller acknowledges inline (still before DB/render work)."""
@@ -1863,7 +1890,12 @@ class DynamicBotManager:
             return None
 
     def _shutdown_pools(self) -> None:
-        """Drains lane workers first (they may still enqueue acks), then the ack pool."""
+        """Releases the long-poll pool (poll tasks are already cancelled; an in-flight getUpdates is not
+        waited for), then drains lane workers (they may still enqueue acks), then the ack pool."""
+        with self._pools_lock:
+            poll, self._poll_pool = self._poll_pool, None
+        if poll is not None:
+            poll.shutdown(wait=False, cancel_futures=True)
         with self._pools_lock:
             worker, self._worker_pool = self._worker_pool, None
         if worker is not None:
@@ -1897,6 +1929,25 @@ class DynamicBotManager:
             seed_fn()
             self._seeded.add(key)
         return True
+
+    def _domain_db(self, cls: Any, db_path: Any, factory=None) -> tuple[Any, bool]:
+        """Returns `(db, cached)`. Physical-path wrappers that open an independent connection per call
+        (`PortalDatabase` / `AdmissionDatabase` / `YoloDatabase`) are built once per (class, normalized path),
+        so `CREATE TABLE IF NOT EXISTS` / `PRAGMA table_info` / default seeding no longer run on every click.
+        `:memory:` wrappers are never cached (each call stays a fresh, isolated instance); a cached wrapper
+        whose file disappeared is rebuilt so its schema is recreated."""
+        build = factory or (lambda: cls(db_path))
+        norm = self._normalize_db_path(db_path)
+        if norm == ":memory:":
+            return build(), False
+        key = (cls, norm)
+        with self._domain_lock:
+            db = self._domain_dbs.get(key)
+            if db is not None and os.path.exists(norm):
+                return db, True
+            db = build()
+            self._domain_dbs[key] = db
+        return db, True
 
     def _remember_answered(self, cq_id: str) -> None:
         with self._answered_cq_lock:
@@ -1937,6 +1988,13 @@ class DynamicBotManager:
                 if keep is None or keep.get(bid) != tok:
                     to_close.append(transport)
                     self._transports.pop(bid, None)
+                    self._offset_primed.discard(bid)  # new token / re-activated bot -> prime its backlog again
+            if keep is not None:
+                for bid in list(self._offset_primed):
+                    if bid not in keep:
+                        self._offset_primed.discard(bid)
+            else:
+                self._offset_primed.clear()
         for transport in to_close:
             transport.close()
 
@@ -1973,7 +2031,11 @@ class DynamicBotManager:
             return False, "portal_hub_not_available"
 
         portal_client = TelegramPortalClient(bot_token)
-        portal_db = PortalDatabase()
+        try:
+            from portal_hub.db import DEFAULT_DB_PATH as _portal_db_path
+        except ImportError:
+            _portal_db_path = ":memory:"  # unknown default -> never cached
+        portal_db, _ = self._domain_db(PortalDatabase, _portal_db_path)
 
         if "callback_query" in item:
             cq = item["callback_query"]
@@ -2301,7 +2363,9 @@ class DynamicBotManager:
             return False, "admission_interactive_not_available"
 
         adm_db_path = getattr(self.engine.db, "db_path", None) or ":memory:"
-        adm_db = AdmissionDatabase(db_path=str(adm_db_path))
+        adm_db, _ = self._domain_db(
+            AdmissionDatabase, adm_db_path, factory=lambda: AdmissionDatabase(db_path=str(adm_db_path))
+        )
 
         if "callback_query" in item:
             cq = item["callback_query"]
@@ -2442,7 +2506,7 @@ class DynamicBotManager:
 
         base_path = getattr(self.engine.db, "db_path", None)
         yolo_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("yolo_brief.sqlite3"))
-        yolo_db = YoloDatabase(yolo_db_path)
+        yolo_db, yolo_cached = self._domain_db(YoloDatabase, yolo_db_path)
         try:
             self._seed_once("yolo_bot", yolo_db_path, lambda: yolo_db.seed_curations(SEED_CURATIONS))
             if "callback_query" in item:
@@ -2479,7 +2543,8 @@ class DynamicBotManager:
                     return True, "yolo_message_handled"
             return False, "not_yolo_interactive_event"
         finally:
-            if yolo_db_path != ":memory:":
+            # cached physical-path wrapper stays open for reuse (its connections are per-call anyway)
+            if yolo_db_path != ":memory:" and not yolo_cached:
                 yolo_db.close()
 
     def sync_bot_updates_once(
@@ -2511,9 +2576,14 @@ class DynamicBotManager:
         last_offset = bot.last_offset or 0
         persisted_offset = last_offset
 
-        if last_offset <= 0:
+        if last_offset > 0:
+            self._offset_primed.add(bot.bot_id)
+        elif bot.bot_id not in self._offset_primed:
+            # Prime once per bot per process: an idle bot (no backlog -> offset stays 0) must not repeat
+            # `getUpdates(offset=-1)` before every 25s long-poll. Failures leave it un-primed (retried).
             try:
                 stale = transport.get_updates(offset=-1, timeout=1)
+                self._offset_primed.add(bot.bot_id)
                 if stale:
                     last_offset = int(stale[-1]["update_id"])
                     self.engine.update_bot_offset(bot.bot_id, last_offset)
@@ -2829,7 +2899,11 @@ class DynamicBotManager:
     async def _poll_loop_for_bot(self, bot_id: str) -> None:
         while self._running:
             try:
-                res = await asyncio.to_thread(self.sync_bot_updates_once, bot_id, timeout=25, parallel_callbacks=True)
+                loop = asyncio.get_running_loop()
+                res = await loop.run_in_executor(
+                    self._get_poll_pool(),
+                    functools.partial(self.sync_bot_updates_once, bot_id, timeout=25, parallel_callbacks=True),
+                )
                 # failed updates are retried (bounded by MAX_UPDATE_ATTEMPTS) after a short back-off
                 await asyncio.sleep(1.0 if (res or {}).get("failed_update_ids") else 0.05)
             except asyncio.CancelledError:

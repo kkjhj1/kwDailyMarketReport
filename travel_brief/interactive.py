@@ -30,7 +30,7 @@ from datetime import datetime as _datetime, timedelta as _timedelta, timezone as
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Optional
 
-from market_brief.channels.http_keepalive import answer_callback_once
+from market_brief.channels.http_keepalive import answer_callback_once, call_with_stale_retry, stdlib_open
 
 from travel_brief.channels.telegram import TelegramChannel
 from travel_brief.channels.telegram_limiter import SafeTelegramDispatcher
@@ -3087,10 +3087,14 @@ class TravelInteractiveHandler:
             req = urllib.request.Request(
                 url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            opener = urllib.request.urlopen
+            if opener is _ORIGINAL_URLOPEN and not self._closed:
+                opener = stdlib_open  # no `requests`: stdlib keep-alive pool (stale socket -> one retry)
+            with opener(req, timeout=10) as resp:
                 return json.load(resp)
 
-        resp = session.post(url, data=payload, timeout=10)
+        # stale keep-alive socket (peer reset after idling) -> exactly one retry; timeouts never retried
+        resp = call_with_stale_retry(lambda: session.post(url, data=payload, timeout=10), label="editMessageText")
         if resp.status_code >= 400:
             raise urllib.error.HTTPError(
                 url, resp.status_code, resp.reason or "", resp.headers, io.BytesIO(resp.content or b"")

@@ -9,6 +9,8 @@ import urllib.request
 import uuid
 import weakref
 from pathlib import Path
+
+from market_brief.channels.http_keepalive import call_with_stale_retry, stdlib_open
 # from travel_brief.core import Briefing
 Briefing = Any
 AssetSummary = Any
@@ -208,15 +210,18 @@ class TelegramChannel:
                 pass
 
     def _api_call_session(self, sess: Any, method: str, url: str, payload: dict | None, timeout: int) -> dict:
-        if payload is None:
-            resp = sess.get(url, timeout=timeout)
-        else:
-            resp = sess.post(
+        def _send() -> Any:
+            if payload is None:
+                return sess.get(url, timeout=timeout)
+            return sess.post(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 timeout=timeout,
             )
+
+        # stale keep-alive socket (peer reset after idling) -> exactly one retry; timeouts never retried
+        resp = call_with_stale_retry(_send, label=method)
         code = int(resp.status_code)
         if code >= 400:
             err_body = ""
@@ -246,6 +251,9 @@ class TelegramChannel:
             )
         # Non-injected channels resolve urlopen at call time so a later patch (offline guard) is honoured.
         opener = self._opener if (self._custom_opener or self._opener is not _ORIGINAL_URLOPEN) else urllib.request.urlopen
+        if opener is _ORIGINAL_URLOPEN and self._session_enabled():
+            # `requests` unavailable in production: stdlib keep-alive pool (stale socket -> one retry)
+            opener = stdlib_open
         try:
             with opener(req, timeout=timeout) as response:
                 res = json.load(response)
