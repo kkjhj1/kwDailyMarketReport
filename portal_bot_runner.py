@@ -14,6 +14,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # Fix Windows console encoding
 if sys.platform == "win32":
@@ -105,18 +106,49 @@ def normalize_menu_text(text: str) -> str:
     return ("/" + cleaned) if has_slash and not cleaned.startswith("/") else cleaned
 
 
+def extract_command(text: str) -> Optional[str]:
+    """Extract a valid Telegram slash command, ignoring an optional bot mention."""
+    first = (text or "").strip().split(maxsplit=1)
+    if not first:
+        return None
+    token = first[0]
+    if not token.startswith("/"):
+        return None
+    command, at_sign, bot_name = token[1:].partition("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", command):
+        return None
+    if at_sign and not re.fullmatch(r"[A-Za-z0-9_]{1,64}", bot_name):
+        return None
+    return "/" + command.lower()
+
+
 def match_menu_action(text: str) -> Optional[str]:
     """Matches raw or space-free text to one of: 'START', 'SUBS', 'CAT', 'TIER', 'HELP', 'SUPPORT'.
     Returns None if text is a keyword search query."""
     if not text:
         return None
+    cmd = extract_command(text)
+    if cmd in {"/start", "/menu", "/home"}:
+        return "START"
+    if cmd in {"/subs", "/mysubs", "/sub"}:
+        return "SUBS"
+    if cmd in {"/category", "/categories", "/cats", "/cat"}:
+        return "CAT"
+    if cmd in {"/tiers", "/tier", "/upgrade"}:
+        return "TIER"
+    if cmd in {"/help", "/guide", "/faq"}:
+        return "HELP"
+    if cmd in {"/support", "/inquiry", "/contact"}:
+        return "SUPPORT"
+    if text.strip().startswith("/"):
+        return None
+
     raw_lower = text.strip().lower()
     norm = normalize_menu_text(text)
 
     # 1. Start / Home
     if (
         raw_lower in MENU_START_COMMANDS
-        or raw_lower.startswith("/start")
         or norm in {"start", "/start", "menu", "/menu", "home", "/home", "홈", "메인", "메인메뉴", "시작", "메인홈"}
     ):
         return "START"

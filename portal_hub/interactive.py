@@ -74,12 +74,12 @@ def _short_chip(bot: BotServiceType) -> str:
 
 
 def _bot_action_row(bot: BotServiceType, is_sub: bool, context_str: str) -> list[dict[str, str]]:
-    """Subscribed: [🚀 <칩> 입장](url) + [<칩> 해지]; un-subscribed: single [➕ <봇> 구독하기] (no URL/gate/lock)."""
+    """Subscribed: [🚀 <칩> 입장](url) + [✖️ <칩> 해지]; un-subscribed: single [➕ <봇> 구독하기] (no URL/gate/lock)."""
     if is_sub:
         chip = _short_chip(bot)
         return [
             {"text": f"🚀 {chip} 입장", "url": _bot_deep_link(bot)},
-            {"text": f"{chip} 해지", "callback_data": f"sub:ask_unsub:{bot.value}:{context_str}"},
+            {"text": f"✖️ {chip} 해지", "callback_data": f"sub:ask_unsub:{bot.value}:{context_str}"},
         ]
     return [{"text": f"➕ {bot.short_name} 구독하기", "callback_data": f"sub:ask_sub:{bot.value}:{context_str}"}]
 
@@ -188,7 +188,10 @@ def render_main_menu(
     """Renders Welcome & Main Hub Dashboard with streamlined 3-row layout and active subscriptions chip."""
     name = html.escape(user.first_name or user.username or "회원")
     active_line = ""
+    slot_line = f"📦 <b>구독 가능 슬롯</b>: <b>{user.tier.max_slots if user.tier != UserTier.BLACK else '무제한'}개</b>\n"
     if subs is not None:
+        active_count = sum(1 for v in subs.values() if v)
+        slot_line = f"📊 <b>구독 슬롯</b>: <b>{build_slot_gauge(active_count, user.tier)}</b>\n"
         active_bots = [b.short_name for b, act in subs.items() if act and b.is_public]
         if active_bots:
             chips = " · ".join(active_bots)
@@ -201,7 +204,7 @@ def render_main_menu(
         f"<b>통합 인텔리전스 허브(Hub)</b>에 오신 것을 환영합니다.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏅 <b>나의 회원 등급</b>: {user.tier.badge}\n"
-        f"📦 <b>구독 가능 슬롯</b>: <b>{user.tier.max_slots if user.tier != UserTier.BLACK else '무제한'}개</b>\n"
+        f"{slot_line}"
         f"{active_line}"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '키즈')를 입력하세요!</i>"
@@ -293,8 +296,8 @@ def render_subscription_view(
 
     keyboard.extend([
         [
-            {"text": "📋 전체 봇", "callback_data": "cat:all"},
             {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
+            {"text": "💬 고객센터", "callback_data": "support:home"},
         ],
         [
             {"text": "🏠 홈으로", "callback_data": "nav:main"},

@@ -324,7 +324,17 @@ class ExhaustivePortalBotMenuTests(unittest.TestCase):
             self.assertTrue(matched, f"Persistent keyboard button '{btn_text}' is not mapped to any menu!")
 
         # Verify space-free robust matching (match_menu_action)
-        from portal_bot_runner import match_menu_action
+        from portal_bot_runner import extract_command, match_menu_action
+        for command, expected in (
+            ("/subs@KwMenu_bot", "SUBS"),
+            ("/category@KwMenu_bot", "CAT"),
+            ("/tiers@KwMenu_bot", "TIER"),
+            ("/support@KwMenu_bot", "SUPPORT"),
+            ("/help@KwMenu_bot", "HELP"),
+        ):
+            self.assertEqual(match_menu_action(command), expected)
+            self.assertEqual(extract_command(command), command.split("@")[0])
+        self.assertIsNone(match_menu_action("/subs_fake"))
         self.assertEqual(match_menu_action("내구독관리"), "SUBS")
         self.assertEqual(match_menu_action("내 구독 관리"), "SUBS")
         self.assertEqual(match_menu_action("📋 내 구독 관리"), "SUBS")

@@ -102,7 +102,6 @@ class PortalHubUnitTests(unittest.TestCase):
                 if key == "cat_home" and name == "입시":
                     continue  # category label "교육 / 입시" itself is kept (described as 준비중)
                 self.assertNotIn(name, text, f"{key} leaks {name}")
-            self.assertNotIn("6개", text, key)
             self.assertNotIn("6대", text, key)
         self.assertIn("준비중", views["cat_home"])
         self.assertIn("(여행, 키즈)", views["cat_home"])
@@ -112,6 +111,10 @@ class PortalHubUnitTests(unittest.TestCase):
         all_subs = {b: True for b in BotServiceType}
         main_text, _ = render_main_menu(user, all_subs)
         self.assertIn("내 활성 구독 (3개)", main_text)
+        self.assertIn(
+            "📊 <b>구독 슬롯</b>: <b>[ ⬛ ⬛ ⬛ ★ ] 6개 활성화 (무제한)</b>",
+            main_text,
+        )
         for name in hidden_names:
             self.assertNotIn(name, main_text)
         _, sub_markup = render_subscription_view(user, all_subs)
@@ -805,8 +808,8 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
 
         user = UserProfile(user_id=1, chat_id=1, first_name="t")
         subs = {b: False for b in BotServiceType}
-        for _, markup in (render_category_home_view(), render_subscription_view(user, subs)):
-            self.assertIn("cat:all", [b.get("callback_data") for b in _all_buttons(markup)])
+        self.assertIn("cat:all", [b.get("callback_data") for b in _all_buttons(render_category_home_view()[1])])
+        self.assertNotIn("cat:all", [b.get("callback_data") for b in _all_buttons(render_subscription_view(user, subs)[1])])
         # Main menu consolidates catalog + subs into a single `nav:subs` entry
         self.assertIn("nav:subs", [b.get("callback_data") for b in _all_buttons(render_main_menu(user)[1])])
 
@@ -1056,7 +1059,7 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
         self.assertEqual(sub_row[0]["text"], f"🚀 {chip} 입장")
         self.assertTrue(sub_row[0]["url"].startswith("https://t.me/"), "subscribed bot must use a direct url")
         self.assertNotIn("callback_data", sub_row[0])
-        self.assertEqual(sub_row[1]["text"], f"{chip} 해지")
+        self.assertEqual(sub_row[1]["text"], f"✖️ {chip} 해지")
         self.assertTrue(sub_row[1]["callback_data"].startswith(f"sub:ask_unsub:{subscribed.value}:"))
         for btn in all_btns:
             cb = btn.get("callback_data", "")
@@ -1103,8 +1106,8 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
         self.assertNotIn("<b>x</b>", text)
         rows = markup["inline_keyboard"]
         self.assertEqual(rows[-2], [
-            {"text": "📋 전체 봇", "callback_data": "cat:all"},
             {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
+            {"text": "💬 고객센터", "callback_data": "support:home"},
         ])
         self.assertEqual(rows[-1], [{"text": "🏠 홈으로", "callback_data": "nav:main"}])
         self.assertNotIn("📂 카테고리", [b["text"] for b in _all_buttons(markup)])
