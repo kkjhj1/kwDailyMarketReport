@@ -14,6 +14,7 @@ def test_ai_prompt_generation_and_deep_link():
     assert "후쿠오카" in prompt
     assert "3박 4일" in prompt
     assert "무비자 90일" in prompt
+    assert "⑤ 위 일정 동선과 예산에 맞는 숙소 추천 지역(역세권/해변 등)과 숙소 유형도 2곳 추천해줘." in prompt
 
     chatgpt_url = AIPromptGenerator.get_chatgpt_deep_link(prompt)
     assert chatgpt_url.startswith("https://chatgpt.com/?q=")

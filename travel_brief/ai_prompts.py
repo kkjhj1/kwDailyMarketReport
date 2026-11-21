@@ -49,7 +49,8 @@ class AIPromptGenerator:
 ① 위 {stay_label} 일정에 맞춘 '무리 없는 시간대별 동선(오전/오후/저녁)'을 상세히 짜줘.
 ② 현지인 추천 가성비 로컬 맛집과 카페를 각 일자별로 2곳씩 추천해줘.
 ③ 예상 예산({round_man(budget.total_per_person_krw)}만 원대) 안에서 알뜰하게 즐길 수 있는 패스권(교통권)이나 결제 꿀팁을 알려줘.
-④ {deal.departure_date[:7]}월 현지 날씨에 맞는 옷차림과 꼭 챙겨야 할 준비물 목록을 정리해줘."""
+④ {deal.departure_date[:7]}월 현지 날씨에 맞는 옷차림과 꼭 챙겨야 할 준비물 목록을 정리해줘.
+⑤ 위 일정 동선과 예산에 맞는 숙소 추천 지역(역세권/해변 등)과 숙소 유형도 2곳 추천해줘."""
         return prompt
 
     @staticmethod

@@ -1141,6 +1141,41 @@ class TestTravelV23Integration(unittest.TestCase):
         self.assertEqual((meta.best_months, meta.caution_months, meta.caution_note), ([], [], "계절 정보 확인 필요"))
         self.assertTrue(meta.flight_baseline_krw > 0 and meta.hotel_night_avg_krw > 0 and meta.daily_meal_transit_krw > 0)
 
+    # 13b. Theme-aware hotel query/label + honest 1실·2인 disclosure (Naver URL uses rooms=1&adults=2)
+    def test_13b_theme_aware_hotel_query_and_label(self):
+        import urllib.parse
+        from dataclasses import replace
+        from travel_bot_runner import format_telegram_briefing
+        from travel_brief.budget_calculator import resolve_hotel_style_label
+
+        pqc = self._live_rec("PQC", 300000, 420000)
+        prg = self._live_rec("PRG", 900000, 1200000)
+        self.assertEqual(pqc.destination.theme, "resort")
+        self.assertEqual(prg.destination.theme, "city")
+        self.assertIn("destination=" + urllib.parse.quote("푸꾸옥 리조트") + "&", pqc.hotel_search_url)
+        self.assertIn("destination=" + urllib.parse.quote("프라하 호텔") + "&", prg.hotel_search_url)
+        for rec in (pqc, prg):
+            self.assertIn("rooms=1&adults=2", rec.hotel_search_url)
+
+        self.assertEqual(resolve_hotel_style_label(pqc.destination), "해변·리조트형 참고")
+        self.assertEqual(resolve_hotel_style_label(prg.destination), "시내·역세권 실속형 (3성 기준)")
+        # RESORT preference never relabels a pure city; customized segments are kept otherwise.
+        self.assertEqual(resolve_hotel_style_label(prg.destination, "RESORT"), "시내·역세권 실속형 (3성 기준)")
+        both = replace(prg.destination, theme="both", hotel_budget_segment="료칸 포함 온천형")
+        self.assertEqual(resolve_hotel_style_label(both, "RESORT"), "해변·리조트형 참고")
+        self.assertEqual(resolve_hotel_style_label(both), "료칸 포함 온천형")
+
+        msg = format_telegram_briefing([pqc], engine=self.engine, target_city="PQC")
+        self.assertIn("숙소 예산: <b>해변·리조트형 참고</b>", msg)
+        self.assertIn("(1실·2인 기준)", msg)
+        self.assertEqual(msg.count("[🏨 숙소 실시간 요금]"), 1)
+
+        # Curated cities keep the curated hotel-name query.
+        fuk = self._live_rec("FUK", 200000, 260000)
+        clean = fuk.destination.recommended_hotel_name.split("(")[0].strip()
+        self.assertTrue(clean)
+        self.assertNotIn(urllib.parse.quote("후쿠오카 호텔") + "&", fuk.hotel_search_url)
+
     def _worst_case_recs(self, url_len=600):
         from dataclasses import replace
         from travel_brief.budget_calculator import BudgetCalculator

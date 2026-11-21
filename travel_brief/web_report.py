@@ -22,7 +22,7 @@ from travel_brief.models import (
     round_man,
 )
 from travel_brief.flight_engine import FlightEngine
-from travel_brief.budget_calculator import BudgetCalculator
+from travel_brief.budget_calculator import BudgetCalculator, resolve_hotel_style_label
 from travel_brief.ai_prompts import AIPromptGenerator
 from travel_brief.city_catalog import (
     REGION_CODES,
@@ -1731,6 +1731,11 @@ class WebReportGenerator:
             hotel_name = html.escape(dest.recommended_hotel_name or "시내 중심 3~4성급 호텔")
             hotel_grade = html.escape(dest.recommended_hotel_grade or "4성급")
             hotel_features = html.escape(dest.recommended_hotel_features or "가성비 우수")
+            hotel_style_label = resolve_hotel_style_label(dest)
+            # Title already shows a customized segment; only prefix the label when it adds information.
+            hotel_style_prefix = (
+                "" if hotel_style_label == dest.hotel_budget_segment else f"{html.escape(hotel_style_label)} · "
+            )
 
             photo = top_photos[rank - 1] if rank - 1 < len(top_photos) else None
             photo_html = (
@@ -1776,7 +1781,7 @@ class WebReportGenerator:
               <strong>숙박 예산: {html.escape(dest.hotel_budget_segment)}</strong>
             </div>
             <div class="hotel-feature-line">
-              └ {budget.nights}박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만)
+              └ {hotel_style_prefix}{budget.nights}박 기준예산 약 {hotel_total_man}만 원 (1박 약 {hotel_night_man}만 · 1실·2인 기준)
             </div>
             <div class="hotel-ref-line" style="margin-top:0.35rem; font-size:0.83rem; color:#94a3b8;">
               📍 추천 참고 호텔: <strong style="color:#f8fafc;">{hotel_name}</strong> <span class="hotel-grade-badge">{hotel_grade}</span> · {hotel_features}

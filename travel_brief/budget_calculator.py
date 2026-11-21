@@ -4,6 +4,37 @@ Computes 1-person and 2-person itemized expense estimates and scores trips.
 from __future__ import annotations
 from typing import Optional, Literal
 from travel_brief.models import DestinationMeta, FlightDeal, BudgetBreakdown, TravelRecommendation
+from travel_brief.city_catalog import FALLBACK_HOTEL_NAME
+
+GENERIC_HOTEL_SEGMENT = "3성급 가성비 비즈니스 호텔"
+RESORT_HOTEL_LABEL = "해변·리조트형 참고"
+CITY_HOTEL_LABEL = "시내·역세권 실속형 (3성 기준)"
+
+
+def resolve_hotel_style_label(dest: DestinationMeta, preferred_theme: str = "ALL") -> str:
+    """Theme-aware accommodation label shown next to the hotel budget line."""
+    theme = (getattr(dest, "theme", "") or "").strip().lower()
+    pref = (preferred_theme or "ALL").strip().upper()
+    if theme == "resort" or (pref == "RESORT" and theme != "city"):
+        return RESORT_HOTEL_LABEL
+    segment = (getattr(dest, "hotel_budget_segment", "") or "").strip()
+    if segment and segment != GENERIC_HOTEL_SEGMENT:
+        return segment
+    return CITY_HOTEL_LABEL
+
+
+def resolve_hotel_query(dest: DestinationMeta) -> str:
+    """Naver hotel search keyword: curated hotel name, else theme-aware city keyword."""
+    # Fallback cities carry a placeholder (not a real hotel) -> treat as "no curated hotel".
+    if dest.recommended_hotel_name and dest.recommended_hotel_name != FALLBACK_HOTEL_NAME:
+        clean_hotel = dest.recommended_hotel_name.split("(")[0].strip()
+        return clean_hotel if dest.name in clean_hotel else f"{dest.name} {clean_hotel}"
+    theme = (getattr(dest, "theme", "") or "").strip().lower()
+    if theme == "resort":
+        return f"{dest.name} 리조트"
+    if theme == "city":
+        return f"{dest.name} 호텔"
+    return dest.name
 
 
 class BudgetCalculator:
@@ -84,8 +115,7 @@ class BudgetCalculator:
         )
 
         import urllib.parse
-        clean_hotel = dest.recommended_hotel_name.split("(")[0].strip() if dest.recommended_hotel_name else dest.name
-        hotel_query = clean_hotel if dest.name in clean_hotel else f"{dest.name} {clean_hotel}"
+        hotel_query = resolve_hotel_query(dest)
         encoded_hotel = urllib.parse.quote(hotel_query)
         hotel_search_url = f"https://m-hotel.naver.com/hotels/search?destination={encoded_hotel}&checkIn={flight.departure_date}&checkOut={flight.return_date}&rooms=1&adults=2"
 

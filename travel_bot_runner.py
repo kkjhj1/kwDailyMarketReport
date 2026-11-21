@@ -51,7 +51,7 @@ from travel_brief.models import (
     round_man,
 )
 from travel_brief.flight_engine import FlightEngine
-from travel_brief.budget_calculator import BudgetCalculator
+from travel_brief.budget_calculator import BudgetCalculator, resolve_hotel_style_label
 from travel_brief.ai_prompts import AIPromptGenerator
 from travel_brief.web_report import (
     EMPTY_SEGMENT_NOTICE,
@@ -365,7 +365,7 @@ def format_telegram_briefing(
                     sched_lines.append(f"  • 포인트: {' · '.join(motive)}")
 
             sched_lines.extend([
-                f"  • 숙소 예산: <b>{html.escape(dest.hotel_budget_segment)}</b> {budget.nights}박 약 {h_man}만 원",
+                f"  • 숙소 예산: <b>{html.escape(resolve_hotel_style_label(dest))}</b> {budget.nights}박 약 {h_man}만 원 (1실·2인 기준)",
                 f"    └ 추천 호텔: {hotel_name_str}{hotel_grade_str}{hotel_feat_str} (실제 요금 링크 확인)",
                 f"  • 예산: <b>1인 약 {total_1p_man}만 원</b> (항공 {f_man}만 + 숙소 {h_man}만 + 식비 {m_man}만)",
             ])
