@@ -212,10 +212,11 @@ def test_ttl_30min_expired_never_sent(db):
     assert db.claim_due_dose_timers(late, "c1") == []
     t = db.get_dose_timer(r["timer_id"])
     assert t.status == "EXPIRED" and t.terminal_reason == "TTL_EXPIRED" and t.attempt_count == 0
-    # exactly at expires_at is still claimable
+    # exactly at expires_at is expired and never claimable
     r2 = _record(db, 7, cid, "k2")
     edge = datetime.strptime(db.get_dose_timer(r2["timer_id"]).expires_at, "%Y-%m-%d %H:%M:%S")
-    assert [x.timer_id for x in db.claim_due_dose_timers(edge, "c2")] == [r2["timer_id"]]
+    assert db.claim_due_dose_timers(edge, "c2") == []
+    assert db.get_dose_timer(r2["timer_id"]).status == "EXPIRED"
 
 
 def test_stale_lease_becomes_unknown_and_is_never_resent(db):
