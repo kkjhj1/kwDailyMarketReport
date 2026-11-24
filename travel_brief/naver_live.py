@@ -355,6 +355,8 @@ def extract_latest_valid_pg_fare(pg_node: Optional[dict]) -> tuple[Optional[int]
 def parse_sse_stream_lines(
     raw_lines: Iterable[bytes | str],
     ret_compact: str,
+    dep_date: Optional[date] = None,
+    ret_date: Optional[date] = None,
 ) -> Optional[dict]:
     """Parses SSE stream lines from Naver `searchFlights` resiliently.
     - Retains the latest `data:` payload containing non-empty `fareMappings`.
@@ -389,10 +391,20 @@ def parse_sse_stream_lines(
     if not last_valid_obj:
         return None
 
-    return parse_sse_final_object(last_valid_obj, ret_compact=ret_compact)
+    return parse_sse_final_object(
+        last_valid_obj,
+        ret_compact=ret_compact,
+        dep_date=dep_date,
+        ret_date=ret_date,
+    )
 
 
-def parse_sse_final_object(obj: dict, ret_compact: str) -> Optional[dict]:
+def parse_sse_final_object(
+    obj: dict,
+    ret_compact: str,
+    dep_date: Optional[date] = None,
+    ret_date: Optional[date] = None,
+) -> Optional[dict]:
     """Extracts verified nonstop cheapest & popular flight details from a parsed SSE JSON object."""
     status = obj.get("status") or {}
     airlines_map: dict[str, str] = {**IATA_AIRLINE_KO, **(status.get("airlinesCodeMap") or {})}
@@ -476,9 +488,36 @@ def parse_sse_final_object(obj: dict, ret_compact: str) -> Optional[dict]:
     parsed_pops = [p for m in (obj.get("popularFlights") or []) if (p := _parse_mapping(m)) is not None]
     popular = parsed_pops[0] if parsed_pops else None
 
+    from travel_brief.flight_engine import (
+        OFFICE_MAX_LEAVE_DAYS,
+        OFFICE_RET_MIN_ARR_MINUTES,
+        _hhmm_to_minutes,
+        calc_required_leave_days,
+    )
+    office = None
+    for cand in parsed_fms:
+        dep_m = _hhmm_to_minutes(cand.get("dep_time") or "")
+        arr_m = _hhmm_to_minutes(cand.get("ret_arr_time") or "")
+        if dep_m is None or arr_m is None or cand.get("next_day_arrival"):
+            continue
+        if arr_m < OFFICE_RET_MIN_ARR_MINUTES:
+            continue
+        if dep_date is not None and ret_date is not None:
+            leave = calc_required_leave_days(dep_date, ret_date, cand["dep_time"])
+            if leave > OFFICE_MAX_LEAVE_DAYS:
+                continue
+            cand_copy = dict(cand)
+            cand_copy["leave_days"] = leave
+            office = cand_copy
+            break
+        elif dep_m >= 18 * 60:
+            office = cand
+            break
+
     return {
         "cheapest": cheapest,
         "popular": popular,
+        "office": office,
     }
 
 
@@ -703,7 +742,12 @@ class NaverFlightLiveClient:
             )
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    parsed = parse_sse_stream_lines(resp, ret_compact=ret_c)
+                    parsed = parse_sse_stream_lines(
+                        resp,
+                        ret_compact=ret_c,
+                        dep_date=date.fromisoformat(dep_iso),
+                        ret_date=date.fromisoformat(ret_iso),
+                    )
                     if parsed is not None:
                         return parsed
             except Exception as exc:
@@ -734,6 +778,27 @@ class NaverFlightLiveClient:
         is_super = (not deal.is_peak_holiday) and (min_card <= dest.flight_deal_threshold_krw)
         max_krw = max(min_card + 30000, min_gen, pop_fare)
 
+        off = sse_result.get("office")
+        off_fare = 0
+        off_airline = ""
+        off_dep = ""
+        off_ret_arr = ""
+        off_leave: Optional[float] = None
+        if off and not getattr(dest, "is_long_haul", False):
+            from travel_brief.flight_engine import calc_required_leave_days
+            off_fare = int(off.get("min_card") or 0)
+            off_airline = str(off.get("airline") or "")
+            off_dep = str(off.get("dep_time") or "")
+            off_ret_arr = str(off.get("ret_arr_time") or "")
+            if off.get("leave_days") is not None:
+                off_leave = float(off["leave_days"])
+            else:
+                off_leave = calc_required_leave_days(
+                    date.fromisoformat(deal.departure_date),
+                    date.fromisoformat(deal.return_date),
+                    off_dep,
+                )
+
         return FlightDeal(
             destination_code=deal.destination_code,
             destination_name=deal.destination_name,
@@ -763,6 +828,11 @@ class NaverFlightLiveClient:
             exact_ret_time=ch["ret_dep_time"],
             exact_ret_arr_time=ch["ret_arr_time"],
             next_day_arrival=ch["next_day_arrival"],
+            office_fare_krw=off_fare,
+            office_airline=off_airline,
+            office_dep_time=off_dep,
+            office_ret_arr_time=off_ret_arr,
+            office_leave_days=off_leave,
         )
 
     def _read_disk_sections(self) -> tuple[dict[str, dict], dict[str, dict]]:

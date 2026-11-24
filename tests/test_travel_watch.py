@@ -2449,3 +2449,66 @@ def test_nav_ack_sent_before_inline_fallback_when_ui_pool_is_closed(mem_db):
         assert order == ["ack", "edit"]
     finally:
         h.shutdown()
+
+
+def test_office_watch_union_strict_matching_long_haul_and_ui(handler, mem_db):
+    from datetime import date, datetime
+    from travel_brief.models import FlightDeal
+    from travel_brief.watch_engine import KST, WatchCheckEngine, union_weekday_option
+
+    assert union_weekday_option(["OFFICE", "WEEKEND"]) == "ANY_OFFICE"
+    assert union_weekday_option(["OFFICE"]) == "OFFICE"
+
+    # UI: OFFICE button lives inside show_advanced on short-haul, hidden & rejected on long-haul
+    handler._remember_watch_card("c1", 900)
+    _cb(handler, "trv:w:s:FUK", mid=900)
+    assert "trv:w:d:FUK:O" not in set(all_callbacks(handler.edits[-1][2]))  # collapsed by default
+    _cb(handler, "trv:w:a:FUK", mid=900)
+    assert "trv:w:d:FUK:O" in set(all_callbacks(handler.edits[-1][2]))
+    assert len("trv:w:d:FUK:O".encode("utf-8")) <= 64
+    _cb(handler, "trv:w:d:FUK:O", mid=900)
+    assert "연차 최소화" in handler.edits[-1][1]
+    _cb(handler, "trv:w:k:FUK:1", mid=900)
+    assert mem_db.get_travel_watch("c1", "FUK")["weekday_option"] == "OFFICE"
+
+    handler._remember_watch_card("c1", 901)
+    _cb(handler, "trv:w:s:CDG", mid=901)
+    _cb(handler, "trv:w:a:CDG", mid=901)
+    assert "trv:w:d:CDG:O" not in set(all_callbacks(handler.edits[-1][2]))  # hidden on long-haul
+    _cb(handler, "trv:w:d:CDG:O", mid=901)
+    assert "장거리 노선" in handler.edits[-1][1]
+
+    # Watch engine strict matching: rejects missing ret_arr / next_day_arrival / STALE / LIVE_PG,
+    # and falls back to verified `office_*` candidate on the same deal
+    seed_recipient(mem_db, "c2")
+    mem_db.upsert_travel_watch("c2", "FUK", 300_000, watch_mode="FLEX", horizon_months=3, weekday_option="OFFICE")
+    mem_db.upsert_travel_watch("c2", "CDG", 1_500_000, watch_mode="FLEX", horizon_months=3, weekday_option="OFFICE")
+
+    def fake_fetcher(code, custom, max_target, spec):
+        if code == "CDG":
+            raise AssertionError("OFFICE must exclude long-haul CDG")
+        return [
+            # Missing ret_arr_time -> dropped
+            FlightDeal("FUK", "후쿠오카", "ICN", "2026-12-04", "2026-12-06", "금", "일", 2, "제주항공",
+                       190_000, 300_000, data_source="LIVE_SSE", freshness="FRESH",
+                       exact_dep_time="19:00", exact_ret_arr_time=""),
+            # Cheapest is 08:30 (1.0 leave, 12:00 arr < 13:00 -> fails),
+            # while office_* candidate on same verified deal qualifies (19:20 -> 18:10, 0.0 leave, 265k <= 300k)!
+            FlightDeal("FUK", "후쿠오카", "ICN", "2026-12-04", "2026-12-06", "금", "일", 2, "제주항공",
+                       210_000, 300_000, data_source="LIVE_SSE", freshness="FRESH",
+                       exact_dep_time="08:30", exact_ret_arr_time="12:00",
+                       office_fare_krw=265_000, office_airline="대한항공",
+                       office_dep_time="19:20", office_ret_arr_time="18:10", office_leave_days=0.0),
+        ]
+    fake_fetcher.accepts_spec = True
+
+    rec = Recorder()
+    we = WatchCheckEngine(
+        db=mem_db, catalog=handler.catalog, quote_fetcher=fake_fetcher,
+        sender=rec,
+        now_fn=lambda: datetime(2026, 11, 24, 12, 30, tzinfo=KST),
+    )
+    res = we.run_once()
+    assert res.sent_count == 1 if hasattr(res, "sent_count") else True
+    assert len(rec.calls) == 1
+    assert "265,000원" in rec.calls[0][1] and "대한항공" in rec.calls[0][1]

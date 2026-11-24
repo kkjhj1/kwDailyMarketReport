@@ -1791,6 +1791,43 @@ class TestTravelLiveBudgetCacheAndTerminalGuard(unittest.TestCase):
         self.assertTrue(h._edit_if_latest("c1", 80, newer, "NEW"))
         self.assertEqual(self.edits[-1][1], "NEW")
 
+    def test_office_helper_line_on_telegram_card_and_slim_fallback(self):
+        import dataclasses
+        from datetime import date
+        from travel_bot_runner import format_telegram_briefing
+        from travel_brief.budget_calculator import BudgetCalculator
+        from travel_brief.city_catalog import CityCatalog
+
+        engine = FlightEngine(live_naver=False)
+        deals = engine.search_deals(dest_code="FUK", months_ahead=3, ref_date=date(2026, 11, 20))
+        recs = BudgetCalculator.rank_recommendations(engine.destinations, deals, top_n=1)
+        # 0.0 leave days must NOT be dropped as falsy!
+        sse_rec = dataclasses.replace(
+            recs[0],
+            best_deal=dataclasses.replace(
+                recs[0].best_deal,
+                data_source="LIVE_SSE",
+                freshness="FRESH",
+                exact_dep_time="08:30",
+                office_fare_krw=298000,
+                office_airline="대한항공",
+                office_dep_time="19:20",
+                office_ret_arr_time="18:10",
+                office_leave_days=0.0,
+            ),
+        )
+        msg = format_telegram_briefing([sse_rec], engine=engine, target_city="FUK")
+        self.assertIn("💼 연차 0일 가능: 19:20 출발 · 18:10 인천도착 (298,000원~)", msg)
+
+        # STALE / LIVE_PG / long-haul must NOT render the office helper line
+        stale_rec = dataclasses.replace(sse_rec, best_deal=dataclasses.replace(sse_rec.best_deal, freshness="STALE"))
+        self.assertNotIn("💼 연차", format_telegram_briefing([stale_rec], engine=engine, target_city="FUK"))
+        pg_rec = dataclasses.replace(sse_rec, best_deal=dataclasses.replace(sse_rec.best_deal, data_source="LIVE_PG"))
+        self.assertNotIn("💼 연차", format_telegram_briefing([pg_rec], engine=engine, target_city="FUK"))
+        cdg_meta = CityCatalog(engine.destinations).get("CDG").meta
+        lh_rec = dataclasses.replace(sse_rec, destination=cdg_meta)
+        self.assertNotIn("💼 연차", format_telegram_briefing([lh_rec], engine=engine, target_city="CDG"))
+
 
 if __name__ == "__main__":
     unittest.main()

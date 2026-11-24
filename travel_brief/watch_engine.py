@@ -23,16 +23,22 @@ import re
 import socket
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from travel_brief.city_catalog import CityCatalog, get_watch_country_meta, is_country_watch_code
 from travel_brief.flight_engine import (
     FSC_CARRIERS,
+    OFFICE_MAX_LEAVE_DAYS,
+    OFFICE_MAX_NIGHTS,
+    OFFICE_MIN_NIGHTS,
+    OFFICE_RET_MIN_ARR_MINUTES,
     WEEKDAY_OPTION_PATTERNS,
     FlightEngine,
+    _hhmm_to_minutes,
     add_months,
+    calc_required_leave_days,
     normalize_weekday_option,
 )
 from travel_brief.models import BudgetBreakdown, FlightDeal, round_man
@@ -144,12 +150,65 @@ def matches_day_pattern(deal: FlightDeal, pattern: str) -> bool:
 
 
 def matches_weekday_option(deal: FlightDeal, option: Optional[str]) -> bool:
-    """WEEKEND: Thu->Sun / Fri->Mon, WEEKDAY: Mon->Thu / Tue->Fri, ANY: all four (3 nights)."""
+    """WEEKEND: Thu->Sun / Fri->Mon, WEEKDAY: Mon->Thu / Tue->Fri, ANY: all four (3N), OFFICE: 2~4N <=1 leave."""
     dep, ret = _parse_day(deal.departure_date), _parse_day(deal.return_date)
     if dep is None or ret is None:
         return False
-    patterns = WEEKDAY_OPTION_PATTERNS[normalize_weekday_option(option or "ANY")]
-    return (dep.weekday(), (ret - dep).days) in set(patterns)
+    norm = normalize_weekday_option(option or "ANY")
+    nights = (ret - dep).days
+    if norm == "OFFICE":
+        return OFFICE_MIN_NIGHTS <= nights <= OFFICE_MAX_NIGHTS and calc_required_leave_days(dep, ret, "18:30") <= OFFICE_MAX_LEAVE_DAYS
+    if norm == "ANY_OFFICE":
+        if (dep.weekday(), nights) in set(WEEKDAY_OPTION_PATTERNS["ANY"]):
+            return True
+        return OFFICE_MIN_NIGHTS <= nights <= OFFICE_MAX_NIGHTS and calc_required_leave_days(dep, ret, "18:30") <= OFFICE_MAX_LEAVE_DAYS
+    patterns = WEEKDAY_OPTION_PATTERNS[norm]
+    return (dep.weekday(), nights) in set(patterns)
+
+
+def _resolve_office_deal(deal: FlightDeal) -> Optional[FlightDeal]:
+    """Strict [DATA-01] filter for OFFICE watches: requires LIVE_SSE + FRESH + valid exact dep/ret_arr times
+    (ret_arr >= 13:00, not next-day arrival) and required leave <= 1.0 day. Falls back to `office_*`
+    candidate on the same verified deal when `cheapest` fails time/leave constraints."""
+    if getattr(deal, "data_source", "") != "LIVE_SSE" or getattr(deal, "freshness", "FRESH") != "FRESH":
+        return None
+    dep, ret = _parse_day(deal.departure_date), _parse_day(deal.return_date)
+    if dep is None or ret is None:
+        return None
+    dep_m = _hhmm_to_minutes(getattr(deal, "exact_dep_time", "") or "")
+    arr_m = _hhmm_to_minutes(getattr(deal, "exact_ret_arr_time", "") or "")
+    if (
+        dep_m is not None
+        and arr_m is not None
+        and arr_m >= OFFICE_RET_MIN_ARR_MINUTES
+        and not getattr(deal, "next_day_arrival", False)
+        and calc_required_leave_days(dep, ret, deal.exact_dep_time) <= OFFICE_MAX_LEAVE_DAYS
+    ):
+        return deal
+    off_fare = int(getattr(deal, "office_fare_krw", 0) or 0)
+    off_dep = getattr(deal, "office_dep_time", "") or ""
+    off_arr = getattr(deal, "office_ret_arr_time", "") or ""
+    off_leave = getattr(deal, "office_leave_days", None)
+    off_dep_m = _hhmm_to_minutes(off_dep)
+    off_arr_m = _hhmm_to_minutes(off_arr)
+    if (
+        off_fare > 0
+        and off_dep_m is not None
+        and off_arr_m is not None
+        and off_arr_m >= OFFICE_RET_MIN_ARR_MINUTES
+        and not getattr(deal, "next_day_arrival", False)
+        and off_leave is not None
+        and float(off_leave) <= OFFICE_MAX_LEAVE_DAYS
+    ):
+        return replace(
+            deal,
+            price_krw=off_fare,
+            price_min_krw=off_fare,
+            airline=getattr(deal, "office_airline", "") or deal.airline,
+            exact_dep_time=off_dep,
+            exact_ret_arr_time=off_arr,
+        )
+    return None
 
 
 def within_horizon(deal: FlightDeal, today: date, horizon_months: int) -> bool:
@@ -161,6 +220,8 @@ def union_weekday_option(options: list[str]) -> str:
     opts = {normalize_weekday_option(o or "ANY") for o in options}
     if len(opts) == 1:
         return opts.pop()
+    if "OFFICE" in opts or "ANY_OFFICE" in opts:
+        return "ANY_OFFICE"
     return "ANY"
 
 
@@ -369,6 +430,13 @@ class WatchCheckEngine:
                     logger.warning("[WATCH] unknown destination %s skipped.", scope)
                     result.fetch_error_count += 1
                 continue
+            if _watch_mode(w) != "FIXED" and str(w.get("weekday_option") or "").upper() == "OFFICE":
+                codes = tuple(
+                    c for c in codes
+                    if not getattr(getattr(self.catalog.get(c), "meta", None), "is_long_haul", False)
+                )
+                if not codes:
+                    continue
             targets[int(w["watch_id"])] = codes
             if _watch_mode(w) == "FIXED":
                 for c in codes:
@@ -446,13 +514,23 @@ class WatchCheckEngine:
         include_peak = bool(watch["include_peak"])
         horizon = int(watch.get("horizon_months") or 6)
         option = watch.get("weekday_option") or "ANY"
-        return [
-            d for d in deals
-            if matches_weekday_option(d, option)
-            and within_horizon(d, today, horizon)
-            and matches_day_pattern(d, watch["day_pattern"])
-            and (include_peak or not is_peak_deal(d))
-        ]
+        norm_opt = normalize_weekday_option(option)
+        out: list[FlightDeal] = []
+        for d in deals:
+            if not (
+                matches_weekday_option(d, option)
+                and within_horizon(d, today, horizon)
+                and matches_day_pattern(d, watch["day_pattern"])
+                and (include_peak or not is_peak_deal(d))
+            ):
+                continue
+            if norm_opt == "OFFICE":
+                eff = _resolve_office_deal(d)
+                if eff is not None:
+                    out.append(eff)
+            else:
+                out.append(d)
+        return out
 
     def _scope_label(self, watch: dict[str, Any]) -> str:
         meta = get_watch_country_meta(watch["dest_code"])

@@ -215,6 +215,11 @@ class FlightDeal:
     exact_ret_arr_time: str = ""
     next_day_arrival: bool = False
     freshness: Literal["FRESH", "STALE"] = "FRESH"
+    office_fare_krw: int = 0
+    office_airline: str = ""
+    office_dep_time: str = ""
+    office_ret_arr_time: str = ""
+    office_leave_days: Optional[float] = None
 
     def __post_init__(self):
         if self.exact_dep_time and (

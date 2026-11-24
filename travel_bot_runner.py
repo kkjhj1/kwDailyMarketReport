@@ -359,6 +359,25 @@ def format_telegram_briefing(
             sched_lines.append(fare_line)
             if include_banner_note and deal.popular_banner_note:
                 sched_lines.append("    └ 💡 <i>네이버 상단 배너 대신 '가격 낮은 순' 1위 실측가</i>")
+            if (
+                include_banner_note
+                and deal.data_source == "LIVE_SSE"
+                and not getattr(deal, "is_stale", False)
+                and not getattr(dest, "is_long_haul", False)
+                and getattr(deal, "office_fare_krw", 0) > 0
+                and getattr(deal, "office_leave_days", None) is not None
+                and (
+                    getattr(deal, "office_dep_time", "") != getattr(deal, "exact_dep_time", "")
+                    or int(getattr(deal, "office_fare_krw", 0)) != int(deal.price_krw)
+                )
+            ):
+                ld = float(deal.office_leave_days)
+                leave_str = "0일" if ld == 0.0 else ("1일" if ld == 1.0 else f"{ld:g}일")
+                off_dep = html.escape(deal.office_dep_time)
+                off_arr = html.escape(deal.office_ret_arr_time)
+                sched_lines.append(
+                    f"    └ 💼 연차 {leave_str} 가능: {off_dep} 출발 · {off_arr} 인천도착 ({int(deal.office_fare_krw):,}원~)"
+                )
             if motivation_mode != "none":
                 motive = build_motivation_parts(dest, deal, compact=(motivation_mode == "short"))
                 if motive:

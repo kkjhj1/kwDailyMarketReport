@@ -38,13 +38,92 @@ FSC_CARRIERS = {"대한항공", "아시아나항공", "가루다인도네시아"
 # Watch slot model (horizon / weekday option / fixed dates)
 # ----------------------------------------------------------------------
 WATCH_HORIZON_MONTHS = (1, 3, 6, 12)
-WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY")
+WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY", "OFFICE")
 # (departure weekday, nights): Mon=0 ... Sun=6
 WEEKDAY_OPTION_PATTERNS: dict[str, tuple[tuple[int, int], ...]] = {
     "WEEKEND": ((3, 3), (4, 3)),                  # Thu->Sun, Fri->Mon
     "WEEKDAY": ((0, 3), (1, 3)),                  # Mon->Thu, Tue->Fri
     "ANY": ((0, 3), (1, 3), (3, 3), (4, 3)),
 }
+# Exact Korean statutory & substitute public holidays (2026-2028).
+# Dates >= 2029 gracefully fall back to weekend-only (`weekday() >= 5`) without crashing.
+KR_PUBLIC_HOLIDAYS_2026_2028: frozenset[date] = frozenset({
+    # 2026
+    date(2026, 1, 1),
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18),
+    date(2026, 3, 1), date(2026, 3, 2),
+    date(2026, 5, 1), date(2026, 5, 5), date(2026, 5, 24), date(2026, 5, 25),
+    date(2026, 6, 6), date(2026, 7, 17), date(2026, 8, 15), date(2026, 8, 17),
+    date(2026, 9, 24), date(2026, 9, 25), date(2026, 9, 26),
+    date(2026, 10, 3), date(2026, 10, 5), date(2026, 10, 9),
+    date(2026, 12, 25),
+    # 2027
+    date(2027, 1, 1),
+    date(2027, 2, 6), date(2027, 2, 7), date(2027, 2, 8), date(2027, 2, 9),
+    date(2027, 3, 1),
+    date(2027, 5, 1), date(2027, 5, 3), date(2027, 5, 5), date(2027, 5, 13),
+    date(2027, 6, 6), date(2027, 7, 17), date(2027, 7, 19), date(2027, 8, 15), date(2027, 8, 16),
+    date(2027, 9, 14), date(2027, 9, 15), date(2027, 9, 16),
+    date(2027, 10, 3), date(2027, 10, 4), date(2027, 10, 9), date(2027, 10, 11),
+    date(2027, 12, 25), date(2027, 12, 27),
+    # 2028
+    date(2028, 1, 1),
+    date(2028, 1, 26), date(2028, 1, 27), date(2028, 1, 28),
+    date(2028, 3, 1),
+    date(2028, 5, 1), date(2028, 5, 2), date(2028, 5, 5),
+    date(2028, 6, 6), date(2028, 7, 17), date(2028, 8, 15),
+    date(2028, 10, 2), date(2028, 10, 3), date(2028, 10, 4), date(2028, 10, 9),
+    date(2028, 12, 25),
+})
+OFFICE_MIN_NIGHTS = 2
+OFFICE_MAX_NIGHTS = 4
+OFFICE_MAX_LEAVE_DAYS = 1.0
+OFFICE_RET_MIN_ARR_MINUTES = 13 * 60
+
+
+def _hhmm_to_minutes(hhmm: str) -> Optional[int]:
+    """Strict `HH:MM` parser returning minutes since midnight, or None if missing/malformed."""
+    s = (hhmm or "").strip()
+    if len(s) != 5 or s[2] != ":":
+        return None
+    hh_s, mm_s = s[:2], s[3:]
+    if not (hh_s.isdigit() and mm_s.isdigit()):
+        return None
+    hh, mm = int(hh_s), int(mm_s)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return hh * 60 + mm
+
+
+def is_kr_workday(d: date) -> bool:
+    return d.weekday() < 5 and d not in KR_PUBLIC_HOLIDAYS_2026_2028
+
+
+def calc_required_leave_days(dep_date: date, ret_date: date, dep_hhmm: str = "") -> float:
+    """Calculates required annual leave days for [dep_date, ret_date] using KR holidays & departure time.
+    - Departure workday: >=18:00 -> 0.0; 14:30..17:59 -> 0.5; <14:30 or unknown -> 1.0.
+    - Intermediate workdays: 1.0 each.
+    - Return workday: 1.0 (weekends/holidays -> 0.0).
+    """
+    if ret_date <= dep_date:
+        return 0.0
+    total = 0.0
+    if is_kr_workday(dep_date):
+        mins = _hhmm_to_minutes(dep_hhmm)
+        if mins is not None and mins >= 18 * 60:
+            total += 0.0
+        elif mins is not None and mins >= 14 * 60 + 30:
+            total += 0.5
+        else:
+            total += 1.0
+    cur = dep_date + timedelta(days=1)
+    while cur < ret_date:
+        if is_kr_workday(cur):
+            total += 1.0
+        cur += timedelta(days=1)
+    if is_kr_workday(ret_date):
+        total += 1.0
+    return total
 FIXED_MIN_NIGHTS = 1
 FIXED_MAX_NIGHTS = 30
 DOW_KO = ["월", "화", "수", "목", "금", "토", "일"]
@@ -64,11 +143,27 @@ def add_months(d: date, months: int) -> date:
 
 def normalize_weekday_option(option: Optional[str]) -> str:
     opt = (option or "WEEKEND").strip().upper()
+    if opt == "ANY_OFFICE":
+        return "ANY_OFFICE"
     return opt if opt in WATCH_WEEKDAY_OPTIONS else "WEEKEND"
 
 
 def make_slot(dep: date, ret: date) -> tuple[date, date, str, str, int]:
     return dep, ret, DOW_KO[dep.weekday()], DOW_KO[ret.weekday()], (ret - dep).days
+
+
+def _generate_office_slots(ref: date, end: date) -> list[tuple[date, date, str, str, int]]:
+    """2~4N short-haul slots achievable with <=1.0 leave day (assuming evening departure on workdays)."""
+    slots: list[tuple[date, date, str, str, int]] = []
+    cur = ref + timedelta(days=1)
+    while cur <= end:
+        for nights in (2, 3, 4):
+            ret = cur + timedelta(days=nights)
+            # Only consider weekend/holiday-anchored trips (leave <= 1.0 with 18:30 departure)
+            if calc_required_leave_days(cur, ret, "18:30") <= OFFICE_MAX_LEAVE_DAYS:
+                slots.append(make_slot(cur, ret))
+        cur += timedelta(days=1)
+    return slots
 
 
 def generate_watch_slots(
@@ -77,15 +172,28 @@ def generate_watch_slots(
     """Calendar-month horizon slots for watches: departures in (ref, ref + horizon_months]."""
     ref = ref_date or kst_today()
     months = int(horizon_months) if int(horizon_months) in WATCH_HORIZON_MONTHS else 6
-    patterns = dict(WEEKDAY_OPTION_PATTERNS[normalize_weekday_option(weekday_option)])
+    norm_opt = normalize_weekday_option(weekday_option)
     end = add_months(ref, months)
-    slots = []
+    if norm_opt == "OFFICE":
+        return _generate_office_slots(ref, end)
+    base_opt = "ANY" if norm_opt == "ANY_OFFICE" else norm_opt
+    patterns = dict(WEEKDAY_OPTION_PATTERNS[base_opt])
+    slots: list[tuple[date, date, str, str, int]] = []
+    seen: set[tuple[date, date]] = set()
     cur = ref + timedelta(days=1)
     while cur <= end:
         nights = patterns.get(cur.weekday())
         if nights:
-            slots.append(make_slot(cur, cur + timedelta(days=nights)))
+            ret = cur + timedelta(days=nights)
+            slots.append(make_slot(cur, ret))
+            seen.add((cur, ret))
         cur += timedelta(days=1)
+    if norm_opt == "ANY_OFFICE":
+        for s in _generate_office_slots(ref, end):
+            if (s[0], s[1]) not in seen:
+                slots.append(s)
+                seen.add((s[0], s[1]))
+        slots.sort(key=lambda s: (s[0], s[1]))
     return slots
 
 
@@ -577,8 +685,16 @@ class FlightEngine:
         fast_live: bool = True,
         live_deadline: Optional[float] = None,
     ) -> list[FlightDeal]:
-        """One destination over a watch horizon (calendar months) with the WEEKEND/WEEKDAY/ANY slot set."""
-        slots = generate_watch_slots(ref_date=ref_date, horizon_months=horizon_months, weekday_option=weekday_option)
+        """One destination over a watch horizon (calendar months) with the WEEKEND/WEEKDAY/ANY/OFFICE slot set."""
+        code_u = (dest_code or "").strip().upper()
+        dest_meta = self.destinations.get(code_u) or (custom_destinations or {}).get(code_u)
+        norm_opt = normalize_weekday_option(weekday_option)
+        if dest_meta is not None and getattr(dest_meta, "is_long_haul", False):
+            if norm_opt == "OFFICE":
+                return []
+            if norm_opt == "ANY_OFFICE":
+                norm_opt = "ANY"
+        slots = generate_watch_slots(ref_date=ref_date, horizon_months=horizon_months, weekday_option=norm_opt)
         kwargs: dict = {
             "dest_code": dest_code,
             "months_ahead": int(horizon_months),

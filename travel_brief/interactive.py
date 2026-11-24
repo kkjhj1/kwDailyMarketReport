@@ -90,10 +90,15 @@ MAX_WATCH_DRAFTS = 2000
 WATCH_DEFAULT_DRAFT = {"watch_mode": "FLEX", "horizon_months": 3, "weekday_option": "ANY", "notify_mode": "DROP"}
 WATCH_HORIZON_CHOICES = (1, 3, 6, 12)
 WATCH_MODE_CODES = {"F": "FLEX", "X": "FIXED"}
-WATCH_WEEKDAY_CODES = {"W": "WEEKEND", "D": "WEEKDAY", "A": "ANY"}
+WATCH_WEEKDAY_CODES = {"W": "WEEKEND", "D": "WEEKDAY", "A": "ANY", "O": "OFFICE"}
 WATCH_NOTIFY_CODES = {"D": "DROP", "Y": "DAILY"}
-WATCH_WEEKDAY_LABELS = {"WEEKEND": "주말(목~일·금~월)", "WEEKDAY": "평일(월~목·화~금)", "ANY": "주말+평일 전체"}
-WATCH_WEEKDAY_SHORT = {"WEEKEND": "주말", "WEEKDAY": "평일", "ANY": "전체"}
+WATCH_WEEKDAY_LABELS = {
+    "WEEKEND": "주말(목~일·금~월)",
+    "WEEKDAY": "평일(월~목·화~금)",
+    "ANY": "주말+평일 전체",
+    "OFFICE": "💼 연차 최소화 (1일 이하)",
+}
+WATCH_WEEKDAY_SHORT = {"WEEKEND": "주말", "WEEKDAY": "평일", "ANY": "전체", "OFFICE": "💼 연차≤1일"}
 WATCH_NOTIFY_LABELS = {"DROP": "목표가 도달·추가 하락 시 즉시", "DAILY": "매일 아침 7:30 브리핑 + 급락 시"}
 WATCH_PICKER_CITIES = ("NRT", "KIX", "FUK", "TPE", "DAD", "BKK")
 _DOW_KO = ["월", "화", "수", "목", "금", "토", "일"]
@@ -2109,8 +2114,11 @@ class TravelInteractiveHandler:
             draft.watch_mode = "FLEX"
             draft.horizon_months = int(arg)
         elif sub == "d":
-            draft.watch_mode = "FLEX"
-            draft.weekday_option = WATCH_WEEKDAY_CODES[arg]
+            if arg == "O" and getattr(getattr(self.catalog.get(code), "meta", None), "is_long_haul", False):
+                notice = "⚠️ 장거리 노선은 연차 최소화(단거리 2~4박) 옵션을 지원하지 않아요."
+            else:
+                draft.watch_mode = "FLEX"
+                draft.weekday_option = WATCH_WEEKDAY_CODES[arg]
         elif sub == "n":
             draft.notify_mode = WATCH_NOTIFY_CODES[arg]
         return self.build_watch_setup_card(chat_id, user_id, code, notice=notice)
@@ -2484,8 +2492,13 @@ class TravelInteractiveHandler:
                 rows.append([
                     {"text": mark(draft.weekday_option == opt, WATCH_WEEKDAY_SHORT[opt]),
                      "callback_data": f"trv:w:d:{code}:{c}"}
-                    for c, opt in WATCH_WEEKDAY_CODES.items()
+                    for c, opt in WATCH_WEEKDAY_CODES.items() if c != "O"
                 ])
+                if not getattr(getattr(self.catalog.get(code), "meta", None), "is_long_haul", False):
+                    rows.append([{
+                        "text": mark(draft.weekday_option == "OFFICE", "💼 연차 최소화 (1일 이하)"),
+                        "callback_data": f"trv:w:d:{code}:O",
+                    }])
             else:
                 rows.append([{"text": "🗓️ 여행 날짜 입력·변경", "callback_data": f"trv:w:f:{code}"}])
             rows.append([

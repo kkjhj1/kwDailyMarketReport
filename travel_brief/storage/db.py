@@ -104,7 +104,7 @@ TRAVEL_BOT_ID = "travel_bot"
 # V2 watch model (additive columns; legacy rows keep their behaviour, see `_migrate_travel_watch_schema`)
 WATCH_MODES = ("FLEX", "FIXED")
 WATCH_HORIZONS = (1, 3, 6, 12)
-WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY")
+WATCH_WEEKDAY_OPTIONS = ("WEEKEND", "WEEKDAY", "ANY", "OFFICE")
 WATCH_NOTIFY_MODES = ("DROP", "DAILY")
 WATCH_DELIVERY_KINDS = ("DAILY", "DROP")
 # Pre-upgrade rows were 6-month weekend-only watches: backfilled once so they keep that exact scope.

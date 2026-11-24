@@ -557,6 +557,77 @@ class TravelNaverLiveTests(unittest.TestCase):
         engine.ensure_deals_sse_verified([deal])
         self.assertEqual(engine._live_client.calls, [123.0, None])
 
+    def test_parse_sse_extracts_office_candidate_and_rejects_bad_arrivals(self):
+        from datetime import date
+        from travel_brief.naver_live import NaverFlightLiveClient, parse_sse_stream_lines
+        from travel_brief.flight_engine import FlightEngine
+
+        # Fri 2026-12-04 -> Sun 2026-12-06: morning cheapest (1.0 leave), evening good-return office (0.0 leave),
+        # plus next_day_arrival and missing ret_arr_time decoys that are cheaper than valid office!
+        payload = {
+            "status": {
+                "isCompleted": True,
+                "airlinesCodeMap": {"7C": "제주항공", "KE": "대한항공"},
+            },
+            "itineraries": [
+                {
+                    "itineraryId": "OUT_1",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "ICN", "date": "20261204", "time": "0830"}}],
+                },
+                {
+                    "itineraryId": "RET_1",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "FUK", "date": "20261206", "time": "1030"}, "arrival": {"airportCode": "ICN", "date": "20261206", "time": "1200"}}],
+                },
+                {
+                    "itineraryId": "OUT_2",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "ICN", "date": "20261204", "time": "1900"}}],
+                },
+                {
+                    "itineraryId": "RET_2",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "FUK", "date": "20261206", "time": "2300"}, "arrival": {"airportCode": "ICN", "date": "20261207", "time": "0030"}}],
+                },
+                {
+                    "itineraryId": "OUT_3",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "ICN", "date": "20261204", "time": "1910"}}],
+                },
+                {
+                    "itineraryId": "RET_3",
+                    "segments": [{"marketingCarrier": {"airlineCode": "7C"}, "departure": {"airportCode": "FUK", "date": "20261206", "time": "1400"}, "arrival": {"airportCode": "ICN", "date": "20261206", "time": ""}}],
+                },
+                {
+                    "itineraryId": "OUT_4",
+                    "segments": [{"marketingCarrier": {"airlineCode": "KE"}, "departure": {"airportCode": "ICN", "date": "20261204", "time": "1920"}}],
+                },
+                {
+                    "itineraryId": "RET_4",
+                    "segments": [{"marketingCarrier": {"airlineCode": "KE"}, "departure": {"airportCode": "FUK", "date": "20261206", "time": "1640"}, "arrival": {"airportCode": "ICN", "date": "20261206", "time": "1810"}}],
+                },
+            ],
+            "fareMappings": [
+                {"itineraryIds": "OUT_1-RET_1", "fares": [{"fareType": "A01", "adult": {"totalFare": 210000}}]},
+                {"itineraryIds": "OUT_2-RET_2", "fares": [{"fareType": "A01", "adult": {"totalFare": 230000}}]},  # next_day_arrival -> rejected
+                {"itineraryIds": "OUT_3-RET_3", "fares": [{"fareType": "A01", "adult": {"totalFare": 240000}}]},  # missing ret_arr_time -> rejected
+                {"itineraryIds": "OUT_4-RET_4", "fares": [{"fareType": "A01", "adult": {"totalFare": 265000}}]},
+            ],
+        }
+        line = "data: " + json.dumps(payload) + "\n"
+        parsed = parse_sse_stream_lines([line], ret_compact="20261206", dep_date=date(2026, 12, 4), ret_date=date(2026, 12, 6))
+        self.assertEqual(parsed["cheapest"]["min_card"], 210000)
+        self.assertIsNotNone(parsed["office"])
+        self.assertEqual(parsed["office"]["min_card"], 265000)
+        self.assertEqual(parsed["office"]["dep_time"], "19:20")
+        self.assertEqual(parsed["office"]["leave_days"], 0.0)
+
+        engine = FlightEngine(live_naver=False)
+        dest = engine.get_destination("FUK")
+        base_deal = engine.search_deals(dest_code="FUK", months_ahead=1, ref_date=date(2026, 11, 20))[0]
+        from dataclasses import replace
+        base_deal = replace(base_deal, departure_date="2026-12-04", return_date="2026-12-06", nights=2)
+        upgraded = NaverFlightLiveClient.apply_sse_to_deal(base_deal, dest, parsed)
+        self.assertEqual(upgraded.office_fare_krw, 265000)
+        self.assertEqual(upgraded.office_leave_days, 0.0)
+        self.assertEqual(upgraded.office_ret_arr_time, "18:10")
+
 
 if __name__ == "__main__":
     unittest.main()

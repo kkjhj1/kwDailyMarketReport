@@ -180,3 +180,38 @@ def test_long_haul_profile_slots_and_copy():
     assert format_trip_length(5, True) == "5박 6일 · 장거리 5박 이상 권장"
     # legacy budget profile keys stay intact; NA is added
     assert {"HAWAII", "PAC", "OCE", "EU", "NA", "SEA", "JP", "CN", "HKMO", "TW", "MN"} <= set(cc._REGION_PROFILES)
+
+
+def test_kr_holidays_leave_calculator_and_office_slots():
+    from datetime import date
+    from travel_brief.city_catalog import CityCatalog
+    from travel_brief.flight_engine import (
+        KR_PUBLIC_HOLIDAYS_2026_2028,
+        calc_required_leave_days,
+        generate_watch_slots,
+    )
+
+    # Normal Fri->Sun (2N): 18:00+ = 0.0, 14:30..17:59 = 0.5, <14:30 or missing = 1.0
+    fri, sun = date(2026, 12, 4), date(2026, 12, 6)
+    assert calc_required_leave_days(fri, sun, "18:00") == 0.0
+    assert calc_required_leave_days(fri, sun, "17:59") == 0.5
+    assert calc_required_leave_days(fri, sun, "14:30") == 0.5
+    assert calc_required_leave_days(fri, sun, "14:29") == 1.0
+    assert calc_required_leave_days(fri, sun, "") == 1.0
+    # Holiday-anchored 4N (Thu->Mon where Mon 2027-03-01 is Samiljeol): Thu 18:30 + Fri work = 1.0 leave
+    assert date(2027, 3, 1) in KR_PUBLIC_HOLIDAYS_2026_2028
+    assert date(2026, 7, 17) in KR_PUBLIC_HOLIDAYS_2026_2028
+    assert date(2027, 5, 3) in KR_PUBLIC_HOLIDAYS_2026_2028
+    assert date(2027, 7, 19) in KR_PUBLIC_HOLIDAYS_2026_2028
+    assert calc_required_leave_days(date(2027, 2, 25), date(2027, 3, 1), "18:30") == 1.0
+    # 2029 fallback (outside 2026-2028 holiday table) works without error using weekends only
+    assert calc_required_leave_days(date(2029, 1, 5), date(2029, 1, 7), "19:00") == 0.0
+
+    office_slots = generate_watch_slots(ref_date=date(2027, 2, 18), horizon_months=1, weekday_option="OFFICE")
+    assert any((d, r, n) == (date(2027, 2, 25), date(2027, 3, 1), 4) for d, r, _, _, n in office_slots)
+    assert any((d, r, n) == (date(2027, 2, 26), date(2027, 2, 28), 2) for d, r, _, _, n in office_slots)
+
+    # Long-haul cities are excluded from OFFICE watch slots
+    engine = FlightEngine(live_naver=False)
+    cdg_meta = CityCatalog(engine.destinations).get("CDG").meta
+    assert engine.search_watch_deals("CDG", horizon_months=3, weekday_option="OFFICE", custom_destinations={"CDG": cdg_meta}) == []
