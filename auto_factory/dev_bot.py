@@ -566,8 +566,8 @@ _STATE_BADGES: dict[str, tuple[str, str, str]] = {
     "AWAITING_START_AUTH": ("\U0001f7e3", "승인 대기", "▶️ Start 를 눌러야 코드 작업이 시작됩니다."),
     "SINGLE_PROVIDER_REVIEW_REQUIRED": ("\U0001f7e3", "승인 대기", "독립 리뷰어가 없어 사람의 코드 확인이 필요합니다."),
     "AWAITING_MERGE": ("\U0001f7e3", "승인 대기", "검증·리뷰 통과 — 병합 승인을 기다립니다."),
-    "BLOCKED": ("\U0001f7e0", "차단됨", "자동 진행이 멈췄습니다. 사유를 확인하세요."),
-    "GUARDRAIL_BLOCKED": ("\U0001f7e0", "차단됨", "허용 범위 밖 변경이 감지되었습니다."),
+    "BLOCKED": ("\U0001f7e0", "차단됨", "안전 게이트에서 멈췄습니다. 아래 사유 확인 후 정리(/status)하세요."),
+    "GUARDRAIL_BLOCKED": ("\U0001f7e0", "차단됨", "안전 규칙 위반이 감지되어 멈췄습니다. 사유 확인 후 폐기하세요."),
 }
 _LIVENESS_BADGES: dict[str, tuple[str, str, str]] = {
     "ACTIVE": ("\U0001f7e2", "작업 중", "AI/검증이 실행 중입니다."),
@@ -585,7 +585,73 @@ _STATE_STEP_KO: dict[str, str] = {
     "VERIFYING": "테스트 검증", "REVIEWING": "교차 리뷰", "AWAITING_MERGE": "병합 승인 대기",
     "MERGED": "병합 완료", "RETRY_WAIT": "재시도 대기", "RECOVERY_PENDING": "복구 대기",
     "SINGLE_PROVIDER_REVIEW_REQUIRED": "사람 리뷰 대기", "CANCEL_REQUESTED": "중지 요청",
+    "BLOCKED": "진행 차단(확인 필요)", "GUARDRAIL_BLOCKED": "안전 규칙 차단", "FAILED": "실패",
+    "CANCELLED": "취소됨", "DISCARDED": "폐기됨",
 }
+# States whose card should explain *why* the task stopped (plain Korean, 1 line).
+_REASON_STATES = frozenset({"BLOCKED", "GUARDRAIL_BLOCKED", "FAILED"})
+_DISCARD_HINT_STATES = frozenset({"BLOCKED", "GUARDRAIL_BLOCKED"})
+_REASON_MAX = 90
+_PATHLIKE_RE = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s\\/'\"]+){1,}[\\/]?|[^\s'\"]+[\\/][^\s'\"]+")
+_REASON_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (lambda s: "AUDIT_BLOCKED" in s and any(k in s.lower() for k in ("permission", "inaccessible")),
+     "사전 감사에서 저장소 접근 권한 문제로 차단됨"),
+    (lambda s: "AUDIT_BLOCKED" in s and any(k in s.lower() for k in ("ambiguous", "allowed_paths", "outside")),
+     "요청이 모호하거나 허용 범위 밖 파일이 포함되어 차단됨"),
+    (lambda s: "AUDIT_BLOCKED" in s, "사전 AI 감사에서 안전상 보류됨"),
+    (lambda s: re.search(r"\bL3\b", s) is not None, "고위험(배포·DB) 작업이라 자동 실행이 제한됨"),
+    (lambda s: "BACKLOG_SCOPE_REQUIRED" in s or "scope" in s.lower(), "수정할 파일 범위가 지정되지 않아 대기/차단됨"),
+    (lambda s: any(k in s for k in ("PROJECT_", "registry_fingerprint", "allow_write")),
+     "프로젝트 설정이 변경되었거나 쓰기가 잠겨 차단됨"),
+    (lambda s: "guardrail" in s.lower() or any(k in s for k in ("SKIP_ADDED", "FORBIDDEN")),
+     "금지된 경로 수정 또는 테스트 약화가 감지되어 차단됨"),
+)
+
+
+def _friendly_reason(task: dict[str, Any], events: Iterable[dict[str, Any]] = ()) -> str:
+    """One short plain-Korean line explaining why `task` stopped ("" if nothing is recorded).
+
+    Sources: the newest event reason that entered the current state, then `last_error`. Known
+    technical codes are translated; otherwise the first line is normalized, paths are masked and
+    the result is truncated (never a raw stack trace). Plain text — the caller escapes it."""
+    state = task.get("state")
+    ev_reason = ""
+    try:
+        for e in reversed(list(events or ())):
+            if e.get("reason") and (e.get("to_state") == state or not ev_reason):
+                ev_reason = str(e["reason"])
+                if e.get("to_state") == state:
+                    break
+    except Exception:
+        ev_reason = ""
+    last_error = str(task.get("last_error") or "")
+    combined = f"{last_error}\n{ev_reason}".strip()
+    if not combined:
+        return ""
+    for match, text in _REASON_RULES:
+        if match(combined):
+            return text
+    raw = ev_reason or last_error
+    first = ""
+    for ln in SafeHtmlFormatter.normalize_plain(raw).split("\n"):
+        ln = ln.strip()
+        if ln and not ln.startswith(("Traceback", "File \"")):
+            first = ln
+            break
+    first = re.sub(r"\s+", " ", _PATHLIKE_RE.sub("…", first)).strip()
+    if not first:
+        return "자세한 사유는 진행 로그에서 확인하세요"
+    return first if len(first) <= _REASON_MAX else first[:_REASON_MAX - 1] + "…"
+
+
+def _short_request(task: dict[str, Any], limit: int) -> str:
+    """First non-empty line of the task request (plain text, truncated; caller escapes)."""
+    raw = task.get("request_text") or task.get("request") or ""
+    for ln in SafeHtmlFormatter.normalize_plain(raw).split("\n"):
+        ln = re.sub(r"\s+", " ", ln).strip()
+        if ln:
+            return ln if len(ln) <= limit else ln[:limit - 1] + "…"
+    return ""
 
 
 def status_badge(state: str, liveness: str | None = None) -> tuple[str, str, str]:
@@ -1800,6 +1866,7 @@ class DevBot:
             if snap is None:
                 emoji, label, why = status_badge(task["state"])
                 extra.insert(0, f"{emoji} {f.b(label, 20)} — {f.esc(why, 80)}")
+            extra.extend(self._reason_lines(task))
             gated = task["state"] in _STATE_BUTTONS
             live_markup = None if gated else self._live_markup(arg, state=task["state"])
             if not gated and live_markup is None:
@@ -1894,6 +1961,30 @@ class DevBot:
                 rows.append([stop])
         return self.fmt.markup(rows)
 
+    def _task_reason(self, task: dict[str, Any]) -> str:
+        """Plain-Korean stop reason; DB events are read-only and failures degrade to last_error."""
+        try:
+            events = self.db.events(task["id"])
+        except Exception:
+            events = []
+        try:
+            return _friendly_reason(task, events)
+        except Exception:
+            return ""
+
+    def _reason_lines(self, task: dict[str, Any]) -> list[str]:
+        """`사유:` + next-step hint for BLOCKED/GUARDRAIL_BLOCKED/FAILED (escaped HTML)."""
+        f = self.fmt
+        if task.get("state") not in _REASON_STATES:
+            return []
+        lines = []
+        reason = self._task_reason(task)
+        if reason:
+            lines.append(f"사유: {f.esc(reason, _REASON_MAX)}")
+        if task["state"] in _DISCARD_HINT_STATES:
+            lines.append("정리하려면 아래 \U0001f5d1 Discard 버튼을 누르세요.")
+        return lines
+
     def _long_id_hint(self, task_id: str) -> str:
         f = self.fmt
         return f"{f.code('/status ' + task_id, 80)} · {f.code('/logs ' + task_id, 80)}"
@@ -1909,6 +2000,15 @@ class DevBot:
             f"State: {f.b(s.state, 40)} (v{int(s.state_version)}) · {f.esc(s.risk_level, 4)}",
             *self._runtime_lines(s),
         ]
+        try:
+            task = self.db.get_task(task_id)
+        except Exception:
+            task = None
+        if task is not None:
+            req = _short_request(task, 80)
+            if req:
+                lines.insert(2, f"요청: {f.esc(req, 80)}")
+            lines.extend(self._reason_lines(task))
         markup = self._live_markup(task_id, state=s.state)
         if markup is None:
             lines.append(self._long_id_hint(task_id))
@@ -2285,18 +2385,18 @@ class DevBot:
             f"진행 중 작업 {len(open_tasks)}개 · 승인 대기 {waiting}개",
             "아래 버튼으로 바로 조작하세요 (명령 목록: /help).",
         ]
-        rows: list[list[dict[str, str]]] = []
+        # Mobile (~360px): max 2 buttons per row, short labels; pause/resume is a full-width last row.
+        rows: list[list[dict[str, str] | None]] = [
+            [af3_button("\U0001f4ca 진행 현황", "nav", "tasks"), af3_button("\U0001f5a5️ 실행 세션", "nav", "sess")],
+            [af3_button("\U0001f4c1 프로젝트", "nav", "proj"), af3_button("\U0001f4cb 보드·백로그", "nav", "board")],
+            [af3_button("\U0001f916 봇 선택", "nav", "bots"), af3_button("❓ 도움말", "nav", "help")],
+        ]
         if stopped:
             tok = self.db.issue_af3_token("RS", chat_id, user_id, {"action": "resume"})
             rows.append([self._resume_button(chat_id, user_id, "▶️ 지금 재개하기", tok)])
-            middle = self._resume_button(chat_id, user_id, "▶️ 재개", tok)
         else:
-            middle = af3_button("⏸️ 전체 일시정지", "pz", "all")
-        rows.append([af3_button("\U0001f4ca 진행 중인 작업", "nav", "tasks"),
-                     af3_button("\U0001f5a5️ 실행 세션/프로세스", "nav", "sess")])
-        rows.append([af3_button("\U0001f916 봇 선택·요청", "nav", "bots"), middle, af3_button("❓ 도움말", "nav", "help")])
-        rows.append([af3_button("\U0001f4c1 프로젝트", "nav", "proj"), af3_button("\U0001f4cb 보드·백로그", "nav", "board")])
-        return "\n".join(lines), f.markup([[b for b in r if b] for r in rows])
+            rows.append([af3_button("⏸️ 전체 일시정지", "pz", "all")])
+        return "\n".join(lines), f.markup([r for r in ([b for b in r if b] for r in rows) if r])
 
     def _tasks_view(self) -> tuple[str, dict | None]:
         f = self.fmt
@@ -2312,14 +2412,32 @@ class DevBot:
             s = runtime.get(t["id"])
             emoji, label, _ = status_badge(t["state"], s.liveness if s else None)
             step = _STATE_STEP_KO.get(t["state"], t["state"])
-            line = f"{emoji} {f.b(label, 16)} · {f.code(t['id'], 64)} · {f.esc(step, 24)}"
+            age = s.state_age if s is not None and s.state_age is not None else None
+            if age is None:
+                try:
+                    age = max(0.0, float(self.db.clock()) - float(t.get("updated_at") or 0))
+                except Exception:
+                    age = None
+            line = (f"{emoji} {f.b(label, 16)} · {f.code(t['id'], 64)} · {f.esc(step, 24)}"
+                    + (f" ({f.esc(fmt_age(age), 12)})" if age is not None else ""))
+            req = _short_request(t, 42)
+            if req:
+                line += f"\n   {f.esc(req, 42)}"
+            if t["state"] in _REASON_STATES:
+                reason = self._task_reason(t)
+                if reason:
+                    line += f"\n   └ 사유: {f.esc(reason, _REASON_MAX)}"
+                elif t["state"] in _DISCARD_HINT_STATES:
+                    line += f"\n   └ 조치: {f.code('/status ' + t['id'], 80)} 에서 폐기 가능"
+            elif t["state"].startswith("AWAITING_"):
+                line += f"\n   └ 조치: {f.code('/status ' + t['id'], 80)} 에서 승인/결정"
             candidate = "\n".join(lines + [line])
             if f.visible_len(candidate) > f.max_visible - reserve or len(candidate) > f.max_html - reserve:
                 lines.append(f"+{len(tasks) - idx} more (/status)")
                 break
             lines.append(line)
             if len(buttons) < 8:
-                b = stateless_task_button(f"{emoji} {t['id'][:24]}", "v", t["id"])
+                b = stateless_task_button(f"{emoji} {t['id'][:16]}", "v", t["id"])
                 if b is not None:
                     buttons.append(b)
         if buttons:
@@ -2389,7 +2507,7 @@ class DevBot:
             "STOP.flag 를 기록합니다. 실행 중인 작업은 다음 체크포인트에서 멈추고 새 작업은 시작되지 않습니다.",
             "언제든 ▶️ 재개로 되돌릴 수 있습니다.",
         ])
-        markup = f.markup([[af3_button("⚠️ 정말 일시정지할까요?", "PZ", tok), af3_button("취소", "nav", "hub")]])
+        markup = f.markup([[af3_button("⚠️ 정말 일시정지할까요?", "PZ", tok)], [af3_button("↩️ 취소", "nav", "hub")]])
         return f"callback:af3:pause_prompt:{self._show(chat_id, message_id, text, markup)}"
 
     def _af3_pause_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
@@ -2426,7 +2544,7 @@ class DevBot:
         except KeyError:
             self._show(chat_id, message_id, f"unknown task {f.code(task_id, 64)}")
             return "callback:af3:cancel:unknown"
-        back = stateless_task_button("취소", "v", task_id) or af3_button("취소", "nav", "tasks")
+        back = stateless_task_button("↩️ 취소", "v", task_id) or af3_button("↩️ 취소", "nav", "tasks")
         emoji, label, _ = status_badge(task["state"])
         if not cancellable_state(task["state"]):
             self._show(chat_id, message_id,
@@ -2443,7 +2561,7 @@ class DevBot:
             f.esc(how, 200),
             "재시도·다른 AI로 넘기기 없이 끝냅니다.",
         ])
-        markup = f.markup([[af3_button("⚠️ 정말 이 작업을 중지할까요?", "TC", tok), back]])
+        markup = f.markup([[af3_button("⚠️ 정말 이 작업을 중지할까요?", "TC", tok)], [back]])
         return f"callback:af3:cancel_prompt:{self._show(chat_id, message_id, text, markup)}"
 
     def _af3_cancel_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
@@ -2548,15 +2666,19 @@ class DevBot:
             mark = "\U0001f3af" if p.project_id == focus.project_id else "•"
             lines.append(f"{mark} {f.b(p.label, 40)} {f.code(p.project_id, 32)} · {f.esc(self._kind_ko(p), 20)}"
                          f" · 최대 {f.esc(p.max_risk, 4)}")
-            b = af3_button(("\U0001f3af " if p.project_id == focus.project_id else "") + p.label[:24], "pf", p.project_id)
+            prefix = "\U0001f3af " if p.project_id == focus.project_id else ""
+            # Project selectors are rendered two-up on mobile. Keep their visible labels
+            # short enough that Telegram never has to ellipsize either column.
+            name_budget = 16 - len(prefix)
+            name = p.label if len(p.label) <= name_budget else p.label[:max(1, name_budget - 1)] + "…"
+            b = af3_button(prefix + name, "pf", p.project_id)
             if b:
                 buttons.append(b)
         lines.append("버튼을 누르면 /backlog 대상 프로젝트(포커스)가 바뀝니다.")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append(self._pager("pp", page, pages))
-        rows.append([b for b in (af3_button("\U0001f50e 폴더 스캔", "ps", "0"), af3_button("\U0001f4cb 백로그", "nav", "blog"),
-                                 af3_button("\U0001f4ca 보드", "nav", "board")) if b])
-        rows.append([b for b in (self._back_to_hub(),) if b])
+        rows.append([b for b in (af3_button("\U0001f50e 폴더 스캔", "ps", "0"), af3_button("\U0001f4cb 백로그", "nav", "blog")) if b])
+        rows.append([b for b in (af3_button("\U0001f4ca 보드", "nav", "board"), self._back_to_hub()) if b])
         return "\n".join(lines), f.markup(rows)
 
     def _scan_view(self, page: int) -> tuple[str, dict | None]:
@@ -2754,7 +2876,7 @@ class DevBot:
             lines.append(f"{badge} #{iid} {f.esc(it['title'], 60)} · P{int(it['priority'])}{scope}{link}")
             row: list[dict[str, str] | None] = []
             if p.writable and it["status"] == "TODO" and not it["linked_task_id"]:
-                row.append(af3_button(f"▶️ #{iid} 작업 시작", "bs", str(iid)))
+                row.append(af3_button(f"▶️ #{iid} 시작", "bs", str(iid)))
             tok = self.db.issue_af3_token("BD", chat_id, user_id,
                                           {"item_id": iid, "expected": it["status"], "to": "DONE"})
             row.append(af3_button(f"✅ #{iid} 완료", "BD", tok))
@@ -2765,8 +2887,9 @@ class DevBot:
             elif not it["linked_task_id"]:
                 tok = self.db.issue_af3_token("BH", chat_id, user_id,
                                               {"item_id": iid, "expected": "BLOCKED", "to": "TODO"})
-                row.append(af3_button(f"↩️ #{iid} 다시 할 일", "BH", tok))
-            rows.append([b for b in row if b])
+                row.append(af3_button(f"↩️ #{iid} 재개", "BH", tok))
+            item_buttons = [b for b in row if b]
+            rows.extend(item_buttons[i:i + 2] for i in range(0, len(item_buttons), 2))
         rows.append(self._pager("bp", page, pages))
         rows.append([b for b in (af3_button("\U0001f4c1 프로젝트 전환", "nav", "proj"), self._back_to_hub()) if b])
         return "\n".join(lines), f.markup(rows)
@@ -2834,7 +2957,8 @@ class DevBot:
         else:
             lines.append("\U0001f7e0 수정 범위(allowed_paths)가 없어 차단됨 상태로 등록됩니다 — "
                          f"/backlog scope {item_id} &lt;경로&gt; 로 먼저 지정하세요.")
-        markup = f.markup([[af3_button("⚠️ 정말 시작할까요?", "BS", tok), af3_button("취소", "bp", "0")]])
+        markup = f.markup([[af3_button("⚠️ 정말 시작할까요?", "BS", tok)],
+                           [af3_button("↩️ 취소", "bp", "0")]])
         shown = self._show(chat_id, message_id, "\n".join(lines), markup)
         return f"callback:af3:backlog:start_prompt:{shown}"
 
@@ -3042,7 +3166,8 @@ class DevBot:
             f"CPU 시간이 {int(self.session_quiet_window)}초 이상 변하지 않았습니다.",
             "이 프로세스 1개만 종료합니다 (트리 종료 없음). 워커는 이 실행을 비정상 종료로 처리합니다.",
         ])
-        markup = f.markup([[af3_button("⚠️ 정말 종료할까요?", "SK", tok), af3_button("취소", "nav", "sess")]])
+        markup = f.markup([[af3_button("⚠️ 정말 종료할까요?", "SK", tok)],
+                           [af3_button("↩️ 취소", "nav", "sess")]])
         return f"callback:af3:kill_prompt:{self._show(chat_id, message_id, text, markup)}"
 
     def _af3_kill_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:

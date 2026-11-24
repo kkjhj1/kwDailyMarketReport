@@ -5022,6 +5022,12 @@ def _cbs(msg) -> list[str]:
     return [b["callback_data"] for row in (msg.get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
 
 
+def _assert_mobile_markup(msg):
+    keyboard = (msg.get("reply_markup") or {}).get("inline_keyboard", [])
+    assert all(len(row) <= 2 for row in keyboard)
+    assert all(len(button["text"]) <= 18 for row in keyboard if len(row) == 2 for button in row)
+
+
 def _af3_tok(msg, op) -> str:
     hits = [d.split("|")[2] for d in _cbs(msg) if d.startswith(f"af3|{op}|")]
     assert hits, (op, _cbs(msg))
@@ -5092,8 +5098,11 @@ class TestMainHub:
             assert bot.handle_update(upd_msg(cmd)) == "cmd:menu"
             kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
             assert [b["callback_data"] for b in kb[0]] == ["af3|nav|tasks", "af3|nav|sess"]
-            assert [b["callback_data"] for b in kb[1]] == ["af3|nav|bots", "af3|pz|all", "af3|nav|help"]
-            assert "⏸️ 전체 일시정지" in [b["text"] for b in kb[1]]
+            assert [b["callback_data"] for b in kb[1]] == ["af3|nav|proj", "af3|nav|board"]
+            assert [b["callback_data"] for b in kb[2]] == ["af3|nav|bots", "af3|nav|help"]
+            assert [b["callback_data"] for b in kb[3]] == ["af3|pz|all"]
+            assert kb[3][0]["text"] == "⏸️ 전체 일시정지"
+            _assert_mobile_markup(tr.sent[-1])
         assert bot.handle_update(upd_msg("/help")) == "cmd:help" and tr.sent[-1]["text"] == dev_bot_mod.HELP_TEXT
         h = dev_bot_mod.HELP_TEXT
         assert len(h) < 800 and "/menu" in h and "/sessions" in h
@@ -5107,12 +5116,14 @@ class TestMainHub:
         assert not bot.stop_flag.exists()  # step 1 never writes STOP.flag
         prompt = tr.edits[-1]
         assert prompt["message_id"] == 77 and "af3|nav|hub" in _cbs(prompt)
+        _assert_mobile_markup(prompt)
         assert "⚠️ 정말 일시정지할까요?" in [b["text"] for row in prompt["reply_markup"]["inline_keyboard"] for b in row]
         pz = _af3_tok(prompt, "PZ")
         assert bot.handle_update(upd_raw(f"af3|PZ|{pz}", message_id=77)) == "callback:af3:paused"
         assert bot.stop_flag.exists()
         hub = tr.edits[-1]
-        assert "개발봇 일시정지됨" in hub["text"] and hub["reply_markup"]["inline_keyboard"][0][0]["text"] == "▶️ 지금 재개하기"
+        assert "개발봇 일시정지됨" in hub["text"] and \
+            hub["reply_markup"]["inline_keyboard"][-1][0]["text"] == "▶️ 지금 재개하기"
         assert "af3|pz|all" not in _cbs(hub)
         assert bot.handle_update(upd_raw(f"af3|PZ|{pz}")) == "callback:af3:rejected:REPLAY"
         rs = _af3_tok(hub, "RS")
@@ -5121,13 +5132,29 @@ class TestMainHub:
         assert "개발봇 일시정지됨" not in tr.edits[-1]["text"]
         _all_html_ok(tr)
 
+    def test_mobile_layout_for_views_and_confirmations(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        for view in (bot._hub_view(ADMIN, ADMIN), bot._projects_view(ADMIN, 0)):
+            _assert_mobile_markup({"reply_markup": view[1]})
+
+        item_id = db.add_backlog_item(DEFAULT_PROJECT_ID, "mobile layout")
+        _assert_mobile_markup({"reply_markup": bot._backlog_view(ADMIN, ADMIN, 0)[1]})
+
+        bot._af3_pause_prompt(ADMIN, ADMIN, 1)
+        _assert_mobile_markup(tr.edits[-1])
+        tid = submit(db, start=False)
+        bot._af3_cancel_prompt(tid, ADMIN, ADMIN, 1)
+        _assert_mobile_markup(tr.edits[-1])
+        bot._af3_backlog_start_prompt(item_id, ADMIN, ADMIN, 1)
+        _assert_mobile_markup(tr.edits[-1])
+
     def test_status_banner_one_click_resume(self, tmp_path, repo, db):
         bot, tr = make_bot(tmp_path, repo, db)
         assert bot.handle_update(upd_msg("/kill")) == "cmd:kill"
         assert bot.handle_update(upd_msg("/status")) == "cmd:status"
         msg = tr.sent[-1]
         assert msg["text"].startswith("⏸️ <b>개발봇 일시정지됨</b>") and "STOP.flag: <b>ON</b>" in msg["text"]
-        assert msg["reply_markup"]["inline_keyboard"][0][0]["text"] == "▶️ 지금 재개하기"
+        assert msg["reply_markup"]["inline_keyboard"][-1][0]["text"] == "▶️ 지금 재개하기"
         assert bot.handle_update(upd_raw(f"af3|RS|{_af3_tok(msg, 'RS')}")) == "callback:af3:resumed"
         assert not bot.stop_flag.exists()
         bot.handle_update(upd_msg("/status"))
@@ -5234,6 +5261,7 @@ class TestTaskCancel:
         assert bot.handle_update(upd_raw(f"af3|tc|{tid}", message_id=5)) == "callback:af3:cancel_prompt:edited"
         prompt = tr.edits[-1]
         assert "⚠️ 정말 이 작업을 중지할까요?" in [b["text"] for r in prompt["reply_markup"]["inline_keyboard"] for b in r]
+        _assert_mobile_markup(prompt)
         assert f"af2|v|{tid}" in _cbs(prompt)  # [취소] goes back to the live card
         return _af3_tok(prompt, "TC")
 
@@ -5432,6 +5460,8 @@ class TestSessions:
         assert insp.killed == []  # step 1 never terminates
         prompt = tr.edits[-1]
         assert "⚠️ 정말 종료할까요?" in prompt["text"] and "트리 종료 없음" in prompt["text"]
+        _assert_mobile_markup(prompt)
+        assert prompt["reply_markup"]["inline_keyboard"][1][0]["text"] == "↩️ 취소"
         SK = _af3_tok(prompt, "SK")
         assert bot.handle_update(upd_raw(f"af3|SK|{SK}", message_id=3)) == "callback:af3:kill:TERMINATED"
         assert insp.killed == [(5000, 1234.5, "codex.exe")]
@@ -5903,8 +5933,8 @@ class TestProjectCommands:
         bot, tr = _proj_bot(tmp_path, repo, db)
         assert bot.handle_update(upd_msg("/menu")) == "cmd:menu"
         kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
-        assert [b["callback_data"] for b in kb[2]] == ["af3|nav|proj", "af3|nav|board"]
-        assert [b["text"] for b in kb[2]] == ["\U0001f4c1 프로젝트", "\U0001f4cb 보드·백로그"]
+        assert [b["callback_data"] for b in kb[1]] == ["af3|nav|proj", "af3|nav|board"]
+        assert [b["text"] for b in kb[1]] == ["\U0001f4c1 프로젝트", "\U0001f4cb 보드·백로그"]
         h = dev_bot_mod.HELP_TEXT
         assert len(h) < 800 and all(x in h for x in ("/projects", "/board", "/backlog"))
         bot.handle_update(upd_msg("/kill"))
@@ -6010,6 +6040,9 @@ class TestProjectCommands:
         assert bot.handle_update(upd_raw(f"af3|bs|{iid}", message_id=8)) == "callback:af3:backlog:start_prompt:edited"
         prompt = tr.edits[-1]
         assert db.list_tasks() == [] and db.get_backlog_item(iid)["status"] == "TODO"  # step 1: no mutation
+        _assert_mobile_markup(prompt)
+        assert [b["text"] for row in prompt["reply_markup"]["inline_keyboard"] for b in row] == [
+            "⚠️ 정말 시작할까요?", "↩️ 취소"]
         bs = _af3_tok(prompt, "BS")
         tr.answer_script = [False]
         assert bot.handle_update(upd_raw(f"af3|BS|{bs}")) == "callback:answer_failed"
@@ -6520,3 +6553,75 @@ class TestPhaseBMultiRepo:
                     d.create_task("x", "L1", ["a.py"], {}, registry_fingerprint="not-a-sha")
             finally:
                 d.close()
+
+
+# ------------------------------------------------ friendly status / block reason (non-developer UX)
+from auto_factory.dev_bot import _friendly_reason
+
+
+def _blocked(db, tid, reason, last_error=None):
+    v = db.get_task(tid)["state_version"]
+    db.transition(tid, v, "BLOCKED", "worker", reason, {"last_error": last_error or reason})
+
+
+class TestFriendlyStatus:
+    def test_friendly_reason_translations(self):
+        def fr(err, events=()):
+            return _friendly_reason({"state": "BLOCKED", "last_error": err}, list(events))
+
+        assert fr("AUDIT_BLOCKED: repo permission denied") == "사전 감사에서 저장소 접근 권한 문제로 차단됨"
+        assert fr("AUDIT_BLOCKED: request ambiguous") == "요청이 모호하거나 허용 범위 밖 파일이 포함되어 차단됨"
+        assert fr("AUDIT_BLOCKED: path outside allowed_paths") == "요청이 모호하거나 허용 범위 밖 파일이 포함되어 차단됨"
+        assert fr("AUDIT_BLOCKED") == "사전 AI 감사에서 안전상 보류됨"
+        assert fr("L3 fail-closed: deploy") == "고위험(배포·DB) 작업이라 자동 실행이 제한됨"
+        assert fr("BACKLOG_SCOPE_REQUIRED") == "수정할 파일 범위가 지정되지 않아 대기/차단됨"
+        assert fr(None, [{"to_state": "BLOCKED", "reason": SCOPE_PARK_REASON}]) == \
+            "수정할 파일 범위가 지정되지 않아 대기/차단됨"
+        assert fr("PROJECT_CONTEXT:PROJECT_WRITE_LOCKED") == "프로젝트 설정이 변경되었거나 쓰기가 잠겨 차단됨"
+        assert fr("guardrail: SKIP_ADDED in tests") == "금지된 경로 수정 또는 테스트 약화가 감지되어 차단됨"
+        assert fr("FORBIDDEN path touched") == "금지된 경로 수정 또는 테스트 약화가 감지되어 차단됨"
+        assert fr(None) == "" and fr("") == ""
+        # Fallback: first meaningful line only, paths masked, truncated, never a stack trace.
+        out = fr("Traceback (most recent call last):\n  File \"C:\\x\\y.py\", line 1\nboom at C:\\secret\\dir\\a.py")
+        assert "Traceback" not in out and "secret" not in out and "boom" in out
+        assert len(fr("x" * 500)) <= 90
+        # Malformed events never raise; last_error still translates.
+        assert fr("AUDIT_BLOCKED", [None]) == "사전 AI 감사에서 안전상 보류됨"
+
+    def test_tasks_view_shows_request_and_reason(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, process_inspector=_FakeInspector([]), session_sleep=lambda s: None)
+        tid = submit(db, request="해열제 안내 문구를 더 쉽게 다듬어줘\n두번째 줄", start=False)
+        _blocked(db, tid, "AUDIT_BLOCKED: target inaccessible (permission)")
+        tid2 = submit(db, request="awaiting one", start=False)
+        _to_state(db, tid2, "AWAITING_START_AUTH")
+        for i in range(40):  # [TG-01] budget pressure
+            t = submit(db, request=f"긴 요청 {i} " + "가" * 80, start=False)
+            _blocked(db, t, "L3 fail-closed")
+        assert bot.handle_update(upd_raw("af3|nav|tasks", message_id=9)) == "callback:af3:tasks:edited"
+        view = tr.edits[-1]
+        text = view["text"]
+        assert "해열제 안내 문구를 더 쉽게 다듬어줘" in text and "두번째 줄" not in text
+        assert "└ 사유: 사전 감사에서 저장소 접근 권한 문제로 차단됨" in text
+        assert "진행 차단(확인 필요)" in text and f"af2|v|{tid}" in _cbs(view)
+        assert "more (/status)" in text
+        _all_html_ok(tr)
+
+    def test_status_blocked_shows_reason_and_discard_hint(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, request="차단될 <요청>", start=False)
+        _blocked(db, tid, "guardrail: SKIP_ADDED", last_error="GUARDRAIL")
+        v = db.get_task(tid)["state_version"]
+        db.update_fields(tid, v, {"base_sha": "a" * 40}, "test")
+        patch = bot.renderer.artifacts_dir / f"{tid}.patch"
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text("diff", encoding="utf-8")
+        bot.handle_update(upd_msg(f"/status {tid}"))
+        text = tr.sent[-1]["text"]
+        assert "사유: 금지된 경로 수정 또는 테스트 약화가 감지되어 차단됨" in text
+        assert "정리하려면 아래 \U0001f5d1 Discard 버튼을 누르세요." in text
+        assert "&lt;요청&gt;" in text
+        assert set(tr.buttons()) == {"d", "x"}
+        bot.handle_update(upd_msg(f"/live {tid}"))
+        live = tr.sent[-1]["text"]
+        assert "요청: 차단될 &lt;요청&gt;" in live and "사유: 금지된 경로" in live and "Liveness:" in live
+        _all_html_ok(tr)
