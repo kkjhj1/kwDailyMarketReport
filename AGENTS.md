@@ -30,6 +30,7 @@
 - Phase 2 (파괴, [AUTH-01]): 사용자의 명확한 착수 승인("개발 진행해" 등, 단순 맞장구 제외) 후 Claude가 Single-Writer Lease로 구현. Gemini 파일 수정 금지, 대화형 작업 중 Claude 실패 시 임의 대체 금지(`IMPLEMENTATION_FAILED`/`BLOCKED` 보고; 무인 파이프라인 예외는 제6장 적용)
 - 최종 판결: 착수 전 `git rev-parse HEAD`·`git status --short`로 기준점 고정, 반환 후 Gemini가 `git diff` Fresh Read로 시행령·불변조건 준수 판정. L3 배포·운영 DB 마이그레이션은 감사 누락/테스트 실패 시 중단(Fail-Closed)
 - Handoff: 전체 소스 복사 금지, 대상 인터페이스만 1~2KB 압축. Writer는 `allowed_paths`만 수정, 완료 시 Drift Self-Report 제출
+- **[META-02] 병렬 세션 격리 라우팅**: 공유 루트(`main`) 동시 직접 수정 금지. 병렬·백그라운드 코딩은 `auto_factory` worktree 또는 서브에이전트 `Workspace="branch"`로 격리 실행하며(`Workspace="share"`는 읽기·리뷰 전용), 예외적 루트 직접 수정 시 `HEAD`/`git status` 사전 점검 및 단일 Writer 원칙을 엄수한다.
 
 ## 6. 무인 자율 파이프라인 (`auto_factory`) 조건부 예외 규약
 - **적용 범위**: `git worktree`로 격리된 로컬 샌드박스 내 무인 파이프라인 작업에 한해 적용한다 (`main` 직접 수정 금지).
