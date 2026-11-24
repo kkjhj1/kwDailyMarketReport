@@ -73,11 +73,15 @@ from .live_progress import (
 from .projects import (
     DEFAULT_PROJECT_ID,
     PROJECT_ID_RE,
+    ProjectContextError,
+    ProjectContextResolver,
     ProjectRegistry,
     ProjectRegistryError,
     ProjectSpec,
     inspect_project_git,
     load_registry,
+    registry_fingerprint,
+    risk_exceeds,
     scan_workspace_projects,
 )
 from .win_job import SESSION_IMAGE_WHITELIST, ProcessInspector, ProcessSample
@@ -103,6 +107,7 @@ from .worktree import (
     safe_read_bytes,
     safe_unlink,
     safe_write_atomic,
+    same_path,
 )
 
 TOKEN_ENV = "AUTO_FACTORY_DEV_BOT_TOKEN"
@@ -829,6 +834,13 @@ class HttpTransport:
             raise TgRejected("getMe returned no bot object")
         return me
 
+    def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        return self._call("setMyCommands", {"commands": list(commands)}) is True
+
+    def set_chat_menu_button(self, menu_button: dict[str, str] | None = None) -> bool:
+        payload: dict[str, Any] = {"menu_button": menu_button or {"type": "commands"}}
+        return self._call("setChatMenuButton", payload) is True
+
 
 class FakeTransport:
     """Offline transport for `--demo` and tests. Scripts are lists of exceptions / return values."""
@@ -877,6 +889,14 @@ class FakeTransport:
         self.get_me_calls = getattr(self, "get_me_calls", 0) + 1
         return {"id": 1, "is_bot": True, "username": "af_fake_bot"}
 
+    def set_my_commands(self, commands) -> bool:
+        self.commands = [dict(c) for c in commands]
+        return True
+
+    def set_chat_menu_button(self, menu_button=None) -> bool:
+        self.menu_button = dict(menu_button or {"type": "commands"})
+        return True
+
     def buttons(self, index: int = -1, source: str = "sent") -> dict[str, str]:
         """Map op -> token for the inline keyboard of a sent/edited message (test helper)."""
         msg = (self.sent if source == "sent" else self.edits)[index]
@@ -900,22 +920,42 @@ class MergeOutcome:
 
 
 class MergeCoordinator:
-    """The only path to MERGED: intent journal -> live verification -> ff-only -> finalize -> cleanup."""
+    """The only path to MERGED: intent journal -> project re-verification -> live verification ->
+    ff-only -> finalize -> cleanup. Every step runs against the task's OWN project repository."""
 
     RETRYABLE = frozenset({"MAIN_DIRTY", "MERGE_LOCKED"})
+    RETRYABLE_CONTEXT = frozenset({"STOPPED"})  # kill switch: refuse now, never park the task
 
     def __init__(self, db: CoordinatorDB, wtm: WorktreeManager, guard: GuardrailChecker,
-                 artifacts_dir: str | os.PathLike, require_supervisor_lock: bool = False):
+                 artifacts_dir: str | os.PathLike, require_supervisor_lock: bool = False,
+                 resolver: ProjectContextResolver | None = None, stop_flag: str | os.PathLike | None = None):
         self.db = db
         self.wtm = wtm
         self.guard = guard
         self.artifacts_dir = Path(artifacts_dir)
         self.require_supervisor_lock = require_supervisor_lock
+        # Without an explicit resolver only the home project is known (default registry, process env
+        # ignored): any other project's task fails closed (PROJECT_UNKNOWN -> BLOCKED).
+        self.resolver = resolver or ProjectContextResolver(
+            lambda: load_registry(wtm.repo_root, None, env={}), wtm.worktrees_dir, home_wtm=wtm, home_guard=guard,
+        )
+        self.stop_flag = Path(stop_flag) if stop_flag else None
 
     def _block_task(self, task_id: str, reason: str) -> None:
         task = self.db.get_task(task_id)
         if task["state"] not in TERMINAL_STATES and task["state"] != "BLOCKED":
             self.db.transition(task_id, task["state_version"], "BLOCKED", "merge-coordinator", reason[:500])
+
+    def _context(self, task: dict[str, Any]):
+        """Fresh registry + policy + fingerprint + root + STOP + candidate slot. Never touches Git state."""
+        ctx = self.resolver.resolve(task.get("project_id") or DEFAULT_PROJECT_ID, risk_level=task["risk_level"],
+                                    fingerprint=task.get("registry_fingerprint"))
+        if (self.stop_flag is not None and os.path.lexists(self.stop_flag)) or ctx.stop_requested():
+            raise ProjectContextError("STOPPED", "STOP.flag present (global or project-local)")
+        wt = task.get("worktree_path")
+        if wt and not same_path(wt, ctx.wtm.path_for(task["id"])):
+            raise ProjectContextError("CANDIDATE_PATH_MISMATCH", "worktree_path is not this project's slot")
+        return ctx
 
     def merge(self, task_id: str, actor: str) -> MergeOutcome:
         if self.require_supervisor_lock:  # lock order: supervisor.lock -> merge.lock
@@ -926,7 +966,21 @@ class MergeCoordinator:
             return MergeOutcome(False, "INTENT_REJECTED", str(exc))
         task = self.db.get_task(task_id)
         try:
-            head = self.wtm.merge_candidate(task, self.guard)
+            try:
+                ctx = self._context(task)
+            except ProjectContextError:
+                raise
+            except Exception as exc:  # unexpected resolver failure: fail closed, Git untouched
+                raise ProjectContextError("PROJECT_ERROR", type(exc).__name__) from None
+        except ProjectContextError as exc:
+            retryable = exc.code in self.RETRYABLE_CONTEXT
+            self.db.abort_merge_intent(intent, f"PROJECT_CONTEXT: {exc}", "ABORTED" if retryable else "BLOCKED")
+            if not retryable:
+                self._block_task(task_id, f"MERGE_PROJECT_{exc.code}: {exc}")
+            return MergeOutcome(False, exc.code, str(exc), intent)
+        wtm = ctx.wtm
+        try:
+            head = wtm.merge_candidate(task, ctx.guard)
         except MergeError as exc:
             retryable = exc.code in self.RETRYABLE
             self.db.abort_merge_intent(
@@ -936,7 +990,7 @@ class MergeCoordinator:
                 self._block_task(task_id, f"MERGE_{exc.code}: {exc}")
             return MergeOutcome(False, exc.code, str(exc), intent)
         except Exception as exc:  # unexpected: decide from Git's actual state, never guess
-            if self.wtm.head_sha() != task["target_sha"]:
+            if wtm.head_sha() != task["target_sha"]:
                 self.db.abort_merge_intent(intent, f"unexpected: {exc}", "BLOCKED")
                 self._block_task(task_id, f"MERGE_ERROR: {type(exc).__name__}")
                 return MergeOutcome(False, "MERGE_ERROR", str(exc), intent)
@@ -945,8 +999,8 @@ class MergeCoordinator:
         self.db.finalize_merge(intent, head)
         cleanup_ok = True
         try:
-            info = WorktreeInfo(task_id, task["worktree_path"], self.wtm.branch_for(task_id), task["base_sha"])
-            self.wtm.cleanup(info, self.artifacts_dir, delete_branch=True)
+            info = WorktreeInfo(task_id, task["worktree_path"], wtm.branch_for(task_id), task["base_sha"])
+            wtm.cleanup(info, self.artifacts_dir, delete_branch=True)
         except Exception as exc:  # the merge is committed; record, never roll back
             self.db.mark_orphan_cleanup(intent, f"cleanup failed: {exc}")
             cleanup_ok = False
@@ -965,12 +1019,22 @@ _STATE_BUTTONS = {
 
 class TaskRenderer:
     def __init__(self, db: CoordinatorDB, fmt: SafeHtmlFormatter, admin_id: int, wtm: WorktreeManager,
-                 artifacts_dir: str | os.PathLike):
+                 artifacts_dir: str | os.PathLike, wtm_for: Callable[[str], WorktreeManager] | None = None):
         self.db = db
         self.fmt = fmt
         self.admin_id = admin_id
         self.wtm = wtm
         self.artifacts_dir = Path(artifacts_dir)
+        self.wtm_for = wtm_for  # project_id -> that project's WorktreeManager (raises if unavailable)
+
+    def _task_wtm(self, task: dict[str, Any]) -> WorktreeManager | None:
+        """The task's own project WorktreeManager, or None if the project cannot be resolved."""
+        if self.wtm_for is None:
+            return self.wtm
+        try:
+            return self.wtm_for(task.get("project_id") or DEFAULT_PROJECT_ID)
+        except Exception:
+            return None
 
     def task_card(self, task: dict[str, Any], reason: str = "", with_buttons: bool = True,
                   extra_lines: Iterable[str] = ()) -> tuple[str, dict | None]:
@@ -1010,9 +1074,10 @@ class TaskRenderer:
         f = self.fmt
         wt, base = task.get("worktree_path"), task.get("base_sha")
         stat, patch = "", ""
-        if wt and Path(wt).is_dir() and base:
-            stat = self.wtm.git("diff", "--stat", base, "HEAD", cwd=wt, check=False)
-            patch = self.wtm.diff_bytes(wt, base).decode("utf-8", "replace")
+        wtm = self._task_wtm(task) if (wt and Path(wt).is_dir() and base) else None
+        if wtm is not None and same_path(wt, wtm.path_for(task["id"])):
+            stat = wtm.git("diff", "--stat", base, "HEAD", cwd=wt, check=False)
+            patch = wtm.diff_bytes(wt, base).decode("utf-8", "replace")
         else:
             p = self.artifacts_dir / f"{task['id']}.patch"
             if p.is_file():
@@ -1147,7 +1212,7 @@ class OutboxDispatcher:
 HELP_TEXT = (
     "<b>auto_factory dev bot</b>\n"
     "/menu — 버튼 메뉴 (작업·세션·일시정지) · /sessions — 실행 중 AI 프로세스\n"
-    "/projects [scan] · /board · /backlog [add &lt;제목&gt;] — 멀티 프로젝트 관리\n"
+    "/projects [scan] · /board · /backlog [add &lt;제목&gt;|scope &lt;id&gt; &lt;a,b&gt;] — 멀티 프로젝트\n"
     "/bots — 봇 프리셋 선택 (✅ unlocked / 🔒 locked)\n"
     "봇 선택 후 자연어로 질문·수정 요청 (질문=읽기 전용 답변, 수정=L2 작업)\n"
     "/ask [preset] &lt;질문&gt; — 읽기 전용 질문\n"
@@ -1159,6 +1224,25 @@ HELP_TEXT = (
     "/kill — write STOP.flag · /resume [clear-circuit]\n"
     "Merges are 2-step and bound to task + target_sha + diff_sha256."
 )
+
+# Left-bottom Telegram menu (≡): only the essentials.
+BOT_COMMANDS: tuple[dict[str, str], ...] = (
+    {"command": "menu", "description": "메인 메뉴 열기"},
+    {"command": "status", "description": "진행 현황 보기"},
+    {"command": "bots", "description": "봇 선택하기"},
+    {"command": "sessions", "description": "실행 세션 확인"},
+)
+# Persistent bottom shortcut bar: 1 row, 3 buttons. Tapping sends the label as plain text.
+SHORTCUT_STATUS = "\U0001f4ca 현황"
+SHORTCUT_BOTS = "\U0001f916 봇 선택"
+SHORTCUT_MENU = "\U0001f3e0 메뉴"
+SHORTCUT_LABELS: tuple[str, ...] = (SHORTCUT_STATUS, SHORTCUT_BOTS, SHORTCUT_MENU)
+SHORTCUT_REPLY_KEYBOARD: dict[str, Any] = {
+    "keyboard": [[{"text": SHORTCUT_STATUS}, {"text": SHORTCUT_BOTS}, {"text": SHORTCUT_MENU}]],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+SHORTCUT_GREETING = "⌨️ 아래 단축 버튼이나 좌측 메뉴로 바로 이동할 수 있습니다."
 
 
 class DevBot:
@@ -1212,10 +1296,17 @@ class DevBot:
         self.merge_approval_ttl = merge_approval_ttl
         self.log = log or (lambda msg: None)
         self.owner = f"bot:{uuid.uuid4().hex[:12]}"
-        self.renderer = TaskRenderer(db, self.fmt, admin_chat_id, self.wtm, self.artifacts_dir)
+        # Multi-project registry: re-loaded per view / task / merge (fail closed on a broken projects.json).
+        self.projects_env = projects_env
+        self._registry_loader = project_registry_loader
+        self.resolver = ProjectContextResolver(self._registry, self.wtm.worktrees_dir, home_wtm=self.wtm,
+                                               home_guard=self.guard)
+        self.renderer = TaskRenderer(db, self.fmt, admin_chat_id, self.wtm, self.artifacts_dir,
+                                     wtm_for=self._project_wtm_for)
         self.dispatcher = OutboxDispatcher(db, transport, self.limiter, self.renderer, admin_chat_id, boot_id)
         self.coordinator = MergeCoordinator(db, self.wtm, self.guard, self.artifacts_dir,
-                                            require_supervisor_lock=require_supervisor_lock)
+                                            require_supervisor_lock=require_supervisor_lock,
+                                            resolver=self.resolver, stop_flag=self.stop_flag)
         # /sessions: read-only process inspector + CPU-time cache {(pid, creation): (cpu, quiet_since)}
         self.inspector = process_inspector if process_inspector is not None else ProcessInspector()
         self.session_clock = session_clock
@@ -1223,9 +1314,6 @@ class DevBot:
         self.session_quiet_window = float(session_quiet_window)
         self.session_short_sample = float(session_short_sample)
         self._session_cpu: dict[tuple[int, float], tuple[float, float]] = {}
-        # Multi-project registry: re-loaded per view (fail closed on a broken projects.json).
-        self.projects_env = projects_env
-        self._registry_loader = project_registry_loader
         self.workspace_dir = Path(workspace_dir) if workspace_dir else self.wtm.repo_root.parent
 
     def _safe_stop_flag(self, stop_flag: str | os.PathLike | None) -> Path:
@@ -1260,9 +1348,40 @@ class DevBot:
         self.db.set_kv("notify_chat_id", self.admin)
         outbox = self.dispatcher.boot()
         merges = self.db.reconcile_merge_intents(
-            self.wtm, self.artifacts_dir, require_supervisor_lock=self.require_supervisor_lock
+            self.wtm, self.artifacts_dir, require_supervisor_lock=self.require_supervisor_lock,
+            wtm_for=self._project_wtm_for,  # each intent is checked against ITS project's HEAD
         )
+        self._register_menu()
         return {"outbox": outbox, "merges": merges}
+
+    def _project_wtm_for(self, project_id: str) -> WorktreeManager:
+        """Reconcile / diff / discard: the project's own repo. A broken registry never strands home
+        tasks (the bot's own repo_root IS the home repository); other projects raise (UNRESOLVED)."""
+        try:
+            return self.resolver.wtm_for(project_id)
+        except ProjectContextError:
+            if project_id == DEFAULT_PROJECT_ID:
+                return self.wtm
+            raise
+
+    def _task_wtm(self, task: dict[str, Any]) -> WorktreeManager:
+        """The task's own project WorktreeManager (raises ProjectContextError if unavailable)."""
+        return self._project_wtm_for(task.get("project_id") or DEFAULT_PROJECT_ID)
+
+    def _register_menu(self) -> None:
+        """Best-effort: setMyCommands + setChatMenuButton. Never fatal; skipped on minimal transports."""
+        set_cmds = getattr(self.transport, "set_my_commands", None)
+        if callable(set_cmds):
+            try:
+                set_cmds([dict(c) for c in BOT_COMMANDS])
+            except Exception as exc:
+                self.log(f"setMyCommands failed: {type(exc).__name__}")
+        set_btn = getattr(self.transport, "set_chat_menu_button", None)
+        if callable(set_btn):
+            try:
+                set_btn({"type": "commands"})
+            except Exception as exc:
+                self.log(f"setChatMenuButton failed: {type(exc).__name__}")
 
     def dispatch_once(self, limit: int = 10) -> dict[str, int]:
         return self.dispatcher.dispatch_once(limit)
@@ -1344,15 +1463,27 @@ class DevBot:
                 return "ignored:leading_space_command"  # " /do ..." is never re-parsed as a command
             if not text.strip():
                 return "ignored:text"
+            shortcut = text.strip()
+            if shortcut == SHORTCUT_STATUS:
+                return self._cmd_status(chat_id, "")
+            if shortcut == SHORTCUT_BOTS:
+                return self._cmd_bots(chat_id)
+            if shortcut == SHORTCUT_MENU:
+                self._send(chat_id, *self._hub_view(chat_id, from_id))
+                return "cmd:menu"
             return self._on_plain_text(chat_id, text, msg.get("message_id"))
         parts = re.split(r"\s+", text, maxsplit=1)
         head, rest = parts[0], (parts[1] if len(parts) > 1 else "")
         cmd = head.split("@", 1)[0].lower()
         arg = rest.strip()
         if cmd == "/help":
-            self._send(chat_id, HELP_TEXT)
+            self._send(chat_id, HELP_TEXT, SHORTCUT_REPLY_KEYBOARD)
             return "cmd:help"
-        if cmd in ("/start", "/menu"):
+        if cmd == "/start":
+            self._send(chat_id, SHORTCUT_GREETING, SHORTCUT_REPLY_KEYBOARD)
+            self._send(chat_id, *self._hub_view(chat_id, from_id))
+            return "cmd:menu"
+        if cmd == "/menu":
             self._send(chat_id, *self._hub_view(chat_id, from_id))
             return "cmd:menu"
         if cmd == "/sessions":
@@ -1375,7 +1506,8 @@ class DevBot:
             return self._cmd_ask(chat_id, arg)
         if cmd == "/clear":
             self.db.clear_chat_focus(chat_id)
-            self._send(chat_id, "\U0001f9f9 선택한 봇을 해제했습니다. /bots 로 다시 선택하세요.")
+            self._send(chat_id, "\U0001f9f9 선택한 봇을 해제했습니다. /bots 로 다시 선택하세요.",
+                       SHORTCUT_REPLY_KEYBOARD)
             return "cmd:clear"
         if cmd == "/status":
             return self._cmd_status(chat_id, arg)
@@ -1411,22 +1543,40 @@ class DevBot:
         self._send(chat_id, "Unknown command. /help")
         return "cmd:unknown"
 
+    def _project_protected(self, p: ProjectSpec) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(self.protected + tuple(p.protected_paths)))
+
     def _cmd_task(self, chat_id: int, text: str) -> str:
+        """`/task` targets this chat's focused project (default: home); scope is validated against
+        THAT project's root_path + protected paths, risk <= its max_risk, spec fingerprint snapshotted."""
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            self._send(chat_id, *self._registry_error_view(err))
+            return "cmd:task:registry_error"
+        p = self._focused_project(chat_id, reg)
+        if not p.writable:
+            self._send(chat_id, f"⚠️ /task rejected: {f.b(p.label, 32)} is read-only (folder / allow_write=false)")
+            return "cmd:task:rejected"
         try:
-            spec = parse_task_command(text, self.wtm.repo_root, self.protected)
+            spec = parse_task_command(text, p.root_path, self._project_protected(p))
+            if spec.risk_level == "L3" or risk_exceeds(spec.risk_level, p.max_risk):
+                raise TaskParseError(f"risk {spec.risk_level} exceeds project max_risk {p.max_risk}")
         except TaskParseError as exc:
-            self._send(chat_id, f"⚠️ /task rejected: {self.fmt.esc(exc, 200)}")
+            self._send(chat_id, f"⚠️ /task rejected: {f.esc(exc, 200)}")
             return "cmd:task:rejected"
         tid, created = self.db.create_task(
-            spec.request, spec.risk_level, list(spec.allowed_paths), {"pytest": list(spec.tests)}
+            spec.request, spec.risk_level, list(spec.allowed_paths), {"pytest": list(spec.tests)},
+            project_id=p.project_id, registry_fingerprint=registry_fingerprint(p),
         )
         if not created:
             self._reply_duplicate(chat_id, tid)
             return f"cmd:task:duplicate:{tid}"
         self._fire_wake()  # after commit
+        where = "" if p.project_id == DEFAULT_PROJECT_ID else f" · {f.code(p.project_id, 32)}"
         self._send(
             chat_id,
-            f"\U0001f195 Task created {self.fmt.code(tid, 64)} ({self.fmt.esc(spec.risk_level, 4)}). "
+            f"\U0001f195 Task created {f.code(tid, 64)} ({f.esc(spec.risk_level, 4)}){where}. "
             "Start buttons arrive at AWAITING_START_AUTH.",
         )
         return f"cmd:task:created:{tid}"
@@ -1448,6 +1598,11 @@ class DevBot:
 
     def _cmd_do(self, chat_id: int, text: str) -> str:
         f = self.fmt
+        focus = self.db.get_kv(self._focus_project_key(chat_id))
+        if isinstance(focus, str) and focus != DEFAULT_PROJECT_ID:
+            self._send(chat_id, f"⚠️ /do 프리셋은 홈 프로젝트({f.code(DEFAULT_PROJECT_ID, 32)}) 전용입니다. "
+                                f"현재 포커스: {f.code(focus, 32)} — /projects 에서 홈으로 전환하거나 /task 를 쓰세요.")
+            return "cmd:do:wrong_project"
         try:
             preset, request = parse_do_command(text, self.wtm.repo_root, self.unlocked_presets)
         except TaskParseError as exc:
@@ -1975,7 +2130,7 @@ class DevBot:
         stat = ""
         if task.get("base_sha") and head:
             try:
-                stat = self.wtm.git("diff", "--shortstat", task["base_sha"], head, check=False).strip()
+                stat = self._task_wtm(task).git("diff", "--shortstat", task["base_sha"], head, check=False).strip()
             except Exception as exc:
                 self.log(f"merge summary shortstat failed: {type(exc).__name__}")
         gates_txt = "(no gate report)"
@@ -2090,8 +2245,11 @@ class DevBot:
         patch_note = ""
         if task.get("worktree_path") and task.get("base_sha"):
             try:
-                info = WorktreeInfo(task["id"], task["worktree_path"], self.wtm.branch_for(task["id"]), task["base_sha"])
-                patch = self.wtm.cleanup(info, self.artifacts_dir, delete_branch=False)
+                wtm = self._task_wtm(task)
+                if not same_path(task["worktree_path"], wtm.path_for(task["id"])):
+                    raise ProjectContextError("CANDIDATE_PATH_MISMATCH")
+                info = WorktreeInfo(task["id"], task["worktree_path"], wtm.branch_for(task["id"]), task["base_sha"])
+                patch = wtm.cleanup(info, self.artifacts_dir, delete_branch=False)
                 patch_note = f" Patch preserved: {patch.name}"
             except Exception as exc:
                 patch_note = f" Cleanup failed ({type(exc).__name__}); worktree kept."
@@ -2497,8 +2655,10 @@ class DevBot:
             self._send(chat_id, *self._backlog_view(chat_id, user_id, 0))
             return "cmd:backlog"
         parts = arg.split(None, 1)
+        if parts[0].lower() == "scope":
+            return self._cmd_backlog_scope(chat_id, user_id, parts[1] if len(parts) > 1 else "")
         if parts[0].lower() != "add":
-            self._send(chat_id, "usage: /backlog [add &lt;제목&gt;]")
+            self._send(chat_id, "usage: /backlog [add &lt;제목&gt; | scope &lt;id&gt; &lt;path1&gt;,&lt;path2&gt;]")
             return "cmd:backlog:bad-arg"
         title = parts[1].strip() if len(parts) > 1 else ""
         if not title:
@@ -2517,6 +2677,53 @@ class DevBot:
         notice = f"✅ 추가됨 · #{item_id} → {f.b(project.label, 32)}"
         self._send(chat_id, *self._backlog_view(chat_id, user_id, 0, notice))
         return f"cmd:backlog:added:{item_id}"
+
+    def _validate_scope(self, paths: Iterable[str], p: ProjectSpec) -> list[str]:
+        """Each path canonical inside `p.root_path`, never forbidden/protected (raises TaskParseError)."""
+        items = list(paths)
+        if not items or any(not isinstance(x, str) for x in items):
+            raise TaskParseError("scope must be a non-empty list of paths")
+        if len(items) > MAX_PATHS:
+            raise TaskParseError(f"at most {MAX_PATHS} paths")
+        protected = self._project_protected(p)
+        return sorted({sanitize_repo_path(x, p.root_path, protected) for x in items})
+
+    def _cmd_backlog_scope(self, chat_id: int, user_id: int, rest: str) -> str:
+        """`/backlog scope <id> <p1>,<p2>`: write scope of a fresh TODO item in the FOCUSED project."""
+        f = self.fmt
+        m = re.fullmatch(r"#?([0-9]{1,12})[ \t]+(\S+)", rest.strip())
+        if not m:
+            self._send(chat_id, "usage: /backlog scope &lt;id&gt; &lt;path1&gt;,&lt;path2&gt;")
+            return "cmd:backlog:bad-arg"
+        item_id, blob = int(m.group(1)), m.group(2)
+        reg, err = self._registry_or_error()
+        if reg is None:
+            self._send(chat_id, *self._registry_error_view(err))
+            return "cmd:backlog:registry_error"
+        p = self._focused_project(chat_id, reg)
+        try:
+            item = self.db.get_backlog_item(item_id)
+        except KeyError:
+            self._send(chat_id, f"⚠️ 없는 항목 #{item_id}")
+            return "cmd:backlog:scope:unknown"
+        if item["project_id"] != p.project_id:
+            self._send(chat_id, f"⚠️ #{item_id} 은(는) 현재 포커스 프로젝트({f.code(p.project_id, 32)})의 항목이 아닙니다.")
+            return "cmd:backlog:scope:wrong_project"
+        if not p.writable:
+            self._send(chat_id, "⚠️ 읽기 전용 프로젝트에는 수정 범위를 지정할 수 없습니다.")
+            return "cmd:backlog:scope:read_only"
+        try:
+            paths = self._validate_scope(blob.split(","), p)
+            saved = self.db.set_backlog_scope_in_tx(item_id, paths, self._actor(user_id))
+        except (TaskParseError, ValueError) as exc:
+            self._send(chat_id, f"⚠️ 수정 범위 거부: {f.esc(exc, 160)}")
+            return "cmd:backlog:scope:rejected"
+        except ActionRejected as exc:
+            self._send(chat_id, f"⚠️ 수정 범위 거부: {f.code(exc.code, 40)} (이미 시작된 항목)")
+            return f"cmd:backlog:scope:rejected:{exc.code}"
+        notice = f"\U0001f3af #{item_id} 수정 범위 {len(saved)}개: {f.code(', '.join(saved), 200)}"
+        self._send(chat_id, *self._backlog_view(chat_id, user_id, 0, notice))
+        return f"cmd:backlog:scope:{item_id}"
 
     def _backlog_view(self, chat_id: int, user_id: int, page: int, notice: str = "") -> tuple[str, dict | None]:
         """Open items of the focused project. `notice` must already be escaped HTML."""
@@ -2543,7 +2750,8 @@ class DevBot:
             iid = int(it["id"])
             badge = self._BACKLOG_BADGES.get(it["status"], "•")
             link = f" · 작업 {f.code(it['linked_task_id'], 40)}" if it["linked_task_id"] else ""
-            lines.append(f"{badge} #{iid} {f.esc(it['title'], 60)} · P{int(it['priority'])}{link}")
+            scope = f" · 범위 {len(it['allowed_paths'])}개" if it.get("allowed_paths") else ""
+            lines.append(f"{badge} #{iid} {f.esc(it['title'], 60)} · P{int(it['priority'])}{scope}{link}")
             row: list[dict[str, str] | None] = []
             if p.writable and it["status"] == "TODO" and not it["linked_task_id"]:
                 row.append(af3_button(f"▶️ #{iid} 작업 시작", "bs", str(iid)))
@@ -2620,10 +2828,12 @@ class DevBot:
             f"#{item_id} {f.esc(item['title'], 80)}",
             f"프로젝트 {f.b(p.label, 32)} · 위험도 {f.esc(p.max_risk, 4)}",
         ]
-        if p.project_id != DEFAULT_PROJECT_ID:
-            lines.append("\U0001f7e0 멀티 저장소 실행(Phase B) 전까지 작업은 차단됨 상태로만 등록됩니다.")
+        scope = item.get("allowed_paths") or []
+        if scope:
+            lines.append(f"\U0001f535 수정 범위: {f.code(', '.join(scope), 200)} → 대기열 등록 (저장소: {f.code(p.project_id, 32)})")
         else:
-            lines.append("\U0001f7e0 수정 범위(allowed_paths)가 없어 차단됨 상태로 등록됩니다 — 사람이 검토합니다.")
+            lines.append("\U0001f7e0 수정 범위(allowed_paths)가 없어 차단됨 상태로 등록됩니다 — "
+                         f"/backlog scope {item_id} &lt;경로&gt; 로 먼저 지정하세요.")
         markup = f.markup([[af3_button("⚠️ 정말 시작할까요?", "BS", tok), af3_button("취소", "bp", "0")]])
         shown = self._show(chat_id, message_id, "\n".join(lines), markup)
         return f"callback:af3:backlog:start_prompt:{shown}"
@@ -2644,7 +2854,17 @@ class DevBot:
             project = reg.get(pid)
             if project is None:
                 raise ActionRejected("PROJECT_UNKNOWN")
-            return self.db.start_backlog_task_in_tx(iid, project, self._actor(user_id), c=c)
+            scope = None
+            row = c.execute("SELECT project_id, allowed_paths FROM backlog_items WHERE id=?", (iid,)).fetchone()
+            if row is not None and row["project_id"] == project.project_id and project.writable:
+                try:  # stored scope is re-validated against the project's CURRENT root / protected paths
+                    stored = json.loads(row["allowed_paths"] or "[]")
+                    if not isinstance(stored, list):
+                        raise TaskParseError("scope is not a list")
+                    scope = self._validate_scope(stored, project) if stored else []
+                except (TaskParseError, ValueError) as exc:
+                    raise ActionRejected("SCOPE_INVALID", str(exc)[:120]) from None
+            return self.db.start_backlog_task_in_tx(iid, project, self._actor(user_id), c=c, allowed_paths=scope)
 
         _, res = self.db.consume_af3_token(token, "BS", chat_id, user_id, effect)
         if res["state"] == "RECEIVED":

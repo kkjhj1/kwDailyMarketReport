@@ -5513,6 +5513,7 @@ from auto_factory.projects import (
     build_project,
     inspect_project_git,
     load_registry,
+    registry_fingerprint,
     scan_workspace_projects,
 )
 
@@ -5836,13 +5837,16 @@ class TestProjectDB:
         assert r2["state"] == "BLOCKED" and r2["parked"] == SCOPE_PARK_REASON
         assert db.get_task(r2["task_id"])["state"] == "BLOCKED"
 
-        other = _spec("other", tmp_path / "o", max_risk="L1")
+        other = _spec("other", tmp_path / "o", max_risk="L1", tests=("tests/test_o.py",))
         oi = db.add_backlog_item("other", "same title")
         r3 = db.start_backlog_task_in_tx(oi, other, "human:tg:1", allowed_paths=["calc.py"])
         t3 = db.get_task(r3["task_id"])
-        assert r3["state"] == "BLOCKED" and r3["parked"] == PHASE_B_PARK_REASON  # never runs in the home repo
+        # Phase B: a scoped task of a writable git project is queued for ITS repository.
+        assert r3["state"] == "RECEIVED" and r3["parked"] == "" and PHASE_B_PARK_REASON not in str(r3)
         assert t3["project_id"] == "other" and t3["risk_level"] == "L1"
-        assert [e["to_state"] for e in db.events(r3["task_id"])] == ["RECEIVED", "BLOCKED"]
+        assert t3["registry_fingerprint"] == registry_fingerprint(other)
+        assert t3["allowed_paths"] == ["calc.py"] and t3["acceptance_spec"]["pytest"] == ["tests/test_o.py"]
+        assert [e["to_state"] for e in db.events(r3["task_id"])] == ["RECEIVED"]
 
     def test_start_backlog_rejections_leave_no_trace(self, tmp_path, db, monkeypatch):
         folder = _spec("notes", tmp_path / "n", kind="folder")
@@ -6044,19 +6048,19 @@ class TestProjectCommands:
         assert db.get_backlog_item(iid)["status"] == "TODO"
         _all_html_ok(tr)
 
-    def test_backlog_non_home_git_project_parks_task(self, tmp_path, repo, db):
+    def test_backlog_non_home_git_project_without_scope_parks_task(self, tmp_path, repo, db):
         other = _git_init(tmp_path / "ws" / "other")
         bot, tr = _proj_bot(tmp_path, repo, db,
                             registry_file=_write_projects(tmp_path, [_entry("other", other, allow_write=True)]))
         bot.handle_update(upd_raw("af3|pf|other"))
         iid = int(bot.handle_update(upd_msg("/backlog add 기능")).rsplit(":", 1)[1])
         bot.handle_update(upd_raw(f"af3|bs|{iid}", message_id=2))
-        assert "Phase B" in tr.edits[-1]["text"]
+        assert f"/backlog scope {iid}" in tr.edits[-1]["text"]
         bs = _af3_tok(tr.edits[-1], "BS")
         assert bot.handle_update(upd_raw(f"af3|BS|{bs}", message_id=2)) == "callback:af3:backlog:started:BLOCKED"
         task = db.get_task(db.get_backlog_item(iid)["linked_task_id"])
-        assert task["project_id"] == "other" and task["state"] == "BLOCKED"
-        assert db.events(task["id"])[-1]["reason"] == PHASE_B_PARK_REASON
+        assert task["project_id"] == "other" and task["state"] == "BLOCKED" and task["allowed_paths"] == []
+        assert db.events(task["id"])[-1]["reason"] == SCOPE_PARK_REASON
 
     def test_backlog_done_hold_and_stale_tokens(self, tmp_path, repo, db):
         bot, tr = _proj_bot(tmp_path, repo, db)
@@ -6089,3 +6093,430 @@ class TestProjectCommands:
         assert second["text"].count("\U0001f535 #") == 2 and "af3|bp|0" in _cbs(second)
         _all_html_ok(tr)
         _all_cbs_safe(tr, forbidden_text=("item",))
+
+
+# ============================================================ shortcut keyboard + ≡ menu
+class TestShortcutKeyboard:
+    def test_boot_registers_menu_commands_and_button(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        assert [(c["command"], c["description"]) for c in tr.commands] == [
+            ("menu", "메인 메뉴 열기"), ("status", "진행 현황 보기"),
+            ("bots", "봇 선택하기"), ("sessions", "실행 세션 확인")]
+        assert tr.menu_button == {"type": "commands"}
+        assert tr.send_attempts == 0  # boot never sends chat messages
+
+    def test_boot_tolerates_missing_or_failing_menu_methods(self, tmp_path, repo, db):
+        class _Bare(FakeTransport):
+            set_my_commands = None
+            set_chat_menu_button = None
+
+        class _Failing(FakeTransport):
+            def set_my_commands(self, commands):
+                raise TgRejected("HTTP 400: nope")
+
+            def set_chat_menu_button(self, menu_button=None):
+                raise TgUnknown("URLError")
+
+        for cls in (_Bare, _Failing):
+            logs: list[str] = []
+            tr = cls()
+            bot = DevBot(db, tr, ADMIN, repo, artifacts_dir=tmp_path / "artifacts", worktrees_dir=tmp_path / "wts",
+                         stop_flag=tmp_path / "STOP.flag", limiter=_no_limit(), log=logs.append)
+            report = bot.boot()
+            assert set(report) == {"outbox", "merges"} and tr.send_attempts == 0
+            if cls is _Failing:
+                assert any("setMyCommands failed" in m for m in logs)
+                assert any("setChatMenuButton failed" in m for m in logs)
+            bot.close()
+
+    def test_http_transport_menu_payloads(self, monkeypatch):
+        t = HttpTransport(VALID_TOKEN)
+        calls = []
+        monkeypatch.setattr(t, "_call", lambda method, payload, timeout=None: calls.append((method, payload)) or True)
+        assert t.set_my_commands(list(dev_bot_mod.BOT_COMMANDS)) is True
+        assert t.set_chat_menu_button() is True
+        assert calls[0] == ("setMyCommands", {"commands": list(dev_bot_mod.BOT_COMMANDS)})
+        assert calls[1] == ("setChatMenuButton", {"menu_button": {"type": "commands"}})
+
+    def test_shortcut_labels_route_directly(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
+        assert bot.handle_update(upd_cb("p", encode_preset_token("kids"))) == "callback:preset:kids"
+        assert dev_bot_mod.SHORTCUT_LABELS == ("📊 현황", "🤖 봇 선택", "🏠 메뉴")
+        calls = []
+        orig = bot._on_plain_text
+        bot._on_plain_text = lambda *a, **k: calls.append(a) or orig(*a, **k)
+        assert bot.handle_update(upd_msg("📊 현황")) == "cmd:status"
+        assert bot.handle_update(upd_msg("  🤖 봇 선택 ")) == "cmd:bots:1"
+        assert bot.handle_update(upd_msg("🏠 메뉴")) == "cmd:menu"
+        kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
+        assert [b["callback_data"] for b in kb[0]] == ["af3|nav|tasks", "af3|nav|sess"]
+        assert calls == [] and db.list_qa_requests() == [] and db.list_tasks() == []
+        assert db.get_kv(f"draft:{ADMIN}") is None
+        assert bot.handle_update(upd_msg("📊 현황 알려줘")).startswith("text:")  # non-exact → normal path
+        assert len(calls) == 1
+        _all_html_ok(tr)
+
+    def test_start_sends_shortcut_keyboard_then_hub(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("/start")) == "cmd:menu"
+        assert tr.send_attempts == 2
+        greet, hub = tr.sent[-2], tr.sent[-1]
+        rk = greet["reply_markup"]
+        assert greet["text"] == dev_bot_mod.SHORTCUT_GREETING
+        assert rk == dev_bot_mod.SHORTCUT_REPLY_KEYBOARD
+        assert rk["resize_keyboard"] is True and rk["is_persistent"] is True
+        assert [[b["text"] for b in row] for row in rk["keyboard"]] == [["📊 현황", "🤖 봇 선택", "🏠 메뉴"]]
+        assert "inline_keyboard" in hub["reply_markup"]
+        n = tr.send_attempts  # /menu stays inline-only (single message)
+        assert bot.handle_update(upd_msg("/menu")) == "cmd:menu" and tr.send_attempts == n + 1
+        assert "keyboard" not in tr.sent[-1]["reply_markup"]
+        assert bot.handle_update(upd_msg("/help")) == "cmd:help"  # /help and /clear carry the pinned bar
+        assert tr.sent[-1]["reply_markup"] == dev_bot_mod.SHORTCUT_REPLY_KEYBOARD
+        assert bot.handle_update(upd_msg("/clear")) == "cmd:clear"
+        assert tr.sent[-1]["reply_markup"] == dev_bot_mod.SHORTCUT_REPLY_KEYBOARD
+        _all_html_ok(tr)
+
+
+# ######################################################################## MULTI-REPO EXECUTION (Phase B)
+from auto_factory.projects import ProjectContextError, ProjectContextResolver
+from auto_factory.worker import StopRequested
+from auto_factory.worktree import WorktreeError, same_path
+
+
+def _head(path) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path), env=build_sandbox_env(),
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _other_repo(tmp_path, name="other"):
+    r = tmp_path / "ws" / name
+    build_demo_repo(r)
+    (r / "MARKER.txt").write_text(f"repo {name}\n", encoding="utf-8")  # distinct history from the home repo
+    _git_main(r, "add", "-A")
+    _git_main(r, "commit", "-q", "-m", f"{name} marker")
+    return r
+
+
+def _other_entry(root, pid="other", **kw):
+    d = {"project_id": pid, "label": pid.title(), "root_path": str(root), "kind": "git", "allow_write": True,
+         "max_risk": "L2", "default_tests": ["tests/test_calc.py"]}
+    d.update(kw)
+    return d
+
+
+def _fp(repo, path, pid):
+    return registry_fingerprint(load_registry(repo, env=_penv(path)).get(pid))
+
+
+def _submit_project(db, repo, path, pid="other", request="fix add (other)", risk="L1", allowed=("calc.py",),
+                    start=True, fp=True):
+    snap = _fp(repo, path, pid) if fp is True else (fp or None)
+    tid, _ = db.create_task(request, risk, list(allowed), {"pytest": ["tests/test_calc.py"]}, project_id=pid,
+                            registry_fingerprint=snap)
+    if start:
+        db.add_approval(tid, "start")
+    return tid
+
+
+def _pb_worker(tmp_path, repo, db, path, **kw):
+    kw.setdefault("claude", [_fix, _fix, _fix])
+    return make_worker(tmp_path, repo, db, projects_env=_penv(path), **kw)
+
+
+class TestPhaseBMultiRepo:
+    def test_worktree_and_merge_lock_layout(self, tmp_path, repo):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other)])
+        home_wtm = WorktreeManager(repo, tmp_path / "wts")
+        base = (tmp_path / "wts").resolve()
+        assert home_wtm.merge_lock_path == base.parent / "merge.lock"  # legacy layout unchanged
+        assert home_wtm.path_for("t1") == base / "t1"
+        guard = GuardrailChecker(home_wtm)
+        res = ProjectContextResolver(lambda: load_registry(repo, env=_penv(path)), tmp_path / "wts",
+                                     home_wtm=home_wtm, home_guard=guard, home_holdout_dir=tmp_path / "holdout")
+        home = res.resolve(DEFAULT_PROJECT_ID, risk_level="L2")
+        assert home.wtm is home_wtm and home.guard is guard and home.holdout_dir == tmp_path / "holdout"
+        ctx = res.resolve("other", risk_level="L1", fingerprint=_fp(repo, path, "other"))
+        assert ctx.wtm.repo_root == other.resolve() and ctx.holdout_dir is None
+        assert ctx.wtm.path_for("t1") == base / "other" / "worktrees" / "t1"
+        assert ctx.wtm.merge_lock_path == base / "other" / "merge.lock" != home_wtm.merge_lock_path
+        assert set(GLOBAL_PROTECTED_PATHS) <= set(ctx.guard.forbidden) and ctx.guard.wt is ctx.wtm
+        assert ctx.stop_flag == other.resolve() / "STOP.flag" and not ctx.stop_requested()
+        assert res.wtm_for("other").merge_lock_path == ctx.wtm.merge_lock_path
+        with pytest.raises(WorktreeError):  # a merge.lock inside the repository is refused
+            WorktreeManager(repo, tmp_path / "wts", merge_lock_path=repo / "merge.lock")
+        (base / "other").mkdir(parents=True, exist_ok=True)
+        (base / "other" / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+        with pytest.raises(ProjectContextError) as ei:  # legacy task worktree named like the project
+            res.resolve("other", risk_level="L1")
+        assert ei.value.code == "LAYOUT_CONFLICT"
+
+    def test_spec_holdout_dir_and_fingerprint(self, tmp_path, repo):
+        other = _other_repo(tmp_path)
+        hold = tmp_path / "other_holdout"
+        hold.mkdir()
+        p = build_project(_other_entry(other, holdout_dir=str(hold)))
+        assert p.holdout_dir == hold.resolve()
+        fp = registry_fingerprint(p)
+        assert len(fp) == 64 and fp == registry_fingerprint(
+            build_project(_other_entry(other, holdout_dir=str(hold), label="Renamed")))  # label is cosmetic
+        for over in ({"max_risk": "L1"}, {"allow_write": False}, {"default_tests": []},
+                     {"protected_paths": ["docs/"]}, {"holdout_dir": None}):
+            e = _other_entry(other, holdout_dir=str(hold))
+            e.update(over)
+            assert registry_fingerprint(build_project(e)) != fp, over
+        for bad in (other / "tests", other, tmp_path / "missing"):
+            with pytest.raises(ProjectRegistryError):
+                build_project(_other_entry(other, holdout_dir=str(bad)))
+        with pytest.raises(ProjectRegistryError):
+            ProjectSpec("x", "x", other.resolve(), "git", (), GLOBAL_PROTECTED_PATHS, True, "L2", other.resolve())
+        with pytest.raises(ProjectRegistryError):  # a holdout inside ANOTHER project's repository
+            load_registry(repo, env=_penv(_write_projects(tmp_path, [_other_entry(other, holdout_dir=str(repo / "tests"))])))
+
+    def test_two_projects_run_and_merge_independently(self, tmp_path, repo, db, monkeypatch):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other)])
+        w = _pb_worker(tmp_path, repo, db, path)
+        calls: dict[str, list] = {"holdout": [], "pytest": []}
+        real_holdout, real_pytest = w.gates.holdout, w.gates.pytest
+        monkeypatch.setattr(w.gates, "holdout",
+                            lambda wt, hd, **k: calls["holdout"].append((wt, hd)) or real_holdout(wt, hd, **k))
+        monkeypatch.setattr(w.gates, "pytest", lambda wt, t, **k: calls["pytest"].append(wt) or real_pytest(wt, t, **k))
+        home_base, other_base = _head(repo), _head(other)
+        th, to = submit(db), _submit_project(db, repo, path)
+        assert w.process_task(th) == "AWAITING_MERGE"
+        assert w.process_task(to) == "AWAITING_MERGE"
+        assert w.wtm.repo_root == repo.resolve() and w._ctx is None  # home context restored
+        h, o = db.get_task(th), db.get_task(to)
+        base = (tmp_path / "wts").resolve()
+        assert same_path(h["worktree_path"], base / th)
+        assert same_path(o["worktree_path"], base / "other" / "worktrees" / to)
+        assert h["base_sha"] == home_base and o["base_sha"] == other_base != home_base
+        # holdout isolation: the home suite ran once (home task) and never inside repo B
+        assert len(calls["holdout"]) == 1 and same_path(calls["holdout"][0][0], h["worktree_path"])
+        assert any(same_path(wt, o["worktree_path"]) for wt in calls["pytest"])
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        approve_merge(db, th)
+        approve_merge(db, to)
+        with _FileLock(w.wtm.merge_lock_path, role="merge"):  # home merge.lock held: repo B is unaffected
+            out_o = bot.coordinator.merge(to, "human:owner")
+            out_h = bot.coordinator.merge(th, "human:owner")
+        assert out_o.ok and out_o.head == o["target_sha"] == _head(other)
+        assert not out_h.ok and out_h.code == "MERGE_LOCKED" and _head(repo) == home_base
+        assert db.get_task(th)["state"] == "AWAITING_MERGE" and (base / "other" / "merge.lock").exists()
+        approve_merge(db, th)
+        out_h = bot.coordinator.merge(th, "human:owner")
+        assert out_h.ok and _head(repo) == h["target_sha"] and _head(other) == o["target_sha"]
+        assert db.get_task(th)["state"] == db.get_task(to)["state"] == "MERGED"
+        done = {i["task_id"]: i for i in db.merge_intents(statuses=("COMPLETED",))}
+        assert done[to]["project_id"] == "other" and done[to]["registry_fingerprint"] == o["registry_fingerprint"]
+        assert done[th]["project_id"] == DEFAULT_PROJECT_ID
+        assert not Path(o["worktree_path"]).exists() and not Path(h["worktree_path"]).exists()
+
+    @pytest.mark.parametrize("variant,code,state,intent", [
+        ("fingerprint", "FINGERPRINT_MISMATCH", "BLOCKED", "BLOCKED"),
+        ("read_only", "PROJECT_READ_ONLY", "BLOCKED", "BLOCKED"),
+        ("removed", "PROJECT_UNKNOWN", "BLOCKED", "BLOCKED"),
+        ("risk", "RISK_TOO_HIGH", "BLOCKED", "BLOCKED"),
+        ("local_stop", "STOPPED", "AWAITING_MERGE", "ABORTED"),
+        ("global_stop", "STOPPED", "AWAITING_MERGE", "ABORTED"),
+    ])
+    def test_merge_refusals_never_touch_git(self, tmp_path, repo, db, monkeypatch, variant, code, state, intent):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other)])
+        w = _pb_worker(tmp_path, repo, db, path)
+        to = _submit_project(db, repo, path)
+        assert w.process_task(to) == "AWAITING_MERGE"
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        approve_merge(db, to)
+        t = db.get_task(to)
+        notes = tmp_path / "ws" / "notes"
+        notes.mkdir(exist_ok=True)
+        rewrite = {
+            "fingerprint": [_other_entry(other, default_tests=["tests/test_other.py"])],
+            "read_only": [_other_entry(other, allow_write=False)],
+            "removed": [_entry("notes", notes, kind="folder")],
+            "risk": [_other_entry(other, max_risk="L0")],
+        }
+        if variant in rewrite:
+            _write_projects(tmp_path, rewrite[variant])
+        elif variant == "local_stop":
+            (other / "STOP.flag").write_text("stop", encoding="utf-8")
+        else:
+            (tmp_path / "STOP.flag").write_text("stop", encoding="utf-8")
+        spy: list[int] = []
+
+        def no_git(self, *a, **k):
+            spy.append(1)
+            raise AssertionError("git merge must not be attempted")
+
+        monkeypatch.setattr(WorktreeManager, "merge_candidate", no_git)
+        out = bot.coordinator.merge(to, "human:owner")
+        assert not out.ok and out.code == code and spy == []
+        assert db.get_task(to)["state"] == state and _head(other) == t["base_sha"]
+        assert Path(t["worktree_path"]).is_dir() and _head(t["worktree_path"]) == t["target_sha"]
+        assert db.merge_intents(to)[-1]["status"] == intent
+
+    def test_worker_refuses_folder_readonly_unknown_l3_overrisk_and_drift(self, tmp_path, repo, db):
+        other, ro, low = _other_repo(tmp_path), _other_repo(tmp_path, "ro"), _other_repo(tmp_path, "low")
+        notes = tmp_path / "ws" / "notes"
+        notes.mkdir(parents=True)
+        path = _write_projects(tmp_path, [_other_entry(other), _other_entry(ro, pid="ro", allow_write=False),
+                                          _other_entry(low, pid="low", max_risk="L0"),
+                                          _entry("notes", notes, kind="folder")])
+        w = _pb_worker(tmp_path, repo, db, path)
+        heads = {r: _head(r) for r in (other, ro, low)}
+        cases = {
+            _submit_project(db, repo, path, pid="notes", request="r1"): "PROJECT_NOT_GIT",
+            _submit_project(db, repo, path, pid="ro", request="r2"): "PROJECT_READ_ONLY",
+            _submit_project(db, repo, path, pid="ghost", request="r3", fp=False): "PROJECT_UNKNOWN",
+            _submit_project(db, repo, path, pid="low", request="r4"): "RISK_TOO_HIGH",
+            _submit_project(db, repo, path, request="r5", risk="L3"): "L3 fail-closed",
+            _submit_project(db, repo, path, request="r6", fp="0" * 64): "FINGERPRINT_MISMATCH",
+        }
+        for tid, needle in cases.items():
+            assert w.process_task(tid) == "BLOCKED"
+            ev = db.events(tid)
+            assert [e["to_state"] for e in ev] == ["RECEIVED", "BLOCKED"] and needle in ev[-1]["reason"], tid
+            assert db.get_task(tid)["worktree_path"] is None
+        assert not (tmp_path / "wts").exists() or os.listdir(tmp_path / "wts") == []
+        assert w.wtm.repo_root == repo.resolve() and w._ctx is None
+        assert {r: _head(r) for r in heads} == heads
+        assert all(not (r / "STOP.flag").exists() for r in heads)
+
+    def test_worker_blocks_tampered_worktree_path_and_honours_project_stop(self, tmp_path, repo, db):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other)])
+        w = _pb_worker(tmp_path, repo, db, path)
+        tid = _submit_project(db, repo, path)
+        _to_state(db, tid, "AWAITING_START_AUTH")
+        v = db.get_task(tid)["state_version"]
+        db.transition(tid, v, "WORKTREE_READY", "w", fields={"worktree_path": str(tmp_path / "wts" / tid)})
+        assert w.process_task(tid) == "BLOCKED"  # home-layout slot for a repo-B task: tampered
+        assert "WORKTREE_PATH_MISMATCH" in db.events(tid)[-1]["reason"]
+        t2 = _submit_project(db, repo, path, request="other with local stop")
+        (other / "STOP.flag").write_text("stop", encoding="utf-8")
+        with pytest.raises(StopRequested):
+            w.process_task(t2)
+        assert db.get_task(t2)["state"] == "RECEIVED" and not w.stop_requested() and w._ctx is None
+        th = submit(db)  # the project-local kill switch never stops the home repository
+        assert w.process_task(th) == "AWAITING_MERGE"
+
+    def test_backlog_scope_then_start_queues_task_in_project(self, tmp_path, repo, db):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other, protected_paths=["secret/"])])
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        home_item = int(bot.handle_update(upd_msg("/backlog add 홈 항목")).rsplit(":", 1)[1])
+        bot.handle_update(upd_raw("af3|pf|other"))
+        iid = int(bot.handle_update(upd_msg("/backlog add 기능")).rsplit(":", 1)[1])
+        for bad in ("../x.py", ".env", "reports/x.py", "a/*.py", "C:/x.py", "secret/a.py", "data/x.py",
+                    "x.sqlite3", "holdout_eval/t.py", "AGENTS.md"):
+            assert bot.handle_update(upd_msg(f"/backlog scope {iid} {bad}")) == "cmd:backlog:scope:rejected", bad
+        assert db.get_backlog_item(iid)["allowed_paths"] == []
+        assert bot.handle_update(upd_msg(f"/backlog scope {home_item} calc.py")) == "cmd:backlog:scope:wrong_project"
+        assert bot.handle_update(upd_msg("/backlog scope x calc.py")) == "cmd:backlog:bad-arg"
+        assert bot.handle_update(upd_msg("/backlog scope 999 calc.py")) == "cmd:backlog:scope:unknown"
+        assert bot.handle_update(upd_msg(f"/backlog scope {iid} calc.py,lib/,calc.py")) == f"cmd:backlog:scope:{iid}"
+        assert db.get_backlog_item(iid)["allowed_paths"] == ["calc.py", "lib/"]
+        assert "범위 2개" in tr.sent[-1]["text"]
+        bot.handle_update(upd_raw(f"af3|bs|{iid}", message_id=2))
+        assert "대기열" in tr.edits[-1]["text"]
+        bs = _af3_tok(tr.edits[-1], "BS")
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}", message_id=2)) == "callback:af3:backlog:started:RECEIVED"
+        task = db.get_task(db.get_backlog_item(iid)["linked_task_id"])
+        assert task["project_id"] == "other" and task["state"] == "RECEIVED" and task["risk_level"] == "L2"
+        assert task["allowed_paths"] == ["calc.py", "lib/"]
+        assert task["acceptance_spec"]["pytest"] == ["tests/test_calc.py"]
+        assert "tests/test_calc.py" not in task["allowed_paths"]  # default_tests never become write scope
+        assert task["registry_fingerprint"] == _fp(repo, path, "other")
+        assert bot.handle_update(upd_msg(f"/backlog scope {iid} calc.py")) == \
+            "cmd:backlog:scope:rejected:ALREADY_STARTED"
+        with pytest.raises(GuardViolation):  # admin-gated: never a worker / automated actor
+            db.set_backlog_scope_in_tx(home_item, ["calc.py"], "worker:x")
+        with db._tx() as con:  # tampered stored scope fails closed at start time
+            con.execute("UPDATE backlog_items SET allowed_paths=? WHERE id=?", ('["../x.py"]', home_item))
+        home = load_registry(repo, env=_penv(path)).get(DEFAULT_PROJECT_ID)
+        with pytest.raises(ActionRejected) as ei:
+            db.start_backlog_task_in_tx(home_item, home, "human:tg:1")
+        assert ei.value.code == "SCOPE_INVALID" and db.get_backlog_item(home_item)["linked_task_id"] is None
+        assert "scope" in dev_bot_mod.HELP_TEXT and len(dev_bot_mod.HELP_TEXT) < 800
+        _all_html_ok(tr)
+
+    def test_task_targets_focus_and_do_stays_home_only(self, tmp_path, repo, db):
+        other = _other_repo(tmp_path)
+        notes = tmp_path / "ws" / "notes"
+        notes.mkdir(parents=True)
+        path = _write_projects(tmp_path, [_other_entry(other, max_risk="L1"), _entry("notes", notes, kind="folder")])
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path, unlocked_presets={"kids"})
+        res = bot.handle_update(upd_msg("/do kids 안내 문구를 고쳐줘"))
+        assert res.startswith("cmd:do:created:")
+        assert db.get_task(res.rsplit(":", 1)[1])["project_id"] == DEFAULT_PROJECT_ID
+        r = bot.handle_update(upd_msg("/task L1 calc.py -- fix home"))
+        t = db.get_task(r.rsplit(":", 1)[1])
+        assert t["project_id"] == DEFAULT_PROJECT_ID
+        assert t["registry_fingerprint"] == _fp(repo, path, DEFAULT_PROJECT_ID)
+        bot.handle_update(upd_raw("af3|pf|other"))
+        assert bot.handle_update(upd_msg("/do kids 다른 문구")) == "cmd:do:wrong_project"
+        assert "/projects" in tr.sent[-1]["text"]
+        r = bot.handle_update(upd_msg("/task L1 calc.py --tests=tests/test_calc.py -- fix other"))
+        t = db.get_task(r.rsplit(":", 1)[1])
+        assert t["project_id"] == "other" and t["registry_fingerprint"] == _fp(repo, path, "other")
+        assert t["acceptance_spec"]["pytest"] == ["tests/test_calc.py"]
+        n = len(db.list_tasks())
+        for bad in ("/task L2 calc.py -- too risky", "/task L3 calc.py -- deploy", "/task L1 reports/x.py -- no",
+                    "/task L1 ../x.py -- no", "/task L1 .env -- no"):
+            assert bot.handle_update(upd_msg(bad)) == "cmd:task:rejected", bad
+        bot.handle_update(upd_raw("af3|pf|notes"))
+        assert bot.handle_update(upd_msg("/task L0 a.md -- folder")) == "cmd:task:rejected"
+        assert len(db.list_tasks()) == n
+        _all_html_ok(tr)
+
+    def test_boot_reconciles_each_intent_against_its_own_repo(self, tmp_path, repo, db):
+        other = _other_repo(tmp_path)
+        path = _write_projects(tmp_path, [_other_entry(other)])
+        w = _pb_worker(tmp_path, repo, db, path)
+        th, to = submit(db), _submit_project(db, repo, path)
+        assert w.process_task(th) == "AWAITING_MERGE" and w.process_task(to) == "AWAITING_MERGE"
+        ghost = _submit_project(db, repo, path, pid="ghost", request="ghost", fp=False, start=False)
+        _fake_awaiting_merge(db, ghost)
+        db.update_fields(ghost, db.get_task(ghost)["state_version"], {"base_sha": "b" * 40}, "test", "bind")
+        for tid in (th, to, ghost):
+            approve_merge(db, tid)
+        ih, io, ig = (db.begin_merge_intent(t, "human:owner") for t in (th, to, ghost))
+        o = db.get_task(to)
+        _git_main(other, "merge", "--ff-only", o["target_sha"])  # crash after `git merge` in repo B only
+        home_head = _head(repo)
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path, boot=False)
+        res = bot.boot()["merges"]
+        assert (io, "FINALIZED") in res and (io, "CLEANED") in res
+        assert (ih, "ABORTED") in res and (ig, "UNRESOLVED") in res
+        assert db.get_task(to)["state"] == "MERGED" and db.get_task(th)["state"] == "AWAITING_MERGE"
+        assert db.get_merge_intent(ig)["status"] == "PREPARING" and db.get_task(ghost)["state"] == "AWAITING_MERGE"
+        assert _head(repo) == home_head and not Path(o["worktree_path"]).exists()
+
+    def test_phase_b_migrations_are_idempotent(self, tmp_path):
+        p = tmp_path / "legacy_b.db"
+        con = _sqlite3.connect(str(p))
+        con.executescript(db_mod._SCHEMA)
+        con.execute("INSERT INTO tasks (id, request_hash, request, risk_level, state, allowed_paths, acceptance_spec,"
+                    " created_at, updated_at) VALUES ('told', 'h', 'r', 'L1', 'AWAITING_MERGE', '[]', '{}', 1, 1)")
+        con.execute("INSERT INTO merge_intents (id, task_id, base_sha, target_sha, diff_sha256, actor, status,"
+                    " created_at, updated_at) VALUES ('mi-old', 'told', 'a', 'b', 'c', 'human:x', 'ABORTED', 1, 1)")
+        con.execute("INSERT INTO backlog_items (project_id, title, status, created_at, updated_at)"
+                    " VALUES ('p', 't', 'TODO', 1, 1)")
+        con.commit()
+        con.close()
+        for _ in range(2):
+            d = CoordinatorDB(p)
+            try:
+                for table, col in (("tasks", "registry_fingerprint"), ("merge_intents", "project_id"),
+                                   ("merge_intents", "registry_fingerprint"), ("backlog_items", "allowed_paths")):
+                    assert [r["name"] for r in d._query(f"PRAGMA table_info({table})")].count(col) == 1
+                assert d.get_task("told")["registry_fingerprint"] is None
+                mi = d.get_merge_intent("mi-old")
+                assert mi["project_id"] == DEFAULT_PROJECT_ID and mi["registry_fingerprint"] is None
+                assert d.list_backlog_items()[0]["allowed_paths"] == []
+                with pytest.raises(ValueError):
+                    d.create_task("x", "L1", ["a.py"], {}, registry_fingerprint="not-a-sha")
+            finally:
+                d.close()
