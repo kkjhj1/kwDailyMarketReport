@@ -261,6 +261,14 @@ SEED_BOOKING_RULES: list[dict] = [
      "rule": ("monthly", 1, "09:00"), "target": "익월 회차", "memo": "유아 단체·가족 회차 구분"},
 ]
 
+# Weekly occurrences need booking-id level anti-spam in the Monday push. Pull
+# views still render every upcoming event from the database unchanged.
+WEEKLY_BOOKING_IDS: set[int] = {
+    int(rule["booking_id"])
+    for rule in SEED_BOOKING_RULES
+    if rule.get("rule", (None,))[0] == "weekly"
+}
+
 
 def _next_open(rule: tuple, today: date) -> datetime:
     kind, n, hhmm = rule

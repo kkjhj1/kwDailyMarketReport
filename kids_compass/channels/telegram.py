@@ -352,13 +352,14 @@ def _md(iso: str, today: date) -> str:
     return f"{year}{d.month}/{d.day}({WEEKDAYS_KO[d.weekday()]})"
 
 
-def format_milestone_push_html(items: list[dict], today: date, subtitle: str = "이번 주 챙길 표준 시기 항목이에요") -> str:
+def format_milestone_push_html(items: list[dict], today: date, subtitle: str = "이번 주 챙길 표준 시기 항목이에요",
+                               limit: int = MILESTONE_PUSH_MAX_ITEMS) -> str:
     """검진·예방접종·임신 체크포인트를 사용자당 1통으로 통합.
     items: {"subject", "kind", "title", "description", "due_from", "due_to"} (milestone_id is used by the keyboard)."""
     lines = ["🩺 <b>우리 아이 건강 체크 알림</b>", esc(subtitle), ""]
     if not items:
         lines += ["지금 챙길 검진·접종 항목이 없어요 👍", ""]
-    shown = items[:MILESTONE_PUSH_MAX_ITEMS]
+    shown = items[:max(0, int(limit))]
     for n, it in enumerate(shown, 1):
         icon = MILESTONE_KIND_ICONS.get(str(it.get("kind")), "📌")
         try:
@@ -381,6 +382,16 @@ def format_milestone_push_html(items: list[dict], today: date, subtitle: str = "
         lines += ["✅ 이미 했다면 아래 버튼으로 표시해 주세요 (다시 알리지 않아요).", ""]
     lines.append(f"<i>{esc(MILESTONE_DISCLAIMER)}</i>")
     return "\n".join(lines)
+
+
+def format_combined_milestone_push_html(d14_text: str, weekly_text: str) -> str:
+    """Merge the two Tuesday health sections into one compact Telegram card."""
+    sections = ["🩺 <b>우리 아이 건강 체크 알림</b>"]
+    if d14_text:
+        sections += ["", "⏳ <b>마감 D-14 리마인드</b>", "\n".join(d14_text.splitlines()[1:])]
+    if weekly_text:
+        sections += ["", "📅 <b>이번 주 챙길 항목</b>", "\n".join(weekly_text.splitlines()[1:])]
+    return "\n".join(sections)
 
 
 def format_d14_milestone_push_html(items: list[dict], today: date) -> str:
@@ -770,6 +781,62 @@ class SafeTelegramDispatcher:
             stats[status.lower()] += 1
             if err:
                 stats["errors"][chat_id] = err
+        return stats
+
+    def dispatch_combined_push_messages(self, channel: Any, db: Any,
+                                        push_messages: Iterable[PushMessage]) -> dict[str, Any]:
+        """Deliver one rendered message while claiming/finalizing multiple stream aliases."""
+        stats: dict[str, Any] = {"total": 0, "sent": 0, "skipped": 0, "unknown": 0, "blocked": 0,
+                                 "failed": 0, "invalid": 0, "errors": {}}
+        for msg in push_messages:
+            stats["total"] += 1
+            if not fits_limits(msg.text):
+                stats["invalid"] += 1
+                stats["errors"][str(msg.chat_id)] = "TG-01 limit exceeded (%d html / %d visible)" % measure_message(msg.text)
+                continue
+            aliases = list(getattr(msg, "delivery_aliases", ()) or ())
+            if not aliases:
+                aliases = [(msg.stream, msg.entity_type, getattr(msg, "dispatch_window", ""), msg.entity_ids)]
+            claimed: list[tuple[str, str, str, list[str]]] = []
+            blocked = False
+            for stream, etype, window, entity_ids in aliases:
+                if db.get_sent_status(str(msg.chat_id), stream, etype, PUSH_MESSAGE_SENTINEL, window) in {
+                    "IN_FLIGHT", "SENT", "UNKNOWN", "BLOCKED"
+                }:
+                    blocked = True
+                    break
+            if blocked:
+                stats["skipped"] += 1
+                continue
+            try:
+                for stream, etype, window, entity_ids in aliases:
+                    if not db.claim_sent_history(str(msg.chat_id), stream, etype, PUSH_MESSAGE_SENTINEL, window,
+                                                  content_hash=msg.content_hash):
+                        blocked = True
+                        break
+                    entity_claimed = [str(eid) for eid in dict.fromkeys(entity_ids)
+                                      if str(eid) != PUSH_MESSAGE_SENTINEL and
+                                      db.claim_sent_history(str(msg.chat_id), stream, etype, str(eid), window,
+                                                             content_hash=msg.content_hash)]
+                    claimed.append((stream, etype, window, [PUSH_MESSAGE_SENTINEL, *entity_claimed]))
+            except ValueError as exc:
+                stats["invalid"] += 1
+                stats["errors"][str(msg.chat_id)] = str(exc)
+                blocked = True
+            if blocked:
+                for stream, etype, window, ids in claimed:
+                    for eid in ids:
+                        db.finalize_sent_history(str(msg.chat_id), stream, etype, eid, window, "FAILED")
+                if not claimed:
+                    stats["skipped"] += 1
+                continue
+            status, err = self._send_with_retry(channel, str(msg.chat_id), msg.text, msg.reply_markup)
+            for stream, etype, window, ids in claimed:
+                for eid in ids:
+                    db.finalize_sent_history(str(msg.chat_id), stream, etype, eid, window, status)
+            stats[status.lower()] += 1
+            if err:
+                stats["errors"][str(msg.chat_id)] = err
         return stats
 
     def _send_with_retry(self, channel: Any, chat_id: int | str, text: str,

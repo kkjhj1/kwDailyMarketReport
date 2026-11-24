@@ -41,7 +41,12 @@ if env_file.exists():
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
-from kids_compass.channels.telegram import KidsTelegramChannel, SafeTelegramDispatcher, measure_message
+from kids_compass.channels.telegram import (
+    KidsTelegramChannel,
+    SafeTelegramDispatcher,
+    format_combined_milestone_push_html,
+    measure_message,
+)
 from kids_compass.collector import SEED_EXPERIENCES, seed_all
 from kids_compass.channels.telegram import PUSH_MESSAGE_SENTINEL
 from kids_compass.interactive_bot import (
@@ -57,6 +62,7 @@ from kids_compass.interactive_bot import (
     push_window,
 )
 from kids_compass.storage.db import KidsCompassDatabase
+from kids_compass.models import PushMessage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("kids_bot_runner")
@@ -203,6 +209,56 @@ def build_push_messages(db: KidsCompassDatabase, kind: str, dry_run: bool = Fals
     return build_dday_push_messages(db, now)
 
 
+def _merge_milestone_push_messages(weekly: list, d14: list, window: str) -> list:
+    """Merge same-user weekly + D-14 cards, retaining both sent-history aliases."""
+    by_user: dict[str, dict[str, object]] = {}
+    for msg in [*weekly, *d14]:
+        by_user.setdefault(str(msg.chat_id), {})["d14" if getattr(msg, "dispatch_window", None) else "weekly"] = msg
+
+    merged: list[PushMessage] = []
+    for uid, parts in by_user.items():
+        weekly_msg = parts.get("weekly")
+        d14_msg = parts.get("d14")
+        if weekly_msg is None or d14_msg is None:
+            single = weekly_msg or d14_msg
+            single.delivery_aliases = [(
+                single.stream,
+                single.entity_type,
+                window if weekly_msg is not None else getattr(single, "dispatch_window", f"D14:{window}"),
+                single.entity_ids,
+            )]
+            merged.append(single)
+            continue
+        buttons: list[dict] = []
+        seen: set[str] = set()
+        for source in (d14_msg, weekly_msg):
+            for row in (source.reply_markup or {}).get("inline_keyboard", []):
+                for button in row:
+                    data = str(button.get("callback_data") or "")
+                    if data == cb("home") or not data or data in seen:
+                        continue
+                    seen.add(data)
+                    buttons.append(button)
+        buttons = buttons[:6]
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([{"text": "🏠 홈", "callback_data": cb("home")}])
+        combined = PushMessage(
+            chat_id=uid,
+            text=format_combined_milestone_push_html(d14_msg.text, weekly_msg.text),
+            reply_markup={"inline_keyboard": rows},
+            stream=weekly_msg.stream,
+            entity_type=weekly_msg.entity_type,
+            entity_ids=list(dict.fromkeys([*d14_msg.entity_ids, *weekly_msg.entity_ids])),
+            content_hash=weekly_msg.content_hash or d14_msg.content_hash,
+        )
+        combined.delivery_aliases = [
+            (d14_msg.stream, d14_msg.entity_type, getattr(d14_msg, "dispatch_window", f"D14:{window}"), d14_msg.entity_ids),
+            (weekly_msg.stream, weekly_msg.entity_type, window, weekly_msg.entity_ids),
+        ]
+        merged.append(combined)
+    return merged
+
+
 def run_dispatch(db: KidsCompassDatabase, token: str, dry_run: bool, kind: str) -> int:
     window = push_window(date.today())
     if not dry_run and not token:
@@ -210,19 +266,18 @@ def run_dispatch(db: KidsCompassDatabase, token: str, dry_run: bool, kind: str) 
         return 1
     messages = build_push_messages(db, kind, dry_run=dry_run)
     d14_messages = build_d14_milestone_push_messages(db, date.today()) if kind == "milestone" else []
+    combined = _merge_milestone_push_messages(messages, d14_messages, window) if kind == "milestone" else messages
     if dry_run:
-        _print_push_preview(db, f"DRY-RUN {kind}", messages, window)
-        if d14_messages:
-            _print_push_preview(db, "DRY-RUN milestone_d14", d14_messages, "D14")
+        _print_push_preview(db, f"DRY-RUN {kind}", combined, window)
+        if kind == "milestone" and combined != messages and d14_messages:
+            print(f"  merged milestone+d14: {len(combined)} user(s)")
         return 0
     dispatcher = SafeTelegramDispatcher()
     channel = KidsTelegramChannel(token)
-    stats = dispatcher.dispatch_push_messages(channel, db, messages, window)
-    if d14_messages:
-        d14_stats = dispatcher.dispatch_push_messages(channel, db, d14_messages, "D14")
-        for key in ("total", "sent", "skipped", "unknown", "blocked", "failed", "invalid"):
-            stats[key] = stats.get(key, 0) + d14_stats.get(key, 0)
-        stats["errors"].update(d14_stats.get("errors", {}))
+    if kind == "milestone" and d14_messages:
+        stats = dispatcher.dispatch_combined_push_messages(channel, db, combined)
+    else:
+        stats = dispatcher.dispatch_push_messages(channel, db, combined, window)
     print(f"📊 kids_{kind}:{window}: total={stats['total']} sent={stats['sent']} skipped={stats['skipped']} "
           f"unknown={stats['unknown']} blocked={stats['blocked']} failed={stats['failed']} invalid={stats['invalid']}")
     if stats["errors"]:

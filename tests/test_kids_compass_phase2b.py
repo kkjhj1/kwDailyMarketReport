@@ -429,8 +429,8 @@ def test_weekend_push_buttons_and_feedback_callbacks(db):
     tap(bot, visit, n=4)
     tap(bot, nope, n=5)
     assert db.get_excluded_exp_ids(7, TODAY) == {first, second}
-    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=30)) == {second}   # VISITED 28d, NOT_INTERESTED 90d
-    assert "4주간" in ch.rendered()[0][2] and "3개월간" in ch.rendered()[1][2]
+    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=30)) == {first, second}   # VISITED 180d, NOT_INTERESTED 3650d
+    assert "180일간" in ch.rendered()[0][2] and "다시 추천하지" in ch.rendered()[1][2]
     # next week never re-suggests them
     nxt = build_weekend_push_messages(db, TODAY + timedelta(days=7), weather_fetcher=snaps(), now=NOW)
     assert all(not ({first, second} & set(x.entity_ids)) for x in nxt)

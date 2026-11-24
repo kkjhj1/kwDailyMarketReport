@@ -40,7 +40,7 @@ SENT_STATUSES = ("IN_FLIGHT", "SENT", "UNKNOWN", "FAILED", "BLOCKED")
 SENT_BLOCKING_STATES = ("IN_FLIGHT", "SENT", "UNKNOWN", "BLOCKED")
 # Rows that count toward the place cooldown (BLOCKED/FAILED never reached the user)
 SENT_COOLDOWN_STATES = ("IN_FLIGHT", "SENT", "UNKNOWN")
-FEEDBACK_SUPPRESS_DAYS = {"VISITED": 28, "NOT_INTERESTED": 90}
+FEEDBACK_SUPPRESS_DAYS = {"VISITED": 180, "NOT_INTERESTED": 3650}
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 When = Union[datetime, date, str]
@@ -220,6 +220,19 @@ CREATE TABLE IF NOT EXISTS kids_sent_history (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(telegram_user_id, stream, entity_type, entity_id, dispatch_window)
+);
+CREATE TABLE IF NOT EXISTS kids_user_booking_mutes (
+    telegram_user_id TEXT NOT NULL,
+    booking_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(telegram_user_id, booking_id)
+);
+CREATE TABLE IF NOT EXISTS kids_feedback_inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'GENERAL',
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS kids_weather_snapshots (
     region_sido TEXT NOT NULL,
@@ -1453,7 +1466,7 @@ class KidsCompassDatabase:
     # ── place feedback & exclusion ────────────────────────────
     def record_place_feedback(self, telegram_user_id: int | str, exp_id: str, action: str,
                               now: Optional[When] = None) -> str:
-        """VISITED suppresses the place for 28 days, NOT_INTERESTED for 90 days. Returns effective_until."""
+        """VISITED suppresses the place for 180 days, NOT_INTERESTED for 3650 days."""
         if action not in FEEDBACK_SUPPRESS_DAYS:
             raise ValueError(f"invalid feedback action: {action!r}")
         stamp = _ts(now)
@@ -1468,7 +1481,7 @@ class KidsCompassDatabase:
         self.conn.commit()
         return until
 
-    def get_excluded_exp_ids(self, telegram_user_id: int | str, today: date, cooldown_days: int = 28) -> set[str]:
+    def get_excluded_exp_ids(self, telegram_user_id: int | str, today: date, cooldown_days: int = 56) -> set[str]:
         """Active feedback suppressions + places pushed (SENT/UNKNOWN/IN_FLIGHT) within the last `cooldown_days`."""
         uid = str(telegram_user_id)
         day_start = _ts(today)
@@ -1488,6 +1501,55 @@ class KidsCompassDatabase:
             ).fetchall()
         }
         return excluded
+
+    # ── booking mutes & free-form feedback ────────────────────
+    def mute_booking(self, telegram_user_id: int | str, booking_id: int) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO kids_user_booking_mutes (telegram_user_id, booking_id, created_at) VALUES (?, ?, ?)",
+            (str(telegram_user_id), int(booking_id), _now()),
+        )
+        self.conn.commit()
+
+    def list_muted_booking_ids(self, telegram_user_id: int | str) -> set[int]:
+        rows = self.conn.execute(
+            "SELECT booking_id FROM kids_user_booking_mutes WHERE telegram_user_id = ?",
+            (str(telegram_user_id),),
+        ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def add_feedback_note(self, telegram_user_id: int | str, message: str, category: str = "GENERAL") -> int:
+        cur = self.conn.execute(
+            "INSERT INTO kids_feedback_inbox (telegram_user_id, category, message) VALUES (?, ?, ?)",
+            (str(telegram_user_id), str(category or "GENERAL"), str(message)),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_feedback_notes(self, limit: int = 50) -> list[dict]:
+        limit = max(0, int(limit))
+        rows = self.conn.execute(
+            "SELECT id, telegram_user_id, category, message, created_at FROM kids_feedback_inbox "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_sent_booking_ids_since(self, telegram_user_id: int | str, stream: str, since_iso: str) -> set[int]:
+        """Return booking IDs represented by recent non-terminal-unknown delivery rows."""
+        rows = self.conn.execute(
+            "SELECT entity_id FROM kids_sent_history "
+            "WHERE telegram_user_id = ? AND stream = ? AND entity_type = 'BOOKING' "
+            "AND status IN ('SENT', 'UNKNOWN', 'IN_FLIGHT') AND created_at >= ?",
+            (str(telegram_user_id), str(stream), _timer_ts(str(since_iso))),
+        ).fetchall()
+        booking_ids: set[int] = set()
+        for row in rows:
+            raw = str(row[0]).split("@", 1)[0]
+            try:
+                booking_ids.add(int(raw))
+            except ValueError:
+                continue
+        return booking_ids
 
     # ── per-entity sent history (atomic claim → finalize) ─────
     def claim_sent_history(self, telegram_user_id: int | str, stream: str, entity_type: str, entity_id: str,

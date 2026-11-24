@@ -228,8 +228,8 @@ def test_place_feedback_suppression_windows(db):
     db.record_place_feedback(7, "seoulforest_insect", "VISITED", NOW)
     db.record_place_feedback(7, "grandpark_zoo", "NOT_INTERESTED", NOW)
     assert db.get_excluded_exp_ids(7, TODAY) == {"seoulforest_insect", "grandpark_zoo"}
-    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=29)) == {"grandpark_zoo"}
-    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=91)) == set()
+    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=181)) == {"grandpark_zoo"}
+    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=3651)) == set()
     assert db.get_excluded_exp_ids(8, TODAY) == set()
     with pytest.raises(ValueError):
         db.record_place_feedback(7, "x", "LIKE", NOW)
@@ -261,7 +261,7 @@ def test_sent_history_cooldown_feeds_exclusion(db):
     db.finalize_sent_history(7, "weekend", "EXPERIENCE", "bok_money", "2026-W47", "FAILED")
     db.claim_sent_history(7, "dday", "BOOKING", "1", "2026-W47", now=NOW)
     assert db.get_excluded_exp_ids(7, TODAY) == {"nmk_main"}
-    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=29)) == set()
+    assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=57)) == set()
     assert db.get_excluded_exp_ids(7, TODAY + timedelta(days=10), cooldown_days=7) == set()
 
 

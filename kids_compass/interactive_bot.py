@@ -60,6 +60,7 @@ from kids_compass.channels.telegram import (
 from kids_compass.collector import (
     MILESTONE_SCHEDULE_VERSION,
     PREGNANCY_BENEFITS,
+    WEEKLY_BOOKING_IDS,
     milestone_window,
     recommend_by_category,
     recommend_weekend_picks,
@@ -121,6 +122,7 @@ ONBOARDING_TTL = timedelta(minutes=30)
 ST_CHILD_NICKNAME, ST_CHILD_BIRTH, ST_CHILD_REGION = "CHILD_NICKNAME", "CHILD_BIRTH_DATE", "CHILD_REGION"
 ST_PREG_NICKNAME, ST_PREG_DUE, ST_PREG_REGION = "PREGNANCY_NICKNAME", "PREGNANCY_DUE_DATE", "PREGNANCY_REGION"
 ST_FOOD_SEARCH = "FOOD_SEARCH"
+ST_FEEDBACK_INPUT = "FEEDBACK_INPUT"
 REGION_STEPS = (ST_CHILD_REGION, ST_PREG_REGION)
 
 # Push policy
@@ -235,6 +237,7 @@ def build_home_keyboard(children: Optional[list] = None, has_profile: bool = Fal
             [_btn("🌡 해열제 계산", cb("fvr")), _btn("🌙 달빛병원", cb("hsp"))],
             [_btn("🎈 주말 나들이", cb("exp")), _btn("⏰ 예약 D-Day", cb("dday"))],
             [_btn("🤰 임신기 태교·바우처", cb("preg")), _btn("🔔 알림 설정", cb("set"))],
+            [_btn("💬 의견·오류 제보", cb("inq"))],
         ])
     rows: list[list[dict[str, str]]] = []
     if len(children) > 1:
@@ -248,6 +251,7 @@ def build_home_keyboard(children: Optional[list] = None, has_profile: bool = Fal
         [_btn("🌳 야외·나들이", cb("hub", "out")), _btn("🏥 병원·해열제·검진", cb("hub", "med"))],
         [_btn("🤰 지원금·임신", cb("preg")), _btn("⚙️ 아이·알림 설정", cb("set"))],
         [_btn("⏰ 예약 D-Day", cb("dday")), _btn("🎈 연령별 나들이", cb("exp"))],
+        [_btn("💬 의견·오류 제보", cb("inq"))],
     ]
     return _kb(rows)
 
@@ -397,6 +401,7 @@ def build_settings_keyboard(profile: dict, children: list, pregnancy=None) -> di
     dd = "ON" if profile.get("alert_dday_reserve") else "OFF"
     together = (profile.get("alert_weekend_mode") or "TOGETHER") == "TOGETHER"
     rows = [
+        [_btn("💬 의견·오류 제보", cb("inq"))],
         [_btn(f"🩺 검진·접종 알림 {hl}", cb("set", "h"))],
         [_btn(f"🎈 목 17시 주말추천 {wk}", cb("set", "w"))],
         [_btn(f"⏰ 월 9시 예약 D-Day {dd}", cb("set", "d"))],
@@ -444,6 +449,12 @@ def build_weekend_feedback_keyboard(pairs: list[tuple[ExperienceItem, str]]) -> 
     rows = [[_btn(f"{n} 가봄", cb("fb", "v", token)), _btn(f"{n} 관심없음", cb("fb", "x", token))]
             for n, (_, token) in enumerate(pairs, 1)]
     rows.append(HOME_ROW)
+    return _kb(rows)
+
+
+def build_dday_push_keyboard(events: list) -> dict[str, Any]:
+    rows = [[_btn("🚫 이 예약 안 보기", cb("dd", "m", ev.booking_id))] for ev in events]
+    rows += [[_btn("⏰ 전체 D-Day 보기", cb("dday"))], HOME_ROW]
     return _kb(rows)
 
 
@@ -546,8 +557,8 @@ def build_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[
         items = collect_due_milestone_items(db, uid, today, MILESTONE_LOOKAHEAD_DAYS, exclude_ids=sent)
         if not items:
             continue  # Silence: nothing due
-        shown = items[:6]
-        text = format_milestone_push_html(items, today)
+        shown = items[:3]
+        text = format_milestone_push_html(items, today, limit=3)
         out.append(PushMessage(chat_id=uid, text=text, reply_markup=build_milestone_keyboard(shown),
                                stream=STREAM_MILESTONE, entity_type="MILESTONE",
                                entity_ids=[str(it["milestone_id"]) for it in shown],
@@ -556,7 +567,7 @@ def build_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[
 
 
 def build_d14_milestone_push_messages(db: KidsCompassDatabase, today: date) -> list[PushMessage]:
-    """Build one D-14 reminder per opted-in user, with a fixed D14 dispatch window."""
+    """Build one D-14 reminder per opted-in user, with a week-scoped D14 window."""
     targets = _push_targets(db, "health")
     for prof in targets:
         sync_relevant_milestones(db, str(prof["telegram_user_id"]), today, DDAY_WINDOW_DAYS)
@@ -566,9 +577,11 @@ def build_d14_milestone_push_messages(db: KidsCompassDatabase, today: date) -> l
     children_by_user = {}
     pregnancy_by_user = {}
     definitions = {d.definition_id: d for d in db.list_milestone_definitions()}
+    out: list[PushMessage] = []
     for prof in targets:
         uid = str(prof["telegram_user_id"])
-        if _push_already_claimed(db, uid, STREAM_MILESTONE_D14, "MILESTONE", "D14"):
+        dispatch_window = f"D14:{push_window(today)}"
+        if _push_already_claimed(db, uid, STREAM_MILESTONE_D14, "MILESTONE", dispatch_window):
             continue
         children_by_user[uid] = {str(c.child_id): c.nickname for c in db.list_children(uid)}
         pregnancy_by_user[uid] = db.get_pregnancy(uid)
@@ -609,7 +622,7 @@ def build_d14_milestone_push_messages(db: KidsCompassDatabase, today: date) -> l
         )
         # PushMessage is intentionally kept backward-compatible; runners can use this
         # additive marker to select the D14 dispatch window.
-        message.dispatch_window = "D14"
+        message.dispatch_window = dispatch_window
         out.append(message)
     return out
 
@@ -750,14 +763,22 @@ def build_dday_push_messages(db: KidsCompassDatabase, now: datetime) -> list[Pus
         if children:
             ages.add(AgeGroup.ALL)
         sent = _sent_entity_ids(db, uid, STREAM_DDAY, "BOOKING")
+        muted = db.list_muted_booking_ids(uid)
+        recent_weekly = db.list_sent_booking_ids_since(
+            uid, STREAM_DDAY, (now - timedelta(days=28)).strftime("%Y-%m-%d %H:%M:%S")
+        )
         matches = []
         for ev in events:
+            if ev.booking_id in muted:
+                continue
             if ev.exp_id not in exp_cache:
                 exp_cache[ev.exp_id] = db.get_experience(ev.exp_id)
             exp = exp_cache[ev.exp_id]
             if exp is None or exp.region_sido != region or exp.age_group not in ages:
                 continue
             if booking_entity_id(ev) in sent:
+                continue
+            if ev.booking_id in WEEKLY_BOOKING_IDS and ev.booking_id in recent_weekly:
                 continue
             matches.append(ev)
             if len(matches) >= DDAY_PUSH_LIMIT:
@@ -767,7 +788,7 @@ def build_dday_push_messages(db: KidsCompassDatabase, now: datetime) -> list[Pus
         _, label = _subjects(db, uid, now.date(), together=True)
         text = format_dday_alert_html(matches, now, subtitle=f"{label} · {region} 맞춤 예약 오픈")
         out.append(PushMessage(chat_id=uid, text=text,
-                               reply_markup=_kb([[_btn("⏰ 전체 D-Day 보기", cb("dday"))], HOME_ROW]),
+                               reply_markup=build_dday_push_keyboard(matches),
                                stream=STREAM_DDAY, entity_type="BOOKING",
                                entity_ids=[booking_entity_id(ev) for ev in matches],
                                content_hash=_content_hash(text)))
@@ -820,8 +841,13 @@ class KidsCompassInteractiveBot:
     # ---------- messages ----------
     def _handle_message(self, msg: dict[str, Any]) -> None:
         chat_id = int((msg.get("chat") or {}).get("id") or 0)
-        text = (msg.get("text") or "").strip()
-        if not chat_id or not text:
+        text = str(msg.get("text") or "").strip()
+        if not chat_id:
+            return
+        if not text:
+            state = self.db.get_onboarding_state(chat_id, self._clock())
+            if state is not None and state.get("step") == ST_FEEDBACK_INPUT:
+                self._onboarding_input(chat_id, state, text)
             return
         cmd = text.split()[0].split("@")[0].lower()
         if cmd == "/cancel":
@@ -931,7 +957,22 @@ class KidsCompassInteractiveBot:
 
     def _onboarding_input(self, chat_id: int, state: dict, text: str) -> None:
         step, payload = state.get("step"), dict(state.get("payload") or {})
-        if step == ST_FOOD_SEARCH:
+        if step == ST_FEEDBACK_INPUT:
+            if not text or len(text) > 500:
+                self.channel.send_message(
+                    chat_id,
+                    "⚠️ 의견은 1~500자로 입력해 주세요. 다시 입력해 주세요!",
+                    _kb([[_btn("❌ 취소", cb("inq", "x"))]]),
+                )
+                return
+            self.db.add_feedback_note(chat_id, text)
+            self.db.clear_onboarding_state(chat_id)
+            self.channel.send_message(
+                chat_id,
+                "🙏 의견을 보내 주셔서 고마워요! 더 편하고 정확한 봇을 만드는 데 반영할게요.",
+                build_home_keyboard(self.db.list_children(chat_id), self.db.get_pregnancy(chat_id) is not None),
+            )
+        elif step == ST_FOOD_SEARCH:
             self._show_food_search(chat_id, None, text)
         elif step in (ST_CHILD_NICKNAME, ST_PREG_NICKNAME):
             if not _NICK_RE.match(text):
@@ -1034,8 +1075,18 @@ class KidsCompassInteractiveBot:
                                         build_exp_result_keyboard())
             else:
                 self._show_exp_menu(chat_id, mid)
-        elif domain == "dday":
-            self._show_dday(chat_id, mid)
+        elif domain in ("dday", "dd"):
+            if action == "m":
+                if len(args) < 2:
+                    raise ValueError(action)
+                self.db.mute_booking(chat_id, int(args[1]))
+                self.channel.send_message(
+                    chat_id,
+                    "🚫 이 예약은 앞으로 월요일 알림에서 제외할게요. 예약 D-Day 화면에서는 계속 확인할 수 있어요.",
+                    _kb([[_btn("⏰ 전체 D-Day 보기", cb("dday"))], HOME_ROW]),
+                )
+            else:
+                self._show_dday(chat_id, mid)
         elif domain == "preg":
             preg = self.db.get_pregnancy(chat_id)
             if action == "x" and preg is not None:
@@ -1087,6 +1138,8 @@ class KidsCompassInteractiveBot:
             self._route_food(chat_id, mid, action, args)
         elif domain == "fb":
             self._route_feedback(chat_id, action, args)
+        elif domain == "inq":
+            self._route_inquiry(chat_id, mid, action)
         elif domain == "ms":
             self._route_milestone(chat_id, mid, action, args)
         else:
@@ -1379,8 +1432,25 @@ class KidsCompassInteractiveBot:
             return
         feedback = FEEDBACK_ACTIONS[action]
         self.db.record_place_feedback(chat_id, exp.exp_id, feedback, now)
-        note = "다녀오셨군요! 4주간 추천에서 빼 둘게요." if feedback == "VISITED" else "관심 없음 — 3개월간 추천하지 않을게요."
+        note = "다녀오셨군요! 180일간 추천에서 빼 둘게요." if feedback == "VISITED" else "관심 없음 — 다시 추천하지 않을게요."
         self.channel.send_message(chat_id, f"👍 <b>{esc(exp.title)}</b>\n{note}")
+
+    def _route_inquiry(self, chat_id: int, mid: Optional[int], action: str) -> None:
+        if action == "x":
+            self.db.clear_onboarding_state(chat_id)
+            self._show_home(chat_id, mid)
+            return
+        if action not in ("", "start"):
+            raise ValueError(action)
+        self.db.set_onboarding_state(
+            chat_id, secrets.token_hex(4), "FEEDBACK", ST_FEEDBACK_INPUT, {}, self._clock() + ONBOARDING_TTL
+        )
+        self._safe_edit_or_send(
+            chat_id,
+            mid,
+            "💬 <b>의견·오류 제보</b>\n봇 이용 중 불편한 점, 잘못된 정보, 추가 희망 기능을 편하게 입력해 주세요!\n(취소: /cancel)",
+            _kb([[_btn("❌ 취소", cb("inq", "x"))]]),
+        )
 
     def _route_milestone(self, chat_id: int, mid: Optional[int], action: str, args: list[str]) -> None:
         if action == "ok":
