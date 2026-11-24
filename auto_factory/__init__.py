@@ -9,4 +9,5 @@ Telegram; only `dev_bot` does, with its own dedicated credentials
 (`AUTO_FACTORY_DEV_BOT_TOKEN` / `AUTO_FACTORY_ADMIN_CHAT_ID`), never product tokens.
 """
 
-__all__ = ["db", "win_job", "worktree", "guardrails", "adapters", "worker", "dev_bot", "supervisor"]
+__all__ = ["db", "win_job", "worktree", "guardrails", "adapters", "worker", "dev_bot", "supervisor",
+           "projects"]

@@ -70,6 +70,16 @@ from .live_progress import (
     read_live_sidecar,
     runtime_snapshots,
 )
+from .projects import (
+    DEFAULT_PROJECT_ID,
+    PROJECT_ID_RE,
+    ProjectRegistry,
+    ProjectRegistryError,
+    ProjectSpec,
+    inspect_project_git,
+    load_registry,
+    scan_workspace_projects,
+)
 from .win_job import SESSION_IMAGE_WHITELIST, ProcessInspector, ProcessSample
 from .presets import (
     PRESET_ALIAS_RE,
@@ -107,8 +117,18 @@ STATELESS_TASK_CB_RE = re.compile(r"^af2\|([vl])\|([A-Za-z0-9][A-Za-z0-9._-]{0,5
 # `PZ`/`RS`/`TC`/`SK` and the kill prompt `sk` carry a single-use server-side token (`af3_actions`).
 AF3_PREFIX = "af3"
 AF3_CALLBACK_RE = re.compile(r"^af3\|([A-Za-z0-9_]{1,8})\|([A-Za-z0-9_-]{1,48})$")
-AF3_NAV_TARGETS = frozenset({"hub", "tasks", "sess", "bots", "help"})
-AF3_TOKEN_OPS = frozenset({"PZ", "RS", "TC", "sk", "SK"})
+AF3_NAV_TARGETS = frozenset({"hub", "tasks", "sess", "bots", "help", "proj", "board", "blog"})
+AF3_TOKEN_OPS = frozenset({"PZ", "RS", "TC", "sk", "SK", "BS", "BD", "BH"})
+# Multi-project management plane (Phase A). Stateless views: pp=projects page, pf=focus project,
+# ps=scan page, bp=backlog page, bs=backlog start prompt. BS/BD/BH consume single-use tokens.
+AF3_PROJECT_VIEW_OPS = frozenset({"pp", "pf", "ps", "bp", "bs"})
+PROJECTS_PAGE_SIZE = 5
+BACKLOG_PAGE_SIZE = 5
+SCAN_PAGE_SIZE = 10
+BOARD_MAX_PROJECTS = 8
+PROJECT_FOCUS_KEY = "focus_project:{chat_id}"
+_PAGE_ARG_RE = re.compile(r"^[0-9]{1,3}$")
+_ITEM_ARG_RE = re.compile(r"^[0-9]{1,12}$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SESSION_QUIET_WINDOW = 120.0  # zero CPU-time delta for this long => 🔴 무응답 멈춤 의심
 SESSION_CPU_EPSILON = 0.05  # seconds of CPU time
@@ -1127,6 +1147,7 @@ class OutboxDispatcher:
 HELP_TEXT = (
     "<b>auto_factory dev bot</b>\n"
     "/menu — 버튼 메뉴 (작업·세션·일시정지) · /sessions — 실행 중 AI 프로세스\n"
+    "/projects [scan] · /board · /backlog [add &lt;제목&gt;] — 멀티 프로젝트 관리\n"
     "/bots — 봇 프리셋 선택 (✅ unlocked / 🔒 locked)\n"
     "봇 선택 후 자연어로 질문·수정 요청 (질문=읽기 전용 답변, 수정=L2 작업)\n"
     "/ask [preset] &lt;질문&gt; — 읽기 전용 질문\n"
@@ -1165,6 +1186,9 @@ class DevBot:
         session_sleep: Callable[[float], None] = time.sleep,
         session_quiet_window: float = SESSION_QUIET_WINDOW,
         session_short_sample: float = SESSION_SHORT_SAMPLE,
+        projects_env: Mapping[str, str] | None = None,
+        project_registry_loader: Callable[[], ProjectRegistry] | None = None,
+        workspace_dir: str | os.PathLike | None = None,
     ):
         if not isinstance(admin_chat_id, int) or isinstance(admin_chat_id, bool) or admin_chat_id == 0:
             raise ConfigError("admin_chat_id must be a non-zero int")
@@ -1199,6 +1223,10 @@ class DevBot:
         self.session_quiet_window = float(session_quiet_window)
         self.session_short_sample = float(session_short_sample)
         self._session_cpu: dict[tuple[int, float], tuple[float, float]] = {}
+        # Multi-project registry: re-loaded per view (fail closed on a broken projects.json).
+        self.projects_env = projects_env
+        self._registry_loader = project_registry_loader
+        self.workspace_dir = Path(workspace_dir) if workspace_dir else self.wtm.repo_root.parent
 
     def _safe_stop_flag(self, stop_flag: str | os.PathLike | None) -> Path:
         """STOP.flag must be named STOP.flag and live in the repo root or the state dir."""
@@ -1330,6 +1358,13 @@ class DevBot:
         if cmd == "/sessions":
             self._send(chat_id, *self._sessions_view(chat_id, from_id))
             return "cmd:sessions"
+        if cmd == "/projects":
+            return self._cmd_projects(chat_id, arg)
+        if cmd == "/board":
+            self._send(chat_id, *self._board_view())
+            return "cmd:board"
+        if cmd == "/backlog":
+            return self._cmd_backlog(chat_id, from_id, arg)
         if cmd == "/task":
             return self._cmd_task(chat_id, text)
         if cmd == "/do":
@@ -2102,6 +2137,7 @@ class DevBot:
         rows.append([af3_button("\U0001f4ca 진행 중인 작업", "nav", "tasks"),
                      af3_button("\U0001f5a5️ 실행 세션/프로세스", "nav", "sess")])
         rows.append([af3_button("\U0001f916 봇 선택·요청", "nav", "bots"), middle, af3_button("❓ 도움말", "nav", "help")])
+        rows.append([af3_button("\U0001f4c1 프로젝트", "nav", "proj"), af3_button("\U0001f4cb 보드·백로그", "nav", "board")])
         return "\n".join(lines), f.markup([[b for b in r if b] for r in rows])
 
     def _tasks_view(self) -> tuple[str, dict | None]:
@@ -2146,9 +2182,14 @@ class DevBot:
                 return self._af3_pause_prompt(chat_id, user_id, message_id)
             if op == "tc":
                 return self._af3_cancel_prompt(arg, chat_id, user_id, message_id)
+            if op in AF3_PROJECT_VIEW_OPS:
+                return self._af3_project_view(op, arg, chat_id, user_id, message_id)
+            if op in ("BD", "BH"):
+                return self._af3_backlog_status(op, arg, chat_id, user_id, message_id)
             if op in AF3_TOKEN_OPS:
                 handler = {"PZ": self._af3_pause_confirm, "RS": self._af3_resume, "TC": self._af3_cancel_confirm,
-                           "sk": self._af3_kill_prompt, "SK": self._af3_kill_confirm}[op]
+                           "sk": self._af3_kill_prompt, "SK": self._af3_kill_confirm,
+                           "BS": self._af3_backlog_start_confirm}[op]
                 return handler(arg, chat_id, user_id, message_id)
         except ActionRejected as exc:
             f = self.fmt
@@ -2169,6 +2210,13 @@ class DevBot:
         if target == "bots":
             self._cmd_bots(chat_id)
             return "callback:af3:bots"
+        if target == "proj":
+            return f"callback:af3:projects:{self._show(chat_id, message_id, *self._projects_view(chat_id, 0))}"
+        if target == "board":
+            return f"callback:af3:board:{self._show(chat_id, message_id, *self._board_view())}"
+        if target == "blog":
+            view = self._backlog_view(chat_id, user_id, 0)
+            return f"callback:af3:backlog:{self._show(chat_id, message_id, *view)}"
         return f"callback:af3:help:{self._show(chat_id, message_id, HELP_TEXT, self.fmt.markup([[self._back_to_hub()]]))}"
 
     # ------------------------------------------------------- pause / resume
@@ -2258,6 +2306,376 @@ class DevBot:
         self._show(chat_id, message_id, f"{emoji} {f.b(label, 20)} · {f.code(tid, 64)}\n{f.esc(why, 120)}",
                    self._live_markup(tid, state=target))
         return "callback:af3:" + ("cancel_requested" if target == "CANCEL_REQUESTED" else "cancelled")
+
+    # ============================================ multi-project (Phase A)
+    # Management plane only: views are read-only (registry, scan, git status); the only writes
+    # are the chat's focus key and backlog rows. Nothing here edits projects.json or any repo.
+    def _registry(self) -> ProjectRegistry:
+        if self._registry_loader is not None:
+            return self._registry_loader()
+        return load_registry(self.wtm.repo_root, self.state_dir, self.projects_env)
+
+    def _registry_or_error(self) -> tuple[ProjectRegistry | None, str]:
+        """(registry, "") or (None, escaped error HTML). A broken projects.json fails closed."""
+        try:
+            return self._registry(), ""
+        except ProjectRegistryError as exc:
+            self.log(f"project registry rejected: {exc}")
+            detail = self.fmt.esc(exc, 160)
+        except Exception as exc:  # unexpected: still fail closed, never crash the poll loop
+            self.log(f"project registry error: {type(exc).__name__}")
+            detail = self.fmt.esc(type(exc).__name__, 60)
+        return None, ("⚠️ <b>프로젝트 레지스트리 오류</b> — 안전을 위해 프로젝트 기능을 멈췄습니다.\n"
+                      f"projects.json 을 확인하세요: {detail}")
+
+    def _registry_error_view(self, err: str) -> tuple[str, dict | None]:
+        return err, self.fmt.markup([[self._back_to_hub()]])
+
+    @staticmethod
+    def _focus_project_key(chat_id: int) -> str:
+        return PROJECT_FOCUS_KEY.format(chat_id=int(chat_id))
+
+    def _focused_project(self, chat_id: int, reg: ProjectRegistry) -> ProjectSpec:
+        raw = self.db.get_kv(self._focus_project_key(chat_id))
+        p = reg.get(raw) if isinstance(raw, str) else None
+        return p or reg.get(DEFAULT_PROJECT_ID)  # registry always contains the home project
+
+    @staticmethod
+    def _kind_ko(p: ProjectSpec) -> str:
+        if p.kind == "folder":
+            return "folder(읽기전용)"
+        return "git(쓰기 가능)" if p.writable else "git(읽기전용)"
+
+    @staticmethod
+    def _page_count(n: int, size: int) -> int:
+        return max(1, -(-n // size))
+
+    def _pager(self, op: str, page: int, pages: int) -> list[dict[str, str]]:
+        row = []
+        if page > 0:
+            row.append(af3_button("◀️ 이전", op, str(page - 1)))
+        if pages > 1:
+            row.append(af3_button(f"{page + 1}/{pages}", op, str(page)))
+        if page + 1 < pages:
+            row.append(af3_button("다음 ▶️", op, str(page + 1)))
+        return [b for b in row if b]
+
+    def _cmd_projects(self, chat_id: int, arg: str) -> str:
+        if arg == "":
+            self._send(chat_id, *self._projects_view(chat_id, 0))
+            return "cmd:projects"
+        if arg.lower() == "scan":
+            self._send(chat_id, *self._scan_view(0))
+            return "cmd:projects:scan"
+        self._send(chat_id, "usage: /projects [scan]")
+        return "cmd:projects:bad-arg"
+
+    def _projects_view(self, chat_id: int, page: int, notice: str = "") -> tuple[str, dict | None]:
+        """`notice` must already be escaped HTML."""
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            return self._registry_error_view(err)
+        items = list(reg)
+        pages = self._page_count(len(items), PROJECTS_PAGE_SIZE)
+        page = min(max(0, page), pages - 1)
+        focus = self._focused_project(chat_id, reg)
+        source = "기본값(홈 프로젝트만)" if reg.source == "default" else "projects.json"
+        lines = [f"<b>\U0001f4c1 프로젝트</b> · 등록 {len(items)}개 · 출처: {f.esc(source, 40)}"]
+        if notice:
+            lines.append(notice)
+        lines.append(f"\U0001f3af 현재 포커스: {f.b(focus.label, 40)} {f.code(focus.project_id, 32)}")
+        buttons: list[dict[str, str]] = []
+        for p in items[page * PROJECTS_PAGE_SIZE:(page + 1) * PROJECTS_PAGE_SIZE]:
+            mark = "\U0001f3af" if p.project_id == focus.project_id else "•"
+            lines.append(f"{mark} {f.b(p.label, 40)} {f.code(p.project_id, 32)} · {f.esc(self._kind_ko(p), 20)}"
+                         f" · 최대 {f.esc(p.max_risk, 4)}")
+            b = af3_button(("\U0001f3af " if p.project_id == focus.project_id else "") + p.label[:24], "pf", p.project_id)
+            if b:
+                buttons.append(b)
+        lines.append("버튼을 누르면 /backlog 대상 프로젝트(포커스)가 바뀝니다.")
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append(self._pager("pp", page, pages))
+        rows.append([b for b in (af3_button("\U0001f50e 폴더 스캔", "ps", "0"), af3_button("\U0001f4cb 백로그", "nav", "blog"),
+                                 af3_button("\U0001f4ca 보드", "nav", "board")) if b])
+        rows.append([b for b in (self._back_to_hub(),) if b])
+        return "\n".join(lines), f.markup(rows)
+
+    def _scan_view(self, page: int) -> tuple[str, dict | None]:
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            return self._registry_error_view(err)
+        found = scan_workspace_projects(self.workspace_dir, reg)
+        pages = self._page_count(len(found), SCAN_PAGE_SIZE)
+        page = min(max(0, page), pages - 1)
+        registered = sum(1 for d in found if d.registered_id)
+        lines = [
+            f"<b>\U0001f50e 워크스페이스 스캔</b> · {f.code(self.workspace_dir.name, 40)} (읽기 전용)",
+            f"폴더 {len(found)}개 · 등록됨 {registered} · 미등록 {len(found) - registered}",
+        ]
+        if not found:
+            lines.append("하위 폴더가 없습니다.")
+        for d in found[page * SCAN_PAGE_SIZE:(page + 1) * SCAN_PAGE_SIZE]:
+            reg_note = f" {f.code(d.registered_id, 32)}" if d.registered_id else ""
+            lines.append(f"• {f.code(d.name, 40)} · {f.esc(d.kind, 8)} · {f.esc(d.status_ko, 20)}{reg_note}")
+        lines.append("등록은 projects.json 을 직접 편집하세요 (봇은 파일을 쓰지 않습니다).")
+        rows = [self._pager("ps", page, pages),
+                [b for b in (af3_button("\U0001f4c1 프로젝트", "nav", "proj"), self._back_to_hub()) if b]]
+        return "\n".join(lines), f.markup(rows)
+
+    def _board_view(self) -> tuple[str, dict | None]:
+        """Cross-project live summary. One broken project never breaks the whole card."""
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            return self._registry_error_view(err)
+        lines = [self._pause_banner()] if self.stop_flag.exists() else []
+        lines.append("<b>\U0001f4ca 프로젝트 보드</b>")
+        try:
+            open_tasks = [t for t in self.db.list_tasks() if t["state"] not in TERMINAL_STATES]
+        except Exception as exc:
+            self.log(f"board task query failed: {type(exc).__name__}")
+            open_tasks = []
+        runtime = self._runtime() if open_tasks else {}
+        by_project: dict[str, list[dict[str, Any]]] = {}
+        for t in open_tasks:
+            by_project.setdefault(t.get("project_id") or DEFAULT_PROJECT_ID, []).append(t)
+        reserve = 120
+        shown = 0
+        for p in reg:
+            if shown >= BOARD_MAX_PROJECTS:
+                lines.append(f"+{len(reg) - shown}개 프로젝트 더 있음 (/projects)")
+                break
+            line = self._board_line(p, by_project.get(p.project_id, []), runtime)
+            candidate = "\n".join(lines + [line])
+            if f.visible_len(candidate) > f.max_visible - reserve or len(candidate) > f.max_html - reserve:
+                lines.append(f"+{len(reg) - shown}개 프로젝트 더 있음 (/projects)")
+                break
+            lines.append(line)
+            shown += 1
+        orphans = sum(len(v) for k, v in by_project.items() if k not in reg)
+        if orphans:
+            lines.append(f"⚠️ 미등록 프로젝트의 열린 작업 {orphans}개")
+        rows = [[b for b in (af3_button("\U0001f504 새로고침", "nav", "board"), af3_button("\U0001f4cb 백로그", "nav", "blog")) if b],
+                [b for b in (af3_button("\U0001f4c1 프로젝트", "nav", "proj"), self._back_to_hub()) if b]]
+        return "\n".join(lines), f.markup(rows)
+
+    def _board_line(self, p: ProjectSpec, tasks: list[dict[str, Any]], runtime: dict[str, RuntimeSnapshot]) -> str:
+        f = self.fmt
+        head = f"{f.b(p.label, 32)} · {f.esc(self._kind_ko(p), 20)}"
+        try:
+            parts = [head]
+            if p.kind == "git":
+                info = inspect_project_git(p)
+                if info.get("ok"):
+                    parts.append(f"변경 {int(info.get('dirty') or 0)}개")
+                else:
+                    parts.append(f"⚠️ {f.esc(info.get('error') or 'git 오류', 40)}")
+            parts.append(f"작업 {len(tasks)}개")
+            backlog = self.db.count_backlog_items(p.project_id, ("TODO", "IN_PROGRESS", "BLOCKED"))
+            parts.append(f"백로그 {backlog}개")
+            stalled = sum(1 for t in tasks if (runtime.get(t["id"]) is not None
+                                               and runtime[t["id"]].liveness == "STALLED"))
+            blocked = sum(1 for t in tasks if t["state"] in ("BLOCKED", "GUARDRAIL_BLOCKED"))
+            emoji = "\U0001f534" if stalled else ("\U0001f7e0" if blocked else ("\U0001f7e2" if tasks else "⚪"))
+            if stalled:
+                parts.append(f"\U0001f534 STALLED {stalled}")
+            if blocked:
+                parts.append(f"\U0001f7e0 차단 {blocked}")
+            return f"{emoji} " + " · ".join(parts)
+        except Exception as exc:  # per-project isolation
+            self.log(f"board line failed for {p.project_id}: {type(exc).__name__}")
+            return f"⚠️ {head} · 상태 확인 실패 ({f.esc(type(exc).__name__, 40)})"
+
+    # ------------------------------------------------------------- backlog
+    _BACKLOG_BADGES = {"TODO": "\U0001f535", "IN_PROGRESS": "\U0001f7e2", "BLOCKED": "⏸️", "DONE": "✅"}
+
+    def _cmd_backlog(self, chat_id: int, user_id: int, arg: str) -> str:
+        f = self.fmt
+        if arg == "":
+            self._send(chat_id, *self._backlog_view(chat_id, user_id, 0))
+            return "cmd:backlog"
+        parts = arg.split(None, 1)
+        if parts[0].lower() != "add":
+            self._send(chat_id, "usage: /backlog [add &lt;제목&gt;]")
+            return "cmd:backlog:bad-arg"
+        title = parts[1].strip() if len(parts) > 1 else ""
+        if not title:
+            self._send(chat_id, "usage: /backlog add &lt;제목&gt;")
+            return "cmd:backlog:bad-arg"
+        reg, err = self._registry_or_error()
+        if reg is None:
+            self._send(chat_id, *self._registry_error_view(err))
+            return "cmd:backlog:registry_error"
+        project = self._focused_project(chat_id, reg)
+        try:
+            item_id = self.db.add_backlog_item(project.project_id, title)
+        except ValueError as exc:
+            self._send(chat_id, f"⚠️ 백로그 추가 거부: {f.esc(exc, 120)}")
+            return "cmd:backlog:rejected"
+        notice = f"✅ 추가됨 · #{item_id} → {f.b(project.label, 32)}"
+        self._send(chat_id, *self._backlog_view(chat_id, user_id, 0, notice))
+        return f"cmd:backlog:added:{item_id}"
+
+    def _backlog_view(self, chat_id: int, user_id: int, page: int, notice: str = "") -> tuple[str, dict | None]:
+        """Open items of the focused project. `notice` must already be escaped HTML."""
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            return self._registry_error_view(err)
+        p = self._focused_project(chat_id, reg)
+        open_st = ("TODO", "IN_PROGRESS", "BLOCKED")
+        total = self.db.count_backlog_items(p.project_id, open_st)
+        pages = self._page_count(total, BACKLOG_PAGE_SIZE)
+        page = min(max(0, page), pages - 1)
+        items = self.db.list_backlog_items(p.project_id, open_st, limit=BACKLOG_PAGE_SIZE,
+                                           offset=page * BACKLOG_PAGE_SIZE)
+        lines = [f"<b>\U0001f4cb 백로그</b> · {f.b(p.label, 32)} {f.code(p.project_id, 32)} · 열린 항목 {total}개"]
+        if notice:
+            lines.append(notice)
+        if not p.writable:
+            lines.append("\U0001f4d6 읽기 전용 프로젝트 — 작업 시작 불가 (추적만 가능)")
+        if not items:
+            lines.append("열린 백로그가 없습니다. /backlog add &lt;제목&gt; 으로 추가하세요.")
+        rows: list[list[dict[str, str]]] = []
+        for it in items:
+            iid = int(it["id"])
+            badge = self._BACKLOG_BADGES.get(it["status"], "•")
+            link = f" · 작업 {f.code(it['linked_task_id'], 40)}" if it["linked_task_id"] else ""
+            lines.append(f"{badge} #{iid} {f.esc(it['title'], 60)} · P{int(it['priority'])}{link}")
+            row: list[dict[str, str] | None] = []
+            if p.writable and it["status"] == "TODO" and not it["linked_task_id"]:
+                row.append(af3_button(f"▶️ #{iid} 작업 시작", "bs", str(iid)))
+            tok = self.db.issue_af3_token("BD", chat_id, user_id,
+                                          {"item_id": iid, "expected": it["status"], "to": "DONE"})
+            row.append(af3_button(f"✅ #{iid} 완료", "BD", tok))
+            if it["status"] != "BLOCKED":
+                tok = self.db.issue_af3_token("BH", chat_id, user_id,
+                                              {"item_id": iid, "expected": it["status"], "to": "BLOCKED"})
+                row.append(af3_button(f"⏸️ #{iid} 보류", "BH", tok))
+            elif not it["linked_task_id"]:
+                tok = self.db.issue_af3_token("BH", chat_id, user_id,
+                                              {"item_id": iid, "expected": "BLOCKED", "to": "TODO"})
+                row.append(af3_button(f"↩️ #{iid} 다시 할 일", "BH", tok))
+            rows.append([b for b in row if b])
+        rows.append(self._pager("bp", page, pages))
+        rows.append([b for b in (af3_button("\U0001f4c1 프로젝트 전환", "nav", "proj"), self._back_to_hub()) if b])
+        return "\n".join(lines), f.markup(rows)
+
+    def _af3_project_view(self, op: str, arg: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Stateless project views. Only `pf` writes (this chat's focus key in bot_kv)."""
+        f = self.fmt
+        if op in ("pp", "ps", "bp"):
+            if not _PAGE_ARG_RE.match(arg):
+                return "callback:malformed"
+            page = int(arg)
+            view = {"pp": lambda: self._projects_view(chat_id, page), "ps": lambda: self._scan_view(page),
+                    "bp": lambda: self._backlog_view(chat_id, user_id, page)}[op]()
+            name = {"pp": "projects", "ps": "scan", "bp": "backlog"}[op]
+            return f"callback:af3:{name}:{self._show(chat_id, message_id, *view)}"
+        if op == "pf":
+            if not PROJECT_ID_RE.match(arg):
+                return "callback:malformed"
+            reg, err = self._registry_or_error()
+            if reg is None:
+                self._show(chat_id, message_id, *self._registry_error_view(err))
+                return "callback:af3:project:registry_error"
+            p = reg.get(arg)
+            if p is None:
+                notice = f"⚠️ 등록되지 않은 프로젝트입니다 ({f.code(arg, 32)})."
+                self._show(chat_id, message_id, *self._projects_view(chat_id, 0, notice))
+                return "callback:af3:project:unknown"
+            self.db.set_kv(self._focus_project_key(chat_id), p.project_id)
+            notice = f"\U0001f3af 포커스 변경 → {f.b(p.label, 32)}"
+            return f"callback:af3:project:focus:{self._show(chat_id, message_id, *self._projects_view(chat_id, 0, notice))}"
+        # op == "bs": step 1 of 2 (no mutation besides issuing the single-use BS token)
+        if not _ITEM_ARG_RE.match(arg):
+            return "callback:malformed"
+        return self._af3_backlog_start_prompt(int(arg), chat_id, user_id, message_id)
+
+    def _af3_backlog_start_prompt(self, item_id: int, chat_id: int, user_id: int, message_id: Any) -> str:
+        f = self.fmt
+        reg, err = self._registry_or_error()
+        if reg is None:
+            self._show(chat_id, message_id, *self._registry_error_view(err))
+            return "callback:af3:backlog:registry_error"
+        try:
+            item = self.db.get_backlog_item(item_id)
+        except KeyError:
+            self._show(chat_id, message_id, *self._backlog_view(chat_id, user_id, 0, f"⚠️ 없는 항목 #{item_id}"))
+            return "callback:af3:backlog:unknown"
+        p = reg.get(item["project_id"])
+        if p is None or not p.writable:
+            notice = "⚠️ 읽기 전용(또는 미등록) 프로젝트라 작업을 시작할 수 없습니다."
+            self._show(chat_id, message_id, *self._backlog_view(chat_id, user_id, 0, notice))
+            return "callback:af3:backlog:read_only"
+        if item["status"] != "TODO" or item["linked_task_id"]:
+            notice = f"⚠️ #{item_id} 은(는) 이미 시작되었거나 할 일 상태가 아닙니다."
+            self._show(chat_id, message_id, *self._backlog_view(chat_id, user_id, 0, notice))
+            return "callback:af3:backlog:not_todo"
+        tok = self.db.issue_af3_token("BS", chat_id, user_id, {"item_id": item_id, "project_id": p.project_id})
+        lines = [
+            "<b>▶️ 백로그 작업을 시작할까요?</b>",
+            f"#{item_id} {f.esc(item['title'], 80)}",
+            f"프로젝트 {f.b(p.label, 32)} · 위험도 {f.esc(p.max_risk, 4)}",
+        ]
+        if p.project_id != DEFAULT_PROJECT_ID:
+            lines.append("\U0001f7e0 멀티 저장소 실행(Phase B) 전까지 작업은 차단됨 상태로만 등록됩니다.")
+        else:
+            lines.append("\U0001f7e0 수정 범위(allowed_paths)가 없어 차단됨 상태로 등록됩니다 — 사람이 검토합니다.")
+        markup = f.markup([[af3_button("⚠️ 정말 시작할까요?", "BS", tok), af3_button("취소", "bp", "0")]])
+        shown = self._show(chat_id, message_id, "\n".join(lines), markup)
+        return f"callback:af3:backlog:start_prompt:{shown}"
+
+    def _af3_backlog_start_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Step 2: token consume + backlog lock + task create + IN_PROGRESS in ONE tx."""
+        f = self.fmt
+        reg, err = self._registry_or_error()  # loaded (git calls) BEFORE the write tx opens
+        if reg is None:
+            self._show(chat_id, message_id, *self._registry_error_view(err))
+            return "callback:af3:backlog:registry_error"
+
+        def effect(c, payload):
+            iid, pid = payload.get("item_id"), payload.get("project_id")
+            if (not isinstance(iid, int) or isinstance(iid, bool) or not isinstance(pid, str)
+                    or not PROJECT_ID_RE.match(pid)):
+                raise ActionRejected("BAD_PAYLOAD")
+            project = reg.get(pid)
+            if project is None:
+                raise ActionRejected("PROJECT_UNKNOWN")
+            return self.db.start_backlog_task_in_tx(iid, project, self._actor(user_id), c=c)
+
+        _, res = self.db.consume_af3_token(token, "BS", chat_id, user_id, effect)
+        if res["state"] == "RECEIVED":
+            self._fire_wake()
+        state_note = "\U0001f535 대기열" if res["state"] == "RECEIVED" else "\U0001f7e0 차단됨(검토 필요)"
+        notice = f"▶️ #{res['item_id']} 작업 생성 {f.code(res['task_id'], 40)} · {state_note}"
+        self._show(chat_id, message_id, *self._backlog_view(chat_id, user_id, 0, notice))
+        return f"callback:af3:backlog:started:{res['state']}"
+
+    def _af3_backlog_status(self, op: str, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Single-step ✅ 완료 / ⏸️ 보류 / ↩️ 다시 할 일: CAS on the status seen when rendered."""
+        f = self.fmt
+        allowed_to = {"BD": ("DONE",), "BH": ("BLOCKED", "TODO")}[op]
+
+        def effect(c, payload):
+            iid, exp, to = payload.get("item_id"), payload.get("expected"), payload.get("to")
+            if (not isinstance(iid, int) or isinstance(iid, bool) or to not in allowed_to
+                    or exp not in ("TODO", "IN_PROGRESS", "BLOCKED")):
+                raise ActionRejected("BAD_PAYLOAD")
+            if to == "TODO":
+                row = c.execute("SELECT linked_task_id FROM backlog_items WHERE id=?", (iid,)).fetchone()
+                if row is None or row["linked_task_id"] is not None:
+                    raise ActionRejected("STALE")
+            if not self.db._set_backlog_status_in_tx(c, iid, to, exp):
+                raise ActionRejected("STALE", "backlog item changed")
+            return iid, to
+
+        _, (iid, to) = self.db.consume_af3_token(token, op, chat_id, user_id, effect)
+        label = {"DONE": "✅ 완료", "BLOCKED": "⏸️ 보류", "TODO": "↩️ 다시 할 일"}[to]
+        self._show(chat_id, message_id, *self._backlog_view(chat_id, user_id, 0, f"{label} · #{iid}"))
+        return f"callback:af3:backlog:{to.lower()}"
 
     # -------------------------------------------------------- sessions
     def _session_owner(self, s: ProcessSample) -> str | None:

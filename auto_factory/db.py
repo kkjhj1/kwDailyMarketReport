@@ -27,6 +27,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .projects import DEFAULT_PROJECT_ID, PROJECT_ID_RE
+
 MAIN_FLOW = (
     "RECEIVED",
     "PREFLIGHTED",
@@ -332,7 +334,31 @@ CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
 CREATE INDEX IF NOT EXISTS idx_tg_outbox_due ON tg_outbox(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_merge_intents_task ON merge_intents(task_id, status);
+CREATE TABLE IF NOT EXISTS backlog_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('TODO','IN_PROGRESS','BLOCKED','DONE')),
+    priority INTEGER NOT NULL DEFAULT 2,
+    linked_task_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_backlog_project ON backlog_items(project_id, status, priority, updated_at);
 """
+# Multi-project (Phase A): every task belongs to a project; legacy rows default to the home repo.
+_TASK_MIGRATIONS = (
+    ("project_id", f"TEXT NOT NULL DEFAULT '{DEFAULT_PROJECT_ID}'"),
+)
+BACKLOG_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED", "DONE")
+BACKLOG_OPEN_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED")
+MAX_BACKLOG_TITLE = 200
+MAX_BACKLOG_DESCRIPTION = 2000
+# Until the multi-repo worker (Phase B) exists, the worker would run any RECEIVED task inside
+# the home repo: tasks for other projects (or without a write scope) are parked BLOCKED at once.
+PHASE_B_PARK_REASON = "multi-repo execution not enabled yet (Phase B); parked for human review"
+SCOPE_PARK_REASON = "backlog task has no allowed_paths scope; parked for human review"
 # Columns added to `approvals` in Step 2 (idempotent ALTER TABLE for Step 1 databases).
 _APPROVAL_MIGRATIONS = (
     ("actor_user_id", "INTEGER"),
@@ -344,6 +370,12 @@ _POST_MIGRATION = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_idem ON approvals(idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 """
+
+
+def _check_project_id(project_id: Any) -> str:
+    if not isinstance(project_id, str) or not PROJECT_ID_RE.match(project_id):
+        raise ValueError("invalid project_id")
+    return project_id
 
 
 class CoordinatorError(RuntimeError):
@@ -612,6 +644,11 @@ class CoordinatorDB:
             for name, typ in _APPROVAL_MIGRATIONS:
                 if name not in cols:
                     c.execute(f"ALTER TABLE approvals ADD COLUMN {name} {typ}")
+            tcols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
+            for name, typ in _TASK_MIGRATIONS:
+                if name not in tcols:
+                    c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {typ}")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_state ON tasks(project_id, state, updated_at)")
         self._conn.executescript(_POST_MIGRATION)
 
     def close(self) -> None:
@@ -660,12 +697,16 @@ class CoordinatorDB:
         acceptance_spec: dict[str, Any],
         idempotency_key: str | None = None,
         task_id: str | None = None,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
     ) -> tuple[str, bool]:
         if risk_level not in RISK_LEVELS:
             raise ValueError(f"unknown risk level: {risk_level}")
+        _check_project_id(project_id)
         with self._tx() as c:
             return self._create_task_in_tx(
-                c, request, risk_level, allowed_paths, acceptance_spec, idempotency_key, task_id
+                c, request, risk_level, allowed_paths, acceptance_spec, idempotency_key, task_id,
+                project_id=project_id,
             )
 
     def _create_task_in_tx(
@@ -677,14 +718,24 @@ class CoordinatorDB:
         acceptance_spec: dict[str, Any],
         idempotency_key: str | None = None,
         task_id: str | None = None,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
     ) -> tuple[str, bool]:
-        """Insert a RECEIVED task inside the caller's tx; same `request_hash` -> existing id."""
+        """Insert a RECEIVED task inside the caller's tx; same `request_hash` -> existing id.
+
+        The home project keeps the legacy hash (existing idempotency is unchanged); any other
+        project mixes `project_id` in, so identical requests in different projects never collide.
+        """
         if risk_level not in RISK_LEVELS:
             raise ValueError(f"unknown risk level: {risk_level}")
+        _check_project_id(project_id)
         canonical = json.dumps(
             [request, risk_level, sorted(allowed_paths), acceptance_spec], sort_keys=True
         )
-        request_hash = sha256_text(idempotency_key or canonical)
+        basis = idempotency_key or canonical
+        if project_id != DEFAULT_PROJECT_ID:
+            basis = json.dumps(["project", project_id, basis])
+        request_hash = sha256_text(basis)
         tid = task_id or f"t{request_hash[:12]}"
         now = self.clock()
         row = c.execute("SELECT id FROM tasks WHERE request_hash=?", (request_hash,)).fetchone()
@@ -692,8 +743,8 @@ class CoordinatorDB:
             return row["id"], False
         c.execute(
             "INSERT INTO tasks (id, request_hash, request, risk_level, state, state_version,"
-            " allowed_paths, acceptance_spec, created_at, updated_at)"
-            " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?)",
+            " allowed_paths, acceptance_spec, created_at, updated_at, project_id)"
+            " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?,?)",
             (
                 tid,
                 request_hash,
@@ -703,6 +754,7 @@ class CoordinatorDB:
                 json.dumps(acceptance_spec),
                 now,
                 now,
+                project_id,
             ),
         )
         c.execute(
@@ -736,6 +788,164 @@ class CoordinatorDB:
                 f"SELECT * FROM tasks WHERE state IN ({marks}) ORDER BY created_at, id", states
             )
         return [self._task_dict(r) for r in rows]
+
+    def open_task_counts_by_project(self) -> dict[str, int]:
+        """{project_id: number of non-terminal tasks} (read-only)."""
+        marks = ",".join("?" * len(TERMINAL_STATES))
+        rows = self._query(
+            f"SELECT project_id, COUNT(*) AS n FROM tasks WHERE state NOT IN ({marks}) GROUP BY project_id",
+            sorted(TERMINAL_STATES),
+        )
+        return {r["project_id"]: int(r["n"]) for r in rows}
+
+    # --------------------------------------------------------------- backlog
+    @staticmethod
+    def _clean_backlog_text(value: Any, limit: int, what: str, required: bool) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{what} must be a string")
+        s = value.replace("\r\n", "\n").replace("\r", "\n")
+        s = "".join(ch for ch in s if ch == "\n" or not (ord(ch) < 32 or ord(ch) == 127)).strip()
+        if required and not s:
+            raise ValueError(f"{what} must not be empty")
+        if len(s) > limit:
+            raise ValueError(f"{what} is longer than {limit} characters")
+        return s
+
+    def add_backlog_item(self, project_id: str, title: str, description: str = "", priority: int = 2) -> int:
+        """Insert a TODO backlog item; returns its id."""
+        _check_project_id(project_id)
+        title = self._clean_backlog_text(title, MAX_BACKLOG_TITLE, "title", True).replace("\n", " ")
+        description = self._clean_backlog_text(description, MAX_BACKLOG_DESCRIPTION, "description", False)
+        if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 9:
+            raise ValueError("priority must be an int in 0..9")
+        now = self.clock()
+        with self._tx() as c:
+            cur = c.execute(
+                "INSERT INTO backlog_items (project_id, title, description, status, priority, linked_task_id,"
+                " created_at, updated_at) VALUES (?,?,?, 'TODO', ?, NULL, ?, ?)",
+                (project_id, title, description, priority, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_backlog_item(self, item_id: int) -> dict[str, Any]:
+        rows = self._query("SELECT * FROM backlog_items WHERE id=?", (int(item_id),))
+        if not rows:
+            raise KeyError(item_id)
+        return dict(rows[0])
+
+    def list_backlog_items(
+        self, project_id: str | None = None, status: str | Iterable[str] | None = None, limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Ordered by priority (0 = most urgent), then most recently updated."""
+        where, params = [], []  # type: ignore[var-annotated]
+        if project_id is not None:
+            where.append("project_id=?")
+            params.append(_check_project_id(project_id))
+        if status is not None:
+            statuses = [status] if isinstance(status, str) else list(status)
+            if not statuses or any(s not in BACKLOG_STATUSES for s in statuses):
+                raise ValueError("unknown backlog status")
+            where.append(f"status IN ({','.join('?' * len(statuses))})")
+            params += statuses
+        limit = max(1, min(int(limit), 200))
+        sql = "SELECT * FROM backlog_items" + (f" WHERE {' AND '.join(where)}" if where else "")
+        sql += " ORDER BY priority ASC, updated_at DESC, id DESC LIMIT ? OFFSET ?"
+        return [dict(r) for r in self._query(sql, params + [limit, max(0, int(offset))])]
+
+    def count_backlog_items(self, project_id: str, status: str | Iterable[str] | None = None) -> int:
+        _check_project_id(project_id)
+        statuses = list(BACKLOG_STATUSES) if status is None else ([status] if isinstance(status, str) else list(status))
+        if not statuses or any(s not in BACKLOG_STATUSES for s in statuses):
+            raise ValueError("unknown backlog status")
+        rows = self._query(
+            f"SELECT COUNT(*) AS n FROM backlog_items WHERE project_id=? AND status IN ({','.join('?' * len(statuses))})",
+            [project_id] + statuses,
+        )
+        return int(rows[0]["n"])
+
+    def _set_backlog_status_in_tx(
+        self, c: sqlite3.Connection, item_id: int, status: str, expected_status: str | None = None,
+    ) -> bool:
+        if status not in BACKLOG_STATUSES:
+            raise ValueError("unknown backlog status")
+        if status == "IN_PROGRESS":
+            raise ValueError("IN_PROGRESS is entered only via start_backlog_task_in_tx")
+        sql = "UPDATE backlog_items SET status=?, updated_at=? WHERE id=?"
+        params: list[Any] = [status, self.clock(), int(item_id)]
+        if expected_status is not None:
+            sql += " AND status=?"
+            params.append(expected_status)
+        return c.execute(sql, params).rowcount == 1
+
+    def set_backlog_status(self, item_id: int, status: str, expected_status: str | None = None) -> bool:
+        """Set TODO / BLOCKED / DONE (optionally CAS on `expected_status`); True if a row changed."""
+        with self._tx() as c:
+            return self._set_backlog_status_in_tx(c, item_id, status, expected_status)
+
+    def start_backlog_task_in_tx(
+        self,
+        item_id: int,
+        project: Any,
+        actor: str,
+        *,
+        c: sqlite3.Connection | None = None,
+        risk_level: str | None = None,
+        allowed_paths: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        """TODO backlog item -> task + IN_PROGRESS, atomically (one `BEGIN IMMEDIATE` tx).
+
+        Pass `c` to run inside an already open transaction (e.g. an af3 token consume effect).
+        Rejects (ActionRejected, nothing changed): unknown item, project mismatch, a `folder` or
+        non-writable project, a risk above `project.max_risk`, and any replay / duplicate start.
+        Tasks for non-home projects or without an `allowed_paths` scope are parked BLOCKED in the
+        same tx, so the (single-repo) worker never runs them in the wrong repository.
+        """
+        if c is None:
+            with self._tx() as conn:
+                return self.start_backlog_task_in_tx(item_id, project, actor, c=conn, risk_level=risk_level,
+                                                     allowed_paths=allowed_paths)
+        pid = getattr(project, "project_id", None)
+        if not isinstance(pid, str) or not PROJECT_ID_RE.match(pid):
+            raise ActionRejected("BAD_PROJECT")
+        if getattr(project, "kind", None) != "git" or getattr(project, "allow_write", False) is not True:
+            raise ActionRejected("PROJECT_READ_ONLY", "folder / read-only projects cannot start tasks")
+        max_risk = getattr(project, "max_risk", None)
+        if max_risk not in ("L0", "L1", "L2"):
+            raise ActionRejected("BAD_PROJECT")
+        risk = risk_level or max_risk
+        if risk not in RISK_LEVELS or RISK_LEVELS.index(risk) > RISK_LEVELS.index(max_risk):
+            raise ActionRejected("RISK_TOO_HIGH")
+        row = c.execute("SELECT * FROM backlog_items WHERE id=?", (int(item_id),)).fetchone()
+        if row is None:
+            raise ActionRejected("BACKLOG_UNKNOWN")
+        if row["project_id"] != pid:
+            raise ActionRejected("PROJECT_MISMATCH")
+        if row["status"] != "TODO" or row["linked_task_id"] is not None:
+            raise ActionRejected("ALREADY_STARTED", "backlog item is not a fresh TODO")
+        paths = list(allowed_paths or [])
+        request = f"[backlog #{int(row['id'])} · {pid}] {row['title']}"
+        if row["description"]:
+            request += "\n\n" + row["description"]
+        spec = {"pytest": list(getattr(project, "default_tests", ()) or ()), "backlog_item_id": int(row["id"])}
+        tid, created = self._create_task_in_tx(
+            c, request, risk, paths, spec, idempotency_key=f"backlog:{pid}:{int(row['id'])}", project_id=pid,
+        )
+        if not created:
+            raise ActionRejected("ALREADY_STARTED", "a task for this backlog item already exists")
+        state = "RECEIVED"
+        park = PHASE_B_PARK_REASON if pid != DEFAULT_PROJECT_ID else (SCOPE_PARK_REASON if not paths else "")
+        if park:
+            self._transition_in_tx(c, tid, 0, "BLOCKED", actor, park)
+            state = "BLOCKED"
+        cur = c.execute(
+            "UPDATE backlog_items SET status='IN_PROGRESS', linked_task_id=?, updated_at=?"
+            " WHERE id=? AND status='TODO' AND linked_task_id IS NULL",
+            (tid, self.clock(), int(row["id"])),
+        )
+        if cur.rowcount != 1:
+            raise ActionRejected("ALREADY_STARTED", "concurrent start")
+        return {"item_id": int(row["id"]), "task_id": tid, "project_id": pid, "state": state, "parked": park}
 
     def _check_guards(
         self,

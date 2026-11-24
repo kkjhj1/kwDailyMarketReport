@@ -5495,3 +5495,597 @@ class TestSessions:
         else:
             assert terminate_verified(me, ct, "codex.exe") == "UNSUPPORTED"
         assert process_start_time(me) == ct  # we are still alive
+
+
+# ######################################################################## MULTI-PROJECT (Phase A)
+import json as _pjson
+import types as _ptypes
+
+import auto_factory.projects as projects_mod
+from auto_factory.db import PHASE_B_PARK_REASON, SCOPE_PARK_REASON, sha256_text
+from auto_factory.projects import (
+    DEFAULT_PROJECT_ID,
+    GLOBAL_PROTECTED_PATHS,
+    PROJECTS_FILE_ENV,
+    ProjectRegistry,
+    ProjectRegistryError,
+    ProjectSpec,
+    build_project,
+    inspect_project_git,
+    load_registry,
+    scan_workspace_projects,
+)
+
+
+def _git_init(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    return path
+
+
+def _entry(pid, root, kind="git", **kw):
+    d = {"project_id": pid, "label": kw.pop("label", pid), "root_path": str(root), "kind": kind}
+    d.update(kw)
+    return d
+
+
+def _write_projects(tmp_path, entries, raw=None, name="projects.json"):
+    p = tmp_path / "pcfg" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if raw is not None:
+        p.write_bytes(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
+    else:
+        p.write_text(_pjson.dumps({"version": 1, "projects": entries}), encoding="utf-8")
+    return p
+
+
+def _penv(path) -> dict[str, str]:
+    return {PROJECTS_FILE_ENV: str(path)}
+
+
+def _spec(pid, root, kind="git", allow_write=True, max_risk="L2", tests=()):
+    return ProjectSpec(pid, pid, Path(root).resolve(), kind, tuple(tests), GLOBAL_PROTECTED_PATHS,
+                       allow_write if kind == "git" else False, max_risk)
+
+
+class TestProjectRegistry:
+    def test_default_registry_only_home_project(self, tmp_path, repo):
+        for state_dir in (None, tmp_path / "state"):
+            reg = load_registry(repo, state_dir, env={})
+            assert reg.ids() == (DEFAULT_PROJECT_ID,) and reg.source == "default"
+            p = reg.get(DEFAULT_PROJECT_ID)
+            assert p.kind == "git" and p.allow_write is True and p.writable and p.max_risk == "L2"
+            assert p.root_path == repo.resolve()
+            assert set(GLOBAL_PROTECTED_PATHS) <= set(p.protected_paths)
+        with pytest.raises(Exception):
+            p.allow_write = False  # frozen dataclass
+
+    def test_slug_validation(self, tmp_path):
+        folder = tmp_path / "f"
+        folder.mkdir()
+        for bad in ("", "A", "-x", "_x", "a" * 33, "a.b", "한글", "a b", "../x", "a/b", None, 7):
+            with pytest.raises(ProjectRegistryError):
+                build_project(_entry(bad, folder, kind="folder"))
+        assert build_project(_entry("my-proj_1", folder, kind="folder")).project_id == "my-proj_1"
+        assert build_project(_entry("a" * 32, folder, kind="folder")).project_id == "a" * 32
+
+    def test_folder_is_always_read_only(self, tmp_path):
+        folder = tmp_path / "notes"
+        folder.mkdir()
+        p = build_project(_entry("notes", folder, kind="folder", allow_write=True, max_risk="L2"))
+        assert p.allow_write is False and p.writable is False and p.kind == "folder"
+        with pytest.raises(ProjectRegistryError):
+            ProjectSpec("notes", "notes", folder.resolve(), "folder", (), GLOBAL_PROTECTED_PATHS, True, "L2")
+        with pytest.raises(ProjectRegistryError):  # global policy cannot be dropped
+            ProjectSpec("notes", "notes", folder.resolve(), "folder", (), (".env",), False, "L2")
+
+    def test_schema_fields_rejected(self, tmp_path, repo):
+        folder = tmp_path / "f"
+        folder.mkdir()
+        bad_entries = [
+            _entry("x", folder, kind="svn"),
+            _entry("x", folder, kind="folder", max_risk="L3"),
+            _entry("x", folder, kind="folder", allow_write="yes"),
+            _entry("x", folder, kind="folder", extra=1),
+            {"project_id": "x", "kind": "folder", "root_path": str(folder)},  # label missing
+            _entry("x", "relative/path", kind="folder"),
+            _entry("x", tmp_path / "missing", kind="folder"),
+            _entry("x", folder, kind="folder", label="\x00\x01"),
+            _entry("x", folder, kind="folder", label="a" * 65),
+        ]
+        for tests in (["../x.py"], ["/abs/test.py"], ["C:/x.py"], ["tests/*.py"], [".env"], ["cfg/.env"],
+                      ["data/x.sqlite3"], ["data/x.sqlite"], ["tests\\a.py"], ["reports/x.py"], ["holdout_eval/t.py"],
+                      "tests/a.py", [""]):
+            bad_entries.append(_entry("x", folder, kind="folder", default_tests=tests))
+        for prot in (["../up"], ["/abs"], ["a/*"], ["a//b"]):
+            bad_entries.append(_entry("x", folder, kind="folder", protected_paths=prot))
+        for e in bad_entries:
+            with pytest.raises(ProjectRegistryError):
+                build_project(e)
+        ok = build_project(_entry("x", folder, kind="folder", default_tests=["tests/test_a.py"],
+                                  protected_paths=["docs/", "secret.txt"]))
+        assert ok.default_tests == ("tests/test_a.py",)
+        assert ok.protected_paths == GLOBAL_PROTECTED_PATHS + ("docs/", "secret.txt")
+
+    def test_git_kind_requires_exact_toplevel(self, tmp_path, repo):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        with pytest.raises(ProjectRegistryError):
+            build_project(_entry("plain", plain, kind="git"))
+        sub = repo / "sub"
+        sub.mkdir()
+        with pytest.raises(ProjectRegistryError):  # nested dir of another repo is not its toplevel
+            build_project(_entry("sub", sub, kind="git"))
+        other = _git_init(tmp_path / "other")
+        assert build_project(_entry("other", other, kind="git", allow_write=True)).writable
+
+    def test_overlap_and_duplicates_rejected(self, tmp_path, repo):
+        inner = repo / "docs"
+        inner.mkdir()
+        sibling = tmp_path / "sib"
+        sibling.mkdir()
+        for entries in (
+            [_entry("docs", inner, kind="folder")],  # nested inside the home repo
+            [_entry("ws", tmp_path, kind="folder")],  # contains the home repo
+            [_entry("sib", sibling, kind="folder"), _entry("sib2", sibling, kind="folder")],  # same root
+            [_entry("sib", sibling, kind="folder"), _entry("sib", tmp_path / "pcfg", kind="folder")],
+        ):
+            (tmp_path / "pcfg").mkdir(exist_ok=True)
+            path = _write_projects(tmp_path, entries)
+            with pytest.raises(ProjectRegistryError):
+                load_registry(repo, env=_penv(path))
+        with pytest.raises(ProjectRegistryError):
+            ProjectRegistry([_spec("only", sibling, kind="folder")])  # home project is mandatory
+
+    def test_corrupt_or_unreadable_file_fails_closed(self, tmp_path, repo):
+        good = [_entry("sib", tmp_path, kind="folder")]
+        raws = ["{not json", "\xff", "[]", '{"version": 2, "projects": []}', '{"version": 1, "projects": []}',
+                '{"version": 1}', '{"version": 1, "projects": [], "x": 1}', '{"version": 1, "projects": [1]}']
+        for raw in raws:
+            path = _write_projects(tmp_path, None, raw=raw)
+            with pytest.raises(ProjectRegistryError):
+                load_registry(repo, env=_penv(path))
+        path = _write_projects(tmp_path, None, raw=b"\xff\xfe{}")
+        with pytest.raises(ProjectRegistryError):
+            load_registry(repo, env=_penv(path))
+        with pytest.raises(ProjectRegistryError):  # configured but missing => fail closed (no default)
+            load_registry(repo, env=_penv(tmp_path / "nope.json"))
+        big = _write_projects(tmp_path, None, raw="{" + " " * (64 * 1024 + 1) + "}")
+        with pytest.raises(ProjectRegistryError):
+            load_registry(repo, env=_penv(big))
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "projects.json").write_text("{broken", encoding="utf-8")
+        with pytest.raises(ProjectRegistryError):  # present in state_dir => configured => fail closed
+            load_registry(repo, state, env={})
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        path = _write_projects(tmp_path, [_entry(DEFAULT_PROJECT_ID, other, kind="git")])
+        with pytest.raises(ProjectRegistryError):  # the home id cannot be re-pointed
+            load_registry(repo, env=_penv(path))
+        assert good  # keeps flake quiet
+
+    def test_valid_file_env_override_and_home_prepended(self, tmp_path, repo):
+        other = _git_init(tmp_path / "ws" / "other")
+        notes = tmp_path / "ws" / "notes"
+        notes.mkdir()
+        path = _write_projects(tmp_path, [
+            _entry("other", other, label="Other <b>", allow_write=True, max_risk="L1", default_tests=["t/test_x.py"]),
+            _entry("notes", notes, kind="folder", allow_write=True),
+        ])
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "projects.json").write_text("{broken", encoding="utf-8")  # env var wins over state_dir
+        reg = load_registry(repo, state, env=_penv(path))
+        assert reg.ids() == (DEFAULT_PROJECT_ID, "other", "notes") and reg.source == str(path)
+        assert reg.get("other").writable and reg.get("other").max_risk == "L1"
+        assert reg.get("notes").allow_write is False and "notes" in reg and "zzz" not in reg
+        assert reg.find_by_root(notes) is reg.get("notes") and reg.get(None) is None
+        path2 = _write_projects(tmp_path, [_entry(DEFAULT_PROJECT_ID, repo, label="Home"),
+                                           _entry("notes", notes, kind="folder")], name="p2.json")
+        reg2 = load_registry(repo, env=_penv(path2))
+        assert reg2.ids() == (DEFAULT_PROJECT_ID, "notes") and reg2.get(DEFAULT_PROJECT_ID).label == "Home"
+
+    def test_symlink_or_junction_rejected(self, tmp_path, repo):
+        real = tmp_path / "real"
+        (real / "sub").mkdir(parents=True)
+        link = tmp_path / "lnk"
+        if not _try_dir_link(link, real):
+            pytest.skip("cannot create a directory symlink/junction here")
+        for target in (link, link / "sub"):
+            with pytest.raises(ProjectRegistryError):
+                build_project(_entry("lnk", target, kind="folder"))
+        path = _write_projects(tmp_path, [_entry("lnk", link, kind="folder")])
+        with pytest.raises(ProjectRegistryError):
+            load_registry(repo, env=_penv(path))
+        ws = scan_workspace_projects(tmp_path, load_registry(repo, env={}))
+        assert [d.kind for d in ws if d.name == "lnk"] == ["link"]
+
+    def test_scan_is_read_only_and_classifies(self, tmp_path, repo):
+        ws = tmp_path / "ws"
+        _git_init(ws / "gitproj")
+        (ws / "plain").mkdir(parents=True)
+        (ws / ".hidden").mkdir()
+        (ws / "file.txt").write_text("x", encoding="utf-8")
+        path = _write_projects(tmp_path, [_entry("plain", ws / "plain", kind="folder")])
+        before = (path.read_bytes(), path.stat().st_mtime_ns, sorted(os.listdir(ws)))
+        reg = load_registry(repo, env=_penv(path))
+        found = {d.name: d for d in scan_workspace_projects(ws, reg)}
+        assert set(found) == {"gitproj", "plain"}
+        assert found["gitproj"].kind == "git" and found["gitproj"].registered_id is None
+        assert found["gitproj"].status_ko == "미등록(읽기 전용)"
+        assert found["plain"].kind == "folder" and found["plain"].registered_id == "plain"
+        assert found["plain"].status_ko == "등록됨"
+        assert (path.read_bytes(), path.stat().st_mtime_ns, sorted(os.listdir(ws))) == before
+        assert scan_workspace_projects(tmp_path / "missing", reg) == []
+
+    def test_inspect_project_git_read_only_and_never_raises(self, tmp_path, repo, monkeypatch):
+        p = build_project(_entry("home", repo, kind="git", allow_write=True))
+        info = inspect_project_git(p)
+        assert info["ok"] and info["dirty"] == 0 and info["last_subject"] and info["last_commit_ts"] > 0
+        (repo / "new_file.txt").write_text("x", encoding="utf-8")
+        assert inspect_project_git(p)["dirty"] == 1
+        assert not (repo / ".git" / "index.lock").exists()
+        folder = tmp_path / "f"
+        folder.mkdir()
+        fi = inspect_project_git(build_project(_entry("f", folder, kind="folder")))
+        assert fi["ok"] and fi["kind"] == "folder" and fi["dirty"] is None
+
+        def timeout(*a, **k):
+            raise subprocess.TimeoutExpired("git", 5)
+
+        monkeypatch.setattr(projects_mod, "_git", timeout)
+        bad = inspect_project_git(p)
+        assert bad["ok"] is False and bad["error"] == "git timeout"
+        monkeypatch.setattr(projects_mod, "_git", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+        assert inspect_project_git(p)["error"].startswith("git error")
+
+
+class TestProjectDB:
+    def test_project_id_migration_is_idempotent(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        legacy_ddl = db_mod._SCHEMA.split("CREATE TABLE IF NOT EXISTS attempts")[0]
+        con = _sqlite3.connect(str(path))
+        con.executescript(legacy_ddl)
+        con.execute("INSERT INTO tasks (id, request_hash, request, risk_level, state, allowed_paths, acceptance_spec,"
+                    " created_at, updated_at) VALUES ('told', 'h', 'r', 'L1', 'RECEIVED', '[]', '{}', 1, 1)")
+        con.commit()
+        con.close()
+        for _ in range(2):
+            d = CoordinatorDB(path)
+            try:
+                cols = [r["name"] for r in d._query("PRAGMA table_info(tasks)")]
+                assert cols.count("project_id") == 1
+                assert d.get_task("told")["project_id"] == DEFAULT_PROJECT_ID
+                idx = {r["name"] for r in d._query("PRAGMA index_list(tasks)")}
+                assert "idx_tasks_project_state" in idx
+                bidx = {r["name"] for r in d._query("PRAGMA index_list(backlog_items)")}
+                assert "idx_backlog_project" in bidx
+            finally:
+                d.close()
+
+    def test_create_task_backward_compatible_and_project_isolated(self, db):
+        spec = {"pytest": ["tests/test_calc.py"]}
+        tid, created = db.create_task("fix add", "L1", ["calc.py"], spec, None, None)  # legacy positional call
+        canonical = _json.dumps(["fix add", "L1", ["calc.py"], spec], sort_keys=True)
+        assert created and tid == f"t{sha256_text(canonical)[:12]}"  # legacy hash unchanged
+        assert db.get_task(tid)["project_id"] == DEFAULT_PROJECT_ID
+        assert db.create_task("fix add", "L1", ["calc.py"], spec) == (tid, False)
+        assert db.create_task("fix add", "L1", ["calc.py"], spec, project_id=DEFAULT_PROJECT_ID) == (tid, False)
+        other, created = db.create_task("fix add", "L1", ["calc.py"], spec, project_id="other")
+        assert created and other != tid and db.get_task(other)["project_id"] == "other"
+        assert db.create_task("fix add", "L1", ["calc.py"], spec, project_id="other") == (other, False)
+        k1, _ = db.create_task("a", "L1", ["x.py"], {}, "same-key")
+        k2, c2 = db.create_task("a", "L1", ["x.py"], {}, "same-key", project_id="other")
+        assert c2 and k1 != k2
+        for bad in ("", "Bad", "../x", "a" * 33):
+            with pytest.raises(ValueError):
+                db.create_task("z", "L1", ["x.py"], {}, project_id=bad)
+        with pytest.raises(TypeError):  # project_id is keyword-only
+            db.create_task("z", "L1", ["x.py"], {}, None, None, "other")
+        assert db.open_task_counts_by_project() == {DEFAULT_PROJECT_ID: 2, "other": 2}
+
+    def test_backlog_crud(self, db):
+        a = db.add_backlog_item("proj", "  first \x07 item ", "desc\r\nline", priority=3)
+        b = db.add_backlog_item("proj", "urgent", priority=0)
+        c = db.add_backlog_item("other", "elsewhere")
+        assert db.get_backlog_item(a)["title"] == "first  item" and db.get_backlog_item(a)["description"] == "desc\nline"
+        assert [i["id"] for i in db.list_backlog_items("proj")] == [b, a]
+        assert [i["id"] for i in db.list_backlog_items()] == [b, c, a]
+        assert all(i["status"] == "TODO" and i["linked_task_id"] is None for i in db.list_backlog_items())
+        assert db.set_backlog_status(a, "BLOCKED") and db.get_backlog_item(a)["status"] == "BLOCKED"
+        assert not db.set_backlog_status(a, "DONE", expected_status="TODO")  # CAS miss
+        assert db.set_backlog_status(a, "DONE", expected_status="BLOCKED")
+        assert [i["id"] for i in db.list_backlog_items("proj", "DONE")] == [a]
+        assert [i["id"] for i in db.list_backlog_items("proj", ("TODO", "BLOCKED"))] == [b]
+        assert db.count_backlog_items("proj") == 2 and db.count_backlog_items("proj", "TODO") == 1
+        assert not db.set_backlog_status(999, "DONE")
+        for bad_call in (lambda: db.set_backlog_status(a, "NOPE"), lambda: db.set_backlog_status(a, "IN_PROGRESS"),
+                         lambda: db.add_backlog_item("proj", "  "), lambda: db.add_backlog_item("proj", "x" * 201),
+                         lambda: db.add_backlog_item("Bad!", "t"), lambda: db.add_backlog_item("proj", "t", priority=10),
+                         lambda: db.add_backlog_item("proj", "t", priority=True),
+                         lambda: db.list_backlog_items("proj", "NOPE")):
+            with pytest.raises(ValueError):
+                bad_call()
+        with pytest.raises(_sqlite3.IntegrityError):  # CHECK constraint is enforced by SQLite itself
+            with db._tx() as con:
+                con.execute("UPDATE backlog_items SET status='WAT' WHERE id=?", (b,))
+        with pytest.raises(KeyError):
+            db.get_backlog_item(12345)
+
+    def test_start_backlog_task_single_tx(self, tmp_path, db):
+        home = _spec(DEFAULT_PROJECT_ID, tmp_path, tests=("tests/test_calc.py",))
+        item = db.add_backlog_item(DEFAULT_PROJECT_ID, "add feature", "details")
+        res = db.start_backlog_task_in_tx(item, home, "human:tg:1", allowed_paths=["calc.py"])
+        assert res["state"] == "RECEIVED" and res["parked"] == "" and res["project_id"] == DEFAULT_PROJECT_ID
+        t = db.get_task(res["task_id"])
+        assert t["project_id"] == DEFAULT_PROJECT_ID and t["risk_level"] == "L2" and t["allowed_paths"] == ["calc.py"]
+        assert t["acceptance_spec"]["pytest"] == ["tests/test_calc.py"] and "add feature" in t["request"]
+        row = db.get_backlog_item(item)
+        assert row["status"] == "IN_PROGRESS" and row["linked_task_id"] == res["task_id"]
+        n_tasks = len(db.list_tasks())
+        with pytest.raises(ActionRejected) as ei:  # replay / duplicate start
+            db.start_backlog_task_in_tx(item, home, "human:tg:1", allowed_paths=["calc.py"])
+        assert ei.value.code == "ALREADY_STARTED" and len(db.list_tasks()) == n_tasks
+        db.set_backlog_status(item, "TODO")  # even if someone resets the status, the link blocks a restart
+        with pytest.raises(ActionRejected):
+            db.start_backlog_task_in_tx(item, home, "human:tg:1", allowed_paths=["calc.py"])
+
+        noscope = db.add_backlog_item(DEFAULT_PROJECT_ID, "no scope")
+        r2 = db.start_backlog_task_in_tx(noscope, home, "human:tg:1")
+        assert r2["state"] == "BLOCKED" and r2["parked"] == SCOPE_PARK_REASON
+        assert db.get_task(r2["task_id"])["state"] == "BLOCKED"
+
+        other = _spec("other", tmp_path / "o", max_risk="L1")
+        oi = db.add_backlog_item("other", "same title")
+        r3 = db.start_backlog_task_in_tx(oi, other, "human:tg:1", allowed_paths=["calc.py"])
+        t3 = db.get_task(r3["task_id"])
+        assert r3["state"] == "BLOCKED" and r3["parked"] == PHASE_B_PARK_REASON  # never runs in the home repo
+        assert t3["project_id"] == "other" and t3["risk_level"] == "L1"
+        assert [e["to_state"] for e in db.events(r3["task_id"])] == ["RECEIVED", "BLOCKED"]
+
+    def test_start_backlog_rejections_leave_no_trace(self, tmp_path, db, monkeypatch):
+        folder = _spec("notes", tmp_path / "n", kind="folder")
+        ro_git = _spec("ro", tmp_path / "r", allow_write=False)
+        home = _spec(DEFAULT_PROJECT_ID, tmp_path)
+        fi = db.add_backlog_item("notes", "read only")
+        ri = db.add_backlog_item("ro", "read only git")
+        hi = db.add_backlog_item(DEFAULT_PROJECT_ID, "home item")
+        low = _spec(DEFAULT_PROJECT_ID, tmp_path, max_risk="L0")
+        cases = [((fi, folder), "PROJECT_READ_ONLY"), ((ri, ro_git), "PROJECT_READ_ONLY"),
+                 ((hi, folder), "PROJECT_READ_ONLY"), ((hi, _spec("other", tmp_path / "o")), "PROJECT_MISMATCH"),
+                 ((424242, home), "BACKLOG_UNKNOWN"), ((hi, _ptypes.SimpleNamespace(project_id="Bad!")), "BAD_PROJECT")]
+        for (iid, proj), code in cases:
+            with pytest.raises(ActionRejected) as ei:
+                db.start_backlog_task_in_tx(iid, proj, "human:tg:1", allowed_paths=["calc.py"])
+            assert ei.value.code == code
+        with pytest.raises(ActionRejected) as ei:
+            db.start_backlog_task_in_tx(hi, low, "human:tg:1", risk_level="L2", allowed_paths=["calc.py"])
+        assert ei.value.code == "RISK_TOO_HIGH"
+        boom = RuntimeError("crash mid-tx")
+        monkeypatch.setattr(db, "_transition_in_tx", lambda *a, **k: (_ for _ in ()).throw(boom))
+        with pytest.raises(RuntimeError):
+            db.start_backlog_task_in_tx(hi, home, "human:tg:1")  # parks => transition => crash => rollback
+        assert db.list_tasks() == []
+        assert all(i["status"] == "TODO" and i["linked_task_id"] is None for i in db.list_backlog_items())
+
+
+def _proj_bot(tmp_path, repo, db, registry_file=None, **kw):
+    env = _penv(registry_file) if registry_file else {}
+    kw.setdefault("workspace_dir", tmp_path / "ws")
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    return make_bot(tmp_path, repo, db, projects_env=env, **kw)
+
+
+def _many_projects(tmp_path, n_folders):
+    ws = tmp_path / "ws"
+    entries = []
+    for i in range(n_folders):
+        (ws / f"f{i}").mkdir(parents=True, exist_ok=True)
+        entries.append(_entry(f"f{i}", ws / f"f{i}", kind="folder", label=f"Folder <{i}>"))
+    return _write_projects(tmp_path, entries)
+
+
+def _all_cbs_safe(tr, forbidden_text=()):
+    for m in tr.sent + tr.edits:
+        for d in _cbs(m):
+            assert len(d.encode("ascii")) <= 64 and validate_callback_data(d) == d
+            assert not any(t in d for t in forbidden_text)
+            assert "\\" not in d and ":" not in d
+
+
+class TestProjectCommands:
+    def test_hub_and_help_have_project_entries(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("/menu")) == "cmd:menu"
+        kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
+        assert [b["callback_data"] for b in kb[2]] == ["af3|nav|proj", "af3|nav|board"]
+        assert [b["text"] for b in kb[2]] == ["\U0001f4c1 프로젝트", "\U0001f4cb 보드·백로그"]
+        h = dev_bot_mod.HELP_TEXT
+        assert len(h) < 800 and all(x in h for x in ("/projects", "/board", "/backlog"))
+        bot.handle_update(upd_msg("/kill"))
+        bot.handle_update(upd_msg("/menu"))
+        assert "af3|nav|proj" in _cbs(tr.sent[-1])
+        _all_html_ok(tr)
+
+    def test_projects_pagination_and_focus(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=_many_projects(tmp_path, 6))
+        assert bot.handle_update(upd_msg("/projects")) == "cmd:projects"
+        first = tr.sent[-1]
+        assert "등록 7개" in first["text"] and "projects.json" in first["text"]
+        assert "Folder &lt;0&gt;" in first["text"]  # labels are escaped
+        pf = [d for d in _cbs(first) if d.startswith("af3|pf|")]
+        assert pf == [f"af3|pf|{DEFAULT_PROJECT_ID}", "af3|pf|f0", "af3|pf|f1", "af3|pf|f2", "af3|pf|f3"]
+        assert "af3|pp|1" in _cbs(first) and "af3|pp|-1" not in _cbs(first)
+        assert bot.handle_update(upd_raw("af3|pp|1", message_id=5)) == "callback:af3:projects:edited"
+        assert [d for d in _cbs(tr.edits[-1]) if d.startswith("af3|pf|")] == ["af3|pf|f4", "af3|pf|f5"]
+        assert bot.handle_update(upd_raw("af3|pp|99", message_id=5)) == "callback:af3:projects:edited"  # clamped
+        assert bot.handle_update(upd_raw("af3|pf|f4", message_id=5)) == "callback:af3:project:focus:edited"
+        assert db.get_kv(f"focus_project:{ADMIN}") == "f4" and "포커스 변경" in tr.edits[-1]["text"]
+        assert bot.handle_update(upd_raw("af3|pf|ghost", message_id=5)) == "callback:af3:project:unknown"
+        assert db.get_kv(f"focus_project:{ADMIN}") == "f4"
+        for bad in ("af3|pf|Bad", "af3|pp|x", "af3|pp|1234", "af3|bs|abc", "af3|ps|-1"):
+            assert bot.handle_update(upd_raw(bad)) == "callback:malformed"
+        assert bot.handle_update(upd_raw("af3|nav|proj", message_id=5)) == "callback:af3:projects:edited"
+        assert bot.handle_update(upd_msg("/projects nope")) == "cmd:projects:bad-arg"
+        _all_html_ok(tr)
+        _all_cbs_safe(tr, forbidden_text=("Folder", str(tmp_path)))
+
+    def test_projects_scan_never_writes(self, tmp_path, repo, db):
+        path = _many_projects(tmp_path, 1)
+        _git_init(tmp_path / "ws" / "unreg_git")
+        (tmp_path / "ws" / "unreg_dir").mkdir()
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        assert bot.handle_update(upd_msg("/projects scan")) == "cmd:projects:scan"
+        text = tr.sent[-1]["text"]
+        assert "unreg_git" in text and "미등록(읽기 전용)" in text and "등록됨" in text and "f0" in text
+        assert bot.handle_update(upd_raw("af3|ps|0", message_id=3)) == "callback:af3:scan:edited"
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+        assert not (tmp_path / "state" / "projects.json").exists()
+        _all_html_ok(tr)
+
+    def test_board_summary_and_per_project_isolation(self, tmp_path, repo, db, monkeypatch):
+        other = _git_init(tmp_path / "ws" / "other")
+        (tmp_path / "ws" / "notes").mkdir(parents=True)
+        path = _write_projects(tmp_path, [_entry("other", other, label="Other", allow_write=True),
+                                          _entry("notes", tmp_path / "ws" / "notes", kind="folder", label="Notes"),
+                                          _entry("broken", _git_init(tmp_path / "ws" / "broken"), label="Broken")])
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        tid = submit(db, start=False)
+        db.create_task("x", "L1", ["a.py"], {}, project_id="other")
+        db.create_task("y", "L1", ["a.py"], {}, project_id="ghost")
+        real = dev_bot_mod.inspect_project_git
+
+        def flaky(p, *a, **k):
+            if p.project_id == "broken":
+                raise RuntimeError("boom")
+            return real(p, *a, **k)
+
+        monkeypatch.setattr(dev_bot_mod, "inspect_project_git", flaky)
+        monkeypatch.setattr(bot, "_runtime", lambda task_id=None: {tid: _ptypes.SimpleNamespace(liveness="STALLED")})
+        bot.handle_update(upd_msg("/kill"))
+        assert bot.handle_update(upd_msg("/board")) == "cmd:board"
+        text = tr.sent[-1]["text"]
+        lines = text.split("\n")
+        assert lines[0].startswith("⏸️ <b>개발봇 일시정지됨</b>")
+        home = next(l for l in lines if DEFAULT_PROJECT_ID in l)
+        assert "\U0001f534 STALLED 1" in home and "작업 1개" in home and "변경 0개" in home
+        assert any("Other" in l and "작업 1개" in l and "git(쓰기 가능)" in l for l in lines)
+        assert any("Notes" in l and "folder(읽기전용)" in l and "변경" not in l for l in lines)
+        assert any("Broken" in l and "상태 확인 실패" in l for l in lines)
+        assert "미등록 프로젝트의 열린 작업 1개" in text
+        assert 0 < SafeHtmlFormatter.visible_len(text) <= 1000
+        assert bot.handle_update(upd_raw("af3|nav|board", message_id=4)) == "callback:af3:board:edited"
+        _all_html_ok(tr)
+
+    def test_corrupt_registry_fails_closed_everywhere(self, tmp_path, repo, db):
+        path = _write_projects(tmp_path, None, raw="{oops")
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=path)
+        for cmd in ("/projects", "/projects scan", "/board", "/backlog"):
+            bot.handle_update(upd_msg(cmd))
+            assert "프로젝트 레지스트리 오류" in tr.sent[-1]["text"]
+        assert bot.handle_update(upd_msg("/backlog add 새 항목")) == "cmd:backlog:registry_error"
+        assert db.list_backlog_items() == []
+        assert bot.handle_update(upd_raw("af3|pf|market_brief_starter")) == "callback:af3:project:registry_error"
+        assert db.get_kv(f"focus_project:{ADMIN}") is None
+        assert bot.handle_update(upd_msg("/menu")) == "cmd:menu"  # the rest of the bot keeps working
+        _all_html_ok(tr)
+
+    def test_backlog_add_start_two_step(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("/backlog")) == "cmd:backlog"
+        assert "열린 백로그가 없습니다" in tr.sent[-1]["text"]
+        res = bot.handle_update(upd_msg("/backlog add 로그인 <b>버그</b> & 수정"))
+        assert res.startswith("cmd:backlog:added:")
+        iid = int(res.rsplit(":", 1)[1])
+        view = tr.sent[-1]
+        assert "로그인 &lt;b&gt;버그&lt;/b&gt; &amp; 수정" in view["text"] and "<b>버그</b>" not in view["text"]
+        assert f"af3|bs|{iid}" in _cbs(view) and _af3_tok(view, "BD") and _af3_tok(view, "BH")
+        assert db.get_backlog_item(iid)["project_id"] == DEFAULT_PROJECT_ID
+        assert bot.handle_update(upd_raw(f"af3|bs|{iid}", message_id=8)) == "callback:af3:backlog:start_prompt:edited"
+        prompt = tr.edits[-1]
+        assert db.list_tasks() == [] and db.get_backlog_item(iid)["status"] == "TODO"  # step 1: no mutation
+        bs = _af3_tok(prompt, "BS")
+        tr.answer_script = [False]
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}")) == "callback:answer_failed"
+        assert db.list_tasks() == [] and _af3_used(db, bs) is None
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}", frm=OTHER)) == "ignored:unauthorized"
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}", message_id=8)) == "callback:af3:backlog:started:BLOCKED"
+        item = db.get_backlog_item(iid)
+        task = db.get_task(item["linked_task_id"])
+        assert item["status"] == "IN_PROGRESS" and task["state"] == "BLOCKED" and task["project_id"] == DEFAULT_PROJECT_ID
+        assert "작업 생성" in tr.edits[-1]["text"] and f"af3|bs|{iid}" not in _cbs(tr.edits[-1])
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}")) == "callback:af3:rejected:REPLAY"
+        assert bot.handle_update(upd_raw(f"af3|bs|{iid}")) == "callback:af3:backlog:not_todo"
+        assert len(db.list_tasks()) == 1
+        assert bot.handle_update(upd_msg("/backlog add")) == "cmd:backlog:bad-arg"
+        assert bot.handle_update(upd_msg("/backlog remove 1")) == "cmd:backlog:bad-arg"
+        assert bot.handle_update(upd_msg("/backlog add " + "x" * 300)) == "cmd:backlog:rejected"
+        _all_html_ok(tr)
+        _all_cbs_safe(tr, forbidden_text=("로그인", "버그"))
+
+    def test_backlog_folder_project_cannot_start(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db, registry_file=_many_projects(tmp_path, 1))
+        bot.handle_update(upd_raw("af3|pf|f0"))
+        res = bot.handle_update(upd_msg("/backlog add 문서 정리"))
+        iid = int(res.rsplit(":", 1)[1])
+        view = tr.sent[-1]
+        assert db.get_backlog_item(iid)["project_id"] == "f0" and "읽기 전용 프로젝트" in view["text"]
+        assert not any(d.startswith("af3|bs|") for d in _cbs(view))
+        assert bot.handle_update(upd_raw(f"af3|bs|{iid}")) == "callback:af3:backlog:read_only"
+        forged = db.issue_af3_token("BS", ADMIN, ADMIN, {"item_id": iid, "project_id": "f0"})
+        assert bot.handle_update(upd_raw(f"af3|BS|{forged}")) == "callback:af3:rejected:PROJECT_READ_ONLY"
+        mismatch = db.issue_af3_token("BS", ADMIN, ADMIN, {"item_id": iid, "project_id": DEFAULT_PROJECT_ID})
+        assert bot.handle_update(upd_raw(f"af3|BS|{mismatch}")) == "callback:af3:rejected:PROJECT_MISMATCH"
+        ghost = db.issue_af3_token("BS", ADMIN, ADMIN, {"item_id": iid, "project_id": "ghost"})
+        assert bot.handle_update(upd_raw(f"af3|BS|{ghost}")) == "callback:af3:rejected:PROJECT_UNKNOWN"
+        assert _af3_used(db, forged) is None and db.list_tasks() == []
+        assert db.get_backlog_item(iid)["status"] == "TODO"
+        _all_html_ok(tr)
+
+    def test_backlog_non_home_git_project_parks_task(self, tmp_path, repo, db):
+        other = _git_init(tmp_path / "ws" / "other")
+        bot, tr = _proj_bot(tmp_path, repo, db,
+                            registry_file=_write_projects(tmp_path, [_entry("other", other, allow_write=True)]))
+        bot.handle_update(upd_raw("af3|pf|other"))
+        iid = int(bot.handle_update(upd_msg("/backlog add 기능")).rsplit(":", 1)[1])
+        bot.handle_update(upd_raw(f"af3|bs|{iid}", message_id=2))
+        assert "Phase B" in tr.edits[-1]["text"]
+        bs = _af3_tok(tr.edits[-1], "BS")
+        assert bot.handle_update(upd_raw(f"af3|BS|{bs}", message_id=2)) == "callback:af3:backlog:started:BLOCKED"
+        task = db.get_task(db.get_backlog_item(iid)["linked_task_id"])
+        assert task["project_id"] == "other" and task["state"] == "BLOCKED"
+        assert db.events(task["id"])[-1]["reason"] == PHASE_B_PARK_REASON
+
+    def test_backlog_done_hold_and_stale_tokens(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db)
+        iid = int(bot.handle_update(upd_msg("/backlog add 보류할 항목")).rsplit(":", 1)[1])
+        view = tr.sent[-1]
+        bd_old, bh = _af3_tok(view, "BD"), _af3_tok(view, "BH")
+        assert bot.handle_update(upd_raw(f"af3|BH|{bh}", message_id=3)) == "callback:af3:backlog:blocked"
+        assert db.get_backlog_item(iid)["status"] == "BLOCKED"
+        held = tr.edits[-1]
+        assert "↩️" in " ".join(b["text"] for row in held["reply_markup"]["inline_keyboard"] for b in row)
+        assert bot.handle_update(upd_raw(f"af3|BD|{bd_old}")) == "callback:af3:rejected:STALE"  # CAS on status
+        assert _af3_used(db, bd_old) is None
+        assert bot.handle_update(upd_raw(f"af3|BH|{_af3_tok(held, 'BH')}", message_id=3)) == "callback:af3:backlog:todo"
+        assert db.get_backlog_item(iid)["status"] == "TODO"
+        assert bot.handle_update(upd_raw(f"af3|BD|{_af3_tok(tr.edits[-1], 'BD')}", message_id=3)) == "callback:af3:backlog:done"
+        assert db.get_backlog_item(iid)["status"] == "DONE" and "열린 백로그가 없습니다" in tr.edits[-1]["text"]
+        assert bot.handle_update(upd_raw(f"af3|BH|{bh}")) == "callback:af3:rejected:REPLAY"
+        _all_html_ok(tr)
+
+    def test_backlog_pagination_and_nav(self, tmp_path, repo, db):
+        bot, tr = _proj_bot(tmp_path, repo, db)
+        for i in range(7):
+            db.add_backlog_item(DEFAULT_PROJECT_ID, f"item {i}", priority=i % 3)
+        assert bot.handle_update(upd_raw("af3|nav|blog", message_id=6)) == "callback:af3:backlog:edited"
+        first = tr.edits[-1]
+        assert "열린 항목 7개" in first["text"] and first["text"].count("\n#") + first["text"].count("\U0001f535 #") >= 5
+        assert "af3|bp|1" in _cbs(first)
+        assert bot.handle_update(upd_raw("af3|bp|1", message_id=6)) == "callback:af3:backlog:edited"
+        second = tr.edits[-1]
+        assert second["text"].count("\U0001f535 #") == 2 and "af3|bp|0" in _cbs(second)
+        _all_html_ok(tr)
+        _all_cbs_safe(tr, forbidden_text=("item",))
