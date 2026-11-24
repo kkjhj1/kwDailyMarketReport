@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -51,6 +52,9 @@ EXCEPTION_STATES = (
     "CANCELLED",
     "GUARDRAIL_BLOCKED",
     "SINGLE_PROVIDER_REVIEW_REQUIRED",
+    # Human asked a leased/active task to stop; only the lease-holding worker (or, with no
+    # lease, the next worker that acquires it) finalizes it to CANCELLED. Never a failure.
+    "CANCEL_REQUESTED",
 )
 ALL_STATES = MAIN_FLOW + EXCEPTION_STATES
 TERMINAL_STATES = frozenset({"MERGED", "FAILED", "DISCARDED", "CANCELLED"})
@@ -101,6 +105,15 @@ ACTION_OPS_BY_STATE: dict[str, frozenset[str]] = {
     "GUARDRAIL_BLOCKED": frozenset("dxX"),
 }
 ACTION_TTL = 3600.0
+# `af3|<op>|<token>` one-time action tokens (hub pause/resume, task cancel, session kill).
+AF3_OP_RE = re.compile(r"^[A-Za-z0-9_]{1,8}$")
+AF3_TTL = 600.0
+MAX_AF3_PAYLOAD = 1024
+# Non-terminal states without a running worker step: a cancel with no live lease ends them at once.
+CANCEL_DIRECT_STATES = frozenset(
+    {"RECEIVED", "PREFLIGHTED", "CLASSIFIED", "PLANNING", "AUDITED", "PLAN_READY", "AWAITING_START_AUTH",
+     "BLOCKED", "GUARDRAIL_BLOCKED", "SINGLE_PROVIDER_REVIEW_REQUIRED", "AWAITING_MERGE"}
+)
 # Delivery tables sharing the outbox SQL helpers (strict allowlist: table names are interpolated).
 _OUTBOX_TABLES = frozenset({"tg_outbox", "qa_outbox"})
 QA_STATUSES = ("PENDING", "RUNNING", "ANSWERED", "FAILED", "EXPIRED")
@@ -126,6 +139,11 @@ def _build_transitions() -> dict[str, frozenset[str]]:
     edges["RETRY_WAIT"].add("IMPLEMENTING")
     edges["RECOVERY_PENDING"] |= {"WORKTREE_READY", "CHECKPOINTED"}
     edges["SINGLE_PROVIDER_REVIEW_REQUIRED"].add("AWAITING_MERGE")
+    for s in ALL_STATES:
+        if s not in TERMINAL_STATES and s != "CANCEL_REQUESTED":
+            edges[s].add("CANCEL_REQUESTED")
+    # A cancel request only ever ends the task: never resumes, retries or fails over.
+    edges["CANCEL_REQUESTED"] = {"CANCELLED", "FAILED", "BLOCKED"}
     for s in ALL_STATES:
         edges[s].discard(s)
     return {s: frozenset(v) for s, v in edges.items()}
@@ -297,6 +315,16 @@ CREATE TABLE IF NOT EXISTS qa_outbox (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS af3_actions (
+    token TEXT PRIMARY KEY,
+    op TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    used_at REAL,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_qa_requests_due ON qa_requests(status, lease_expires_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_qa_requests_hash ON qa_requests(request_hash, status);
 CREATE INDEX IF NOT EXISTS idx_qa_outbox_due ON qa_outbox(status, next_retry_at);
@@ -463,6 +491,22 @@ def heartbeat_nowait(
             (now, now + float(ttl), task_id, owner_nonce),
         )
         return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def cancel_requested_nowait(db_path: str | Path, task_id: str) -> bool:
+    """True iff the task is in CANCEL_REQUESTED (read-only `mode=ro`, `busy_timeout=0`).
+
+    Used by `LeaseKeeper` between heartbeats. A busy/locked DB raises immediately (caller skips
+    this tick); a missing task reads as False. Never creates the DB file.
+    """
+    p = Path(db_path)
+    conn = sqlite3.connect(p.resolve().as_uri() + "?mode=ro", uri=True, timeout=0)
+    try:
+        conn.execute("PRAGMA busy_timeout=0")
+        row = conn.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return bool(row) and row[0] == "CANCEL_REQUESTED"
     finally:
         conn.close()
 
@@ -1878,6 +1922,98 @@ class CoordinatorDB:
             action, task_d = dict(row), self._task_dict(task)
             result = effect(c, action, task_d) if effect is not None else None
             return action, task_d, result
+
+    # ----------------------------------------------------------- af3 actions
+    def issue_af3_token(
+        self, op: str, chat_id: int, user_id: int, payload: dict[str, Any] | None = None, ttl: float = AF3_TTL,
+    ) -> str:
+        """22-char single-use `af3` token bound to chat/user, op, a JSON payload and an expiry."""
+        if not isinstance(op, str) or not AF3_OP_RE.match(op):
+            raise ValueError("invalid af3 op")
+        body = json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)
+        if len(body) > MAX_AF3_PAYLOAD:
+            raise ValueError("af3 payload too large")
+        now = self.clock()
+        with self._tx() as c:
+            for _ in range(5):
+                token = secrets.token_urlsafe(16)
+                try:
+                    c.execute(
+                        "INSERT INTO af3_actions (token, op, chat_id, user_id, payload_json, expires_at,"
+                        " used_at, created_at) VALUES (?,?,?,?,?,?,NULL,?)",
+                        (token, op, int(chat_id), int(user_id), body, now + float(ttl), now),
+                    )
+                    return token
+                except sqlite3.IntegrityError:
+                    continue
+            raise CoordinatorError("could not allocate a unique af3 token")
+
+    def consume_af3_token(
+        self,
+        token: str,
+        op: str,
+        chat_id: int,
+        user_id: int,
+        effect: Callable[[sqlite3.Connection, dict[str, Any]], Any] | None = None,
+    ) -> tuple[dict[str, Any], Any]:
+        """Validate + consume (CAS on `used_at IS NULL`) and run `effect(conn, payload)` in ONE tx.
+
+        Any rejection (unknown / op / identity / replay / expiry) or an exception inside `effect`
+        rolls the whole transaction back: the token stays unused and nothing else changed.
+        """
+        now = self.clock()
+        with self._tx() as c:
+            row = c.execute("SELECT * FROM af3_actions WHERE token=?", (token,)).fetchone()
+            if row is None:
+                raise ActionRejected("UNKNOWN_TOKEN")
+            if row["op"] != op:
+                raise ActionRejected("OP_MISMATCH")
+            if row["chat_id"] != int(chat_id) or row["user_id"] != int(user_id):
+                raise ActionRejected("IDENTITY_MISMATCH")
+            if row["used_at"] is not None:
+                raise ActionRejected("REPLAY", "token already used")
+            if row["expires_at"] <= now:
+                raise ActionRejected("EXPIRED")
+            cur = c.execute("UPDATE af3_actions SET used_at=? WHERE token=? AND used_at IS NULL", (now, token))
+            if cur.rowcount != 1:
+                raise ActionRejected("REPLAY", "concurrent use")
+            try:
+                payload = json.loads(row["payload_json"])
+            except ValueError:
+                raise ActionRejected("BAD_PAYLOAD") from None
+            if not isinstance(payload, dict):
+                raise ActionRejected("BAD_PAYLOAD")
+            result = effect(c, payload) if effect is not None else None
+            return payload, result
+
+    def _lease_active_in_tx(self, c: sqlite3.Connection, task_id: str, now: float) -> bool:
+        row = c.execute("SELECT expires_at FROM leases WHERE task_id=?", (task_id,)).fetchone()
+        return bool(row) and float(row["expires_at"]) > now
+
+    def request_cancel_in_tx(
+        self, c: sqlite3.Connection, task_id: str, expected_state: str, expected_version: int, actor: str,
+    ) -> str:
+        """Human cancel, decided atomically with the lease check (same `BEGIN IMMEDIATE` tx).
+
+        - ACTIVE state or a live lease: `CANCEL_REQUESTED` only (the lease holder finalizes; the bot
+          never releases a lease).
+        - otherwise (parked / gated, no lease): straight to `CANCELLED`.
+        Returns the new state. Raises ActionRejected on a stale/terminal task.
+        """
+        task = c.execute("SELECT state, state_version FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if task is None:
+            raise ActionRejected("UNKNOWN_TASK")
+        if (task["state"], int(task["state_version"])) != (expected_state, int(expected_version)):
+            raise ActionRejected("STALE", f"task is now {task['state']} v{task['state_version']}")
+        state = task["state"]
+        if state in TERMINAL_STATES or state == "CANCEL_REQUESTED":
+            raise ActionRejected("BAD_STATE", f"cannot cancel from {state}")
+        leased = self._lease_active_in_tx(c, task_id, self.clock())
+        target = "CANCELLED" if (state in CANCEL_DIRECT_STATES and not leased) else "CANCEL_REQUESTED"
+        self._transition_in_tx(c, task_id, int(expected_version), target, actor,
+                               "cancel requested via dev bot" if target == "CANCEL_REQUESTED"
+                               else "cancelled via dev bot")
+        return target
 
     # -------------------------------------------------------- merge intents
     def begin_merge_intent(self, task_id: str, actor: str) -> str:

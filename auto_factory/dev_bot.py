@@ -23,6 +23,10 @@ Security model (fail closed everywhere):
 - Callback data is `af2|<op>|<22-char token>` (28 ASCII bytes). Tokens live server side
   (`tg_actions`) and bind chat/user, op, task state + state_version + target/diff SHA and an
   expiry. `answerCallbackQuery` is called FIRST; if it fails nothing else happens.
+- Button-first UI (`/start`, `/menu`, `/sessions`): `af3|<op>|<arg>` callbacks. Views/prompts are
+  stateless; pause / resume / task cancel / session kill consume single-use `af3_actions` tokens.
+  Task cancel never releases a lease (active -> CANCEL_REQUESTED, finalized by the lease holder);
+  session kill re-verifies pid + creation time + image + ownership and terminates ONE process.
 - Mutations are two-step (prompt -> confirm). Merge only runs through `MergeCoordinator`
   (merge intent journal -> live re-verification -> `git merge --ff-only` -> `finalize_merge`).
 - Notifications use the transactional `tg_outbox`; only 429 is retried, timeout / reset / 5xx
@@ -50,6 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .db import (
+    ACTIVE_STATES,
     ActionRejected,
     CoordinatorDB,
     CoordinatorError,
@@ -62,8 +67,10 @@ from .live_progress import (
     RuntimeSnapshot,
     fmt_age,
     read_live_log_tail,
+    read_live_sidecar,
     runtime_snapshots,
 )
+from .win_job import SESSION_IMAGE_WHITELIST, ProcessInspector, ProcessSample
 from .presets import (
     PRESET_ALIAS_RE,
     PRESET_POLICY_VERSION,
@@ -96,7 +103,17 @@ CALLBACK_PREFIX = "af2"
 CALLBACK_RE = re.compile(r"^af2\|([scdrRmMxXpqez])\|([A-Za-z0-9_-]{22})$")
 # Stateless read-only views (no tg_actions token): v = live status / refresh, l = live.log tail.
 STATELESS_TASK_CB_RE = re.compile(r"^af2\|([vl])\|([A-Za-z0-9][A-Za-z0-9._-]{0,57})$")
+# Button-first UI. Lower-case `nav`/`pz`/`tc` are stateless, non-mutating views/prompts; upper-case
+# `PZ`/`RS`/`TC`/`SK` and the kill prompt `sk` carry a single-use server-side token (`af3_actions`).
+AF3_PREFIX = "af3"
+AF3_CALLBACK_RE = re.compile(r"^af3\|([A-Za-z0-9_]{1,8})\|([A-Za-z0-9_-]{1,48})$")
+AF3_NAV_TARGETS = frozenset({"hub", "tasks", "sess", "bots", "help"})
+AF3_TOKEN_OPS = frozenset({"PZ", "RS", "TC", "sk", "SK"})
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SESSION_QUIET_WINDOW = 120.0  # zero CPU-time delta for this long => 🔴 무응답 멈춤 의심
+SESSION_CPU_EPSILON = 0.05  # seconds of CPU time
+SESSION_SHORT_SAMPLE = 1.0  # first sighting: one short second sample (never enough to call it stalled)
+MAX_SESSION_ROWS = 12
 MAX_CALLBACK_BYTES = 64
 LOGS_DEFAULT_LINES = 20
 LOGS_MAX_LINES = 80
@@ -491,8 +508,8 @@ def validate_callback_data(data: str) -> str:
         raise ValueError("callback_data must be ASCII") from None
     if len(raw) > MAX_CALLBACK_BYTES:
         raise ValueError(f"callback_data is {len(raw)} bytes (> {MAX_CALLBACK_BYTES})")
-    if not (CALLBACK_RE.match(data) or STATELESS_TASK_CB_RE.match(data)):
-        raise ValueError("callback_data does not match af2|<op>|<token>")
+    if not (CALLBACK_RE.match(data) or STATELESS_TASK_CB_RE.match(data) or AF3_CALLBACK_RE.match(data)):
+        raise ValueError("callback_data does not match af2|<op>|<token> or af3|<op>|<arg>")
     return data
 
 
@@ -502,6 +519,61 @@ def stateless_task_button(label: str, op: str, task_id: str) -> dict[str, str] |
     if len(data.encode("utf-8")) > MAX_CALLBACK_BYTES or not STATELESS_TASK_CB_RE.match(data):
         return None
     return {"text": label, "callback_data": validate_callback_data(data)}
+
+
+def af3_button(label: str, op: str, arg: str) -> dict[str, str] | None:
+    """`af3|<op>|<arg>` button (<= 64 ASCII bytes), or None if `arg` does not fit the grammar."""
+    data = f"{AF3_PREFIX}|{op}|{arg}"
+    if len(data.encode("utf-8")) > MAX_CALLBACK_BYTES or not AF3_CALLBACK_RE.match(data):
+        return None
+    return {"text": label, "callback_data": validate_callback_data(data)}
+
+
+# ------------------------------------------------- human-readable status badges
+# (emoji, short Korean label, one-line explanation). State wins over liveness so CANCELLED is
+# never shown as a failure and gated states always read as "approval pending".
+_STATE_BADGES: dict[str, tuple[str, str, str]] = {
+    "CANCEL_REQUESTED": ("⛔", "중지 요청됨", "워커가 현재 단계를 안전하게 끝내고 취소로 마무리합니다 (재시도·대체 AI 없음)."),
+    "CANCELLED": ("⚪", "취소됨", "사람이 취소한 작업입니다 (실패 아님)."),
+    "FAILED": ("❌", "실패", "작업이 실패로 끝났습니다."),
+    "MERGED": ("✅", "완료", "main 에 병합되었습니다."),
+    "DISCARDED": ("\U0001f5d1", "폐기됨", "후보 변경을 폐기했습니다 (patch 보존)."),
+    "AWAITING_START_AUTH": ("\U0001f7e3", "승인 대기", "▶️ Start 를 눌러야 코드 작업이 시작됩니다."),
+    "SINGLE_PROVIDER_REVIEW_REQUIRED": ("\U0001f7e3", "승인 대기", "독립 리뷰어가 없어 사람의 코드 확인이 필요합니다."),
+    "AWAITING_MERGE": ("\U0001f7e3", "승인 대기", "검증·리뷰 통과 — 병합 승인을 기다립니다."),
+    "BLOCKED": ("\U0001f7e0", "차단됨", "자동 진행이 멈췄습니다. 사유를 확인하세요."),
+    "GUARDRAIL_BLOCKED": ("\U0001f7e0", "차단됨", "허용 범위 밖 변경이 감지되었습니다."),
+}
+_LIVENESS_BADGES: dict[str, tuple[str, str, str]] = {
+    "ACTIVE": ("\U0001f7e2", "작업 중", "AI/검증이 실행 중입니다."),
+    "QUIET": ("\U0001f7e1", "응답 대기 중", "실행 중이지만 최근 출력이 없습니다 (생각 중일 수 있음)."),
+    "STALLED": ("\U0001f534", "멈춤 의심", "하트비트가 끊겼습니다. 워커/프로세스를 확인하세요."),
+    "WAITING_HUMAN": ("\U0001f7e3", "승인 대기", "사람의 결정을 기다립니다."),
+    "QUEUED": ("\U0001f535", "대기열", "워커가 곧 처리합니다."),
+    "DONE": ("✅", "완료", "작업이 끝났습니다."),
+    "FAILED": ("❌", "실패", "작업이 실패로 끝났습니다."),
+}
+_STATE_STEP_KO: dict[str, str] = {
+    "RECEIVED": "접수", "PREFLIGHTED": "사전 점검", "CLASSIFIED": "분류", "PLANNING": "계획·감사",
+    "AUDITED": "감사 완료", "PLAN_READY": "계획 확정", "AWAITING_START_AUTH": "시작 승인 대기",
+    "WORKTREE_READY": "작업 공간 준비", "IMPLEMENTING": "코드 작성", "CHECKPOINTED": "체크포인트",
+    "VERIFYING": "테스트 검증", "REVIEWING": "교차 리뷰", "AWAITING_MERGE": "병합 승인 대기",
+    "MERGED": "병합 완료", "RETRY_WAIT": "재시도 대기", "RECOVERY_PENDING": "복구 대기",
+    "SINGLE_PROVIDER_REVIEW_REQUIRED": "사람 리뷰 대기", "CANCEL_REQUESTED": "중지 요청",
+}
+
+
+def status_badge(state: str, liveness: str | None = None) -> tuple[str, str, str]:
+    """(emoji, label, explanation) for a task. CANCELLED (⚪ 취소됨) is never rendered as FAILED."""
+    if state in _STATE_BADGES:
+        return _STATE_BADGES[state]
+    if liveness in _LIVENESS_BADGES:
+        return _LIVENESS_BADGES[liveness]
+    return ("\U0001f535", "대기열", "워커가 곧 처리합니다.")
+
+
+def cancellable_state(state: str) -> bool:
+    return state not in TERMINAL_STATES and state != "CANCEL_REQUESTED"
 
 
 class SafeHtmlFormatter:
@@ -1054,6 +1126,7 @@ class OutboxDispatcher:
 # ===================================================================== bot
 HELP_TEXT = (
     "<b>auto_factory dev bot</b>\n"
+    "/menu — 버튼 메뉴 (작업·세션·일시정지) · /sessions — 실행 중 AI 프로세스\n"
     "/bots — 봇 프리셋 선택 (✅ unlocked / 🔒 locked)\n"
     "봇 선택 후 자연어로 질문·수정 요청 (질문=읽기 전용 답변, 수정=L2 작업)\n"
     "/ask [preset] &lt;질문&gt; — 읽기 전용 질문\n"
@@ -1087,6 +1160,11 @@ class DevBot:
         require_supervisor_lock: bool = False,
         state_dir: str | os.PathLike | None = None,
         unlocked_presets: Iterable[str] = (),
+        process_inspector: Any = None,
+        session_clock: Callable[[], float] = time.monotonic,
+        session_sleep: Callable[[float], None] = time.sleep,
+        session_quiet_window: float = SESSION_QUIET_WINDOW,
+        session_short_sample: float = SESSION_SHORT_SAMPLE,
     ):
         if not isinstance(admin_chat_id, int) or isinstance(admin_chat_id, bool) or admin_chat_id == 0:
             raise ConfigError("admin_chat_id must be a non-zero int")
@@ -1114,6 +1192,13 @@ class DevBot:
         self.dispatcher = OutboxDispatcher(db, transport, self.limiter, self.renderer, admin_chat_id, boot_id)
         self.coordinator = MergeCoordinator(db, self.wtm, self.guard, self.artifacts_dir,
                                             require_supervisor_lock=require_supervisor_lock)
+        # /sessions: read-only process inspector + CPU-time cache {(pid, creation): (cpu, quiet_since)}
+        self.inspector = process_inspector if process_inspector is not None else ProcessInspector()
+        self.session_clock = session_clock
+        self.session_sleep = session_sleep
+        self.session_quiet_window = float(session_quiet_window)
+        self.session_short_sample = float(session_short_sample)
+        self._session_cpu: dict[tuple[int, float], tuple[float, float]] = {}
 
     def _safe_stop_flag(self, stop_flag: str | os.PathLike | None) -> Path:
         """STOP.flag must be named STOP.flag and live in the repo root or the state dir."""
@@ -1236,9 +1321,15 @@ class DevBot:
         head, rest = parts[0], (parts[1] if len(parts) > 1 else "")
         cmd = head.split("@", 1)[0].lower()
         arg = rest.strip()
-        if cmd in ("/help", "/start"):
+        if cmd == "/help":
             self._send(chat_id, HELP_TEXT)
             return "cmd:help"
+        if cmd in ("/start", "/menu"):
+            self._send(chat_id, *self._hub_view(chat_id, from_id))
+            return "cmd:menu"
+        if cmd == "/sessions":
+            self._send(chat_id, *self._sessions_view(chat_id, from_id))
+            return "cmd:sessions"
         if cmd == "/task":
             return self._cmd_task(chat_id, text)
         if cmd == "/do":
@@ -1516,17 +1607,22 @@ class DevBot:
                 return "cmd:status:unknown"
             snap = self._runtime(arg).get(arg)
             extra = self._runtime_lines(snap) if snap else [f"Runtime: {f.i('unavailable', 20)}"]
+            if snap is None:
+                emoji, label, why = status_badge(task["state"])
+                extra.insert(0, f"{emoji} {f.b(label, 20)} — {f.esc(why, 80)}")
             gated = task["state"] in _STATE_BUTTONS
-            live_markup = None if gated else self._live_markup(arg)
+            live_markup = None if gated else self._live_markup(arg, state=task["state"])
             if not gated and live_markup is None:
                 extra.append(self._long_id_hint(arg))
             text, markup = self.renderer.task_card(task, extra_lines=extra)
-            # Human-gated states keep exactly their workflow buttons; others get stateless Refresh/Logs.
+            # Human-gated states keep exactly their workflow buttons; others get Refresh/Logs (+ 🛑 stop).
             self._send(chat_id, text, markup if gated else live_markup)
             return "cmd:status:task"
         counts = self.db.outbox_counts()
         tasks = [t for t in self.db.list_tasks() if t["state"] not in TERMINAL_STATES]
+        stopped = self.stop_flag.exists()
         lines = [
+            *([self._pause_banner()] if stopped else []),
             "<b>auto_factory status</b>",
             f"STOP.flag: {f.b('ON' if self.stop_flag.exists() else 'off', 8)} · "
             f"circuit: {f.b('OPEN' if self.db.circuit_is_open(CIRCUIT) else 'closed', 8)}",
@@ -1534,7 +1630,7 @@ class DevBot:
             f"open tasks: {len(tasks)}",
         ]
         if self.db.circuit_is_open(QA_CIRCUIT):
-            lines.insert(2, f"qa_circuit: {f.b('OPEN', 8)}")
+            lines.insert(3 if stopped else 2, f"qa_circuit: {f.b('OPEN', 8)}")
         runtime = self._runtime() if tasks else {}
         reserve = 40  # room for the "+N more" line
         for idx, t in enumerate(tasks):
@@ -1545,7 +1641,11 @@ class DevBot:
                 lines.append(f"+{len(tasks) - idx} more (/status &lt;id&gt;)")
                 break
             lines.append(line)
-        self._send(chat_id, "\n".join(lines))
+        markup = None
+        if stopped:
+            resume = self._resume_button(chat_id, chat_id, "▶️ 지금 재개하기")
+            markup = f.markup([[resume]]) if resume else None
+        self._send(chat_id, "\n".join(lines), markup)
         return "cmd:status"
 
     # ------------------------------------------------------- live progress
@@ -1560,7 +1660,8 @@ class DevBot:
 
     def _overview_line(self, t: dict[str, Any], s: RuntimeSnapshot | None) -> str:
         f = self.fmt
-        head = f"{f.code(t['id'], 64)} {f.esc(t['state'], 40)} {f.esc(t['risk_level'], 4)}"
+        emoji, label, _ = status_badge(t["state"], s.liveness if s is not None else None)
+        head = f"{emoji} {f.esc(label, 16)} · {f.code(t['id'], 64)} {f.esc(t['state'], 40)} {f.esc(t['risk_level'], 4)}"
         if s is None:
             return head
         age = s.elapsed if s.elapsed is not None else s.state_age
@@ -1570,7 +1671,10 @@ class DevBot:
 
     def _runtime_lines(self, s: RuntimeSnapshot) -> list[str]:
         f = self.fmt
+        emoji, label, why = status_badge(s.state, s.liveness)
+        step_ko = _STATE_STEP_KO.get(s.state)
         lines = [
+            f"{emoji} {f.b(label, 20)} — {f.esc(why, 80)}" + (f" · 단계: {f.esc(step_ko, 20)}" if step_ko else ""),
             f"Stage: {f.code(s.stage, 40)} · Liveness: {f.b(s.liveness, 16)}",
             f"Elapsed: {f.esc(fmt_age(s.elapsed), 12)} · in state {f.esc(fmt_age(s.state_age), 12)}"
             f" · Attempt: {f.code(s.attempt, 60)}",
@@ -1583,16 +1687,22 @@ class DevBot:
             lines.append(f.i("holdout: coarse metadata only", 40))
         return lines
 
-    def _live_markup(self, task_id: str, logs_view: bool = False) -> dict[str, Any] | None:
+    def _live_markup(self, task_id: str, logs_view: bool = False, state: str | None = None) -> dict[str, Any] | None:
+        """Refresh/Logs row; plus `[🛑 이 작업 중지]` (stateless 2-step prompt) for cancellable tasks."""
         if logs_view:
             row = [stateless_task_button("\U0001f4ca Status", "v", task_id),
                    stateless_task_button("\U0001f4cb Refresh Logs", "l", task_id)]
         else:
-            row = [stateless_task_button("\U0001f504 Refresh", "v", task_id),
-                   stateless_task_button("\U0001f4cb Logs", "l", task_id)]
+            row = [stateless_task_button("\U0001f504 새로고침", "v", task_id),
+                   stateless_task_button("\U0001f4cb 진행 로그", "l", task_id)]
         if any(b is None for b in row):
             return None
-        return self.fmt.markup([row])
+        rows = [row]
+        if not logs_view and state is not None and cancellable_state(state) and TASK_ID_RE.match(task_id):
+            stop = af3_button("\U0001f6d1 이 작업 중지", "tc", task_id)
+            if stop is not None:
+                rows.append([stop])
+        return self.fmt.markup(rows)
 
     def _long_id_hint(self, task_id: str) -> str:
         f = self.fmt
@@ -1609,7 +1719,7 @@ class DevBot:
             f"State: {f.b(s.state, 40)} (v{int(s.state_version)}) · {f.esc(s.risk_level, 4)}",
             *self._runtime_lines(s),
         ]
-        markup = self._live_markup(task_id)
+        markup = self._live_markup(task_id, state=s.state)
         if markup is None:
             lines.append(self._long_id_hint(task_id))
         return "\n".join(lines), markup
@@ -1713,15 +1823,20 @@ class DevBot:
         chat_id = (msg.get("chat") or {}).get("id")
         if not self._authorized(from_id, chat_id):
             return "ignored:unauthorized"
-        # [TG-03] answer FIRST; if that fails there are zero DB/Git side effects.
-        self.limiter.wait(None)
+        data = cq.get("data") or ""
+        is_af3 = isinstance(data, str) and data.startswith(AF3_PREFIX + "|")
+        # [TG-03] answer FIRST; if that fails there are zero DB/Git/process side effects.
+        # af3 (button-first UI) acks immediately, never queued behind the send limiter.
+        if not is_af3:
+            self.limiter.wait(None)
         try:
             answered = self.transport.answer_callback_query(str(cq.get("id", "")))
         except Exception:
             answered = False
         if answered is not True:
             return "callback:answer_failed"
-        data = cq.get("data") or ""
+        if is_af3:
+            return self._on_af3(data, chat_id, from_id, msg.get("message_id"))
         sm = STATELESS_TASK_CB_RE.match(data) if isinstance(data, str) else None
         if sm and len(data.encode("utf-8")) <= MAX_CALLBACK_BYTES:
             return self._cb_stateless(sm.group(1), sm.group(2), chat_id, msg.get("message_id"))
@@ -1948,6 +2063,367 @@ class DevBot:
         self._edit(chat_id, message_id, f"\U0001f5d1 Discarded {self.fmt.code(task['id'], 64)}.{self.fmt.esc(patch_note, 200)}")
         return "callback:discarded"
 
+    # ================================================== af3: button-first UI
+    def _show(self, chat_id: int, message_id: Any, text: str, markup: dict | None = None) -> str:
+        """Edit the pressed message in place; send a new one only when there is no message id."""
+        if isinstance(message_id, int) and not isinstance(message_id, bool):
+            return self._edit_in_place(chat_id, message_id, text, markup)
+        return "sent" if self._send(chat_id, text, markup) else "failed"
+
+    @staticmethod
+    def _pause_banner() -> str:
+        return "⏸️ <b>개발봇 일시정지됨</b> — 새 작업이 시작되지 않습니다."
+
+    def _resume_button(self, chat_id: int, user_id: int, label: str, token: str | None = None) -> dict | None:
+        tok = token or self.db.issue_af3_token("RS", chat_id, user_id, {"action": "resume"})
+        return af3_button(label, "RS", tok)
+
+    def _back_to_hub(self) -> dict[str, str] | None:
+        return af3_button("⬅️ 메뉴", "nav", "hub")
+
+    def _hub_view(self, chat_id: int, user_id: int) -> tuple[str, dict | None]:
+        f = self.fmt
+        stopped = self.stop_flag.exists()
+        open_tasks = [t for t in self.db.list_tasks() if t["state"] not in TERMINAL_STATES]
+        waiting = sum(1 for t in open_tasks if t["state"] in _STATE_BUTTONS)
+        lines = [self._pause_banner()] if stopped else []
+        lines += [
+            "<b>\U0001f3ed auto_factory 개발봇</b>",
+            f"진행 중 작업 {len(open_tasks)}개 · 승인 대기 {waiting}개",
+            "아래 버튼으로 바로 조작하세요 (명령 목록: /help).",
+        ]
+        rows: list[list[dict[str, str]]] = []
+        if stopped:
+            tok = self.db.issue_af3_token("RS", chat_id, user_id, {"action": "resume"})
+            rows.append([self._resume_button(chat_id, user_id, "▶️ 지금 재개하기", tok)])
+            middle = self._resume_button(chat_id, user_id, "▶️ 재개", tok)
+        else:
+            middle = af3_button("⏸️ 전체 일시정지", "pz", "all")
+        rows.append([af3_button("\U0001f4ca 진행 중인 작업", "nav", "tasks"),
+                     af3_button("\U0001f5a5️ 실행 세션/프로세스", "nav", "sess")])
+        rows.append([af3_button("\U0001f916 봇 선택·요청", "nav", "bots"), middle, af3_button("❓ 도움말", "nav", "help")])
+        return "\n".join(lines), f.markup([[b for b in r if b] for r in rows])
+
+    def _tasks_view(self) -> tuple[str, dict | None]:
+        f = self.fmt
+        tasks = [t for t in self.db.list_tasks() if t["state"] not in TERMINAL_STATES]
+        runtime = self._runtime() if tasks else {}
+        lines = [self._pause_banner()] if self.stop_flag.exists() else []
+        lines.append(f"<b>\U0001f4ca 진행 중인 작업</b> · {len(tasks)}개")
+        if not tasks:
+            lines.append("진행 중인 작업이 없습니다.")
+        buttons: list[dict[str, str]] = []
+        reserve = 40
+        for idx, t in enumerate(tasks):
+            s = runtime.get(t["id"])
+            emoji, label, _ = status_badge(t["state"], s.liveness if s else None)
+            step = _STATE_STEP_KO.get(t["state"], t["state"])
+            line = f"{emoji} {f.b(label, 16)} · {f.code(t['id'], 64)} · {f.esc(step, 24)}"
+            candidate = "\n".join(lines + [line])
+            if f.visible_len(candidate) > f.max_visible - reserve or len(candidate) > f.max_html - reserve:
+                lines.append(f"+{len(tasks) - idx} more (/status)")
+                break
+            lines.append(line)
+            if len(buttons) < 8:
+                b = stateless_task_button(f"{emoji} {t['id'][:24]}", "v", t["id"])
+                if b is not None:
+                    buttons.append(b)
+        if buttons:
+            lines.append("작업을 누르면 실시간 카드(새로고침·로그·🛑 중지)가 열립니다.")
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([b for b in (af3_button("\U0001f504 새로고침", "nav", "tasks"), self._back_to_hub()) if b])
+        return "\n".join(lines), f.markup(rows)
+
+    def _on_af3(self, data: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        m = AF3_CALLBACK_RE.match(data) if len(data.encode("utf-8")) <= MAX_CALLBACK_BYTES else None
+        if not m:
+            return "callback:malformed"
+        op, arg = m.groups()
+        try:
+            if op == "nav":
+                return self._af3_nav(arg, chat_id, user_id, message_id)
+            if op == "pz":
+                return self._af3_pause_prompt(chat_id, user_id, message_id)
+            if op == "tc":
+                return self._af3_cancel_prompt(arg, chat_id, user_id, message_id)
+            if op in AF3_TOKEN_OPS:
+                handler = {"PZ": self._af3_pause_confirm, "RS": self._af3_resume, "TC": self._af3_cancel_confirm,
+                           "sk": self._af3_kill_prompt, "SK": self._af3_kill_confirm}[op]
+                return handler(arg, chat_id, user_id, message_id)
+        except ActionRejected as exc:
+            f = self.fmt
+            text = f"⚠️ 만료되었거나 이미 처리된 버튼입니다 ({f.code(exc.code, 40)}). 최신 화면을 다시 여세요."
+            self._show(chat_id, message_id, text, f.markup([[self._back_to_hub()]]))
+            return f"callback:af3:rejected:{exc.code}"
+        return "callback:malformed"
+
+    def _af3_nav(self, target: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        if target not in AF3_NAV_TARGETS:
+            return "callback:malformed"
+        if target == "hub":
+            return f"callback:af3:hub:{self._show(chat_id, message_id, *self._hub_view(chat_id, user_id))}"
+        if target == "tasks":
+            return f"callback:af3:tasks:{self._show(chat_id, message_id, *self._tasks_view())}"
+        if target == "sess":
+            return f"callback:af3:sessions:{self._show(chat_id, message_id, *self._sessions_view(chat_id, user_id))}"
+        if target == "bots":
+            self._cmd_bots(chat_id)
+            return "callback:af3:bots"
+        return f"callback:af3:help:{self._show(chat_id, message_id, HELP_TEXT, self.fmt.markup([[self._back_to_hub()]]))}"
+
+    # ------------------------------------------------------- pause / resume
+    def _af3_pause_prompt(self, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Step 1 of 2 (no mutation): confirmation screen with a single-use PZ token."""
+        f = self.fmt
+        if self.stop_flag.exists():
+            return f"callback:af3:pause:already:{self._show(chat_id, message_id, *self._hub_view(chat_id, user_id))}"
+        tok = self.db.issue_af3_token("PZ", chat_id, user_id, {"action": "pause"})
+        text = "\n".join([
+            "<b>⚠️ 전체 일시정지</b>",
+            "STOP.flag 를 기록합니다. 실행 중인 작업은 다음 체크포인트에서 멈추고 새 작업은 시작되지 않습니다.",
+            "언제든 ▶️ 재개로 되돌릴 수 있습니다.",
+        ])
+        markup = f.markup([[af3_button("⚠️ 정말 일시정지할까요?", "PZ", tok), af3_button("취소", "nav", "hub")]])
+        return f"callback:af3:pause_prompt:{self._show(chat_id, message_id, text, markup)}"
+
+    def _af3_pause_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        self.db.consume_af3_token(token, "PZ", chat_id, user_id)
+        try:  # no-follow atomic write; the bot itself keeps running
+            safe_write_atomic(self.stop_flag, f"paused via dev bot menu at {time.time():.0f}\n")
+        except (OSError, UnsafePathError) as exc:
+            self.log(f"STOP.flag write refused: {type(exc).__name__}")
+            self._show(chat_id, message_id, "⚠️ STOP.flag 기록 거부 (unsafe path). 워커를 수동으로 멈추세요.")
+            return "callback:af3:pause:failed"
+        self._show(chat_id, message_id, *self._hub_view(chat_id, user_id))
+        return "callback:af3:paused"
+
+    def _af3_resume(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        self.db.consume_af3_token(token, "RS", chat_id, user_id)
+        try:
+            safe_unlink(self.stop_flag, missing_ok=True)
+        except (OSError, UnsafePathError) as exc:  # fail closed: the worker stays stopped
+            self.log(f"STOP.flag removal refused: {type(exc).__name__}")
+            self._show(chat_id, message_id, "⚠️ STOP.flag 삭제 거부 (unsafe path) — 워커는 계속 멈춰 있습니다.")
+            return "callback:af3:resume:failed"
+        self._fire_wake()
+        self._show(chat_id, message_id, *self._hub_view(chat_id, user_id))
+        return "callback:af3:resumed"
+
+    # ---------------------------------------------------------- task cancel
+    def _af3_cancel_prompt(self, task_id: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Step 1 of 2 (no task mutation): bind a TC token to the task's current state + version."""
+        f = self.fmt
+        if not TASK_ID_RE.match(task_id):
+            return "callback:malformed"
+        try:
+            task = self.db.get_task(task_id)
+        except KeyError:
+            self._show(chat_id, message_id, f"unknown task {f.code(task_id, 64)}")
+            return "callback:af3:cancel:unknown"
+        back = stateless_task_button("취소", "v", task_id) or af3_button("취소", "nav", "tasks")
+        emoji, label, _ = status_badge(task["state"])
+        if not cancellable_state(task["state"]):
+            self._show(chat_id, message_id,
+                       f"{emoji} {f.code(task_id, 64)} 은(는) 이미 {f.b(label, 20)} 상태입니다.", f.markup([[back]]))
+            return "callback:af3:cancel:not_cancellable"
+        tok = self.db.issue_af3_token("TC", chat_id, user_id, {
+            "task_id": task_id, "state": task["state"], "state_version": int(task["state_version"])})
+        running = task["state"] in ACTIVE_STATES or self.db.get_lease(task_id) is not None
+        how = ("실행 중: 중지 요청 → 워커가 현재 단계를 안전하게 끝내고 부분 작업을 WIP 커밋으로 보존한 뒤 "
+               "⚪ 취소됨으로 마무리합니다." if running else "대기 중: 바로 ⚪ 취소됨으로 바뀝니다.")
+        text = "\n".join([
+            "<b>⚠️ 이 작업을 중지할까요?</b>",
+            f"{f.code(task_id, 64)} · {emoji} {f.esc(label, 20)} ({f.esc(task['state'], 40)} v{int(task['state_version'])})",
+            f.esc(how, 200),
+            "재시도·다른 AI로 넘기기 없이 끝냅니다.",
+        ])
+        markup = f.markup([[af3_button("⚠️ 정말 이 작업을 중지할까요?", "TC", tok), back]])
+        return f"callback:af3:cancel_prompt:{self._show(chat_id, message_id, text, markup)}"
+
+    def _af3_cancel_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        """Step 2: token consume + lease check + transition in ONE tx. The bot never touches a lease."""
+        f = self.fmt
+
+        def effect(c, payload):
+            tid, st, ver = payload.get("task_id"), payload.get("state"), payload.get("state_version")
+            if (not isinstance(tid, str) or not TASK_ID_RE.match(tid) or not isinstance(st, str)
+                    or not isinstance(ver, int) or isinstance(ver, bool)):
+                raise ActionRejected("BAD_PAYLOAD")
+            return tid, self.db.request_cancel_in_tx(c, tid, st, ver, self._actor(user_id))
+
+        _, (tid, target) = self.db.consume_af3_token(token, "TC", chat_id, user_id, effect)
+        if target == "CANCEL_REQUESTED":
+            self._fire_wake()  # committed: let the lease holder (or next worker) finalize it
+        emoji, label, why = status_badge(target)
+        self._show(chat_id, message_id, f"{emoji} {f.b(label, 20)} · {f.code(tid, 64)}\n{f.esc(why, 120)}",
+                   self._live_markup(tid, state=target))
+        return "callback:af3:" + ("cancel_requested" if target == "CANCEL_REQUESTED" else "cancelled")
+
+    # -------------------------------------------------------- sessions
+    def _session_owner(self, s: ProcessSample) -> str | None:
+        """Task id whose worker recorded this process (or one of its verified ancestors) as its
+        running child, with a live lease in OUR coordinator DB. None = not provably ours."""
+        if not s.accessible or s.creation_time is None:
+            return None
+        ids = [(s.pid, float(s.creation_time))] + [(int(p), float(t)) for p, t in s.ancestry]
+        now = self.db.clock()
+        for t in self.db.list_tasks():
+            if t["state"] in TERMINAL_STATES or not TASK_ID_RE.match(t["id"]):
+                continue
+            lease = self.db.get_lease(t["id"])
+            if not lease or float(lease["expires_at"]) <= now:
+                continue
+            live = read_live_sidecar(self.artifacts_dir, t["id"])
+            if not live or not live.get("running") or live.get("lease_lost"):
+                continue
+            lp, lct = live.get("pid"), live.get("proc_start_time")
+            if (not isinstance(lp, int) or isinstance(lp, bool) or not isinstance(lct, (int, float))
+                    or isinstance(lct, bool)):
+                continue
+            if any(pid == lp and abs(ct - float(lct)) < 0.01 for pid, ct in ids):
+                return t["id"]
+        return None
+
+    def _sample_sessions(self) -> list[ProcessSample]:
+        """Whitelisted samples; a first sighting gets one short second sample (non-cached delta)."""
+        def snap() -> list[ProcessSample]:
+            out = []
+            for s in list(self.inspector.snapshot() or [])[:64]:
+                if isinstance(s, ProcessSample) and s.image_name.lower() in SESSION_IMAGE_WHITELIST:
+                    out.append(s)
+            return out
+
+        samples = snap()
+        now = self.session_clock()
+        fresh = [s for s in samples if s.accessible and s.creation_time is not None and s.cpu_time is not None
+                 and (s.pid, s.creation_time) not in self._session_cpu]
+        for s in fresh:
+            self._session_cpu[(s.pid, s.creation_time)] = (float(s.cpu_time), now)
+        if fresh and self.session_short_sample > 0:
+            self.session_sleep(self.session_short_sample)
+            samples = snap()
+        live = {(s.pid, s.creation_time) for s in samples}
+        for key in [k for k in self._session_cpu if k not in live]:
+            del self._session_cpu[key]
+        return samples
+
+    def _classify_session(self, s: ProcessSample, now: float) -> str:
+        """ACTIVE | QUIET | STALLED | READONLY from the CPU-time delta over a quiet window."""
+        if not s.accessible or s.creation_time is None or s.cpu_time is None:
+            return "READONLY"
+        key, cpu = (s.pid, s.creation_time), float(s.cpu_time)
+        rec = self._session_cpu.get(key)
+        if rec is None:
+            self._session_cpu[key] = (cpu, now)
+            return "QUIET"
+        last, since = rec
+        if cpu - last > SESSION_CPU_EPSILON:
+            self._session_cpu[key] = (cpu, now)
+            return "ACTIVE"
+        return "STALLED" if now - since >= self.session_quiet_window else "QUIET"
+
+    _SESSION_BADGES = {
+        "ACTIVE": "\U0001f7e2 활동 중",
+        "QUIET": "\U0001f7e1 조용함 · 측정 중",
+        "STALLED": "\U0001f534 무응답 멈춤 의심",
+        "READONLY": "⚪ 읽기 전용 · 종료 불가",
+    }
+
+    def _sessions_view(self, chat_id: int, user_id: int, notice: str = "") -> tuple[str, dict | None]:
+        """`notice` must already be escaped HTML. Never shows command lines or environments."""
+        f = self.fmt
+        samples = self._sample_sessions()
+        now = self.session_clock()
+        lines = ["<b>\U0001f5a5️ 실행 세션 / 프로세스</b>"]
+        if notice:
+            lines.append(notice)
+        lines.append(f"codex.exe · claude.exe 만 표시 · CPU 시간 {int(self.session_quiet_window)}초 무변화 시 \U0001f534")
+        if not samples:
+            lines.append("실행 중인 codex/claude 프로세스가 없습니다.")
+        rows: list[list[dict[str, str]]] = []
+        for s in samples[:MAX_SESSION_ROWS]:
+            st = self._classify_session(s, now)
+            owner = self._session_owner(s) if st != "READONLY" else None
+            parts = [f.code(f"{s.image_name} (PID {int(s.pid)})", 40), self._SESSION_BADGES[st]]
+            if st != "READONLY":
+                parts.append(f"CPU {float(s.cpu_time):.1f}s")
+                if owner is None:
+                    parts.append("외부 세션 · 종료 불가")
+                else:
+                    parts.append(f"작업 {f.code(owner, 64)}")
+                    if not s.can_terminate:
+                        parts.append("권한 없음 · 종료 불가")
+            lines.append("• " + " · ".join(parts))
+            if st == "STALLED" and owner is not None and s.can_terminate:
+                tok = self.db.issue_af3_token("sk", chat_id, user_id, {
+                    "pid": int(s.pid), "ct": float(s.creation_time), "img": s.image_name, "tag": owner})
+                b = af3_button(f"\U0001f6d1 강제 종료 · PID {int(s.pid)}", "sk", tok)
+                if b is not None:
+                    rows.append([b])
+        if len(samples) > MAX_SESSION_ROWS:
+            lines.append(f"+{len(samples) - MAX_SESSION_ROWS} more")
+        rows.append([b for b in (af3_button("\U0001f504 새로고침", "nav", "sess"), self._back_to_hub()) if b])
+        return "\n".join(lines), f.markup(rows)
+
+    def _verify_kill_target(self, payload: dict[str, Any]) -> tuple[ProcessSample, str] | str:
+        """Fresh re-sample: same pid + creation_time + image, still ours, still stalled, terminable."""
+        pid, ct, img, tag = payload.get("pid"), payload.get("ct"), payload.get("img"), payload.get("tag")
+        if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not isinstance(ct, (int, float))
+                or isinstance(ct, bool) or not isinstance(img, str) or img not in SESSION_IMAGE_WHITELIST
+                or not isinstance(tag, str) or not TASK_ID_RE.match(tag)):
+            return "BAD_PAYLOAD"
+        match = None
+        for s in list(self.inspector.snapshot() or []):
+            if (isinstance(s, ProcessSample) and s.pid == pid and s.image_name == img
+                    and s.creation_time is not None and abs(float(s.creation_time) - float(ct)) < 0.01):
+                match = s
+                break
+        if match is None:
+            return "GONE_OR_REUSED"
+        if not match.accessible or not match.can_terminate:
+            return "NOT_PERMITTED"
+        if self._session_owner(match) != tag:
+            return "NOT_OWNED"
+        if self._classify_session(match, self.session_clock()) != "STALLED":
+            return "NOT_STALLED"
+        return match, tag
+
+    def _af3_kill_prompt(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        f = self.fmt
+        payload, _ = self.db.consume_af3_token(token, "sk", chat_id, user_id)
+        target = self._verify_kill_target(payload)
+        if isinstance(target, str):
+            notice = f"⚠️ 종료 대상 재확인 실패 ({f.code(target, 24)}) — 아무것도 종료하지 않았습니다."
+            self._show(chat_id, message_id, *self._sessions_view(chat_id, user_id, notice))
+            return f"callback:af3:kill:refused:{target}"
+        s, owner = target
+        tok = self.db.issue_af3_token("SK", chat_id, user_id, dict(payload))
+        text = "\n".join([
+            "<b>⚠️ 정말 종료할까요?</b>",
+            f"{f.code(f'{s.image_name} (PID {int(s.pid)})', 40)} · 작업 {f.code(owner, 64)}",
+            f"CPU 시간이 {int(self.session_quiet_window)}초 이상 변하지 않았습니다.",
+            "이 프로세스 1개만 종료합니다 (트리 종료 없음). 워커는 이 실행을 비정상 종료로 처리합니다.",
+        ])
+        markup = f.markup([[af3_button("⚠️ 정말 종료할까요?", "SK", tok), af3_button("취소", "nav", "sess")]])
+        return f"callback:af3:kill_prompt:{self._show(chat_id, message_id, text, markup)}"
+
+    def _af3_kill_confirm(self, token: str, chat_id: int, user_id: int, message_id: Any) -> str:
+        f = self.fmt
+        payload, _ = self.db.consume_af3_token(token, "SK", chat_id, user_id)
+        target = self._verify_kill_target(payload)  # re-verified right before TerminateProcess
+        if isinstance(target, str):
+            notice = f"⚠️ 종료 대상 재확인 실패 ({f.code(target, 24)}) — 아무것도 종료하지 않았습니다."
+            self._show(chat_id, message_id, *self._sessions_view(chat_id, user_id, notice))
+            return f"callback:af3:kill:refused:{target}"
+        s, owner = target
+        result = str(self.inspector.terminate(int(s.pid), float(s.creation_time), s.image_name))
+        self.log(f"session kill pid={int(s.pid)} task={owner} result={result[:20]}")
+        self._session_cpu.pop((s.pid, s.creation_time), None)
+        notice = ("\U0001f6d1 종료 완료" if result == "TERMINATED" else f"⚠️ 종료 실패 ({f.code(result, 20)})") \
+            + f" · {f.code(f'{s.image_name} (PID {int(s.pid)})', 40)}"
+        self._show(chat_id, message_id, *self._sessions_view(chat_id, user_id, notice))
+        return f"callback:af3:kill:{result}"
+
 
 # ===================================================================== demo
 class _DemoClock:
@@ -2091,6 +2567,9 @@ def run_demo(out: Callable[[str], None] = print) -> int:
                   [i["status"] for i in db.merge_intents(tid)] == ["COMPLETED"]
                   and not Path(task["worktree_path"]).exists())
             check("replayed merge confirm rejected", press("M", confirm_m) == "callback:rejected:REPLAY")
+            check("/menu renders the button hub", msg("/menu") == "cmd:menu"
+                  and any(b["callback_data"] == "af3|pz|all"
+                          for row in tr.sent[-1]["reply_markup"]["inline_keyboard"] for b in row))
             check("/kill writes STOP.flag", msg("/kill") == "cmd:kill" and bot.stop_flag.exists())
             check("/resume removes STOP.flag", msg("/resume") == "cmd:resume" and not bot.stop_flag.exists())
             for m in tr.sent + tr.edits:

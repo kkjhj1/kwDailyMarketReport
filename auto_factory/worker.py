@@ -50,6 +50,7 @@ from .db import (
     MAIN_FLOW,
     ArtifactIntegrityError,
     CoordinatorDB,
+    CoordinatorError,
     is_transient_db_error,
     read_db_summary_readonly,
     sha256_file,
@@ -93,13 +94,20 @@ QA_NOTIFY_UNAVAILABLE = "⚠️ 지금은 답변 가능한 AI가 없어 질문 �
 QA_NOTIFY_TAMPER = "⚠️ 답변 중 저장소 변경이 감지되어 결과를 폐기했습니다 (TAMPER_DETECTED)."
 QA_NOTIFY_ERROR = "⚠️ 질문 처리 중 내부 오류가 발생했습니다. 잠시 후 다시 질문해 주세요."
 DEFAULT_COOLDOWN = 900.0
-RUNNABLE_STATES = MAIN_FLOW[: MAIN_FLOW.index("WORKTREE_READY") + 1] + ("RETRY_WAIT", "RECOVERY_PENDING")
+# CANCEL_REQUESTED is runnable so an orphaned request (worker died) is still finalized to CANCELLED.
+RUNNABLE_STATES = MAIN_FLOW[: MAIN_FLOW.index("WORKTREE_READY") + 1] + ("RETRY_WAIT", "RECOVERY_PENDING",
+                                                                       "CANCEL_REQUESTED")
 FAILURE_OUTCOMES = frozenset({"BLOCKED", "FAILED", "GUARDRAIL_BLOCKED"})
 SUCCESS_OUTCOMES = frozenset({"AWAITING_MERGE", "SINGLE_PROVIDER_REVIEW_REQUIRED"})
+CANCELLED_ATTEMPT_CODE = "CANCELLED"
 
 
 class StopRequested(Exception):
     pass
+
+
+class CancelRequested(Exception):
+    """Human cancel of THIS task. Never a TIMEOUT/provider failure: no retry, no failover."""
 
 
 _KW_CACHE: dict[Any, bool] = {}
@@ -193,6 +201,8 @@ class PipelineWorker:
         self.lease_keeper_interval = lease_keeper_interval
         self._sink: ProgressSink | None = None
         self._keeper: LeaseKeeper | None = None
+        self._current_task: str | None = None
+        self._cancel_latched = False
         self.progress_errors: list[str] = []
         self.qa_circuit_threshold = qa_circuit_threshold
         self.qa_circuit_cooldown = qa_circuit_cooldown
@@ -256,8 +266,72 @@ class PipelineWorker:
 
     def _check_stop(self) -> None:
         self._check_lease()
+        self._check_cancel()
         if self.stop_requested():
             raise StopRequested(str(self.stop_flag))
+
+    # ------------------------------------------------------------- cancel
+    def _cancel_seen(self) -> bool:
+        """In-memory only (polled by JobRunner every tick): latch, keeper or sink signal."""
+        if self._cancel_latched:
+            return True
+        for src in (self._keeper, self._sink):
+            probe = getattr(src, "is_cancel_requested", None) if src is not None else None
+            if probe is not None:
+                try:
+                    if probe():
+                        self._cancel_latched = True
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    def _child_stop(self) -> bool:
+        """`stop_check` for provider runs: STOP.flag or a latched human cancel."""
+        return self._cancel_seen() or self.stop_requested()
+
+    def _check_cancel(self) -> None:
+        """Raise CancelRequested if this task was asked to stop (in-memory latch or a DB read)."""
+        tid = self._current_task
+        if tid is None:
+            return
+        if not self._cancel_seen():
+            if self.db.get_task(tid)["state"] != "CANCEL_REQUESTED":
+                return
+            self._cancel_latched = True
+        raise CancelRequested(tid)
+
+    def _abort_if_cancelled(self, attempt_id: int | None) -> None:
+        """Right after a provider/gate run: a cancelled run is recorded as CANCELLED (never TIMEOUT)."""
+        if self._current_task is None:
+            return
+        if not self._cancel_seen() and self.db.get_task(self._current_task)["state"] != "CANCEL_REQUESTED":
+            return
+        self._cancel_latched = True
+        if attempt_id is not None:
+            self.db.finish_attempt(attempt_id, failure_code=CANCELLED_ATTEMPT_CODE)
+        raise CancelRequested(self._current_task)
+
+    def _finalize_cancel(self, task_id: str) -> str:
+        """Holding the lease: preserve any partial work as a WIP commit, then CANCEL_REQUESTED -> CANCELLED."""
+        task = self.db.get_task(task_id)
+        if task["state"] != "CANCEL_REQUESTED":
+            return task["state"]  # nothing to finalize (already terminal / moved by a human)
+        fields: dict[str, Any] = {}
+        note = ""
+        wt = task.get("worktree_path")
+        try:
+            if wt and Path(wt).is_dir() and self.wtm.is_dirty(wt):
+                fields["checkpoint_sha"] = self.wtm.commit_wip_checkpoint(wt, f"{task_id} cancelled (partial work kept)")
+                note = f"; WIP {fields['checkpoint_sha'][:12]} kept"
+        except Exception as exc:  # never lose the cancel because of a WIP commit problem
+            note = f"; WIP commit failed ({type(exc).__name__}), worktree kept"
+        try:
+            self.db.transition(task_id, task["state_version"], "CANCELLED", self.actor,
+                               f"cancelled on human request (no retry/failover){note}"[:500], fields)
+        except CoordinatorError:  # CAS lost to a concurrent human action: report what is there now
+            return self.db.get_task(task_id)["state"]
+        return "CANCELLED"
 
     # ------------------------------------------------------- live progress
     def _lease_is_lost(self) -> bool:
@@ -284,13 +358,15 @@ class PipelineWorker:
             except Exception as exc:
                 self.progress_errors.append(f"keeper: {type(exc).__name__}")
         sink: ProgressSink
+        cancel_signal = keeper.is_cancel_requested if keeper else None
         try:
             sink = LiveProgressSink(self.artifacts_dir, task_id, clock=self.db.clock,
-                                    lease_signal=keeper.is_lease_lost if keeper else None)
+                                    lease_signal=keeper.is_lease_lost if keeper else None,
+                                    cancel_signal=cancel_signal)
             sink.begin_run(self.db.get_task(task_id)["state"])
-        except Exception as exc:  # monitoring is optional; the lease signal is not
+        except Exception as exc:  # monitoring is optional; the lease/cancel signals are not
             self.progress_errors.append(f"sink: {type(exc).__name__}")
-            sink = ProgressSink(lease_signal=keeper.is_lease_lost if keeper else None)
+            sink = ProgressSink(lease_signal=keeper.is_lease_lost if keeper else None, cancel_signal=cancel_signal)
         if keeper is not None:
             keeper.sink = sink
             keeper.start()
@@ -522,6 +598,7 @@ class PipelineWorker:
             attempt_id = self.db.add_attempt(tid, provider, "auditor", sha256_text(text))
             self._progress_stage("audit", provider, "auditor", attempt_id)
             result, problem = self._audit_in_clone(task, provider, contract, cpath)
+            self._abort_if_cancelled(attempt_id)  # a cancelled audit never falls back to the next auditor
             code = problem.split(":", 1)[0] if problem else (result.code.value if result else "NO_RESULT")
             self.db.finish_attempt(attempt_id, failure_code=code,
                                    output_digest=sha256_text(result.stdout) if result else None)
@@ -579,7 +656,7 @@ class PipelineWorker:
                 consumed = self.units
                 result = call_with_progress(
                     self.adapters[provider].invoke, contract, str(clone), "auditor", str(cpath),
-                    self.stop_requested, progress_sink=self._sink,
+                    self._child_stop, progress_sink=self._sink,
                 )
                 self._check_lease(active=True)
                 if self.wtm.clone_snapshot(clone) != clone_before:
@@ -660,10 +737,11 @@ class PipelineWorker:
             self._progress_stage("implement", writer, "writer", attempt_id)
             try:
                 result = call_with_progress(self.adapters[writer].invoke, contract, wt, "writer", str(cpath),
-                                            self.stop_requested, progress_sink=self._sink)
+                                            self._child_stop, progress_sink=self._sink)
             finally:
                 self.db.settle(writer, self.units, self.units)
             self._check_lease(active=True)  # lost lease: abort before touching attempt/task rows
+            self._abort_if_cancelled(attempt_id)  # cancel: CANCELLED attempt, no failover, no checkpoint step
             self.db.finish_attempt(
                 attempt_id, failure_code=result.code.value, output_digest=sha256_text(result.stdout)
             )
@@ -713,18 +791,21 @@ class PipelineWorker:
         self._progress_stage("py_compile", "deterministic", "verify")
         results = [call_with_progress(self.gates.py_compile, wt, py_files, progress_sink=self._sink)]
         self._check_lease(active=True)
+        self._abort_if_cancelled(None)  # a gate killed by cancel is never a RETRY_WAIT/self-heal signal
         targets = task["acceptance_spec"].get("pytest", [])
         if results[-1].ok and targets:
             self._check_stop()
             self._progress_stage("pytest", "deterministic", "verify")
             results.append(call_with_progress(self.gates.pytest, wt, targets, progress_sink=self._sink))
             self._check_lease(active=True)
+            self._abort_if_cancelled(None)
         if results[-1].ok and self.holdout_dir:
             self._check_stop()
             self._progress_stage("holdout", "deterministic", "verify", redaction="holdout")
             results.append(call_with_progress(self.gates.holdout, wt, str(self.holdout_dir),
                                               progress_sink=self._sink))
             self._check_lease(active=True)
+            self._abort_if_cancelled(None)
             self._progress_stage("verify_done", "deterministic", "verify")
         report = [{"gate": r.name, "ok": r.ok, "rc": r.returncode, "hash": r.traceback_hash} for r in results]
         self._save_artifact(task["id"], "gates", f"gates-v{task['state_version']}.json", json.dumps(report), "deterministic")
@@ -788,10 +869,11 @@ class PipelineWorker:
             self._progress_stage("review", reviewer, "reviewer", attempt_id)
             try:
                 result = call_with_progress(self.adapters[reviewer].invoke, contract, wt, "reviewer", str(cpath),
-                                            self.stop_requested, progress_sink=self._sink)
+                                            self._child_stop, progress_sink=self._sink)
             finally:
                 self.db.settle(reviewer, self.units, self.units)
             self._check_lease(active=True)
+            self._abort_if_cancelled(attempt_id)
             self.db.finish_attempt(attempt_id, failure_code=result.code.value, output_digest=sha256_text(result.stdout))
             self._check_stop()
             task = self.db.get_task(task["id"])
@@ -887,10 +969,11 @@ class PipelineWorker:
         lease_expires = self.db.clock() + self.lease_ttl
         if not self.db.acquire_lease(task_id, self.nonce, self.pid, self.proc_start, self.lease_ttl):
             return "LEASED_ELSEWHERE"
+        self._current_task, self._cancel_latched = task_id, False
         try:
             self._start_progress(task_id, lease_expires)
             while True:
-                self._check_stop()
+                self._check_stop()  # includes the CANCEL_REQUESTED check
                 task = self.db.get_task(task_id)
                 self._progress_state(task["state"])
                 handler = self._handlers.get(task["state"])
@@ -902,6 +985,10 @@ class PipelineWorker:
         except LeaseLostError:
             # Split-brain guard: we no longer own this task, so we never transition or block it.
             return "LEASE_LOST"
+        except CancelRequested:
+            if self._lease_is_lost():
+                return "LEASE_LOST"  # never finalize a task we no longer own
+            return self._finalize_cancel(task_id)  # still holding the lease (released in finally)
         except StopRequested:
             raise
         except Exception as exc:  # fail closed: park the task for a human
@@ -910,11 +997,15 @@ class PipelineWorker:
             if self._lease_is_lost():
                 return "LEASE_LOST"  # never mutate a task we no longer own
             task = self.db.get_task(task_id)
+            if task["state"] == "CANCEL_REQUESTED":
+                # e.g. our CAS lost the race against the human cancel: honour the cancel, never BLOCK it.
+                return self._finalize_cancel(task_id)
             reason = f"EXCEPTION {type(exc).__name__}: {exc}"[:500]
             if task["state"] not in ("BLOCKED", "FAILED", "DISCARDED", "CANCELLED", "MERGED"):
                 self.db.transition(task_id, task["state_version"], "BLOCKED", self.actor, reason, {"last_error": reason})
             return "BLOCKED"
         finally:
+            self._current_task = None
             self._stop_progress(task_id)  # final sidecar flush BEFORE the lease is released
             try:
                 self.db.release_lease(task_id, self.nonce)

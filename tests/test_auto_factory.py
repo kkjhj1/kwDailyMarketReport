@@ -164,7 +164,7 @@ class TestCoordinatorDB:
         assert len(MAIN_FLOW) == 14
         assert set(EXCEPTION_STATES) == {
             "RETRY_WAIT", "RECOVERY_PENDING", "BLOCKED", "FAILED", "DISCARDED", "CANCELLED",
-            "GUARDRAIL_BLOCKED", "SINGLE_PROVIDER_REVIEW_REQUIRED",
+            "GUARDRAIL_BLOCKED", "SINGLE_PROVIDER_REVIEW_REQUIRED", "CANCEL_REQUESTED",
         }
 
     def test_cas_transition_writes_event_atomically(self, db):
@@ -4838,7 +4838,7 @@ class TestDevBotLive:
         _implementing(db, tid)
         before = _tg_action_count(db)
         assert bot.handle_update(upd_msg(f"/status {tid}")) == "cmd:status:task"
-        assert tr.buttons() == {"v": tid, "l": tid} and _tg_action_count(db) == before
+        assert tr.buttons() == {"v": tid, "l": tid, "tc": tid} and _tg_action_count(db) == before
         text = tr.sent[-1]["text"]
         for needle in ("Stage:", "09/14 IMPLEMENTING", "Liveness:", "Elapsed:", "Attempt:", "hb_age", "output_age"):
             assert needle in text
@@ -4854,7 +4854,7 @@ class TestDevBotLive:
         _implementing(db, tid)
         before, ver = _tg_action_count(db), db.get_task(tid)["state_version"]
         assert bot.handle_update(upd_msg(f"/live {tid}")) == "cmd:live"
-        assert tr.buttons() == {"v": tid, "l": tid} and _tg_action_count(db) == before
+        assert tr.buttons() == {"v": tid, "l": tid, "tc": tid} and _tg_action_count(db) == before
         assert db.get_task(tid)["state_version"] == ver and "09/14 IMPLEMENTING" in tr.sent[-1]["text"]
         assert bot.handle_update(upd_msg("/live ../etc")) == "cmd:live:bad-id"
         assert bot.handle_update(upd_msg("/live tnope")) == "cmd:live:unknown"
@@ -4917,7 +4917,8 @@ class TestDevBotLive:
         tr.answer_callback_query, tr.edit_message_text = answer, edit
         assert bot.handle_update(upd_cb("v", tid, message_id=55)) == "callback:live:edited"
         assert order == ["answer", "edit"] and tr.edits[-1]["message_id"] == 55
-        assert "09/14 IMPLEMENTING" in tr.edits[-1]["text"] and tr.buttons(source="edits") == {"v": tid, "l": tid}
+        assert "09/14 IMPLEMENTING" in tr.edits[-1]["text"]
+        assert tr.buttons(source="edits") == {"v": tid, "l": tid, "tc": tid}
         assert bot.handle_update(upd_cb("l", tid, message_id=55)) == "callback:logs:edited"
         assert "event=start step=implement" in tr.edits[-1]["text"]
         tr.edit_script = [TgRejected("HTTP 400: Bad Request: message is not modified")]
@@ -5000,3 +5001,497 @@ class TestStatusCliLive:
         lines.clear()
         assert worker_mod.print_status_readonly(dbp, lines.append, logs_task=tid) == 0
         assert lines[-1] == "live log unavailable"
+
+
+# ######################################################################## BUTTON-FIRST UI (af3)
+from auto_factory.adapters import AdapterResult as _AdapterResult
+from auto_factory.db import TRANSITIONS as _TRANSITIONS
+from auto_factory.db import cancel_requested_nowait
+from auto_factory.dev_bot import AF3_CALLBACK_RE, CALLBACK_RE, af3_button, status_badge
+from auto_factory.win_job import ProcessInspector, ProcessSample, terminate_verified
+
+
+def upd_raw(data, frm=ADMIN, chat=ADMIN, message_id=7):
+    _UPD[0] += 1
+    return {"update_id": _UPD[0], "callback_query": {
+        "id": f"cq{_UPD[0]}", "from": {"id": frm}, "data": data,
+        "message": {"message_id": message_id, "chat": {"id": chat}}}}
+
+
+def _cbs(msg) -> list[str]:
+    return [b["callback_data"] for row in (msg.get("reply_markup") or {}).get("inline_keyboard", []) for b in row]
+
+
+def _af3_tok(msg, op) -> str:
+    hits = [d.split("|")[2] for d in _cbs(msg) if d.startswith(f"af3|{op}|")]
+    assert hits, (op, _cbs(msg))
+    return hits[0]
+
+
+def _af3_used(db, token):
+    return db._query("SELECT used_at FROM af3_actions WHERE token=?", (token,))[0]["used_at"]
+
+
+def _all_html_ok(tr):
+    for m in tr.sent + tr.edits:
+        assert SafeHtmlFormatter().finalize(m["text"]) == m["text"]
+        assert SafeHtmlFormatter.visible_len(m["text"]) <= 1800 and len(m["text"]) <= 3500
+        for d in _cbs(m):
+            assert len(d.encode("ascii")) <= 64
+
+
+class TestAf3Protocol:
+    def test_af2_regexes_untouched_and_af3_grammar(self):
+        assert CALLBACK_RE.pattern == r"^af2\|([scdrRmMxXpqez])\|([A-Za-z0-9_-]{22})$"
+        assert STATELESS_TASK_CB_RE.pattern == r"^af2\|([vl])\|([A-Za-z0-9][A-Za-z0-9._-]{0,57})$"
+        assert AF3_CALLBACK_RE.pattern == r"^af3\|([A-Za-z0-9_]{1,8})\|([A-Za-z0-9_-]{1,48})$"
+        assert validate_callback_data("af3|nav|hub") and validate_callback_data("af3|TC|" + "A" * 22)
+        for bad in ("af3|nav|", "af3||hub", "af3|toolong12|x", "af3|nav|a.b", "af3|nav|" + "a" * 49, "af3|n v|x"):
+            with pytest.raises(ValueError):
+                validate_callback_data(bad)
+        assert af3_button("x", "tc", "t.dotted") is None and af3_button("x", "tc", "t" * 49) is None
+
+    def test_af3_token_single_use_identity_expiry(self, tmp_path):
+        clock = Clock()
+        d = CoordinatorDB(tmp_path / "a.db", clock=clock)
+        try:
+            tok = d.issue_af3_token("PZ", ADMIN, ADMIN, {"action": "pause"}, ttl=60)
+            assert len(tok) == 22 and AF3_CALLBACK_RE.match(f"af3|PZ|{tok}")
+            for args, code in (((tok, "RS", ADMIN, ADMIN), "OP_MISMATCH"), ((tok, "PZ", ADMIN, OTHER), "IDENTITY_MISMATCH"),
+                               (("nope", "PZ", ADMIN, ADMIN), "UNKNOWN_TOKEN")):
+                with pytest.raises(ActionRejected) as ei:
+                    d.consume_af3_token(*args)
+                assert ei.value.code == code
+            assert _af3_used(d, tok) is None
+
+            def boom(c, payload):
+                raise ActionRejected("STALE")
+
+            with pytest.raises(ActionRejected):
+                d.consume_af3_token(tok, "PZ", ADMIN, ADMIN, boom)
+            assert _af3_used(d, tok) is None  # effect failure rolls the consume back
+            assert d.consume_af3_token(tok, "PZ", ADMIN, ADMIN)[0] == {"action": "pause"}
+            with pytest.raises(ActionRejected) as ei:
+                d.consume_af3_token(tok, "PZ", ADMIN, ADMIN)
+            assert ei.value.code == "REPLAY"
+            late = d.issue_af3_token("RS", ADMIN, ADMIN, ttl=60)
+            clock.t += 61
+            with pytest.raises(ActionRejected) as ei:
+                d.consume_af3_token(late, "RS", ADMIN, ADMIN)
+            assert ei.value.code == "EXPIRED"
+            with pytest.raises(ValueError):
+                d.issue_af3_token("bad|op", ADMIN, ADMIN)
+        finally:
+            d.close()
+
+
+class TestMainHub:
+    def test_start_and_menu_render_hub(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        for cmd in ("/start", "/menu"):
+            assert bot.handle_update(upd_msg(cmd)) == "cmd:menu"
+            kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
+            assert [b["callback_data"] for b in kb[0]] == ["af3|nav|tasks", "af3|nav|sess"]
+            assert [b["callback_data"] for b in kb[1]] == ["af3|nav|bots", "af3|pz|all", "af3|nav|help"]
+            assert "⏸️ 전체 일시정지" in [b["text"] for b in kb[1]]
+        assert bot.handle_update(upd_msg("/help")) == "cmd:help" and tr.sent[-1]["text"] == dev_bot_mod.HELP_TEXT
+        h = dev_bot_mod.HELP_TEXT
+        assert len(h) < 800 and "/menu" in h and "/sessions" in h
+        _all_html_ok(tr)
+
+    def test_two_step_pause_and_resume(self, tmp_path, repo, db):
+        wakes = []
+        bot, tr = make_bot(tmp_path, repo, db, on_wake=lambda: wakes.append(1))
+        bot.handle_update(upd_msg("/menu"))
+        assert bot.handle_update(upd_raw("af3|pz|all", message_id=77)) == "callback:af3:pause_prompt:edited"
+        assert not bot.stop_flag.exists()  # step 1 never writes STOP.flag
+        prompt = tr.edits[-1]
+        assert prompt["message_id"] == 77 and "af3|nav|hub" in _cbs(prompt)
+        assert "⚠️ 정말 일시정지할까요?" in [b["text"] for row in prompt["reply_markup"]["inline_keyboard"] for b in row]
+        pz = _af3_tok(prompt, "PZ")
+        assert bot.handle_update(upd_raw(f"af3|PZ|{pz}", message_id=77)) == "callback:af3:paused"
+        assert bot.stop_flag.exists()
+        hub = tr.edits[-1]
+        assert "개발봇 일시정지됨" in hub["text"] and hub["reply_markup"]["inline_keyboard"][0][0]["text"] == "▶️ 지금 재개하기"
+        assert "af3|pz|all" not in _cbs(hub)
+        assert bot.handle_update(upd_raw(f"af3|PZ|{pz}")) == "callback:af3:rejected:REPLAY"
+        rs = _af3_tok(hub, "RS")
+        assert bot.handle_update(upd_raw(f"af3|RS|{rs}", message_id=77)) == "callback:af3:resumed"
+        assert not bot.stop_flag.exists() and wakes == [1]
+        assert "개발봇 일시정지됨" not in tr.edits[-1]["text"]
+        _all_html_ok(tr)
+
+    def test_status_banner_one_click_resume(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        assert bot.handle_update(upd_msg("/kill")) == "cmd:kill"
+        assert bot.handle_update(upd_msg("/status")) == "cmd:status"
+        msg = tr.sent[-1]
+        assert msg["text"].startswith("⏸️ <b>개발봇 일시정지됨</b>") and "STOP.flag: <b>ON</b>" in msg["text"]
+        assert msg["reply_markup"]["inline_keyboard"][0][0]["text"] == "▶️ 지금 재개하기"
+        assert bot.handle_update(upd_raw(f"af3|RS|{_af3_tok(msg, 'RS')}")) == "callback:af3:resumed"
+        assert not bot.stop_flag.exists()
+        bot.handle_update(upd_msg("/status"))
+        assert tr.sent[-1]["reply_markup"] is None and "개발봇 일시정지됨" not in tr.sent[-1]["text"]
+
+    def test_af3_ack_first_unauthorized_and_ack_failure(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tok = db.issue_af3_token("PZ", ADMIN, ADMIN, {"action": "pause"})
+        assert bot.handle_update(upd_raw(f"af3|PZ|{tok}", frm=OTHER)) == "ignored:unauthorized"
+        assert bot.handle_update(upd_raw(f"af3|PZ|{tok}", chat=OTHER)) == "ignored:unauthorized"
+        assert tr.answers == [] and tr.edits == [] and not bot.stop_flag.exists()
+        tr.answer_script = [False]
+        assert bot.handle_update(upd_raw(f"af3|PZ|{tok}")) == "callback:answer_failed"
+        tr.answer_script = [TgUnknown("timeout")]
+        assert bot.handle_update(upd_raw(f"af3|PZ|{tok}")) == "callback:answer_failed"
+        assert not bot.stop_flag.exists() and _af3_used(db, tok) is None and tr.edits == []
+        order = []
+        real_answer = tr.answer_callback_query
+        bot.limiter.wait = lambda chat=None: order.append(("wait", chat)) or 0.0
+        tr.answer_callback_query = lambda *a, **k: order.append("answer") or real_answer(*a, **k)
+        assert bot.handle_update(upd_raw(f"af3|PZ|{tok}")) == "callback:af3:paused"
+        assert order[0] == "answer" and ("wait", None) not in order  # af3 ACK never waits on the limiter
+        forged = db.issue_af3_token("RS", ADMIN, OTHER)
+        assert bot.handle_update(upd_raw(f"af3|RS|{forged}")) == "callback:af3:rejected:IDENTITY_MISMATCH"
+        assert bot.stop_flag.exists()
+        assert bot.handle_update(upd_raw("af3|RS|" + "A" * 22)) == "callback:af3:rejected:UNKNOWN_TOKEN"
+        assert bot.handle_update(upd_raw("af3|nav|nowhere")) == "callback:malformed"
+        assert bot.handle_update(upd_raw("af3|zz|x")) == "callback:malformed"
+
+    def test_nav_views_edit_in_place(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db, process_inspector=_FakeInspector([]), session_sleep=lambda s: None)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        assert bot.handle_update(upd_raw("af3|nav|tasks", message_id=9)) == "callback:af3:tasks:edited"
+        view = tr.edits[-1]
+        assert tid in view["text"] and f"af2|v|{tid}" in _cbs(view) and "af3|nav|hub" in _cbs(view)
+        assert bot.handle_update(upd_raw(f"af2|v|{tid}", message_id=9)) == "callback:live:edited"
+        assert f"af3|tc|{tid}" in _cbs(tr.edits[-1])
+        assert bot.handle_update(upd_raw("af3|nav|help", message_id=9)) == "callback:af3:help:edited"
+        assert tr.edits[-1]["text"] == dev_bot_mod.HELP_TEXT
+        assert bot.handle_update(upd_raw("af3|nav|sess", message_id=9)) == "callback:af3:sessions:edited"
+        assert bot.handle_update(upd_raw("af3|nav|hub", message_id=9)) == "callback:af3:hub:edited"
+        assert bot.handle_update(upd_raw("af3|nav|bots")) == "callback:af3:bots"
+        _all_html_ok(tr)
+
+
+class TestStatusBadges:
+    def test_badge_translation(self):
+        assert status_badge("CANCELLED", "FAILED")[:2] == ("⚪", "취소됨")
+        assert status_badge("FAILED", "FAILED")[:2] == ("❌", "실패")
+        assert status_badge("MERGED", "DONE")[:2] == ("✅", "완료")
+        assert status_badge("CANCEL_REQUESTED", "ACTIVE")[:2] == ("⛔", "중지 요청됨")
+        assert status_badge("IMPLEMENTING", "ACTIVE")[:2] == ("\U0001f7e2", "작업 중")
+        assert status_badge("IMPLEMENTING", "QUIET")[:2] == ("\U0001f7e1", "응답 대기 중")
+        assert status_badge("VERIFYING", "STALLED")[:2] == ("\U0001f534", "멈춤 의심")
+        assert status_badge("AWAITING_START_AUTH", "WAITING_HUMAN")[:2] == ("\U0001f7e3", "승인 대기")
+        assert status_badge("RECEIVED", "QUEUED")[1] == "대기열"
+        for state in ("CANCELLED", "FAILED", "IMPLEMENTING", "AWAITING_MERGE"):
+            assert status_badge(state)[2]  # always a one-line explanation
+
+    def test_cancelled_is_not_rendered_as_failure(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _advance(db, tid, ["CANCELLED"])
+        bot.handle_update(upd_msg(f"/status {tid}"))
+        text = tr.sent[-1]["text"]
+        assert "⚪ <b>취소됨</b>" in text and "❌" not in text and "실패 아님" in text
+        assert "af3|tc|" not in "".join(_cbs(tr.sent[-1]))
+        tid2 = submit(db, request="other", start=False)
+        _advance(db, tid2, ["FAILED"])
+        bot.handle_update(upd_msg(f"/live {tid2}"))
+        assert "❌ <b>실패</b>" in tr.sent[-1]["text"] and "취소됨" not in tr.sent[-1]["text"]
+
+    def test_live_card_badges_and_gated_buttons_unchanged(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        bot.handle_update(upd_msg(f"/live {tid}"))
+        msg = tr.sent[-1]
+        assert "\U0001f534 <b>멈춤 의심</b>" in msg["text"] and "단계: 코드 작성" in msg["text"]
+        assert _cbs(msg) == [f"af2|v|{tid}", f"af2|l|{tid}", f"af3|tc|{tid}"]
+        assert "\U0001f6d1 이 작업 중지" in msg["reply_markup"]["inline_keyboard"][1][0]["text"]
+        bot.handle_update(upd_msg("/status"))
+        assert "\U0001f534 멈춤 의심" in tr.sent[-1]["text"]
+        # human-gated cards keep exactly their af2 workflow buttons (no 🛑 row; run_demo checks SPRR {d, r, x})
+        sp = submit(db, request="gated", start=False)
+        _fake_awaiting_merge(db, sp)
+        bot.handle_update(upd_msg(f"/status {sp}"))
+        assert all(d.startswith("af2|") for d in _cbs(tr.sent[-1])) and set(tr.buttons()) == {"m", "x"}
+        _all_html_ok(tr)
+
+
+class TestTaskCancel:
+    def test_fsm_edges(self):
+        assert _TRANSITIONS["CANCEL_REQUESTED"] == frozenset({"CANCELLED", "FAILED", "BLOCKED"})
+        for s in ("RECEIVED", "PLANNING", "AWAITING_START_AUTH", "WORKTREE_READY", "IMPLEMENTING", "CHECKPOINTED",
+                  "VERIFYING", "REVIEWING", "RETRY_WAIT", "RECOVERY_PENDING", "BLOCKED", "GUARDRAIL_BLOCKED",
+                  "SINGLE_PROVIDER_REVIEW_REQUIRED", "AWAITING_MERGE"):
+            assert "CANCEL_REQUESTED" in _TRANSITIONS[s], s
+        for s in ("MERGED", "FAILED", "DISCARDED", "CANCELLED"):
+            assert "CANCEL_REQUESTED" not in _TRANSITIONS[s]
+
+    def _prompt(self, bot, tr, tid):
+        assert bot.handle_update(upd_raw(f"af3|tc|{tid}", message_id=5)) == "callback:af3:cancel_prompt:edited"
+        prompt = tr.edits[-1]
+        assert "⚠️ 정말 이 작업을 중지할까요?" in [b["text"] for r in prompt["reply_markup"]["inline_keyboard"] for b in r]
+        assert f"af2|v|{tid}" in _cbs(prompt)  # [취소] goes back to the live card
+        return _af3_tok(prompt, "TC")
+
+    def test_parked_task_cancels_directly_and_replay_rejected(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _to_state(db, tid, "AWAITING_START_AUTH")
+        v = db.get_task(tid)["state_version"]
+        tok = self._prompt(bot, tr, tid)
+        assert db.get_task(tid)["state_version"] == v  # step 1 never mutates the task
+        assert bot.handle_update(upd_raw(f"af3|TC|{tok}", message_id=5)) == "callback:af3:cancelled"
+        assert db.get_task(tid)["state"] == "CANCELLED" and "취소됨" in tr.edits[-1]["text"]
+        assert bot.handle_update(upd_raw(f"af3|TC|{tok}")) == "callback:af3:rejected:REPLAY"
+        assert bot.handle_update(upd_raw(f"af3|tc|{tid}")) == "callback:af3:cancel:not_cancellable"
+
+    def test_active_or_leased_task_only_requests_cancel(self, tmp_path, repo, db):
+        wakes = []
+        bot, tr = make_bot(tmp_path, repo, db, on_wake=lambda: wakes.append(1))
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        tok = self._prompt(bot, tr, tid)
+        assert bot.handle_update(upd_raw(f"af3|TC|{tok}")) == "callback:af3:cancel_requested"
+        assert db.get_task(tid)["state"] == "CANCEL_REQUESTED" and wakes == [1]
+        assert f"af3|tc|{tid}" not in _cbs(tr.edits[-1]) and "⛔" in tr.edits[-1]["text"]
+        # a parked state whose lease is held: CANCEL_REQUESTED only, the lease row is never touched
+        tid2 = submit(db, request="leased", start=False)
+        _to_state(db, tid2, "AWAITING_START_AUTH")
+        assert db.acquire_lease(tid2, "worker-nonce", 1, 1.0, ttl=600)
+        tok2 = self._prompt(bot, tr, tid2)
+        assert bot.handle_update(upd_raw(f"af3|TC|{tok2}")) == "callback:af3:cancel_requested"
+        assert db.get_task(tid2)["state"] == "CANCEL_REQUESTED"
+        assert db.get_lease(tid2)["owner_nonce"] == "worker-nonce"
+
+    def test_stale_confirm_rolls_back(self, tmp_path, repo, db):
+        bot, tr = make_bot(tmp_path, repo, db)
+        tid = submit(db, start=False)
+        _to_state(db, tid, "AWAITING_START_AUTH")
+        tok = self._prompt(bot, tr, tid)
+        db.add_approval(tid, "start")
+        _advance(db, tid, ["WORKTREE_READY"])  # the task moved after the prompt was shown
+        assert bot.handle_update(upd_raw(f"af3|TC|{tok}")) == "callback:af3:rejected:STALE"
+        assert db.get_task(tid)["state"] == "WORKTREE_READY" and _af3_used(db, tok) is None
+
+    def test_worker_finalizes_active_cancel_without_failover(self, tmp_path, repo, db):
+        tid = submit(db)
+
+        def cancelled_mid_run(wt, contract, role):
+            Path(wt, "calc.py").write_text("def add(a, b):\n    return a + b  # partial\n", encoding="utf-8")
+            t = db.get_task(tid)
+            db.transition(tid, t["state_version"], "CANCEL_REQUESTED", "human:tg:1", "cancel via test")
+            return _AdapterResult("claude", role, FailureCode.TIMEOUT, stderr="killed")  # looks like a timeout
+
+        w = make_worker(tmp_path, repo, db, claude=[cancelled_mid_run])
+        assert w.process_task(tid) == "CANCELLED"
+        task = db.get_task(tid)
+        assert task["state"] == "CANCELLED" and task["last_error"] is None and task["checkpoint_sha"]
+        assert w.adapters["codex"].calls == [] and w.adapters["gemini"].calls == []  # no failover
+        writer = db.attempts(tid, "writer")
+        assert len(writer) == 1 and writer[0]["failure_code"] == "CANCELLED"  # never recorded as TIMEOUT
+        assert db.attempts(tid, "verify") == [] and db.attempts(tid, "reviewer") == []
+        assert [e["to_state"] for e in db.events(tid)][-2:] == ["CANCEL_REQUESTED", "CANCELLED"]
+        assert db.get_lease(tid) is None
+        show = subprocess.run(["git", "show", task["checkpoint_sha"], "--", "calc.py"], cwd=task["worktree_path"],
+                              capture_output=True, text=True, env=build_sandbox_env())
+        assert "# partial" in show.stdout  # partial work preserved as a WIP commit
+        assert not db.circuit_is_open(CIRCUIT)
+
+    def test_cancel_racing_a_successful_writer_wins(self, tmp_path, repo, db):
+        tid = submit(db)
+
+        def ok_then_cancel(wt, contract, role):
+            Path(wt, "calc.py").write_text(FIX, encoding="utf-8")
+            t = db.get_task(tid)
+            db.transition(tid, t["state_version"], "CANCEL_REQUESTED", "human:tg:1")
+
+        w = make_worker(tmp_path, repo, db, claude=[ok_then_cancel])
+        assert w.process_task(tid) == "CANCELLED"
+        assert "CHECKPOINTED" not in [e["to_state"] for e in db.events(tid)]
+
+    def test_orphaned_cancel_request_is_finalized(self, tmp_path, repo, db):
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        t = db.get_task(tid)
+        db.transition(tid, t["state_version"], "CANCEL_REQUESTED", "human:tg:1")
+        w = make_worker(tmp_path, repo, db)
+        assert tid in [x["id"] for x in w._runnable()]
+        summary = w.run_cycle()
+        assert (tid, "CANCELLED") in summary["processed"] and db.get_task(tid)["state"] == "CANCELLED"
+        assert w.adapters["claude"].calls == []
+
+    def test_job_runner_cancel_kind(self):
+        res = JobRunner(poll_interval=0.02).run(_py("import time; time.sleep(60)"), wall_timeout=60, idle_timeout=60,
+                                                progress_sink=ProgressSink(cancel_signal=lambda: True))
+        assert res.timeout_kind == "cancel" and res.duration < 20
+
+    def test_lease_keeper_latches_cancel(self, tmp_path):
+        clock = Clock(1_000_000.0)
+        d = CoordinatorDB(tmp_path / "lk.db", clock=clock)
+        try:
+            tid, _ = d.create_task("r", "L1", ["calc.py"], {})
+            assert d.acquire_lease(tid, "owner-nonce", os.getpid(), process_start_time(os.getpid()), ttl=60)
+            sink = LiveProgressSink(tmp_path / "artifacts", tid, clock=clock)
+            sink.begin_run("RECEIVED")
+            k = LeaseKeeper(d.path, tid, "owner-nonce", 60.0, clock=clock, sink=sink)
+            assert k.tick() is True and not k.is_cancel_requested() and not sink.is_cancel_requested()
+            d.transition(tid, 0, "CANCEL_REQUESTED", "human:tg:1")
+            assert cancel_requested_nowait(d.path, tid) is True
+            assert k.tick() is True and k.is_cancel_requested() and sink.is_cancel_requested()
+            assert not k.is_lease_lost() and d.get_lease(tid)["owner_nonce"] == "owner-nonce"
+            assert any("event=CANCEL_REQUESTED" in ln for ln in read_live_log_tail(tmp_path / "artifacts", tid, 20))
+        finally:
+            d.close()
+        missing = tmp_path / "nope" / "c.db"
+        with pytest.raises(_sqlite3.OperationalError):
+            cancel_requested_nowait(missing, "t1")
+        assert not missing.exists()
+
+
+# --------------------------------------------------------------------- sessions
+class _FakeInspector:
+    def __init__(self, procs):
+        self.procs = list(procs)
+        self.killed: list[tuple] = []
+        self.result = "TERMINATED"
+
+    def snapshot(self):
+        return list(self.procs)
+
+    def terminate(self, pid, creation_time, image_name):
+        self.killed.append((pid, creation_time, image_name))
+        return self.result
+
+
+def _proc(pid, img="codex.exe", ct=1234.5, cpu=1.0, accessible=True, can_terminate=True, ancestry=()):
+    return ProcessSample(pid, img, ct if accessible else None, cpu if accessible else None, accessible,
+                         can_terminate, tuple(ancestry))
+
+
+class TestSessions:
+    def _setup(self, tmp_path, repo, db, procs, recorded_pid=5000, recorded_ct=1234.5):
+        now = [100.0]
+        insp = _FakeInspector(procs)
+        sleeps = []
+
+        def sleep(s):
+            sleeps.append(s)
+            now[0] += s
+
+        bot, tr = make_bot(tmp_path, repo, db, process_inspector=insp, session_clock=lambda: now[0],
+                           session_sleep=sleep, session_quiet_window=120.0)
+        tid = submit(db, start=False)
+        _implementing(db, tid)
+        assert db.acquire_lease(tid, "worker-nonce", 4242, 1.0, ttl=3600)
+        sink = LiveProgressSink(tmp_path / "artifacts", tid, clock=db.clock)
+        sink.begin_run("IMPLEMENTING")
+        sink.start(recorded_pid, recorded_ct, "implement", "codex", "writer")
+        return bot, tr, insp, now, sleeps, tid
+
+    def test_whitelist_classification_and_readonly(self, tmp_path, repo, db):
+        procs = [_proc(5000), _proc(7000, "claude.exe", ct=50.0), _proc(8000, "claude.exe", accessible=False),
+                 _proc(9000, "node.exe")]
+        bot, tr, insp, now, sleeps, tid = self._setup(tmp_path, repo, db, procs)
+        assert bot.handle_update(upd_msg("/sessions")) == "cmd:sessions"
+        text = tr.sent[-1]["text"]
+        assert sleeps == [1.0]  # first sighting: one short 2-sample window, never "stalled" from it
+        assert "node.exe" not in text and "PID 9000" not in text
+        assert "codex.exe (PID 5000)" in text and "\U0001f7e1 조용함" in text and "\U0001f534" not in text.split("\n", 2)[2]
+        assert "claude.exe (PID 8000)" in text and "⚪ 읽기 전용 · 종료 불가" in text
+        assert f"작업 <code>{tid}</code>" in text and "외부 세션 · 종료 불가" in text
+        assert not any(d.startswith("af3|sk|") for d in _cbs(tr.sent[-1]))
+        insp.procs = [_proc(5000, cpu=5.0), _proc(7000, "claude.exe", ct=50.0)]
+        now[0] += 10
+        bot.handle_update(upd_msg("/sessions"))
+        text = tr.sent[-1]["text"]
+        assert "\U0001f7e2 활동 중" in text and sleeps == [1.0]  # cached delta: no extra sleep
+        now[0] += 130  # 130 s with zero CPU-time delta
+        bot.handle_update(upd_msg("/sessions"))
+        msg = tr.sent[-1]
+        assert msg["text"].count("\U0001f534 무응답 멈춤 의심") == 2
+        sk = [d for d in _cbs(msg) if d.startswith("af3|sk|")]
+        assert len(sk) == 1  # only the owned + terminable one (PID 7000 is an external session)
+        for secret in ("--", str(repo), "worker-nonce", str(tmp_path)):
+            assert secret not in msg["text"]
+        _all_html_ok(tr)
+
+    def _stalled(self, bot, tr, now):
+        bot.handle_update(upd_msg("/sessions"))
+        now[0] += 130
+        bot.handle_update(upd_msg("/sessions"))
+        return _af3_tok(tr.sent[-1], "sk")
+
+    def test_two_step_kill_and_replay(self, tmp_path, repo, db):
+        bot, tr, insp, now, _, tid = self._setup(tmp_path, repo, db, [_proc(5000)])
+        sk = self._stalled(bot, tr, now)
+        assert bot.handle_update(upd_raw(f"af3|sk|{sk}", message_id=3)) == "callback:af3:kill_prompt:edited"
+        assert insp.killed == []  # step 1 never terminates
+        prompt = tr.edits[-1]
+        assert "⚠️ 정말 종료할까요?" in prompt["text"] and "트리 종료 없음" in prompt["text"]
+        SK = _af3_tok(prompt, "SK")
+        assert bot.handle_update(upd_raw(f"af3|SK|{SK}", message_id=3)) == "callback:af3:kill:TERMINATED"
+        assert insp.killed == [(5000, 1234.5, "codex.exe")]
+        assert "\U0001f6d1 종료 완료" in tr.edits[-1]["text"]
+        assert bot.handle_update(upd_raw(f"af3|SK|{SK}")) == "callback:af3:rejected:REPLAY"
+        assert bot.handle_update(upd_raw(f"af3|sk|{sk}")) == "callback:af3:rejected:REPLAY"
+        assert len(insp.killed) == 1 and db.get_task(tid)["state"] == "IMPLEMENTING"
+        _all_html_ok(tr)
+
+    def test_pid_reuse_and_not_stalled_and_not_owned_rejected(self, tmp_path, repo, db):
+        bot, tr, insp, now, _, tid = self._setup(tmp_path, repo, db, [_proc(5000)])
+        sk = self._stalled(bot, tr, now)
+        bot.handle_update(upd_raw(f"af3|sk|{sk}"))
+        SK = _af3_tok(tr.edits[-1], "SK")
+        insp.procs = [_proc(5000, ct=9999.0)]  # same PID, different creation time => reused PID
+        assert bot.handle_update(upd_raw(f"af3|SK|{SK}")) == "callback:af3:kill:refused:GONE_OR_REUSED"
+        payload = {"pid": 5000, "ct": 1234.5, "img": "codex.exe", "tag": tid}
+        insp.procs = [_proc(5000, cpu=99.0)]  # CPU moved: no longer stalled
+        tok = db.issue_af3_token("SK", ADMIN, ADMIN, payload)
+        assert bot.handle_update(upd_raw(f"af3|SK|{tok}")) == "callback:af3:kill:refused:NOT_STALLED"
+        insp.procs = [_proc(5000, cpu=99.0, can_terminate=False)]
+        tok = db.issue_af3_token("SK", ADMIN, ADMIN, payload)
+        assert bot.handle_update(upd_raw(f"af3|SK|{tok}")) == "callback:af3:kill:refused:NOT_PERMITTED"
+        insp.procs = [_proc(5000, cpu=99.0)]
+        now[0] += 500
+        db.force_release_lease(tid)  # ownership can no longer be proven
+        tok = db.issue_af3_token("SK", ADMIN, ADMIN, payload)
+        assert bot.handle_update(upd_raw(f"af3|SK|{tok}")) == "callback:af3:kill:refused:NOT_OWNED"
+        tok = db.issue_af3_token("SK", ADMIN, ADMIN, dict(payload, img="python.exe"))
+        assert bot.handle_update(upd_raw(f"af3|SK|{tok}")) == "callback:af3:kill:refused:BAD_PAYLOAD"
+        assert insp.killed == []
+
+    def test_unprovable_or_inaccessible_never_offered_kill(self, tmp_path, repo, db):
+        procs = [_proc(6000, "claude.exe", ct=2000.0, can_terminate=False, ancestry=[(5000, 1234.5)]),
+                 _proc(6100, "claude.exe", ct=2000.0)]
+        bot, tr, insp, now, _, tid = self._setup(tmp_path, repo, db, procs)
+        bot.handle_update(upd_msg("/sessions"))
+        now[0] += 130
+        bot.handle_update(upd_msg("/sessions"))
+        text = tr.sent[-1]["text"]
+        assert f"작업 <code>{tid}</code>" in text  # owned via verified shim ancestry
+        assert "권한 없음 · 종료 불가" in text and "외부 세션 · 종료 불가" in text
+        assert not any(d.startswith("af3|sk|") for d in _cbs(tr.sent[-1]))
+
+    def test_owned_via_shim_ancestry_can_be_killed(self, tmp_path, repo, db):
+        procs = [_proc(6000, "claude.exe", ct=2000.0, ancestry=[(5000, 1234.5)])]
+        bot, tr, insp, now, _, tid = self._setup(tmp_path, repo, db, procs)
+        sk = self._stalled(bot, tr, now)
+        bot.handle_update(upd_raw(f"af3|sk|{sk}"))
+        assert bot.handle_update(upd_raw(f"af3|SK|{_af3_tok(tr.edits[-1], 'SK')}")) == "callback:af3:kill:TERMINATED"
+        assert insp.killed == [(6000, 2000.0, "claude.exe")]
+
+    def test_real_inspector_is_read_only_and_refuses_non_whitelisted(self):
+        samples = ProcessInspector().snapshot()
+        assert all(isinstance(s, ProcessSample) and s.image_name in ("codex.exe", "claude.exe") for s in samples)
+        me, ct = os.getpid(), process_start_time(os.getpid())
+        if IS_WINDOWS:
+            assert terminate_verified(me, ct, "python.exe") == "MISMATCH"  # not whitelisted: never touched
+            assert terminate_verified(me, ct, "codex.exe") == "MISMATCH"  # image differs: never touched
+            assert terminate_verified(me, (ct or 0) + 5, "codex.exe") == "MISMATCH"
+        else:
+            assert terminate_verified(me, ct, "codex.exe") == "UNSUPPORTED"
+        assert process_start_time(me) == ct  # we are still alive

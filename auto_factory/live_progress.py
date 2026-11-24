@@ -25,7 +25,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .db import ACTIVE_STATES, MAIN_FLOW, TERMINAL_STATES, heartbeat_nowait, is_transient_db_error
+from .db import (
+    ACTIVE_STATES,
+    MAIN_FLOW,
+    TERMINAL_STATES,
+    cancel_requested_nowait,
+    heartbeat_nowait,
+    is_transient_db_error,
+)
 from .worktree import (
     UnsafePathError,
     _assert_no_link_or_reparse_ancestors,
@@ -117,9 +124,26 @@ def read_live_log_tail(artifacts_dir: str | Path | None, task_id: str, lines: in
 class ProgressSink:
     """No-op sink. `lease_signal` (optional) lets a bare sink still carry the lease stop signal."""
 
-    def __init__(self, lease_signal: Callable[[], bool] | None = None) -> None:
+    def __init__(self, lease_signal: Callable[[], bool] | None = None,
+                 cancel_signal: Callable[[], bool] | None = None) -> None:
         self.lease_signal = lease_signal
+        self.cancel_signal = cancel_signal
         self._lease_lost = False
+        self._cancel_requested = False
+
+    def mark_cancel_requested(self) -> None:
+        self._cancel_requested = True
+
+    def is_cancel_requested(self) -> bool:
+        """Human cancel (CANCEL_REQUESTED): `JobRunner` kills the child with timeout_kind "cancel"."""
+        if self._cancel_requested:
+            return True
+        if self.cancel_signal is not None:
+            try:
+                return bool(self.cancel_signal())
+            except Exception:
+                return False
+        return False
 
     def start(self, pid: int | None, proc_start_time: float | None, step: str | None = None,
               provider: str | None = None, role: str | None = None, attempt_id: int | None = None,
@@ -166,8 +190,9 @@ class LiveProgressSink(ProgressSink):
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         lease_signal: Callable[[], bool] | None = None,
+        cancel_signal: Callable[[], bool] | None = None,
     ) -> None:
-        super().__init__(lease_signal)
+        super().__init__(lease_signal, cancel_signal)
         self.task_id = validate_task_id(task_id)
         self.artifacts_dir = Path(artifacts_dir)
         self.json_path, self.log_path = sidecar_paths(self.artifacts_dir, task_id)
@@ -297,7 +322,7 @@ class LiveProgressSink(ProgressSink):
     def finish(self, returncode, timed_out=False, timeout_kind=None) -> None:
         with self._state_lock:
             self._f.update(running=False, finished_at=self.clock())
-        status = "lease_lost" if timeout_kind == "lease_lost" else (
+        status = timeout_kind if timeout_kind in ("lease_lost", "cancel") else (
             f"timeout:{timeout_kind}" if timed_out else f"exit:{returncode}")
         self._flush("finish", force=True, status=status)
 
@@ -306,6 +331,12 @@ class LiveProgressSink(ProgressSink):
         self._lease_lost = True
         if first:
             self._flush("LEASE_DEGRADED", force=True, status=_token(reason or "lease_lost"))
+
+    def mark_cancel_requested(self) -> None:
+        first = not self._cancel_requested
+        self._cancel_requested = True
+        if first:
+            self._flush("CANCEL_REQUESTED", force=True, status="stopping")
 
     def close(self, state: str | None = None) -> None:
         """Final flush (running=false) before the lease is released."""
@@ -420,7 +451,10 @@ class LeaseKeeper:
         safety_margin: float | None = None,
         expires_at: float | None = None,
         heartbeat_fn: Callable[..., bool] = heartbeat_nowait,
+        cancel_fn: Callable[[str, str], bool] | None = cancel_requested_nowait,
     ) -> None:
+        self._cancel_fn = cancel_fn
+        self._cancel = False
         self.db_path = str(db_path)
         self.task_id = task_id
         self._nonce = owner_nonce
@@ -446,6 +480,25 @@ class LeaseKeeper:
 
     def is_lease_lost(self) -> bool:
         return self._lost
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel
+
+    def _poll_cancel(self) -> None:
+        """Latch CANCEL_REQUESTED (read-only, non-blocking); errors just skip this tick."""
+        if self._cancel or self._cancel_fn is None:
+            return
+        try:
+            hit = bool(self._cancel_fn(self.db_path, self.task_id))
+        except Exception:
+            return
+        if hit:
+            self._cancel = True
+            if self.sink is not None:
+                try:
+                    self.sink.mark_cancel_requested()
+                except Exception:
+                    pass
 
     def _declare_lost(self, reason: str) -> None:
         if self._lost:
@@ -477,6 +530,7 @@ class LeaseKeeper:
             if ok is True:
                 self.beats += 1
                 self.expires_at = now + self.ttl
+                self._poll_cancel()
                 return True
             if ok is False:
                 self._declare_lost("lease_taken")
