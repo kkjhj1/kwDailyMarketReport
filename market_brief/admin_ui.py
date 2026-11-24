@@ -1912,6 +1912,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="tab-btn" data-tab="history" onclick="switchTab('history')">
       📜 이력 센터
     </button>
+    <button class="tab-btn" data-tab="kids" onclick="switchTab('kids')">
+      👶 키즈 카탈로그
+    </button>
   </nav>
 
   <!-- Mobile Bottom Navigation Bar (App Navigation) -->
@@ -1932,6 +1935,10 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="bnav-btn" data-bnav="history" onclick="switchTab('history')">
       <span class="bnav-icon">📜</span>
       <span class="bnav-label">이력 센터</span>
+    </button>
+    <button class="bnav-btn" data-bnav="kids" onclick="switchTab('kids')">
+      <span class="bnav-icon">👶</span>
+      <span class="bnav-label">키즈</span>
     </button>
     <button class="bnav-btn" onclick="openSimModal()">
       <span class="bnav-icon">🧪</span>
@@ -2242,6 +2249,48 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- =================================================================== -->
+    <!-- TAB 5: KIDS CONTENT CATALOG                                          -->
+    <!-- =================================================================== -->
+    <section id="pane-kids" class="tab-pane">
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px;">
+          <div>
+            <h2 class="card-title">👶 Kids Compass 콘텐츠 카탈로그</h2>
+            <p class="card-desc">놀이·발달·먹거리 가이드를 조회하고 검증된 JSON만 임포트합니다.</p>
+          </div>
+          <button class="btn btn-primary hist-touch" type="button" onclick="loadKidsCatalog()">🔃 목록 새로고침</button>
+        </div>
+        <div class="hist-filter-bar" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;">
+          <select id="kidsCatalogDomain" class="form-select hist-touch" aria-label="카탈로그 영역">
+            <option value="">전체 영역</option>
+            <option value="PLAY">놀이</option>
+            <option value="DEV_GUIDE">발달 가이드</option>
+            <option value="FOOD">먹거리</option>
+          </select>
+          <input id="kidsCatalogStage" class="form-input" placeholder="stage_code 필터" maxlength="64" />
+          <button class="btn hist-touch" type="button" onclick="loadKidsCatalog()">🔍 조회</button>
+        </div>
+        <div id="kidsCatalogList" class="hist-card-list">
+          <div class="hist-meta">카탈로그를 불러오는 중...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header" style="margin-bottom:10px;">
+          <div>
+            <h3 class="card-title">⬆️ JSON 카탈로그 임포트</h3>
+            <p class="card-desc">최대 512KB · 서버가 content_id·HTML 유사 마크업·세부 필드를 검증합니다.</p>
+          </div>
+        </div>
+        <textarea id="kidsCatalogImportJson" class="form-textarea" rows="10" spellcheck="false" placeholder='{"items":[{"content_id":"custom_play","domain":"PLAY","stage_code":"M0_11","title":"제목","summary":"요약","detail":{}}]}'></textarea>
+        <div style="display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; margin-top:10px;">
+          <button class="btn hist-touch" type="button" onclick="document.getElementById('kidsCatalogImportJson').value=''">지우기</button>
+          <button class="btn btn-primary hist-touch" type="button" onclick="importKidsCatalog()">✅ 검증 후 임포트</button>
+        </div>
+        <div id="kidsCatalogImportStatus" class="hist-meta" style="margin-top:8px;"></div>
+      </div>
+    </section>
+
   </main>
 
   <!-- ===================================================================== -->
@@ -2518,6 +2567,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       thresholds: {},
       userBotContexts: {},
       userBotContextEpochs: {},
+      kidsCatalog: [],
     };
     let searchDebounce = null;
 
@@ -2605,7 +2655,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         bodyPayload = JSON.stringify(bodyPayload);
       }
       const res = await fetch(url, { ...opts, headers, body: bodyPayload });
-      if (res.status === 401 && !opts._retriedAuth) {
+      if ((res.status === 401 || res.status === 503) && !opts._retriedAuth) {
         const saved = await openAdminTokenModal('관리자 인증이 필요한 작업입니다.');
         if (saved) {
           return req(url, { ...opts, _retriedAuth: true });
@@ -2625,11 +2675,72 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       if (tab === 'bots') return loadBots();
       if (tab === 'dashboard') return loadDashboard();
       if (tab === 'history') return loadHistoryCenter();
+      if (tab === 'kids') return loadKidsCatalog();
     }
 
     function refreshCurrentTab() {
       toast('🔄 관리자 화면 새로고침');
       switchTab(S.activeTab);
+    }
+
+    async function loadKidsCatalog() {
+      const list = document.getElementById('kidsCatalogList');
+      if (!list) return;
+      const params = new URLSearchParams();
+      const domain = (document.getElementById('kidsCatalogDomain') || {}).value || '';
+      const stage = ((document.getElementById('kidsCatalogStage') || {}).value || '').trim();
+      if (domain) params.set('domain', domain);
+      if (stage) params.set('stage_code', stage);
+      list.innerHTML = '<div class="hist-meta">카탈로그를 불러오는 중...</div>';
+      try {
+        const result = await req('/api/kids/catalog?' + params.toString());
+        const items = Array.isArray(result.items) ? result.items : [];
+        S.kidsCatalog = items;
+        if (!items.length) {
+          list.innerHTML = '<div class="hist-meta">조건에 맞는 카탈로그가 없습니다.</div>';
+          return;
+        }
+        list.innerHTML = items.map(item => {
+          const detail = item.detail && typeof item.detail === 'object' ? JSON.stringify(item.detail, null, 2) : '{}';
+          const guideHref = '/kids/guide/' + encodeURIComponent(String(item.content_id || ''));
+          return `<article class="hist-card">
+            <div class="hist-card-top"><span><b>${esc(item.title || '-')}</b> <span class="hist-badge info">${esc(item.domain || '-')}</span></span>
+              <a class="btn btn-sm hist-touch" href="${esc(guideHref)}" target="_blank" rel="noopener">상세 보기</a></div>
+            <div class="hist-diff-line">${esc(item.summary || '-')}</div>
+            <div class="hist-meta"><code>${esc(item.content_id || '-')}</code> · stage ${esc(item.stage_code || '-')} · source ${esc(item.source || '-')}</div>
+            <details style="margin-top:8px;"><summary class="hist-touch" style="cursor:pointer;">세부 JSON</summary><pre class="sched-pre">${esc(detail)}</pre></details>
+          </article>`;
+        }).join('');
+      } catch (e) {
+        list.innerHTML = `<div style="color:var(--danger);">카탈로그 로드 실패: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function importKidsCatalog() {
+      const input = document.getElementById('kidsCatalogImportJson');
+      const status = document.getElementById('kidsCatalogImportStatus');
+      const raw = input ? input.value.trim() : '';
+      if (!raw) {
+        alert('임포트할 JSON을 입력하세요.');
+        return;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (e) {
+        alert('JSON 문법을 확인하세요: ' + e.message);
+        return;
+      }
+      if (status) status.textContent = '서버 검증 및 임포트 중...';
+      try {
+        const result = await req('/api/kids/catalog/import', { method: 'POST', body: payload });
+        if (status) status.textContent = `완료: 신규 ${esc(result.inserted || 0)} · 수정 ${esc(result.updated || 0)}`;
+        toast('✅ 키즈 카탈로그 임포트 완료');
+        await loadKidsCatalog();
+      } catch (e) {
+        if (status) status.textContent = '임포트 실패: ' + String(e.message || '알 수 없는 오류');
+        alert('카탈로그 임포트 실패: ' + e.message);
+      }
     }
 
     function closeModal(id) {
@@ -4627,7 +4738,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     // =========================================================================
     // TELEGRAM DEEP-LINK (?tab=users&req_id=123)
     // =========================================================================
-    const DEEPLINK_TABS = ['users', 'bots', 'dashboard', 'history'];
+    const DEEPLINK_TABS = ['users', 'bots', 'dashboard', 'history', 'kids'];
 
     function highlightRequestCard(reqId) {
       switchUserSubTab('upgrades');

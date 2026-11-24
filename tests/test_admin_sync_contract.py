@@ -23,13 +23,19 @@ MUST_BE_COVERED = (
     "travel_watch_deliveries",
     "travel_user_prefs",
 )
+KIDS_CATALOG_SCHEMA_SOURCE = "kids_compass/storage/db.py"
 
 
 def _schema_tables() -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
-    for rel in SCHEMA_SOURCES:
+    for rel in (*SCHEMA_SOURCES, KIDS_CATALOG_SCHEMA_SOURCE):
         text = (ROOT / rel).read_text(encoding="utf-8")
-        found[rel] = set(_CREATE_RE.findall(text))
+        tables = set(_CREATE_RE.findall(text))
+        # Kids Compass has many user-state tables that are intentionally outside
+        # the legacy Market/Travel admin contract. Part B adds only the shared
+        # content catalogue to this contract; its Admin coverage is registered
+        # in ADMIN_SYNC_REGISTRY above.
+        found[rel] = tables if rel != KIDS_CATALOG_SCHEMA_SOURCE else {"kids_content_catalog"} & tables
     return found
 
 

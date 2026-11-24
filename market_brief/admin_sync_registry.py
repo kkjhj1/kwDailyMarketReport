@@ -132,6 +132,12 @@ ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
         "db_reader": "MarketBriefDatabase.list_all_watches",
         "description": "여행봇 2-Track 선호(정기 ON/OFF·특가 일시중지) — 맞춤 감시·선호 현황",
     },
+    "kids_content_catalog": {
+        "bot_id": "kids_bot",
+        "admin_api": ["GET /api/kids/catalog", "POST /api/kids/catalog/import"],
+        "db_reader": "KidsCompassDatabase.list_catalog_items",
+        "description": "키즈 놀이·발달·먹거리 콘텐츠 카탈로그 — 관리자 조회·JSON 임포트",
+    },
 }
 
 ADMIN_USER_CONTEXT_REGISTRY: dict[str, dict[str, Any]] = {

@@ -13,6 +13,7 @@ Supports:
 """
 from __future__ import annotations
 import argparse
+import json
 import logging
 import os
 import sys
@@ -61,18 +62,39 @@ from kids_compass.interactive_bot import (
     offline_weather,
     push_window,
 )
-from kids_compass.storage.db import KidsCompassDatabase
+from kids_compass.storage.db import KidsCompassDatabase, resolve_kids_db_path
 from kids_compass.models import PushMessage
+from kids_compass.web_guide import validate_catalog_import_payload
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("kids_bot_runner")
 
-DEFAULT_DB_PATH = str(BASE_DIR / "kids_compass.sqlite3")
+DEFAULT_DB_PATH = resolve_kids_db_path()
 
 
 def get_kids_bot_token() -> str:
     """Kids-only token. Deliberately no fallback to TELEGRAM_BOT_TOKEN (would hijack another bot's getUpdates)."""
     return (os.environ.get("KIDS_TELEGRAM_BOT_TOKEN") or os.environ.get("KIDS_BOT_TOKEN") or "").strip()
+
+
+def import_catalog_file(db: KidsCompassDatabase, path: str) -> dict[str, int]:
+    """Validate and import a JSON catalogue file without allowing SEED overwrite."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = validate_catalog_import_payload(payload)
+    ids = [row["content_id"] for row in rows]
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        existing = db.conn.execute(
+            f"SELECT content_id, source FROM kids_content_catalog WHERE content_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        protected = [row["content_id"] for row in existing if row["source"] != "IMPORT"]
+        if protected:
+            raise ValueError(f"SEED 콘텐츠는 덮어쓸 수 없습니다: {', '.join(protected)}")
+    result = db.import_catalog_items(rows)
+    if result.get("rejected"):
+        raise ValueError("보호된 SEED 콘텐츠가 포함되어 임포트가 거부되었습니다.")
+    return result
 
 
 class _ConsoleDemoChannel:
@@ -326,6 +348,8 @@ def main() -> None:
                         help="Send due fever cross-dosing timers")
     parser.add_argument("--import-hospitals", metavar="PATH",
                         help="Import E-gen hospital XML/JSON/CSV and opening hours")
+    parser.add_argument("--import-catalog", metavar="PATH",
+                        help="Validate and import Kids Compass catalogue JSON")
     parser.add_argument("--dry-run", action="store_true", help="With --dispatch-*: preview without sending")
     parser.add_argument("--db-path", default=os.environ.get("KIDS_DB_PATH", DEFAULT_DB_PATH), help="SQLite path")
     args = parser.parse_args()
@@ -334,11 +358,22 @@ def main() -> None:
         run_demo()
         return
     dispatching = args.dispatch_weekend or args.dispatch_dday or args.dispatch_milestone or args.dispatch_timers
-    if not (args.seed_sample or args.poll or dispatching or args.import_hospitals):
+    if not (args.seed_sample or args.poll or dispatching or args.import_hospitals or args.import_catalog):
         parser.print_help()
         return
 
-    db = KidsCompassDatabase(args.db_path)
+    db = KidsCompassDatabase(resolve_kids_db_path(args.db_path))
+    if args.import_catalog:
+        try:
+            result = import_catalog_file(db, args.import_catalog)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"❌ Catalog import failed: {exc}")
+            db.close()
+            sys.exit(1)
+        print(f"✅ Imported catalogue from {args.import_catalog} → {result}")
+        if not (args.seed_sample or args.poll or dispatching or args.import_hospitals):
+            db.close()
+            return
     if args.import_hospitals:
         from kids_compass.hospitals_importer import import_hospitals_file
         result = import_hospitals_file(db, args.import_hospitals)

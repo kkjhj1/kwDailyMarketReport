@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 
 
 class PlayStage(str, Enum):
@@ -40,6 +41,7 @@ class HomePlayItem:
     how_to: str
     dev_benefit: str
     safety_note: str
+    steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,11 +81,17 @@ DEV_STAGE_LABELS: dict[str, str] = {
 
 
 def _play(play_id: str, stage: PlayStage, title: str, duration: int, materials: str,
-          how_to: str, benefit: str, safety: str) -> HomePlayItem:
-    return HomePlayItem(play_id, stage.value, title, duration, materials, how_to, benefit, safety)
+          how_to: str, benefit: str, safety: str, steps: tuple[str, ...] | None = None) -> HomePlayItem:
+    detailed_steps = steps or (
+        f"{materials}을 준비하고 놀이 공간의 위험 요소를 치워요.",
+        how_to,
+        "아이의 반응에 맞춰 속도와 난이도를 조절해요.",
+        "놀이가 끝나면 작은 물건과 도구를 바로 정리해요.",
+    )
+    return HomePlayItem(play_id, stage.value, title, duration, materials, how_to, benefit, safety, detailed_steps)
 
 
-# Three short, no-cost/low-cost activities per play bucket.  Infant activities
+# Five short, no-cost/low-cost activities per play bucket.  Infant activities
 # keep the safety note explicit even when the activity itself uses no object.
 HOME_PLAY_ITEMS: tuple[HomePlayItem, ...] = (
     _play("m0_face", PlayStage.M0_11, "거울 속 표정 찾기", 5, "안전한 거울",
@@ -122,6 +130,30 @@ HOME_PLAY_ITEMS: tuple[HomePlayItem, ...] = (
           "편안한 음악 한 곡을 고르고 아기에게 오늘을 짧게 이야기해요.", "정서적 연결·휴식 루틴", "소리는 편안한 크기로 유지하고 통증·출혈 등 이상 증상은 놀이보다 진료가 우선이에요."),
     _play("preg_sort", PlayStage.PREG, "출산 준비 우선순위", 15, "종이·펜",
           "‘이번 주·나중·도움 요청’ 세 칸으로 할 일을 나눠요.", "계획·부담 조절·가족 협력", "무거운 물건을 들지 말고, 일정·복약은 의료진과 확인한 내용을 기준으로 적으세요."),
+    _play("m0_touch", PlayStage.M0_11, "부드러운 촉감 바구니", 5, "큰 천 조각 2~3개",
+          "서로 다른 천을 만져 보고 촉감을 말해 줘요.", "촉각 탐색·공동 주의", "작은 조각·끈·단추가 없는 큰 천만 사용하고 계속 지켜보세요."),
+    _play("m0_voice", PlayStage.M0_11, "목소리 숨바꼭질", 5, "보호자의 목소리",
+          "아이의 시야 가까이에서 이름을 부르고 천천히 얼굴을 보여 줘요.", "청각 추적·애착 상호작용", "큰 소리로 놀라게 하지 말고 아이가 피곤해하면 바로 쉬어요."),
+    _play("m12_box", PlayStage.M12_23, "상자 속 보물 찾기", 10, "큰 상자·큰 공 2개",
+          "공을 상자에 넣고 꺼내며 위치와 동작을 말해 줘요.", "대상 영속성·손 협응·언어", "손가락이 끼지 않는 큰 상자와 삼키지 않을 크기의 물건만 사용하세요."),
+    _play("m12_bubble", PlayStage.M12_23, "비눗방울 따라가기", 10, "유아용 비눗방울",
+          "비눗방울을 천천히 불고 눈으로 따라가거나 터뜨려요.", "시각 추적·대근육·차례 지키기", "용액을 마시지 않도록 하고 미끄러운 바닥은 즉시 닦아요."),
+    _play("m24_color", PlayStage.M24_47, "색깔 보물 분류", 10, "큰 색 카드·바구니 2개",
+          "색을 골라 같은 색 바구니에 넣고 이름을 말해요.", "분류·어휘·집중", "작은 카드나 조각 대신 손바닥보다 큰 자료를 사용하세요."),
+    _play("m24_ice", PlayStage.M24_47, "얼음 녹이기 관찰", 15, "큰 얼음·대야·수건",
+          "얼음이 녹는 과정을 만져 보고 따뜻한 물과 비교해요.", "관찰·감각·원인과 결과", "물은 얕게 사용하고 미끄럼을 닦으며 얼음을 입에 넣지 않게 하세요."),
+    _play("y4_map", PlayStage.Y4_7, "보물지도 만들기", 20, "종이·색연필·스티커",
+          "방 안의 장소를 간단한 기호로 그리고 보물 위치를 표시해요.", "공간 이해·계획·표현", "실제 주소나 개인정보를 지도에 쓰지 않고 가위는 보호자가 관리하세요."),
+    _play("y4_rhyme", PlayStage.Y4_7, "끝말 소리 놀이", 10, "그림 카드 또는 주변 물건",
+          "단어를 고르고 비슷한 끝소리 단어를 번갈아 찾아요.", "음운 인식·어휘·차례", "틀린 답을 놀리지 말고 아이가 즐거워하는 수준에서 멈춰요."),
+    _play("y8_cipher", PlayStage.Y8_13, "가족 암호 편지", 20, "종이·연필",
+          "간단한 기호표를 만들고 짧은 비밀 문장을 서로 풀어요.", "논리·규칙 만들기·읽기", "온라인 계정 비밀번호나 개인정보를 암호로 쓰지 않도록 안내하세요."),
+    _play("y8_bridge2", PlayStage.Y8_13, "실패에서 다시 설계", 25, "종이컵·종이·테이프",
+          "작은 구조물을 만들고 무너진 이유를 적은 뒤 한 가지를 바꿔 다시 시험해요.", "회고·문제 해결·끈기", "무너지기 쉬운 구조물은 얼굴 가까이 두지 말고 바닥에서 시험하세요."),
+    _play("preg_body", PlayStage.PREG, "몸의 신호 기록", 10, "메모장·펜",
+          "오늘의 피로·기분·불편함을 짧게 기록하고 도움 요청을 정해요.", "자기 돌봄·의사소통·계획", "새 증상을 진단하려 하지 말고 이상 신호는 의료기관에 문의하세요."),
+    _play("preg_nest", PlayStage.PREG, "안전한 아기 공간 상상", 15, "종이·펜",
+          "아기와 보호자가 편히 지낼 공간의 필요한 물건을 우선순위로 적어요.", "준비·가족 협력·부담 조절", "무거운 가구를 직접 옮기지 말고 설치는 주변 도움을 받으세요."),
 )
 
 
@@ -173,10 +205,48 @@ def dev_stage_for_months(months: int) -> str:
     return DevStage.DY8_13.value
 
 
-def pick_home_plays(stage: str, offset: int = 0, limit: int = 2) -> list[HomePlayItem]:
+def _detail(row: dict) -> dict:
+    detail = row.get("detail", row.get("detail_json", {}))
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except json.JSONDecodeError:
+            detail = {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def _play_from_row(row: dict) -> HomePlayItem:
+    detail = _detail(row)
+    steps = tuple(str(value) for value in detail.get("steps", ()) if str(value).strip())
+    return HomePlayItem(
+        str(row["content_id"]), str(row["stage_code"]), str(row["title"]),
+        int(detail.get("duration_min", 5)), str(detail.get("materials", "")),
+        str(row.get("summary", "")), str(detail.get("dev_benefit", "")),
+        str(row.get("safety_note", "")), steps or (str(row.get("summary", "")),),
+    )
+
+
+def _dev_from_row(row: dict) -> DevGuideItem:
+    detail = _detail(row)
+    return DevGuideItem(
+        str(row["content_id"]), str(row["stage_code"]), str(row["title"]),
+        [str(value) for value in detail.get("checkpoints", ())],
+        [str(value) for value in detail.get("parent_tips", ())],
+        [str(value) for value in detail.get("consult_signs", ())],
+    )
+
+
+def pick_home_plays(stage: str, offset: int = 0, limit: int = 2, db=None) -> list[HomePlayItem]:
     """Pick a stable, circular window from one stage without mutating the catalogue."""
     stage = stage.value if isinstance(stage, PlayStage) else str(stage)
-    items = [item for item in HOME_PLAY_ITEMS if item.stage == stage]
+    items = []
+    if db is not None:
+        try:
+            items = [_play_from_row(row) for row in db.list_catalog_items("PLAY", stage)]
+        except (AttributeError, TypeError):
+            items = []
+    if not items:
+        items = [item for item in HOME_PLAY_ITEMS if item.stage == stage]
     if not items:
         raise ValueError(f"unknown play stage: {stage}")
     if limit <= 0:
@@ -185,10 +255,50 @@ def pick_home_plays(stage: str, offset: int = 0, limit: int = 2) -> list[HomePla
     return [items[(start + i) % len(items)] for i in range(min(int(limit), len(items)))]
 
 
-def get_dev_guides(stage: str) -> list[DevGuideItem]:
+def get_dev_guides(stage: str, db=None) -> list[DevGuideItem]:
     """Return all concise development guides for a stage."""
     stage = stage.value if isinstance(stage, DevStage) else str(stage)
     if stage not in DEV_STAGE_LABELS:
         raise ValueError(f"unknown development stage: {stage}")
+    if db is not None:
+        try:
+            rows = db.list_catalog_items("DEV_GUIDE", stage)
+            if rows:
+                return [_dev_from_row(row) for row in rows]
+        except (AttributeError, TypeError):
+            pass
     return [item for item in DEV_GUIDE_ITEMS if item.stage == stage]
+
+
+def build_catalog_seed_rows() -> list[dict]:
+    rows: list[dict] = []
+    for item in HOME_PLAY_ITEMS:
+        rows.append({
+            "content_id": item.play_id,
+            "domain": "PLAY",
+            "stage_code": item.stage,
+            "title": item.title,
+            "summary": item.how_to,
+            "detail": {
+                "steps": list(item.steps), "materials": item.materials,
+                "duration_min": item.duration_min, "dev_benefit": item.dev_benefit,
+            },
+            "min_months": 0, "max_months": 240,
+            "safety_note": item.safety_note, "source": "SEED",
+        })
+    for item in DEV_GUIDE_ITEMS:
+        rows.append({
+            "content_id": item.guide_id,
+            "domain": "DEV_GUIDE",
+            "stage_code": item.stage,
+            "title": item.title,
+            "summary": item.checkpoints[0] if item.checkpoints else item.title,
+            "detail": {
+                "checkpoints": list(item.checkpoints), "parent_tips": list(item.parent_tips),
+                "consult_signs": list(item.consult_signs),
+            },
+            "min_months": 0, "max_months": 240,
+            "safety_note": DEV_DISCLAIMER, "source": "SEED",
+        })
+    return rows
 

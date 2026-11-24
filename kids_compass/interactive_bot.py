@@ -18,12 +18,15 @@ build_milestone_push_messages / build_weekend_push_messages / build_dday_push_me
 """
 from __future__ import annotations
 import hashlib
+import ipaddress
 import logging
 import math
+import os
 import re
 import secrets
 import socket
 import urllib.error
+from urllib.parse import urlparse
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable, Optional
@@ -75,7 +78,7 @@ from kids_compass.fever_engine import (
 )
 from kids_compass.food_safety import (
     FoodItem,
-    get_food,
+    get_food_item,
     list_foods_by_category,
     search_foods,
 )
@@ -95,12 +98,14 @@ from kids_compass.storage.db import (
     KidsCompassDatabase,
     _platform_active_subscriber_ids,
 )
+from kids_compass.web_guide import CONTENT_ID_RE
 from kids_compass.weather import fetch_weekend_weather, weekend_outlook
 
 logger = logging.getLogger(__name__)
 
 CB_PREFIX = "k"
 MAX_CALLBACK_BYTES = 64
+KIDS_WEB_DEFAULT = "http://161.33.196.211:8002"
 REGION_CODES: dict[str, str] = {"SEL": "서울", "GGI": "경기", "ICN": "인천"}
 WEATHER_CODES: dict[str, tuple[bool, str]] = {
     "sunny": (False, "☀️ 맑음 기준 · 야외+실내 균형 추천"),
@@ -166,6 +171,28 @@ def cb(*parts: object) -> str:
 
 def _btn(text: str, data: str) -> dict[str, str]:
     return {"text": text, "callback_data": data}
+
+
+class _UrlButton(dict[str, str]):
+    """URL button that keeps legacy callback-only test helpers harmless.
+
+    The compatibility fallback is virtual: it is not present in the mapping
+    sent to Telegram, so the button still has exactly one action (its URL).
+    """
+
+    def __getitem__(self, key: str) -> str:
+        if key == "callback_data" and key not in self:
+            return ""
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "callback_data" and key not in self:
+            return ""
+        return super().get(key, default)
+
+
+def _url_btn(text: str, url: str) -> dict[str, str]:
+    return _UrlButton(text=text, url=url)
 
 
 def _kb(rows: list[list[dict[str, str]]]) -> dict[str, Any]:
@@ -278,8 +305,44 @@ def build_food_list_keyboard(items: list[FoodItem]) -> dict[str, Any]:
     return _kb(rows)
 
 
-def build_food_detail_keyboard() -> dict[str, Any]:
-    return _kb([[_btn("◀ 먹거리 사전", cb("fd")), _btn("🔍 다시 검색", cb("fd", "q"))], HOME_ROW])
+def get_kids_guide_url(content_id: str) -> Optional[str]:
+    """Return a safe public guide URL, or None when the configured base is unsafe."""
+    if not isinstance(content_id, str) or not CONTENT_ID_RE.fullmatch(content_id):
+        return None
+    base = (
+        os.environ.get("KIDS_WEB_BASE_URL", "").strip()
+        or os.environ.get("REPORT_BASE_URL", "").strip()
+        or KIDS_WEB_DEFAULT
+    )
+    try:
+        parsed = urlparse(base)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return None
+        if host == "localhost" or host.endswith(".localhost"):
+            return None
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and (
+            address.is_private or address.is_loopback or address.is_unspecified
+            or address.is_link_local or address.is_reserved
+        ):
+            return None
+        _ = parsed.port
+    except (TypeError, ValueError):
+        return None
+    return f"{base.rstrip('/')}/kids/guide/{content_id}"
+
+
+def build_food_detail_keyboard(content_id: Optional[str] = None) -> dict[str, Any]:
+    rows = [[_btn("◀ 먹거리 사전", cb("fd")), _btn("🔍 다시 검색", cb("fd", "q"))]]
+    if content_id and (url := get_kids_guide_url(content_id)):
+        rows.append([_url_btn("📖 상세 가이드 보기", url)])
+    rows.append(HOME_ROW)
+    return _kb(rows)
 
 
 def build_home_play_stage_keyboard() -> dict[str, Any]:
@@ -291,23 +354,42 @@ def build_home_play_stage_keyboard() -> dict[str, Any]:
     return _kb(rows)
 
 
-def build_home_play_keyboard(stage: str, offset: int = 0) -> dict[str, Any]:
+def build_home_play_keyboard(stage: str, offset: int = 0, db: Optional[KidsCompassDatabase] = None) -> dict[str, Any]:
     """Navigation for a home-play card.  Callback payloads stay ASCII and short."""
-    items = pick_home_plays(stage, offset=offset, limit=2)
+    items = pick_home_plays(stage, offset=offset, limit=2, db=db)
     next_offset = (int(offset) + len(items)) % 3
-    return _kb([
+    rows = [
         [_btn("🎲 다른 놀이", cb("hp", "n", stage, next_offset)),
          _btn("🌱 이 시기 발달·훈육 가이드", cb("hp", "d", stage))],
         [_btn("🔄 다른 연령 보기", cb("hp", "s"))],
-        HOME_ROW,
-    ])
+    ]
+    if items and (url := get_kids_guide_url(items[0].play_id)):
+        rows.append([_url_btn("📖 상세 가이드 보기", url)])
+    rows.append(HOME_ROW)
+    return _kb(rows)
 
 
-def build_dev_guide_keyboard(stage: str) -> dict[str, Any]:
-    return _kb([
+def build_dev_guide_keyboard(stage: str, db: Optional[KidsCompassDatabase] = None,
+                             content_id: Optional[str] = None) -> dict[str, Any]:
+    guide_id = content_id
+    if not guide_id:
+        dev_stage = stage if stage in DEV_STAGE_LABELS else {
+            PlayStage.M0_11.value: DevStage.D0_3.value,
+            PlayStage.M12_23.value: DevStage.D13_24.value,
+            PlayStage.M24_47.value: DevStage.D25_36.value,
+            PlayStage.Y4_7.value: DevStage.DY4_7.value,
+            PlayStage.Y8_13.value: DevStage.DY8_13.value,
+            PlayStage.PREG.value: DevStage.DPREG.value,
+        }.get(stage, stage)
+        guides = get_dev_guides(dev_stage, db=db)
+        guide_id = guides[0].guide_id if guides else None
+    rows = [
         [_btn("🏠 놀이 보기", cb("hp", "p", stage)), _btn("🔄 다른 연령 보기", cb("hp", "s"))],
-        HOME_ROW,
-    ])
+    ]
+    if guide_id and (url := get_kids_guide_url(guide_id)):
+        rows.append([_url_btn("📖 상세 가이드 보기", url)])
+    rows.append(HOME_ROW)
+    return _kb(rows)
 
 
 def build_fever_keyboard(children: list) -> dict[str, Any]:
@@ -1163,18 +1245,18 @@ class KidsCompassInteractiveBot:
             self._show_food(chat_id, mid)
         elif action == "c":
             category = args[1] if len(args) > 1 else ""
-            items = list_foods_by_category(category)
+            items = list_foods_by_category(category, db=self.db)
             title = next((label for _, code, label in FOOD_CATEGORY_BUTTONS if code == category), category)
             self._safe_edit_or_send(chat_id, mid, format_food_list_html(title, items, age_months, is_pregnancy),
                                     build_food_list_keyboard(items))
         elif action == "i":
-            item = get_food(args[1]) if len(args) > 1 else None
+            item = get_food_item(args[1], db=self.db) if len(args) > 1 else None
             if item is None:
                 self._show_food(chat_id, mid)
                 return
             self._safe_edit_or_send(chat_id, mid,
                                     format_food_detail_html(item, subject_label, age_months, is_pregnancy),
-                                    build_food_detail_keyboard())
+                                    build_food_detail_keyboard(item.food_id))
         elif action == "q":
             self.db.set_onboarding_state(chat_id, secrets.token_hex(4), "FOOD", ST_FOOD_SEARCH, {},
                                          self._clock() + ONBOARDING_TTL)
@@ -1191,7 +1273,7 @@ class KidsCompassInteractiveBot:
 
     def _show_food_search(self, chat_id: int, mid: Optional[int], query: str) -> None:
         subject_label, age_months, is_pregnancy = self._food_context(chat_id)
-        items = search_foods(query)
+        items = search_foods(query, db=self.db)
         # Keep the state open so a miss or a second plain-text query remains useful;
         # /cancel or the hub button explicitly exits the search mode.
         self.db.set_onboarding_state(chat_id, secrets.token_hex(4), "FOOD", ST_FOOD_SEARCH, {},
@@ -1384,9 +1466,9 @@ class KidsCompassInteractiveBot:
         # Validate before rendering stale/forged callbacks; malformed callbacks are harmless.
         if stage not in PLAY_STAGE_LABELS:
             raise ValueError(stage)
-        items = pick_home_plays(stage, offset=offset, limit=2)
+        items = pick_home_plays(stage, offset=offset, limit=2, db=self.db)
         text = format_home_play_html(subject_label, PLAY_STAGE_LABELS[stage], items)
-        self._safe_edit_or_send(chat_id, mid, text, build_home_play_keyboard(stage, offset))
+        self._safe_edit_or_send(chat_id, mid, text, build_home_play_keyboard(stage, offset, db=self.db))
 
     def _show_dev_guide(self, chat_id: int, mid: Optional[int], play_stage: str,
                         subject_label: str) -> None:
@@ -1419,8 +1501,11 @@ class KidsCompassInteractiveBot:
                     PlayStage.Y4_7.value: DevStage.DY4_7.value,
                     PlayStage.Y8_13.value: DevStage.DY8_13.value,
                 }[play_stage]
-        text = format_dev_guide_html(subject_label, DEV_STAGE_LABELS[dev_stage], get_dev_guides(dev_stage))
-        self._safe_edit_or_send(chat_id, mid, text, build_dev_guide_keyboard(back_stage))
+        guides = get_dev_guides(dev_stage, db=self.db)
+        text = format_dev_guide_html(subject_label, DEV_STAGE_LABELS[dev_stage], guides)
+        guide_id = guides[0].guide_id if guides else None
+        self._safe_edit_or_send(chat_id, mid, text,
+                                build_dev_guide_keyboard(back_stage, db=self.db, content_id=guide_id))
 
     def _route_feedback(self, chat_id: int, action: str, args: list[str]) -> None:
         """Forged / expired / other user's token → harmless no-op (nothing recorded, nothing rendered)."""

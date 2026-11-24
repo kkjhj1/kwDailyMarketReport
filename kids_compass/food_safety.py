@@ -5,6 +5,7 @@ is safe to use from the interactive Kids Compass menu and from token-free demos.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -100,9 +101,39 @@ FOOD_ITEMS: tuple[FoodItem, ...] = (
 _FOODS_BY_ID = {item.food_id: item for item in FOOD_ITEMS}
 
 
-def get_food(food_id: str) -> Optional[FoodItem]:
+def _food_from_catalog_row(row: dict) -> FoodItem:
+    detail = row.get("detail", row.get("detail_json", {}))
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except json.JSONDecodeError:
+            detail = {}
+    detail = detail if isinstance(detail, dict) else {}
+    return FoodItem(
+        food_id=str(row["content_id"]), name=str(row["title"]),
+        aliases=tuple(str(value) for value in detail.get("aliases", ()) if str(value).strip()),
+        category=str(row["stage_code"]), min_months=int(row.get("min_months", 0)),
+        risk_level=str(detail.get("risk_level", "SAFE")),
+        prep_tip=str(detail.get("prep_tip", "")),
+        allergy_note=str(detail.get("allergy_note", "")),
+        safety_warning=str(row.get("safety_note", "")),
+    )
+
+
+def get_food_item(food_id: str, db=None) -> Optional[FoodItem]:
     """Return a catalogue item by its stable ASCII identifier."""
+    if db is not None:
+        try:
+            row = db.get_catalog_item(str(food_id), active_only=True)
+            if row is not None and row.get("domain") == "FOOD":
+                return _food_from_catalog_row(row)
+        except (AttributeError, TypeError):
+            pass
     return _FOODS_BY_ID.get(str(food_id))
+
+
+def get_food(food_id: str, db=None) -> Optional[FoodItem]:
+    return get_food_item(food_id, db=db)
 
 
 def evaluate_food_for_child(food: FoodItem, age_months: Optional[int], is_pregnancy: bool = False) -> tuple[str, str]:
@@ -123,18 +154,53 @@ def _search_key(value: str) -> str:
     return re.sub(r"[^\w가-힣]+", "", str(value).casefold(), flags=re.UNICODE)
 
 
-def search_foods(query: str, limit: int = 8) -> list[FoodItem]:
+def search_foods(query: str, limit: int = 8, db=None) -> list[FoodItem]:
     """Find catalogue items by partial name or alias, safely ignoring spacing/punctuation."""
     key = _search_key(query)
     if not key or limit <= 0:
         return []
-    matches = [item for item in FOOD_ITEMS
+    source = FOOD_ITEMS
+    if db is not None:
+        try:
+            rows = db.list_catalog_items("FOOD", limit=1000)
+            if rows:
+                source = tuple(_food_from_catalog_row(row) for row in rows)
+        except (AttributeError, TypeError):
+            pass
+    matches = [item for item in source
                if any(key in _search_key(candidate) for candidate in (item.name, *item.aliases))]
     return matches[: int(limit)]
 
 
-def list_foods_by_category(category: str) -> list[FoodItem]:
+def list_foods_by_category(category: str, db=None) -> list[FoodItem]:
     """Return catalogue items in a category; unknown categories return an empty list."""
     wanted = str(category or "").strip().upper()
-    return [item for item in FOOD_ITEMS if item.category == wanted]
+    source = FOOD_ITEMS
+    if db is not None:
+        try:
+            rows = db.list_catalog_items("FOOD", wanted, limit=1000)
+            if rows:
+                source = tuple(_food_from_catalog_row(row) for row in rows)
+        except (AttributeError, TypeError):
+            pass
+    return [item for item in source if item.category == wanted]
+
+
+def build_food_catalog_seed_rows() -> list[dict]:
+    return [
+        {
+            "content_id": item.food_id,
+            "domain": "FOOD",
+            "stage_code": item.category,
+            "title": item.name,
+            "summary": item.safety_warning,
+            "detail": {
+                "aliases": list(item.aliases), "risk_level": item.risk_level,
+                "prep_tip": item.prep_tip, "allergy_note": item.allergy_note,
+            },
+            "min_months": item.min_months, "max_months": 240,
+            "safety_note": item.safety_warning, "source": "SEED",
+        }
+        for item in FOOD_ITEMS
+    ]
 

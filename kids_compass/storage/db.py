@@ -2,6 +2,7 @@
 from __future__ import annotations
 import calendar
 import json
+import os
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -29,6 +30,7 @@ from kids_compass.models import (
 )
 
 DEFAULT_DB_PATH = "kids_compass.sqlite3"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Terminal delivery states (SENT / ambiguous-timeout / blocked by user) — FAILED rows are retried next run
 DONE_STATES = ("SENT", "UNKNOWN", "BLOCKED")
 
@@ -107,6 +109,20 @@ CREATE TABLE IF NOT EXISTS kids_experiences (
     key_points TEXT NOT NULL DEFAULT '',
     operating_hours TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS kids_content_catalog (
+    content_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    stage_code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    min_months INTEGER NOT NULL DEFAULT 0,
+    max_months INTEGER NOT NULL DEFAULT 240,
+    safety_note TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'SEED',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS kids_booking_events (
     booking_id INTEGER PRIMARY KEY,
@@ -296,6 +312,7 @@ CREATE INDEX IF NOT EXISTS idx_kids_milestone_user ON kids_milestone_states(tele
 CREATE INDEX IF NOT EXISTS idx_kids_rec_item_user ON kids_recommendation_items(telegram_user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_kids_sent_user ON kids_sent_history(telegram_user_id, entity_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_kids_exp_filter ON kids_experiences(is_active, age_group, region_sido, category);
+CREATE INDEX IF NOT EXISTS idx_kids_catalog_domain_stage ON kids_content_catalog(is_active, domain, stage_code);
 CREATE INDEX IF NOT EXISTS idx_kids_hospital_region ON kids_moonlight_hospitals(is_active, region_sido, region_sigungu);
 CREATE INDEX IF NOT EXISTS idx_kids_booking_open ON kids_booking_events(open_datetime);
 """
@@ -418,9 +435,67 @@ def _platform_active_subscriber_ids(
         return set()
 
 
+def resolve_kids_db_path(base_db_path: Optional[str | Path] = None) -> str:
+    """Resolve the Kids Compass database path from one deterministic policy.
+
+    Environment configuration wins over an optional caller base path.  Relative
+    environment paths are project-relative so a service started from another
+    working directory cannot silently open a second Kids DB.
+    """
+    configured = os.environ.get("KIDS_DB_PATH", "").strip()
+    if configured:
+        if configured == ":memory:":
+            return ":memory:"
+        path = Path(configured)
+        return str((PROJECT_ROOT / path if not path.is_absolute() else path).resolve())
+    if base_db_path is not None:
+        if str(base_db_path) == ":memory:":
+            return ":memory:"
+        return str(Path(base_db_path).resolve().with_name(DEFAULT_DB_PATH))
+    return str((PROJECT_ROOT / DEFAULT_DB_PATH).resolve())
+
+
+def _catalog_detail(item: dict) -> str:
+    detail = item.get("detail", item.get("detail_json", {}))
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except json.JSONDecodeError:
+            detail = {"text": detail}
+    if not isinstance(detail, dict):
+        raise ValueError("catalog detail must be an object")
+    return json.dumps(detail, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _catalog_values(item: dict, source: str) -> tuple:
+    content_id = str(item.get("content_id", "")).strip()
+    domain = str(item.get("domain", "")).strip()
+    stage_code = str(item.get("stage_code", "")).strip()
+    title = str(item.get("title", "")).strip()
+    summary = str(item.get("summary", "")).strip()
+    safety_note = str(item.get("safety_note", "") or "")
+    min_months = int(item.get("min_months", 0))
+    max_months = int(item.get("max_months", 240))
+    if not content_id or not domain or not stage_code or not title or not summary:
+        raise ValueError("catalog rows require content_id, domain, stage_code, title and summary")
+    if min_months < 0 or max_months > 240 or min_months > max_months:
+        raise ValueError("catalog month range is invalid")
+    return (content_id, domain, stage_code, title, summary, _catalog_detail(item),
+            min_months, max_months, safety_note, source, int(item.get("is_active", 1)))
+
+
 class KidsCompassDatabase:
-    def __init__(self, db_path: str | Path = DEFAULT_DB_PATH):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        # Keep explicitly supplied existing files readable for legacy callers;
+        # all new/default paths go through the central resolver.
+        explicit = db_path is not None and str(db_path) != ":memory:"
+        supplied = Path(db_path).expanduser() if explicit else None
+        if os.environ.get("KIDS_DB_PATH", "").strip():
+            self.db_path = resolve_kids_db_path(db_path)
+        elif supplied is not None and supplied.exists():
+            self.db_path = str(supplied.resolve())
+        else:
+            self.db_path = resolve_kids_db_path(db_path)
         self.conn = sqlite3.connect(self.db_path, timeout=15.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -524,6 +599,100 @@ class KidsCompassDatabase:
 
     def close(self) -> None:
         self.conn.close()
+
+    # ── content catalogue ────────────────────────────────────
+    @staticmethod
+    def _catalog_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        try:
+            item["detail"] = json.loads(item["detail_json"])
+        except (TypeError, json.JSONDecodeError):
+            item["detail"] = {}
+        return item
+
+    def seed_content_catalog(self, items: Iterable[dict]) -> int:
+        """Idempotently seed content without replacing IMPORT/ADMIN rows."""
+        count = 0
+        for item in items:
+            values = _catalog_values(item, "SEED")
+            cur = self.conn.execute(
+                """INSERT INTO kids_content_catalog
+                   (content_id, domain, stage_code, title, summary, detail_json,
+                    min_months, max_months, safety_note, source, is_active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(content_id) DO UPDATE SET
+                    domain=excluded.domain, stage_code=excluded.stage_code,
+                    title=excluded.title, summary=excluded.summary,
+                    detail_json=excluded.detail_json, min_months=excluded.min_months,
+                    max_months=excluded.max_months, safety_note=excluded.safety_note,
+                    is_active=excluded.is_active, updated_at=CURRENT_TIMESTAMP
+                   WHERE kids_content_catalog.source = 'SEED'""",
+                values,
+            )
+            count += max(cur.rowcount, 0)
+        self.conn.commit()
+        return count
+
+    def import_catalog_items(self, items: Iterable[dict]) -> dict[str, int]:
+        """Import validated rows atomically; only new/IMPORT rows are upserted."""
+        result = {"inserted": 0, "updated": 0, "rejected": 0}
+        rows = list(items)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for item in rows:
+                values = _catalog_values(item, "IMPORT")
+                existing = self.conn.execute(
+                    "SELECT source FROM kids_content_catalog WHERE content_id = ?", (values[0],)
+                ).fetchone()
+                if existing is not None and existing[0] != "IMPORT":
+                    result["rejected"] += 1
+                    continue
+                self.conn.execute(
+                    """INSERT INTO kids_content_catalog
+                       (content_id, domain, stage_code, title, summary, detail_json,
+                        min_months, max_months, safety_note, source, is_active)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'IMPORT', ?)
+                       ON CONFLICT(content_id) DO UPDATE SET
+                        domain=excluded.domain, stage_code=excluded.stage_code,
+                        title=excluded.title, summary=excluded.summary,
+                        detail_json=excluded.detail_json, min_months=excluded.min_months,
+                        max_months=excluded.max_months, safety_note=excluded.safety_note,
+                        is_active=excluded.is_active, source='IMPORT', updated_at=CURRENT_TIMESTAMP""",
+                    values[:9] + (values[10],),
+                )
+                result["updated" if existing is not None else "inserted"] += 1
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return result
+
+    def list_catalog_items(self, domain: Optional[str] = None, stage_code: Optional[str] = None,
+                           active_only: bool = True, limit: int = 200) -> list[dict]:
+        limit = max(0, min(int(limit), 1000))
+        if limit == 0:
+            return []
+        sql = "SELECT * FROM kids_content_catalog WHERE 1 = 1"
+        params: list[object] = []
+        if active_only:
+            sql += " AND is_active = 1"
+        if domain is not None:
+            sql += " AND domain = ?"
+            params.append(str(domain))
+        if stage_code is not None:
+            sql += " AND stage_code = ?"
+            params.append(str(stage_code))
+        sql += " ORDER BY domain, stage_code, content_id LIMIT ?"
+        params.append(limit)
+        return [self._catalog_row(row) for row in self.conn.execute(sql, params).fetchall()]
+
+    def get_catalog_item(self, content_id: str, active_only: bool = True) -> Optional[dict]:
+        sql = "SELECT * FROM kids_content_catalog WHERE content_id = ?"
+        params: list[object] = [str(content_id)]
+        if active_only:
+            sql += " AND is_active = 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return self._catalog_row(row) if row else None
 
     # ── user profiles ─────────────────────────────────────────
     def ensure_user(self, telegram_user_id: int | str, default_region: str = "서울") -> None:
@@ -1619,3 +1788,31 @@ class KidsCompassDatabase:
             summary_text=row["summary_text"], provider=row["provider"], fetched_at=row["fetched_at"],
             expires_at=row["expires_at"], is_failed=bool(row["is_failed"]),
         )
+
+
+def read_catalog_item_readonly(db_path: str, content_id: str) -> Optional[dict]:
+    """Read one active catalogue row without creating or mutating a DB file."""
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    uri = f"file:{path.as_posix()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM kids_content_catalog WHERE content_id = ? AND is_active = 1",
+                (str(content_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+    if row is None:
+        return None
+    item = dict(row)
+    try:
+        item["detail"] = json.loads(item["detail_json"])
+    except (TypeError, json.JSONDecodeError):
+        item["detail"] = {}
+    return item

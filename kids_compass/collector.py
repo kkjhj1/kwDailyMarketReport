@@ -21,6 +21,8 @@ from kids_compass.models import (
     MoonlightHospital,
     PregnancyBenefit,
 )
+from kids_compass.food_safety import build_food_catalog_seed_rows
+from kids_compass.home_play import build_catalog_seed_rows
 from kids_compass.storage.db import milestone_window as _child_milestone_window
 
 UNVERIFIED = "미검증(운영 전 E-gen 확인 필요)"
@@ -492,10 +494,12 @@ def recommend_by_category(db, category: ExperienceCategory, region_sido: Optiona
 def seed_all(db, today: Optional[date] = None) -> dict[str, int]:
     from kids_compass.fever_engine import DEFAULT_MEDICINES
 
+    catalog_rows = build_catalog_seed_rows() + build_food_catalog_seed_rows()
     return {
         "medicines": db.upsert_medicines(DEFAULT_MEDICINES.values()),
         "experiences": db.upsert_experiences(SEED_EXPERIENCES),
         "bookings": db.upsert_booking_events(build_booking_events(today)),
         "hospitals": db.upsert_hospitals(SEED_HOSPITALS),
         "milestones": db.upsert_milestone_definitions(SEED_MILESTONES),
+        "catalog": db.seed_content_catalog(catalog_rows),
     }

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import hmac
 import json
 import os
+import sqlite3
 import shutil
 import sys
 from datetime import datetime
@@ -47,6 +49,17 @@ from market_brief.bot_visibility import is_public_bot_id, is_wip_bot_id
 from market_brief.name_resolution import is_placeholder_name, resolve_telegram_display_name
 from market_brief.briefing_service import generate_bot_briefing, send_bot_test_message
 from market_brief.subscription_engine import SubscriptionEngine
+from kids_compass.storage.db import (
+    KidsCompassDatabase,
+    read_catalog_item_readonly,
+    resolve_kids_db_path,
+)
+from kids_compass.web_guide import (
+    CONTENT_ID_RE,
+    render_guide_html,
+    render_not_found_html,
+    validate_catalog_import_payload,
+)
 
 try:
     from travel_brief.flight_engine import FlightEngine
@@ -106,6 +119,21 @@ def verify_admission_admin_token(request: Request) -> None:
         token = request.query_params.get("admin_token", "").strip()
     if token != expected:
         raise HTTPException(status_code=401, detail="유효한 관리자 인증 토큰(X-Admin-Token)이 필요합니다.")
+
+
+def _require_strict_admin_token(request: Request) -> None:
+    """Require a configured token carried only by the X-Admin-Token header.
+
+    The legacy ``verify_admin_token`` intentionally remains backward-compatible
+    for existing routes.  Kids catalogue administration is newer and must fail
+    closed when the server has no configured credential.
+    """
+    expected = os.environ.get("ADMIN_API_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="관리자 API 토큰이 설정되지 않았습니다.")
+    supplied = request.headers.get("X-Admin-Token", "").strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="유효한 X-Admin-Token 헤더가 필요합니다.")
 
 
 # =========================================================================
@@ -357,6 +385,10 @@ def create_admin_app(
     app.state.router = router
     app.state.bot_manager = bot_manager
     app.state.schedule_manager = schedule_manager
+    # Kids Compass has its own SQLite SSOT. Keep this on app.state so tests and
+    # embedders can inject an isolated file without rebuilding the app.
+    kids_db_path = resolve_kids_db_path(db_path)
+    app.state.kids_db_path = kids_db_path
 
     adm_db = AdmissionDatabase(db_path=db_path) if _HAS_ADMISSION_MODULE else None
     adm_curator = AICurator() if _HAS_ADMISSION_MODULE else None
@@ -1786,6 +1818,72 @@ def create_admin_app(
             dispatcher = AdmissionSafeDispatcher()
             stats = dispatcher.dispatch(channel=channel, briefing=briefing, db=adm_db)
             return {"success": True, "dry_run": False, "stats": stats}
+
+    def _kids_db_path_for_request(request: Request) -> str:
+        return str(getattr(request.app.state, "kids_db_path", kids_db_path))
+
+    @app.get("/kids/guide/{content_id}", response_class=HTMLResponse)
+    def get_kids_guide(content_id: str, request: Request):
+        if not CONTENT_ID_RE.fullmatch(content_id):
+            return HTMLResponse(content=render_not_found_html(), status_code=404)
+        item = read_catalog_item_readonly(_kids_db_path_for_request(request), content_id)
+        if item is None:
+            return HTMLResponse(content=render_not_found_html(), status_code=404)
+        return HTMLResponse(content=render_guide_html(item), status_code=200)
+
+    @app.get("/api/kids/catalog")
+    def list_kids_catalog(request: Request, domain: str = "", stage_code: str = ""):
+        _require_strict_admin_token(request)
+        db = KidsCompassDatabase(_kids_db_path_for_request(request))
+        try:
+            return {
+                "items": db.list_catalog_items(
+                    domain=domain.strip() or None,
+                    stage_code=stage_code.strip() or None,
+                    active_only=False,
+                )
+            }
+        finally:
+            db.close()
+
+    @app.post("/api/kids/catalog/import")
+    async def import_kids_catalog(request: Request):
+        _require_strict_admin_token(request)
+        raw_body = await request.body()
+        if len(raw_body) > 512 * 1024:
+            raise HTTPException(status_code=413, detail="카탈로그 임포트 본문은 512KB 이하만 허용됩니다.")
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+            rows = validate_catalog_import_payload(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"카탈로그 임포트 payload가 올바르지 않습니다: {exc}") from exc
+
+        db = KidsCompassDatabase(_kids_db_path_for_request(request))
+        try:
+            # Part A deliberately protects SEED rows. Preflight the whole batch
+            # so a mixed request cannot partially import before returning 400.
+            content_ids = [row["content_id"] for row in rows]
+            if content_ids:
+                placeholders = ",".join("?" for _ in content_ids)
+                existing = db.conn.execute(
+                    f"SELECT content_id, source FROM kids_content_catalog WHERE content_id IN ({placeholders})",
+                    content_ids,
+                ).fetchall()
+                protected = [row["content_id"] for row in existing if row["source"] != "IMPORT"]
+                if protected:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"SEED 콘텐츠는 덮어쓸 수 없습니다: {', '.join(protected)}",
+                    )
+            try:
+                result = db.import_catalog_items(rows)
+            except (ValueError, sqlite3.Error, OSError) as exc:
+                raise HTTPException(status_code=400, detail=f"카탈로그 임포트에 실패했습니다: {exc}") from exc
+            if result.get("rejected"):
+                raise HTTPException(status_code=400, detail="보호된 SEED 콘텐츠가 포함되어 임포트가 거부되었습니다.")
+            return {"success": True, **result}
+        finally:
+            db.close()
 
     @app.get("/healthz")
     def healthz_check():

@@ -64,9 +64,9 @@ def run_kids_timer_tick_once(
 
     from kids_compass.channels.telegram import KidsTelegramChannel
     from kids_compass.interactive_bot import dispatch_due_dose_timers
-    from kids_compass.storage.db import KidsCompassDatabase
+    from kids_compass.storage.db import KidsCompassDatabase, resolve_kids_db_path
 
-    kc_db = KidsCompassDatabase(str(db_path))
+    kc_db = KidsCompassDatabase(resolve_kids_db_path(db_path))
     try:
         return dispatch_due_dose_timers(
             kc_db,
@@ -2537,12 +2537,12 @@ class DynamicBotManager:
             from kids_compass.channels.telegram import KidsTelegramChannel
             from kids_compass.collector import seed_all
             from kids_compass.interactive_bot import KidsCompassInteractiveBot
-            from kids_compass.storage.db import KidsCompassDatabase
+            from kids_compass.storage.db import KidsCompassDatabase, resolve_kids_db_path
         except ImportError:
             return False, "kids_interactive_not_available"
 
         base_path = getattr(self.engine.db, "db_path", None)
-        kc_db_path = ":memory:" if (not base_path or str(base_path) == ":memory:") else str(Path(str(base_path)).with_name("kids_compass.sqlite3"))
+        kc_db_path = resolve_kids_db_path(base_path) if base_path else ":memory:"
         kc_db = KidsCompassDatabase(kc_db_path)
         try:
             # booking events are relative to today -> re-seed once per day (not once per update)
@@ -3020,7 +3020,8 @@ class DynamicBotManager:
                 if not base_path or str(base_path) == ":memory:":
                     kc_db_path = None
                 else:
-                    candidate = Path(str(base_path)).with_name("kids_compass.sqlite3")
+                    from kids_compass.storage.db import resolve_kids_db_path
+                    candidate = Path(resolve_kids_db_path(base_path))
                     kc_db_path = str(candidate) if candidate.is_file() else None
                 if kc_db_path is not None:
                     loop = asyncio.get_running_loop()
