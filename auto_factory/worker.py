@@ -69,6 +69,14 @@ from .live_progress import (
     runtime_snapshots,
 )
 from .presets import PRESET_POLICY_VERSION, PRESETS
+from .projects import (
+    DEFAULT_PROJECT_ID,
+    ProjectContext,
+    ProjectContextError,
+    ProjectContextResolver,
+    ProjectRegistry,
+    load_registry,
+)
 from .win_job import build_sandbox_env, current_identity, is_same_process
 from .worktree import (
     DB_FILENAME,
@@ -82,6 +90,7 @@ from .worktree import (
     _is_link_or_reparse,
     default_state_dir,
     safe_write_atomic,
+    same_path,
     snapshot_tree,
     validate_state_layout,
 )
@@ -196,6 +205,9 @@ class PipelineWorker:
         qa_lease_ttl: float = 300.0,
         live_progress: bool = True,
         lease_keeper_interval: float | None = None,
+        state_dir: str | os.PathLike | None = None,
+        projects_env: dict[str, str] | None = None,
+        project_registry_loader: Callable[[], ProjectRegistry] | None = None,
     ) -> None:
         self.live_progress = live_progress
         self.lease_keeper_interval = lease_keeper_interval
@@ -223,6 +235,19 @@ class PipelineWorker:
         self.artifacts_dir = Path(artifacts_dir)
         self.stop_flag = Path(stop_flag) if stop_flag else self.wtm.repo_root / "STOP.flag"
         self.holdout_dir = Path(holdout_dir) if holdout_dir else None
+        # Phase B: every task runs in ITS project's repository. `wtm` / `guard` / `holdout_dir` are
+        # swapped to the task's ProjectContext while it is processed and restored afterwards.
+        self._home: tuple[Any, Any, Any] | None = None
+        self._ctx: ProjectContext | None = None
+        if state_dir is None and db.path != ":memory:":
+            state_dir = Path(db.path).parent  # same default as the supervisor (db lives in the state dir)
+        self.state_dir = Path(state_dir) if state_dir else None
+        self.projects_env = projects_env
+        self._registry_loader = project_registry_loader
+        self.resolver = ProjectContextResolver(
+            self._registry, self.wtm.worktrees_dir, home_wtm=self.wtm, home_guard=self.guard,
+            home_holdout_dir=self.holdout_dir,
+        )
         self.quota_ratio = quota_ratio
         self.units = units_per_call
         self.max_tasks_per_cycle = max_tasks_per_cycle
@@ -262,7 +287,53 @@ class PipelineWorker:
     def stop_requested(self) -> bool:
         if self.external_stop is not None and self.external_stop():
             return True
+        if self._ctx is not None and self._ctx.stop_requested():  # project-local <root>/STOP.flag
+            return True
         return self.stop_flag.exists()
+
+    # ------------------------------------------------------- project context
+    def _registry(self) -> ProjectRegistry:
+        if self._registry_loader is not None:
+            return self._registry_loader()
+        return load_registry(self._home[0].repo_root if self._home else self.wtm.repo_root,
+                             self.state_dir, self.projects_env)
+
+    def _enter_project(self, task_id: str) -> str | None:
+        """Resolve the task's ProjectContext (fresh registry) and switch to it.
+
+        Returns None on success (or when the task needs no execution context), else the final
+        state after parking the task BLOCKED (unknown/removed/read-only/folder project, L3 or a
+        risk above the project's max, registry drift, unsafe root, tampered worktree_path).
+        """
+        task = self.db.get_task(task_id)
+        if task["state"] not in self._handlers:
+            return None
+        self._home = (self.wtm, self.guard, self.holdout_dir)
+        self.resolver.home_wtm, self.resolver.home_guard = self.wtm, self.guard
+        self.resolver.home_holdout_dir = self.holdout_dir
+        self.resolver.base = self.wtm.worktrees_dir
+        pid = task.get("project_id") or DEFAULT_PROJECT_ID
+        try:
+            ctx = self.resolver.resolve(pid, risk_level=task["risk_level"],
+                                        fingerprint=task.get("registry_fingerprint"))
+            wt = task.get("worktree_path")
+            if wt and not same_path(wt, ctx.wtm.path_for(task_id)):
+                raise ProjectContextError("WORKTREE_PATH_MISMATCH", "worktree_path is not this project's slot")
+        except ProjectContextError as exc:
+            if exc.code == "RISK_L3":
+                reason = "L3 fail-closed: deploy/DB/live-send is outside unattended scope"
+            else:
+                reason = f"PROJECT_CONTEXT: {exc}"
+            self._move(task, "BLOCKED", reason[:500], last_error=f"PROJECT_CONTEXT:{exc.code}")
+            return "BLOCKED"
+        self._ctx = ctx
+        self.wtm, self.guard, self.holdout_dir = ctx.wtm, ctx.guard, ctx.holdout_dir
+        return None
+
+    def _leave_project(self) -> None:
+        if self._home is not None:
+            self.wtm, self.guard, self.holdout_dir = self._home
+        self._home, self._ctx = None, None
 
     def _check_stop(self) -> None:
         self._check_lease()
@@ -494,7 +565,8 @@ class PipelineWorker:
 
     # ------------------------------------------------------------ handlers
     def _preflight(self, task: dict[str, Any]) -> bool:
-        bad = [p for p in task["allowed_paths"] if is_forbidden(p)]
+        forbidden = getattr(self.guard, "forbidden", None) or ()
+        bad = [p for p in task["allowed_paths"] if is_forbidden(p) or (forbidden and is_forbidden(p, forbidden))]
         if bad:
             self._move(task, "BLOCKED", f"PREFLIGHT: forbidden allowed_paths {bad}")
             return False
@@ -972,6 +1044,10 @@ class PipelineWorker:
         self._current_task, self._cancel_latched = task_id, False
         try:
             self._start_progress(task_id, lease_expires)
+            self._check_stop()  # a pending cancel is honoured before any project resolution
+            parked = self._enter_project(task_id)
+            if parked is not None:
+                return parked
             while True:
                 self._check_stop()  # includes the CANCEL_REQUESTED check
                 task = self.db.get_task(task_id)
@@ -1005,6 +1081,7 @@ class PipelineWorker:
                 self.db.transition(task_id, task["state_version"], "BLOCKED", self.actor, reason, {"last_error": reason})
             return "BLOCKED"
         finally:
+            self._leave_project()
             self._current_task = None
             self._stop_progress(task_id)  # final sidecar flush BEFORE the lease is released
             try:
@@ -1459,6 +1536,7 @@ def main(argv: list[str] | None = None) -> int:
                 db, args.repo, default_adapters(), artifacts_dir=layout["artifacts"],
                 worktrees_dir=layout["worktrees"], stop_flag=layout["stop_flag"],
                 holdout_dir=Path(args.repo) / "holdout_eval", auto_audit_l2=args.auto_audit_l2,
+                state_dir=layout["state_dir"],
             )
             cycles = worker.run_forever(max_cycles=args.max_cycles, idle_sleep=0)
             print(f"[auto_factory] cycles={cycles} restarts={worker.restart_count}")

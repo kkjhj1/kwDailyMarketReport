@@ -14,21 +14,31 @@ Rules:
 - Discovery (`scan_workspace_projects`) and Git inspection (`inspect_project_git`) are strictly
   read-only and never write `projects.json` or any repository state.
 
-Phase A never executes work in a non-default project: the worker still runs every task in
-`market_brief_starter`, so the coordinator parks such tasks (see `CoordinatorDB`).
+Phase B (execution plane): `ProjectContextResolver` re-loads the registry for every task /
+merge and yields a `ProjectContext` (per-project `WorktreeManager`, guardrails, holdout and
+STOP.flag). Anything unknown, read-only, `folder`, over-risk, fingerprint-drifted or with an
+unsafe root fails closed with `ProjectContextError` (callers park the task BLOCKED).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from .guardrails import FORBIDDEN_PATTERNS, GuardrailChecker
 from .win_job import build_sandbox_env
-from .worktree import UnsafePathError, _assert_no_link_or_reparse_ancestors, _is_link_or_reparse
+from .worktree import (
+    UnsafePathError,
+    WorktreeError,
+    WorktreeManager,
+    _assert_no_link_or_reparse_ancestors,
+    _is_link_or_reparse,
+)
 
 DEFAULT_PROJECT_ID = "market_brief_starter"
 PROJECTS_FILE_ENV = "AUTO_FACTORY_PROJECTS_FILE"
@@ -48,8 +58,10 @@ GLOBAL_PROTECTED_PATHS = (".env", ".git/", "reports/", "holdout_eval/")
 GLOBAL_FORBIDDEN_SUFFIXES = (".sqlite3", ".sqlite", ".db", ".db-wal", ".db-shm")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SPEC_KEYS = frozenset(
-    {"project_id", "label", "root_path", "kind", "default_tests", "protected_paths", "allow_write", "max_risk"}
+    {"project_id", "label", "root_path", "kind", "default_tests", "protected_paths", "allow_write", "max_risk",
+     "holdout_dir"}
 )
+RISK_ORDER = ("L0", "L1", "L2", "L3")
 _REQUIRED_KEYS = frozenset({"project_id", "label", "root_path", "kind"})
 
 
@@ -121,6 +133,7 @@ class ProjectSpec:
     protected_paths: tuple[str, ...] = field(default=GLOBAL_PROTECTED_PATHS)
     allow_write: bool = False
     max_risk: str = "L2"
+    holdout_dir: Path | None = None  # external, immutable holdout suite (never inside root_path)
 
     def __post_init__(self) -> None:
         validate_project_id(self.project_id)
@@ -142,6 +155,11 @@ class ProjectSpec:
         for g in GLOBAL_PROTECTED_PATHS:
             if g not in self.protected_paths:
                 raise ProjectRegistryError("protected_paths must include the global policy")
+        if self.holdout_dir is not None:
+            if not isinstance(self.holdout_dir, Path) or not self.holdout_dir.is_absolute():
+                raise ProjectRegistryError("holdout_dir must be an absolute Path")
+            if _overlaps(self.holdout_dir, self.root_path):
+                raise ProjectRegistryError("holdout_dir must not overlap root_path")
 
     @property
     def writable(self) -> bool:
@@ -149,24 +167,24 @@ class ProjectSpec:
         return self.kind == "git" and self.allow_write
 
 
-def _canonical_root(raw: Any) -> Path:
+def _canonical_root(raw: Any, what: str = "root_path") -> Path:
     """Absolute, existing directory with no symlink/junction/reparse point on the way."""
     if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
-        raise ProjectRegistryError("root_path must be a non-empty path")
+        raise ProjectRegistryError(f"{what} must be a non-empty path")
     lexical = Path(os.path.abspath(os.fspath(raw)))
     if not Path(os.fspath(raw)).is_absolute():
-        raise ProjectRegistryError("root_path must be absolute")
+        raise ProjectRegistryError(f"{what} must be absolute")
     for cand in (lexical, *lexical.parents):
         if _is_link_or_reparse(cand):
-            raise ProjectRegistryError(f"root_path has a symlink/reparse ancestor: {cand}")
+            raise ProjectRegistryError(f"{what} has a symlink/reparse ancestor: {cand}")
     try:
         canon = _assert_no_link_or_reparse_ancestors(lexical.resolve(strict=True))
     except (OSError, RuntimeError) as exc:
-        raise ProjectRegistryError(f"root_path does not exist: {type(exc).__name__}") from None
+        raise ProjectRegistryError(f"{what} does not exist: {type(exc).__name__}") from None
     except UnsafePathError as exc:
         raise ProjectRegistryError(str(exc)) from None
     if not canon.is_dir():
-        raise ProjectRegistryError("root_path must be a directory")
+        raise ProjectRegistryError(f"{what} must be a directory")
     return canon
 
 
@@ -232,9 +250,30 @@ def build_project(entry: Mapping[str, Any], *, verify_git: bool = True) -> Proje
     extra = _rel_tuple(entry.get("protected_paths"), "protected_paths",
                        lambda v: _validate_rel(v, "protected_paths", allow_prefix=True))
     protected = tuple(dict.fromkeys(GLOBAL_PROTECTED_PATHS + extra))
+    holdout = entry.get("holdout_dir")
+    holdout_dir = _canonical_root(holdout, "holdout_dir") if holdout is not None else None
+    if holdout_dir is not None and _overlaps(holdout_dir, root):
+        raise ProjectRegistryError(f"{pid}: holdout_dir must not overlap root_path")
     if kind == "git" and verify_git:
         _verify_git_toplevel(root)
-    return ProjectSpec(pid, _clean_label(entry["label"]), root, kind, tests, protected, allow_write, max_risk)
+    return ProjectSpec(pid, _clean_label(entry["label"]), root, kind, tests, protected, allow_write, max_risk,
+                       holdout_dir)
+
+
+def registry_fingerprint(project: ProjectSpec) -> str:
+    """Canonical SHA-256 of the security-relevant `ProjectSpec` fields (label excluded)."""
+    data = {
+        "project_id": project.project_id,
+        "canonical_root": _norm(project.root_path),
+        "kind": project.kind,
+        "allow_write": bool(project.allow_write),
+        "max_risk": project.max_risk,
+        "protected_paths": list(project.protected_paths),
+        "default_tests": list(project.default_tests),
+        "holdout_dir": _norm(project.holdout_dir) if project.holdout_dir is not None else None,
+    }
+    raw = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()
 
 
 class ProjectRegistry:
@@ -254,6 +293,10 @@ class ProjectRegistry:
                 if _overlaps(p.root_path, other.root_path):
                     raise ProjectRegistryError(
                         f"root_path of {p.project_id} overlaps/nests with {other.project_id}")
+                for a, b in ((p, other), (other, p)):
+                    if a.holdout_dir is not None and _overlaps(a.holdout_dir, b.root_path):
+                        raise ProjectRegistryError(
+                            f"holdout_dir of {a.project_id} overlaps root_path of {b.project_id}")
             seen[p.project_id] = p
         if DEFAULT_PROJECT_ID not in seen:
             raise ProjectRegistryError(f"registry must include {DEFAULT_PROJECT_ID}")
@@ -352,6 +395,171 @@ def load_registry(
     if not any(s.project_id == DEFAULT_PROJECT_ID for s in specs):
         specs.insert(0, default_project(repo_canon, verify_git=verify_git))
     return ProjectRegistry(specs, str(path))
+
+
+# ------------------------------------------------------- execution plane (Phase B)
+class ProjectContextError(ValueError):
+    """A task/merge may not run in this project. `code` is a stable reason; nothing was touched."""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(f"{code}: {detail}" if detail else code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ProjectContext:
+    """Everything needed to run / merge one task in its own repository."""
+
+    project: ProjectSpec
+    wtm: WorktreeManager
+    guard: Any  # GuardrailChecker(wtm, FORBIDDEN_PATTERNS + project.protected_paths)
+    holdout_dir: Path | None
+    fingerprint: str
+
+    @property
+    def project_id(self) -> str:
+        return self.project.project_id
+
+    @property
+    def root_path(self) -> Path:
+        return self.project.root_path
+
+    @property
+    def stop_flag(self) -> Path:
+        """Project-local kill switch (`<root>/STOP.flag`), honoured in addition to the global one."""
+        return self.project.root_path / "STOP.flag"
+
+    def stop_requested(self) -> bool:
+        return os.path.lexists(self.stop_flag)
+
+
+def risk_exceeds(risk_level: str, max_risk: str) -> bool:
+    return RISK_ORDER.index(risk_level) > RISK_ORDER.index(max_risk)
+
+
+class ProjectContextResolver:
+    """Fresh-reload the registry and build a fail-closed `ProjectContext` per task/merge.
+
+    Worktree layout under `base_worktrees_dir`:
+    - home project (`market_brief_starter`): legacy `<base>/<task_id>` + `<base>.parent/merge.lock`
+    - any other project: `<base>/<project_id>/worktrees/<task_id>` + `<base>/<project_id>/merge.lock`
+    """
+
+    def __init__(
+        self,
+        registry_loader: Callable[[], ProjectRegistry],
+        base_worktrees_dir: str | os.PathLike,
+        *,
+        home_wtm: WorktreeManager | None = None,
+        home_guard: Any = None,
+        home_holdout_dir: str | os.PathLike | None = None,
+        forbidden: Iterable[str] = FORBIDDEN_PATTERNS,
+        verify_git: bool = True,
+    ):
+        self.registry_loader = registry_loader
+        self.base = Path(base_worktrees_dir).resolve()
+        self.home_wtm = home_wtm
+        self.home_guard = home_guard
+        self.home_holdout_dir = Path(home_holdout_dir) if home_holdout_dir else None
+        self.forbidden = tuple(forbidden)
+        self.verify_git = verify_git
+
+    # -------------------------------------------------------------- lookup
+    def _lookup(self, project_id: Any) -> ProjectSpec:
+        if not isinstance(project_id, str) or not PROJECT_ID_RE.match(project_id):
+            raise ProjectContextError("BAD_PROJECT", "invalid project_id")
+        try:
+            reg = self.registry_loader()
+        except ProjectRegistryError as exc:
+            raise ProjectContextError("REGISTRY_ERROR", str(exc)[:200]) from None
+        except Exception as exc:  # unexpected loader failure: still fail closed
+            raise ProjectContextError("REGISTRY_ERROR", type(exc).__name__) from None
+        spec = reg.get(project_id)
+        if spec is None:
+            raise ProjectContextError("PROJECT_UNKNOWN", f"{project_id} is not registered")
+        return spec
+
+    def _check_root(self, spec: ProjectSpec) -> None:
+        try:
+            canon = _canonical_root(spec.root_path)
+        except ProjectRegistryError as exc:
+            raise ProjectContextError("ROOT_UNSAFE", str(exc)[:200]) from None
+        if _norm(canon) != _norm(spec.root_path):
+            raise ProjectContextError("ROOT_UNSAFE", "root_path is not canonical")
+        if spec.kind == "git" and self.verify_git:
+            try:
+                _verify_git_toplevel(canon)
+            except ProjectRegistryError as exc:
+                raise ProjectContextError("ROOT_NOT_TOPLEVEL", str(exc)[:200]) from None
+
+    def _wtm_for_spec(self, spec: ProjectSpec) -> WorktreeManager:
+        try:
+            if spec.project_id == DEFAULT_PROJECT_ID:
+                if self.home_wtm is not None and _norm(self.home_wtm.repo_root) == _norm(spec.root_path):
+                    return self.home_wtm
+                return WorktreeManager(spec.root_path, self.base)  # legacy layout
+            layout = self.base / spec.project_id
+            for cand in (layout, layout / "worktrees"):
+                if _is_link_or_reparse(cand):
+                    raise ProjectContextError("LAYOUT_UNSAFE", f"link/reparse point: {cand}")
+            if os.path.lexists(layout / ".git"):  # a legacy task worktree named like the project
+                raise ProjectContextError("LAYOUT_CONFLICT", f"{layout} is a git worktree")
+            return WorktreeManager(spec.root_path, layout / "worktrees", merge_lock_path=layout / "merge.lock")
+        except WorktreeError as exc:
+            raise ProjectContextError("LAYOUT_UNSAFE", str(exc)[:200]) from None
+
+    def _guard_for(self, spec: ProjectSpec, wtm: WorktreeManager) -> Any:
+        forbidden = tuple(dict.fromkeys(self.forbidden + tuple(spec.protected_paths)))
+        home = self.home_guard
+        if (spec.project_id == DEFAULT_PROJECT_ID and home is not None and getattr(home, "wt", None) is wtm
+                and set(forbidden) <= set(getattr(home, "forbidden", ()))):
+            return home
+        return GuardrailChecker(wtm, forbidden)
+
+    def _holdout_for(self, spec: ProjectSpec) -> Path | None:
+        if spec.project_id == DEFAULT_PROJECT_ID:
+            return self.home_holdout_dir
+        if spec.holdout_dir is None:
+            return None  # never fall back to another project's holdout suite
+        try:
+            hd = _canonical_root(spec.holdout_dir, "holdout_dir")
+        except ProjectRegistryError as exc:
+            raise ProjectContextError("HOLDOUT_UNSAFE", str(exc)[:200]) from None
+        if _overlaps(hd, spec.root_path):
+            raise ProjectContextError("HOLDOUT_UNSAFE", "holdout_dir overlaps root_path")
+        return hd
+
+    # -------------------------------------------------------------- public
+    def wtm_for(self, project_id: Any) -> WorktreeManager:
+        """Lenient, read-mostly view (boot reconcile / diff / cleanup): registered git project with a
+        safe root. Never used to start work or merge (see `resolve`)."""
+        spec = self._lookup(project_id or DEFAULT_PROJECT_ID)
+        if spec.kind != "git":
+            raise ProjectContextError("PROJECT_NOT_GIT", f"{spec.project_id} is a {spec.kind} project")
+        self._check_root(spec)
+        return self._wtm_for_spec(spec)
+
+    def resolve(self, project_id: Any, *, risk_level: str | None = None,
+                fingerprint: str | None = None) -> ProjectContext:
+        """Strict check for execution and merge. Order: registry -> policy -> fingerprint -> root/git."""
+        spec = self._lookup(project_id or DEFAULT_PROJECT_ID)
+        if spec.kind != "git":
+            raise ProjectContextError("PROJECT_NOT_GIT", f"{spec.project_id} is a {spec.kind} project")
+        if spec.allow_write is not True:
+            raise ProjectContextError("PROJECT_READ_ONLY", f"{spec.project_id} has allow_write=false")
+        if risk_level is not None:
+            if risk_level not in RISK_ORDER:
+                raise ProjectContextError("BAD_RISK", str(risk_level)[:8])
+            if risk_level == "L3":
+                raise ProjectContextError("RISK_L3", "L3 is never executed or merged by the pipeline")
+            if risk_exceeds(risk_level, spec.max_risk):
+                raise ProjectContextError("RISK_TOO_HIGH", f"{risk_level} > max_risk {spec.max_risk}")
+        fp = registry_fingerprint(spec)
+        if fingerprint and fingerprint != fp:
+            raise ProjectContextError("FINGERPRINT_MISMATCH", "project registry changed since the task was created")
+        self._check_root(spec)
+        wtm = self._wtm_for_spec(spec)
+        return ProjectContext(spec, wtm, self._guard_for(spec, wtm), self._holdout_for(spec), fp)
 
 
 # ------------------------------------------------------------ read-only views

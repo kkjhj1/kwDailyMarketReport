@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .projects import DEFAULT_PROJECT_ID, PROJECT_ID_RE
+from .worktree import same_path as _same_path
 
 MAIN_FLOW = (
     "RECEIVED",
@@ -350,13 +351,22 @@ CREATE INDEX IF NOT EXISTS idx_backlog_project ON backlog_items(project_id, stat
 # Multi-project (Phase A): every task belongs to a project; legacy rows default to the home repo.
 _TASK_MIGRATIONS = (
     ("project_id", f"TEXT NOT NULL DEFAULT '{DEFAULT_PROJECT_ID}'"),
+    ("registry_fingerprint", "TEXT"),  # Phase B: project spec snapshot (NULL for legacy tasks)
 )
+_MERGE_INTENT_MIGRATIONS = (
+    ("project_id", f"TEXT NOT NULL DEFAULT '{DEFAULT_PROJECT_ID}'"),
+    ("registry_fingerprint", "TEXT"),
+)
+_BACKLOG_MIGRATIONS = (
+    ("allowed_paths", "TEXT NOT NULL DEFAULT '[]'"),  # JSON array of repo-relative paths
+)
+MAX_BACKLOG_SCOPE_PATHS = 20
 BACKLOG_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED", "DONE")
 BACKLOG_OPEN_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED")
 MAX_BACKLOG_TITLE = 200
 MAX_BACKLOG_DESCRIPTION = 2000
-# Until the multi-repo worker (Phase B) exists, the worker would run any RECEIVED task inside
-# the home repo: tasks for other projects (or without a write scope) are parked BLOCKED at once.
+# Phase A parked every non-home task (kept for reading old event rows). Phase B runs scoped tasks
+# in their own repository; only tasks WITHOUT a write scope are still parked BLOCKED at once.
 PHASE_B_PARK_REASON = "multi-repo execution not enabled yet (Phase B); parked for human review"
 SCOPE_PARK_REASON = "backlog task has no allowed_paths scope; parked for human review"
 # Columns added to `approvals` in Step 2 (idempotent ALTER TABLE for Step 1 databases).
@@ -644,10 +654,12 @@ class CoordinatorDB:
             for name, typ in _APPROVAL_MIGRATIONS:
                 if name not in cols:
                     c.execute(f"ALTER TABLE approvals ADD COLUMN {name} {typ}")
-            tcols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
-            for name, typ in _TASK_MIGRATIONS:
-                if name not in tcols:
-                    c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {typ}")
+            for table, migrations in (("tasks", _TASK_MIGRATIONS), ("merge_intents", _MERGE_INTENT_MIGRATIONS),
+                                      ("backlog_items", _BACKLOG_MIGRATIONS)):
+                tcols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+                for name, typ in migrations:
+                    if name not in tcols:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
             c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_project_state ON tasks(project_id, state, updated_at)")
         self._conn.executescript(_POST_MIGRATION)
 
@@ -699,6 +711,7 @@ class CoordinatorDB:
         task_id: str | None = None,
         *,
         project_id: str = DEFAULT_PROJECT_ID,
+        registry_fingerprint: str | None = None,
     ) -> tuple[str, bool]:
         if risk_level not in RISK_LEVELS:
             raise ValueError(f"unknown risk level: {risk_level}")
@@ -706,7 +719,7 @@ class CoordinatorDB:
         with self._tx() as c:
             return self._create_task_in_tx(
                 c, request, risk_level, allowed_paths, acceptance_spec, idempotency_key, task_id,
-                project_id=project_id,
+                project_id=project_id, registry_fingerprint=registry_fingerprint,
             )
 
     def _create_task_in_tx(
@@ -720,15 +733,19 @@ class CoordinatorDB:
         task_id: str | None = None,
         *,
         project_id: str = DEFAULT_PROJECT_ID,
+        registry_fingerprint: str | None = None,
     ) -> tuple[str, bool]:
         """Insert a RECEIVED task inside the caller's tx; same `request_hash` -> existing id.
 
         The home project keeps the legacy hash (existing idempotency is unchanged); any other
         project mixes `project_id` in, so identical requests in different projects never collide.
+        `registry_fingerprint` snapshots the project spec (re-verified before execution and merge).
         """
         if risk_level not in RISK_LEVELS:
             raise ValueError(f"unknown risk level: {risk_level}")
         _check_project_id(project_id)
+        if registry_fingerprint is not None and not re.fullmatch(r"[0-9a-f]{64}", str(registry_fingerprint)):
+            raise ValueError("registry_fingerprint must be a 64-hex sha256")
         canonical = json.dumps(
             [request, risk_level, sorted(allowed_paths), acceptance_spec], sort_keys=True
         )
@@ -743,8 +760,8 @@ class CoordinatorDB:
             return row["id"], False
         c.execute(
             "INSERT INTO tasks (id, request_hash, request, risk_level, state, state_version,"
-            " allowed_paths, acceptance_spec, created_at, updated_at, project_id)"
-            " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?,?)",
+            " allowed_paths, acceptance_spec, created_at, updated_at, project_id, registry_fingerprint)"
+            " VALUES (?,?,?,?, 'RECEIVED', 0, ?,?,?,?,?,?)",
             (
                 tid,
                 request_hash,
@@ -755,6 +772,7 @@ class CoordinatorDB:
                 now,
                 now,
                 project_id,
+                registry_fingerprint,
             ),
         )
         c.execute(
@@ -827,11 +845,21 @@ class CoordinatorDB:
             )
             return int(cur.lastrowid)
 
+    @staticmethod
+    def _backlog_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        try:
+            paths = json.loads(d.get("allowed_paths") or "[]")
+        except ValueError:
+            paths = None  # corrupt scope: treated as "no scope" (task parks BLOCKED)
+        d["allowed_paths"] = [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+        return d
+
     def get_backlog_item(self, item_id: int) -> dict[str, Any]:
         rows = self._query("SELECT * FROM backlog_items WHERE id=?", (int(item_id),))
         if not rows:
             raise KeyError(item_id)
-        return dict(rows[0])
+        return self._backlog_dict(rows[0])
 
     def list_backlog_items(
         self, project_id: str | None = None, status: str | Iterable[str] | None = None, limit: int = 50,
@@ -851,7 +879,7 @@ class CoordinatorDB:
         limit = max(1, min(int(limit), 200))
         sql = "SELECT * FROM backlog_items" + (f" WHERE {' AND '.join(where)}" if where else "")
         sql += " ORDER BY priority ASC, updated_at DESC, id DESC LIMIT ? OFFSET ?"
-        return [dict(r) for r in self._query(sql, params + [limit, max(0, int(offset))])]
+        return [self._backlog_dict(r) for r in self._query(sql, params + [limit, max(0, int(offset))])]
 
     def count_backlog_items(self, project_id: str, status: str | Iterable[str] | None = None) -> int:
         _check_project_id(project_id)
@@ -883,6 +911,58 @@ class CoordinatorDB:
         with self._tx() as c:
             return self._set_backlog_status_in_tx(c, item_id, status, expected_status)
 
+    @staticmethod
+    def validate_scope_paths(paths: Any) -> list[str]:
+        """Repo-relative scope entries (no abs/drive/UNC/`..`/globs, no secrets/DBs/protected dirs).
+
+        The bot additionally checks them against the project's `root_path` and protected paths.
+        Raises ValueError. Returns sorted unique entries (1..MAX_BACKLOG_SCOPE_PATHS).
+        """
+        from .projects import GLOBAL_FORBIDDEN_SUFFIXES, GLOBAL_PROTECTED_PATHS, _validate_rel
+
+        if isinstance(paths, str) or not isinstance(paths, (list, tuple)):
+            raise ValueError("allowed_paths must be a list")
+        if not 1 <= len(paths) <= MAX_BACKLOG_SCOPE_PATHS:
+            raise ValueError(f"allowed_paths must hold 1..{MAX_BACKLOG_SCOPE_PATHS} entries")
+        out: set[str] = set()
+        for raw in paths:
+            p = _validate_rel(raw, "allowed_paths", allow_prefix=True)
+            low = p.lower().rstrip("/")
+            leaf = low.rsplit("/", 1)[-1]
+            if any(seg.startswith("-") for seg in low.split("/")):
+                raise ValueError(f"allowed_paths: segment starts with '-' in {p!r}")
+            if leaf == ".env" or leaf.startswith(".env.") or ".sqlite" in low or low.endswith(GLOBAL_FORBIDDEN_SUFFIXES):
+                raise ValueError(f"allowed_paths: forbidden target {p!r}")
+            for g in GLOBAL_PROTECTED_PATHS:
+                gl = g.lower().rstrip("/")
+                if low == gl or low.startswith(gl + "/"):
+                    raise ValueError(f"allowed_paths: protected location {p!r}")
+            out.add(p)
+        return sorted(out)
+
+    def set_backlog_scope_in_tx(
+        self, item_id: int, allowed_paths: Iterable[str], actor: str, *, c: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        """Admin-only: set the write scope of a fresh TODO backlog item (never once a task exists)."""
+        if not isinstance(actor, str) or not actor.startswith("human"):
+            raise GuardViolation("backlog scope requires a human (admin) actor")
+        paths = self.validate_scope_paths(list(allowed_paths) if not isinstance(allowed_paths, str) else allowed_paths)
+        if c is None:
+            with self._tx() as conn:
+                return self.set_backlog_scope_in_tx(item_id, paths, actor, c=conn)
+        row = c.execute("SELECT * FROM backlog_items WHERE id=?", (int(item_id),)).fetchone()
+        if row is None:
+            raise ActionRejected("BACKLOG_UNKNOWN")
+        if row["status"] != "TODO" or row["linked_task_id"] is not None:
+            raise ActionRejected("ALREADY_STARTED", "scope can only change while the item is a fresh TODO")
+        cur = c.execute(
+            "UPDATE backlog_items SET allowed_paths=?, updated_at=? WHERE id=? AND status='TODO'"
+            " AND linked_task_id IS NULL", (json.dumps(paths), self.clock(), int(item_id)),
+        )
+        if cur.rowcount != 1:
+            raise ActionRejected("ALREADY_STARTED", "concurrent start")
+        return paths
+
     def start_backlog_task_in_tx(
         self,
         item_id: int,
@@ -898,13 +978,17 @@ class CoordinatorDB:
         Pass `c` to run inside an already open transaction (e.g. an af3 token consume effect).
         Rejects (ActionRejected, nothing changed): unknown item, project mismatch, a `folder` or
         non-writable project, a risk above `project.max_risk`, and any replay / duplicate start.
-        Tasks for non-home projects or without an `allowed_paths` scope are parked BLOCKED in the
-        same tx, so the (single-repo) worker never runs them in the wrong repository.
+        Scope = `allowed_paths` arg, else the item's stored scope. `default_tests` only ever become
+        acceptance tests, never write scope. A scope-less task is parked BLOCKED in the same tx;
+        a scoped task of a writable git project (never L3) is queued RECEIVED with its project's
+        `registry_fingerprint` snapshot (Phase B multi-repo worker).
         """
         if c is None:
             with self._tx() as conn:
                 return self.start_backlog_task_in_tx(item_id, project, actor, c=conn, risk_level=risk_level,
                                                      allowed_paths=allowed_paths)
+        from .projects import ProjectSpec, registry_fingerprint
+
         pid = getattr(project, "project_id", None)
         if not isinstance(pid, str) or not PROJECT_ID_RE.match(pid):
             raise ActionRejected("BAD_PROJECT")
@@ -914,7 +998,7 @@ class CoordinatorDB:
         if max_risk not in ("L0", "L1", "L2"):
             raise ActionRejected("BAD_PROJECT")
         risk = risk_level or max_risk
-        if risk not in RISK_LEVELS or RISK_LEVELS.index(risk) > RISK_LEVELS.index(max_risk):
+        if risk not in RISK_LEVELS or risk == "L3" or RISK_LEVELS.index(risk) > RISK_LEVELS.index(max_risk):
             raise ActionRejected("RISK_TOO_HIGH")
         row = c.execute("SELECT * FROM backlog_items WHERE id=?", (int(item_id),)).fetchone()
         if row is None:
@@ -923,18 +1007,25 @@ class CoordinatorDB:
             raise ActionRejected("PROJECT_MISMATCH")
         if row["status"] != "TODO" or row["linked_task_id"] is not None:
             raise ActionRejected("ALREADY_STARTED", "backlog item is not a fresh TODO")
-        paths = list(allowed_paths or [])
+        raw_paths = list(allowed_paths) if allowed_paths is not None else self._backlog_dict(row)["allowed_paths"]
+        try:
+            paths = self.validate_scope_paths(raw_paths) if raw_paths else []
+        except ValueError as exc:
+            raise ActionRejected("SCOPE_INVALID", str(exc)[:200]) from None
+        default_tests = list(getattr(project, "default_tests", ()) or ())
         request = f"[backlog #{int(row['id'])} · {pid}] {row['title']}"
         if row["description"]:
             request += "\n\n" + row["description"]
-        spec = {"pytest": list(getattr(project, "default_tests", ()) or ()), "backlog_item_id": int(row["id"])}
+        spec = {"pytest": default_tests, "backlog_item_id": int(row["id"])}
+        fp = registry_fingerprint(project) if isinstance(project, ProjectSpec) else None
         tid, created = self._create_task_in_tx(
             c, request, risk, paths, spec, idempotency_key=f"backlog:{pid}:{int(row['id'])}", project_id=pid,
+            registry_fingerprint=fp,
         )
         if not created:
             raise ActionRejected("ALREADY_STARTED", "a task for this backlog item already exists")
         state = "RECEIVED"
-        park = PHASE_B_PARK_REASON if pid != DEFAULT_PROJECT_ID else (SCOPE_PARK_REASON if not paths else "")
+        park = SCOPE_PARK_REASON if not paths else ""
         if park:
             self._transition_in_tx(c, tid, 0, "BLOCKED", actor, park)
             state = "BLOCKED"
@@ -2249,8 +2340,10 @@ class CoordinatorDB:
             intent_id = f"mi-{uuid.uuid4().hex[:16]}"
             c.execute(
                 "INSERT INTO merge_intents (id, task_id, base_sha, target_sha, diff_sha256, actor, status,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?, 'PREPARING', ?, ?)",
-                (intent_id, task_id, task["base_sha"], task["target_sha"], task["diff_sha256"], actor, now, now),
+                " created_at, updated_at, project_id, registry_fingerprint)"
+                " VALUES (?,?,?,?,?,?, 'PREPARING', ?, ?, ?, ?)",
+                (intent_id, task_id, task["base_sha"], task["target_sha"], task["diff_sha256"], actor, now, now,
+                 task["project_id"] or DEFAULT_PROJECT_ID, task["registry_fingerprint"]),
             )
             return intent_id
 
@@ -2315,7 +2408,8 @@ class CoordinatorDB:
             return version
 
     def reconcile_merge_intents(
-        self, wtm: Any, artifacts_dir: str | Path | None = None, require_supervisor_lock: bool = False
+        self, wtm: Any, artifacts_dir: str | Path | None = None, require_supervisor_lock: bool = False,
+        *, wtm_for: Callable[[str], Any] | None = None,
     ) -> list[tuple[str, str]]:
         """Boot crash recovery for the Git <-> DB merge boundary.
 
@@ -2323,6 +2417,11 @@ class CoordinatorDB:
         - open intent and main HEAD == base_sha   -> merge never happened: ABORTED
         - open intent and any other HEAD          -> intent BLOCKED, task BLOCKED (manual reconciliation)
         - COMPLETED intent whose worktree still exists -> retry cleanup, else ORPHAN_CLEANUP
+
+        Every intent is checked against ITS project's repository: `wtm_for(project_id)` returns that
+        project's WorktreeManager (or raises). Without `wtm_for` only home-project intents are
+        handled with `wtm`. An unresolvable project leaves the intent untouched (`UNRESOLVED`) -
+        another repository's HEAD is never consulted.
 
         `require_supervisor_lock=True` (live entrypoints) refuses to run unless this process
         holds `supervisor.lock` (raises LockOrderError).
@@ -2332,9 +2431,30 @@ class CoordinatorDB:
 
             assert_supervisor_lock_held()
         results: list[tuple[str, str]] = []
-        head = wtm.head_sha()
+        managers: dict[str, Any] = {}
+
+        def manager(project_id: str | None) -> Any:
+            pid = project_id or DEFAULT_PROJECT_ID
+            if pid not in managers:
+                try:
+                    if wtm_for is not None:
+                        managers[pid] = wtm_for(pid)
+                    else:
+                        managers[pid] = wtm if pid == DEFAULT_PROJECT_ID else None
+                except Exception:
+                    managers[pid] = None
+            return managers[pid]
+
+        heads: dict[int, str] = {}
         for intent in self.merge_intents(statuses=OPEN_MERGE_INTENT):
             iid = intent["id"]
+            m = manager(intent.get("project_id"))
+            if m is None:
+                results.append((iid, "UNRESOLVED"))
+                continue
+            if id(m) not in heads:
+                heads[id(m)] = m.head_sha()
+            head = heads[id(m)]
             if head == intent["target_sha"]:
                 if intent["status"] == "PREPARING":
                     self.mark_merge_intent_git_merged(iid)
@@ -2358,8 +2478,14 @@ class CoordinatorDB:
                 wt = task["worktree_path"]
                 if not wt or not Path(wt).is_dir():
                     continue
+                m = manager(intent.get("project_id"))
+                if m is None:
+                    results.append((intent["id"], "UNRESOLVED"))
+                    continue
                 try:
-                    wtm.cleanup(wtm.attach(task["id"], task["base_sha"]), artifacts_dir, delete_branch=True)
+                    if not _same_path(wt, m.path_for(task["id"])):
+                        raise ValueError("worktree_path is not this project's slot")
+                    m.cleanup(m.attach(task["id"], task["base_sha"]), artifacts_dir, delete_branch=True)
                     results.append((intent["id"], "CLEANED"))
                 except Exception as exc:  # recorded, never rolls back the merge
                     self.mark_orphan_cleanup(intent["id"], f"cleanup failed: {exc}")

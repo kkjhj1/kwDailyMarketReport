@@ -493,6 +493,11 @@ class ChangedFile:
     old_path: str | None = None
 
 
+def same_path(a: str | os.PathLike, b: str | os.PathLike) -> bool:
+    """Lexical, case-normalized equality of two absolute paths (no link following)."""
+    return os.path.normcase(os.path.abspath(os.fspath(a))) == os.path.normcase(os.path.abspath(os.fspath(b)))
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
@@ -502,13 +507,23 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 
 class WorktreeManager:
-    def __init__(self, repo_root: str | os.PathLike, worktrees_dir: str | os.PathLike | None = None):
+    def __init__(
+        self,
+        repo_root: str | os.PathLike,
+        worktrees_dir: str | os.PathLike | None = None,
+        *,
+        merge_lock_path: str | os.PathLike | None = None,
+    ):
         self.repo_root = Path(repo_root).resolve()
         if worktrees_dir is None:
             worktrees_dir = self.repo_root.parent / ".auto_factory_worktrees" / self.repo_root.name
         self.worktrees_dir = Path(worktrees_dir).resolve()
         if _is_within(self.worktrees_dir, self.repo_root):
             raise WorktreeError("worktrees_dir must live outside the repository")
+        # Phase B: non-home projects get their own merge.lock (never shared across repositories).
+        self._merge_lock_path = Path(merge_lock_path).resolve() if merge_lock_path is not None else None
+        if self._merge_lock_path is not None and _is_within(self._merge_lock_path, self.repo_root):
+            raise WorktreeError("merge_lock_path must live outside the repository")
 
     # ------------------------------------------------------------------ git
     def git(self, *args: str, cwd: str | os.PathLike | None = None, check: bool = True) -> str:
@@ -641,7 +656,9 @@ class WorktreeManager:
     # ----------------------------------------------------------------- merge
     @property
     def merge_lock_path(self) -> Path:
-        return self.worktrees_dir.parent / "merge.lock"
+        if self._merge_lock_path is not None:
+            return self._merge_lock_path
+        return self.worktrees_dir.parent / "merge.lock"  # legacy layout (home project)
 
     def main_is_clean(self) -> bool:
         return self.git("status", "--porcelain=v1", "--untracked-files=all") == ""
@@ -668,6 +685,8 @@ class WorktreeManager:
                 raise MergePreconditionError("REBASE_REQUIRED", f"main HEAD {head[:12]} != base {base[:12]}")
             if not wt or not Path(wt).is_dir():
                 raise MergePreconditionError("CANDIDATE_MISSING", "candidate worktree is gone")
+            if task.get("id") and not same_path(wt, self.path_for(task["id"])):
+                raise MergePreconditionError("CANDIDATE_PATH_MISMATCH", "worktree_path is not this project's slot")
             if self.is_dirty(wt):
                 raise MergePreconditionError("CANDIDATE_DIRTY", "candidate worktree has uncommitted changes")
             if self.head_sha(cwd=wt) != target:
