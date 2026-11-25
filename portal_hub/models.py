@@ -102,6 +102,7 @@ class BotServiceType(str, Enum):
     SILVER = "silver_bot"        # 실버케어 부모님 복지 비서
     KIDS = "kids_bot"            # 키즈 나침반 체험 & 응급육아
     YOLO = "yolo_bot"            # 욜로봇 1인 라이프 큐레이션
+    CHUNGYAK = "chungyak_bot"    # 아파트 청약 알림봇 (WIP, 기본 비공개)
 
     @property
     def title(self) -> str:
@@ -112,6 +113,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: "👵 실버케어 부모님 복지",
             BotServiceType.KIDS: "🍼 키즈 나침반 (체험 & 응급육아)",
             BotServiceType.YOLO: "🏄 욜로봇 (1인 라이프 큐레이션)",
+            BotServiceType.CHUNGYAK: "🏠 아파트 청약 알림",
         }
         return titles.get(self, self.value)
 
@@ -124,6 +126,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: "부모님 복지",
             BotServiceType.KIDS: "키즈 나침반",
             BotServiceType.YOLO: "욜로 라이프",
+            BotServiceType.CHUNGYAK: "청약 알림",
         }
         return names.get(self, self.value)
 
@@ -136,6 +139,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: BotCategory.LIFE,
             BotServiceType.KIDS: BotCategory.LIFE,
             BotServiceType.YOLO: BotCategory.LIFE,
+            BotServiceType.CHUNGYAK: BotCategory.FINANCE,
         }
         return cats.get(self, BotCategory.FINANCE)
 
@@ -148,6 +152,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: "👵",
             BotServiceType.KIDS: "🍼",
             BotServiceType.YOLO: "🏄",
+            BotServiceType.CHUNGYAK: "🏠",
         }
         return icons.get(self, "🤖")
 
@@ -160,6 +165,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: "부모님 맞춤 동사무소·보건소 복지 & 일요일 효도 브리핑",
             BotServiceType.KIDS: "주말 연령별 맞춤 체험/예약 D-Day & 평일 해열제/달빛병원 3초 대처",
             BotServiceType.YOLO: "4대 성향별 1인 라이프·취미·혼여 큐레이션 & 우천 실내 플랜 B",
+            BotServiceType.CHUNGYAK: "내 조건 맞춤 청약 공고 3단계 자격 판정 & 08:00 정기 다이제스트",
         }
         return descs.get(self, "")
 
@@ -173,6 +179,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: ["실버", "부모님", "효도", "복지", "노인", "어르신", "기초연금", "임플란트", "보건소", "주민센터", "silver", "care"],
             BotServiceType.KIDS: ["키즈", "육아", "자녀", "아이", "체험", "나들이", "해열제", "소아과", "달빛병원", "박물관", "숲체험", "소방체험", "어린이", "kids", "baby"],
             BotServiceType.YOLO: ["욜로", "혼놀", "혼여", "혼술", "취미", "전시", "팝업", "등산", "러닝", "클라이밍", "독립서점", "솔로", "라이프", "yolo", "solo"],
+            BotServiceType.CHUNGYAK: ["청약", "아파트", "분양", "무순위", "특별공급", "신혼부부", "생애최초", "청약통장", "부동산", "chungyak", "apt"],
         }
         return kw.get(self, [])
 
@@ -185,6 +192,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: os.environ.get("SILVER_TELEGRAM_BOT_USERNAME") or os.environ.get("SILVER_BOT_USERNAME", "KwSilver_bot"),
             BotServiceType.KIDS: os.environ.get("KIDS_TELEGRAM_BOT_USERNAME") or os.environ.get("KIDS_BOT_USERNAME", "KwKids_bot"),
             BotServiceType.YOLO: os.environ.get("YOLO_TELEGRAM_BOT_USERNAME") or os.environ.get("YOLO_BOT_USERNAME", "KwYolo_bot"),
+            BotServiceType.CHUNGYAK: os.environ.get("APTAPP_TELEGRAM_BOT_USERNAME") or os.environ.get("CHUNGYAK_BOT_USERNAME", ""),
         }
         raw = handles.get(self, "")
         return raw.strip().lstrip("@")

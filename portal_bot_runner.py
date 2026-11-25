@@ -230,6 +230,27 @@ def get_portal_token() -> str:
     return token.strip()
 
 
+CHUNGYAK_BOT_ROW: tuple = (
+    "chungyak_bot", "INFO", "청약", "", "", "부동산·청약", "🏠",
+    "내 조건 맞춤 청약 공고 3단계 자격 판정 및 08:00 정기 다이제스트를 제공합니다.", "CHUNGYAK", 0, 7,
+)
+
+
+def ensure_chungyak_bot_registered(db: PortalDatabase) -> bool:
+    """Registers chungyak_bot in the `bots` catalogue (INSERT OR IGNORE, is_active=0 → WIP, never overwrites).
+    Returns True only when the row was newly inserted."""
+    with db._get_conn() as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO bots
+               (bot_id, bot_type, name, telegram_username, token, category, icon_emoji, description,
+                topic_code, is_active, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            CHUNGYAK_BOT_ROW,
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def run_polling(token: str) -> None:
     """Runs long-polling loop handling persistent reply keyboards, slash commands, search queries, and inline callbacks."""
     if not token:
@@ -238,6 +259,10 @@ def run_polling(token: str) -> None:
 
     client = TelegramPortalClient(token)
     db = PortalDatabase()
+    try:
+        ensure_chungyak_bot_registered(db)
+    except Exception as exc:  # catalogue registration must never block the portal loop
+        logger.warning("chungyak_bot registration skipped: %s", type(exc).__name__)
 
     # Register blue menu button commands
     client.set_my_commands([
@@ -406,6 +431,7 @@ def run_demo() -> None:
     print("🧪 [Portal Hub Bot v2.0] Console Demo & Interactive Menu Verification")
     print("=" * 60)
     demo_db = PortalDatabase(":memory:")
+    print(f"🏠 chungyak_bot 카탈로그 등록(:memory:, is_active=0): {ensure_chungyak_bot_registered(demo_db)}")
     demo_user = demo_db.get_or_create_user(
         user_id=999001,
         chat_id=999001,

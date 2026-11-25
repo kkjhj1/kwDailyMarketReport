@@ -22,7 +22,13 @@ MUST_BE_COVERED = (
     "travel_price_watches",
     "travel_watch_deliveries",
     "travel_user_prefs",
+    "chungyak_notices",
+    "chungyak_user_profiles",
+    "chungyak_regular_subs",
+    "chungyak_deliveries",
 )
+
+CHUNGYAK_TABLES = MUST_BE_COVERED[-4:]
 
 
 def _schema_tables() -> dict[str, set[str]]:
@@ -98,6 +104,54 @@ class AdminSyncContractTests(unittest.TestCase):
             with self.subTest(table=table):
                 self.assertIn(table, ADMIN_SYNC_REGISTRY)
                 self.assertNotIn(table, ADMIN_EXEMPT_TABLES)
+
+    def test_chungyak_tables_registered_from_sidecar_schema(self):
+        self.assertIn("chungyak_brief/storage/db.py", SCHEMA_SOURCES)
+        self.assertEqual(_schema_tables()["chungyak_brief/storage/db.py"], set(CHUNGYAK_TABLES))
+        for table in CHUNGYAK_TABLES:
+            with self.subTest(table=table):
+                meta = ADMIN_SYNC_REGISTRY[table]
+                self.assertEqual(meta["bot_id"], "chungyak_bot")
+                self.assertEqual(meta["db_file"], "chungyak_brief.sqlite3")
+                self.assertTrue(all(a.startswith("GET /api/chungyak/") for a in meta["admin_api"]))
+                self.assertTrue(meta["db_reader"].startswith("MarketBriefDatabase.list_chungyak_"))
+                from market_brief.storage.db import MarketBriefDatabase
+
+                self.assertTrue(callable(getattr(MarketBriefDatabase, meta["db_reader"].split(".", 1)[1], None)))
+
+    def test_chungyak_pii_endpoint_is_fail_closed(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from fastapi.testclient import TestClient
+
+        from admin_server import create_admin_app
+        from market_brief.admin_sync_registry import ADMIN_FAIL_CLOSED_PII_APIS
+
+        self.assertIn("GET /api/chungyak/subscribers", ADMIN_FAIL_CLOSED_PII_APIS)
+        self.assertIn("GET /api/chungyak/subscribers", ADMIN_SYNC_REGISTRY["chungyak_regular_subs"]["admin_api"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("ADMIN_API_TOKEN", None)
+                app = create_admin_app(db_path=str(Path(tmp) / "a.sqlite3"), env_path=Path(tmp) / "empty.env")
+                client = TestClient(app)
+                for api in ADMIN_FAIL_CLOSED_PII_APIS:
+                    path = api.split(" ", 1)[1]
+                    with self.subTest(api=api, token="unset"):
+                        self.assertEqual(client.get(path).status_code, 503)
+                    with patch.dict(os.environ, {"ADMIN_API_TOKEN": "k3y"}):
+                        with self.subTest(api=api, token="missing"):
+                            self.assertEqual(client.get(path).status_code, 401)
+                        with self.subTest(api=api, token="valid"):
+                            res = client.get(path, headers={"X-Admin-Token": "k3y"})
+                            self.assertEqual((res.status_code, res.json()), (200, []))
+                # Non-PII chungyak endpoints: 200 + [] with no sidecar, and the sidecar is never created.
+                for ep in ("notices", "watches", "deliveries"):
+                    with self.subTest(ep=ep):
+                        res = client.get(f"/api/chungyak/{ep}")
+                        self.assertEqual((res.status_code, res.json()), (200, []))
+                self.assertFalse((Path(tmp) / "chungyak_brief.sqlite3").exists())
 
     def test_registered_admin_apis_exist_on_app(self):
         import tempfile

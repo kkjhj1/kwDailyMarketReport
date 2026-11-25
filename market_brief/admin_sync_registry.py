@@ -1,7 +1,7 @@
 """Admin Console sync registry (SSOT for Admin coverage of bot DB tables).
 
-Every `CREATE TABLE IF NOT EXISTS <name>` declared in `market_brief/storage/db.py` and
-`travel_brief/storage/db.py` MUST appear in exactly one of:
+Every `CREATE TABLE IF NOT EXISTS <name>` declared in a `SCHEMA_SOURCES` file (market, travel, chungyak
+sidecar) MUST appear in exactly one of:
 
 - `ADMIN_SYNC_REGISTRY`: the table is surfaced in the Admin Console (API endpoint(s) + DB reader).
 - `ADMIN_EXEMPT_TABLES`: the table is internal operational state, with an explicit non-empty reason.
@@ -16,6 +16,7 @@ from typing import Any
 SCHEMA_SOURCES: tuple[str, ...] = (
     "market_brief/storage/db.py",
     "travel_brief/storage/db.py",
+    "chungyak_brief/storage/db.py",
 )
 
 ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
@@ -132,7 +133,39 @@ ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
         "db_reader": "MarketBriefDatabase.list_all_watches",
         "description": "여행봇 2-Track 선호(정기 ON/OFF·특가 일시중지) — 맞춤 감시·선호 현황",
     },
+    # --- Chungyak bot (sidecar `chungyak_brief.sqlite3`, read-only from Admin) -------------------------
+    "chungyak_notices": {
+        "bot_id": "chungyak_bot",
+        "db_file": "chungyak_brief.sqlite3",
+        "admin_api": ["GET /api/chungyak/notices"],
+        "db_reader": "MarketBriefDatabase.list_chungyak_notices",
+        "description": "청약봇 청약홈 공고(정정 revision·content_hash) — 맞춤 발송 이력 > 청약 알림 현황",
+    },
+    "chungyak_user_profiles": {
+        "bot_id": "chungyak_bot",
+        "db_file": "chungyak_brief.sqlite3",
+        "admin_api": ["GET /api/chungyak/watches"],
+        "db_reader": "MarketBriefDatabase.list_chungyak_user_profiles",
+        "description": "청약봇 사용자 맞춤 자격 조건(마스킹 chat_id) — 맞춤 발송 이력 > 청약 알림 현황",
+    },
+    "chungyak_regular_subs": {
+        "bot_id": "chungyak_bot",
+        "db_file": "chungyak_brief.sqlite3",
+        "admin_api": ["GET /api/chungyak/subscribers"],
+        "db_reader": "MarketBriefDatabase.list_chungyak_regular_subs",
+        "description": "청약봇 08:00 정기 다이제스트 구독(PII, Fail-Closed 토큰) — 청약 알림 현황",
+    },
+    "chungyak_deliveries": {
+        "bot_id": "chungyak_bot",
+        "db_file": "chungyak_brief.sqlite3",
+        "admin_api": ["GET /api/chungyak/deliveries"],
+        "db_reader": "MarketBriefDatabase.list_chungyak_deliveries",
+        "description": "청약봇 발송 원장(CUSTOM_MATCH/REGULAR_DAILY, QUEUED_MORNING vs UNKNOWN) — 청약 알림 현황",
+    },
 }
+
+# Admin endpoints exposing raw chat_id lists (PII): token is REQUIRED (503 when ADMIN_API_TOKEN is unset).
+ADMIN_FAIL_CLOSED_PII_APIS: tuple[str, ...] = ("GET /api/chungyak/subscribers",)
 
 ADMIN_USER_CONTEXT_REGISTRY: dict[str, dict[str, Any]] = {
     "admission_subscribers": {

@@ -1,0 +1,44 @@
+{
+  "version": "2026.1",
+  "source_note": "주택공급에 관한 규칙 별표2(민영주택 청약 예치기준금액) 및 2026 청약홈 공고 기준 요약. 단위: 만원. 실제 신청 전 입주자모집공고 원문 확인 필수.",
+  "region_groups": {
+    "SEOUL_BUSAN": ["서울", "부산"],
+    "METRO": ["대구", "인천", "광주", "대전", "울산"]
+  },
+  "region_group_labels": {
+    "SEOUL_BUSAN": "서울·부산",
+    "METRO": "기타광역시",
+    "OTHER": "기타시군"
+  },
+  "capital_area": ["서울", "경기", "인천"],
+  "deposit_table_manwon": {
+    "SEOUL_BUSAN": {"85": 300, "102": 600, "135": 1000, "all": 1500},
+    "METRO": {"85": 250, "102": 400, "135": 700, "all": 1000},
+    "OTHER": {"85": 200, "102": 300, "135": 400, "all": 500}
+  },
+  "area_bands_m2": ["85", "102", "135", "all"],
+  "first_priority_min_account_months": {
+    "regulated": 24,
+    "capital_area": 12,
+    "non_capital": 6
+  },
+  "public_first_priority_min_payments": {
+    "regulated": 24,
+    "capital_area": 12,
+    "non_capital": 6
+  },
+  "local_priority_min_residence_years_regulated": 2,
+  "residence_required_types": ["APT_GENERAL", "PUBLIC", "CANCEL_RE"],
+  "homeless_required_types": ["PUBLIC", "MOOSUNWI", "CANCEL_RE"],
+  "account_required_types": ["APT_GENERAL", "PUBLIC"],
+  "nationwide_types": ["MOOSUNWI", "IMUI"],
+  "excluded_house_types_default": ["OFFICETEL", "URBAN_LIFE"],
+  "special_supply": {
+    "NEWLYWED": {"label": "신혼부부", "requires_homeless": true, "note": "혼인 7년 이내(예비 포함)"},
+    "FIRST_LIFE": {"label": "생애최초", "requires_homeless": true, "note": "세대원 전원 주택 소유 이력 없음"},
+    "MULTI_CHILD": {"label": "다자녀", "requires_homeless": true, "note": "미성년 자녀 2명 이상"},
+    "ELDERLY_PARENT": {"label": "노부모부양", "requires_homeless": true, "note": "65세 이상 직계존속 3년 이상 부양"},
+    "NEWBORN": {"label": "신생아", "requires_homeless": true, "note": "입주자모집공고일 기준 2년 이내 출생 자녀"},
+    "YOUTH": {"label": "청년", "requires_homeless": true, "note": "공공분양 청년 특별공급(만 19~39세 미혼)"}
+  }
+}

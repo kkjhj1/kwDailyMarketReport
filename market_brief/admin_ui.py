@@ -963,6 +963,9 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
     .watch-section-label { font-size: 12px; font-weight: 800; color: var(--text-muted); margin: 10px 0 6px; }
     .watch-card-actions { display: flex; justify-content: flex-end; margin-top: 6px; }
     .watch-card-actions .btn { min-height: 44px; min-width: 44px; }
+    #subpane-custom-dispatch .chungyak-filter-bar { grid-template-columns: minmax(0, 1fr); }
+    .chungyak-panel .hist-card { min-width: 0; overflow-wrap: anywhere; }
+    .chungyak-panel .form-select, #chungyakRefreshBtn { min-height: 44px; }
 
     /* Mobile Responsive Overrides */
     @media (max-width: 768px) {
@@ -2238,6 +2241,31 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
             </table>
           </div>
           <div class="hist-meta" id="customDispatchMore" style="margin-top:8px;"></div>
+
+          <!-- Chungyak bot (sidecar, read-only): notices / masked profiles / ledger (QUEUED_MORNING vs UNKNOWN) -->
+          <div class="watch-panel chungyak-panel" id="chungyakPanel" style="margin-top:14px;">
+            <div class="watch-panel-head">
+              <h3 class="watch-panel-title">🏠 청약 알림 현황</h3>
+              <button class="btn btn-sm hist-touch" id="chungyakRefreshBtn" type="button">🔃 새로고침</button>
+            </div>
+            <div class="watch-stats" id="chungyakStats"></div>
+            <div class="hist-filter-bar chungyak-filter-bar">
+              <select id="chungyakStatusSel" class="form-select hist-touch" aria-label="청약 발송 상태 필터">
+                <option value="">전체 상태</option>
+                <option value="SENT">SENT (성공)</option>
+                <option value="QUEUED_MORNING">QUEUED_MORNING (야간 대기)</option>
+                <option value="UNKNOWN">UNKNOWN (결과 불명)</option>
+                <option value="PENDING">PENDING (발송 중)</option>
+                <option value="FAILED">FAILED (실패)</option>
+              </select>
+            </div>
+            <div class="watch-section-label">📨 청약 발송 원장</div>
+            <div id="chungyakDeliveryList" class="hist-card-list"><div class="hist-meta">불러오는 중...</div></div>
+            <div class="watch-section-label">🎯 맞춤 자격 조건 (chat_id 마스킹)</div>
+            <div id="chungyakProfileList" class="hist-card-list"><div class="hist-meta">불러오는 중...</div></div>
+            <div class="watch-section-label">📋 최근 공고</div>
+            <div id="chungyakNoticeList" class="hist-card-list"><div class="hist-meta">불러오는 중...</div></div>
+          </div>
         </div>
       </div>
     </section>
@@ -4166,7 +4194,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       document.querySelectorAll('#pane-history .hist-subpane').forEach(p => p.classList.toggle('active', p.id === `subpane-${sp}`));
       if (sp === 'dispatch') loadDispatchHistory();
       if (sp === 'audit') loadAuditLogs();
-      if (sp === 'custom-dispatch') { loadWatchPanel(); loadCustomDispatchHistory(); }
+      if (sp === 'custom-dispatch') { loadWatchPanel(); loadCustomDispatchHistory(); loadChungyakPanel(); }
     }
 
     // ---------------------------------------------------------------------
@@ -4320,6 +4348,92 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       bind('customDispatchRefreshBtn', 'click', () => loadCustomDispatchHistory());
       bind('customDispatchBotSel', 'change', () => loadCustomDispatchHistory());
       bind('customDispatchStatusSel', 'change', () => loadCustomDispatchHistory());
+    })();
+
+    // ---------------------------------------------------------------------
+    // 🏠 Chungyak bot panel (read-only sidecar). Decimal TEXT rendered as-is (never Number()); esc() everywhere.
+    //   QUEUED_MORNING (야간 대기, 08:00 예약) and UNKNOWN (결과 불명, 재발송 금지) are distinct badges.
+    // ---------------------------------------------------------------------
+    function chungyakStatusBadge(status) {
+      const s = String(status || '').toUpperCase();
+      if (s === 'QUEUED_MORNING') return '<span class="hist-badge info">🌙 야간 대기 (08:00)</span>';
+      if (s === 'UNKNOWN') return '<span class="hist-badge warn">❔ 결과 불명 · 재발송 금지</span>';
+      if (s === 'PENDING') return '<span class="hist-badge">⏳ 발송 중</span>';
+      return deliveryStatusBadge(s);
+    }
+
+    function chungyakTri(v, yes, no) {
+      if (v === null || v === undefined) return '미입력';
+      return v ? yes : no;
+    }
+
+    async function loadChungyakPanel() {
+      const statsEl = document.getElementById('chungyakStats');
+      const delivEl = document.getElementById('chungyakDeliveryList');
+      const profEl = document.getElementById('chungyakProfileList');
+      const noticeEl = document.getElementById('chungyakNoticeList');
+      if (!delivEl) return;
+      const sel = document.getElementById('chungyakStatusSel');
+      const st = sel ? sel.value : '';
+      try {
+        const [deliveries, profiles, notices] = await Promise.all([
+          req('/api/chungyak/deliveries?limit=50' + (st ? '&status=' + encodeURIComponent(st) : '')),
+          req('/api/chungyak/watches?limit=100'),
+          req('/api/chungyak/notices?limit=20'),
+        ]);
+        const dl = Array.isArray(deliveries) ? deliveries : [];
+        const pf = Array.isArray(profiles) ? profiles : [];
+        const nt = Array.isArray(notices) ? notices : [];
+        const nQueued = dl.filter(d => d.status === 'QUEUED_MORNING').length;
+        const nUnknown = dl.filter(d => d.status === 'UNKNOWN').length;
+        statsEl.innerHTML = [
+          ['📋 공고', nt.length], ['🎯 조건 등록', pf.length], ['🌙 야간 대기', nQueued], ['❔ 결과 불명', nUnknown],
+        ].map(([label, n]) => `<div class="watch-stat"><b>${esc(n)}</b><span>${esc(label)}</span></div>`).join('');
+
+        delivEl.innerHTML = dl.map(d => `
+          <div class="hist-card" data-status="${esc(d.status)}">
+            <div class="hist-card-top">
+              <span><b>${esc(d.house_name || d.notice_key || '-')}</b> <span class="hist-meta">${esc(d.channel_type || '')}</span></span>
+              <span>${chungyakStatusBadge(d.status)}</span>
+            </div>
+            <div class="hist-meta"><code>${esc(d.chat_id_masked)}</code> · ${esc(utcToKst(d.created_at))}${d.scheduled_at_kst ? ' · 예약 ' + esc(d.scheduled_at_kst) + ' KST' : ''} · ${esc(d.trigger_context || '-')}</div>
+            ${d.error_detail ? `<div class="hist-meta" style="color:var(--danger);">${esc(d.error_detail)}</div>` : ''}
+          </div>`).join('') || '<div class="hist-meta">청약 발송 이력이 없습니다.</div>';
+
+        profEl.innerHTML = pf.map(p => {
+          const regions = Array.isArray(p.preferred_regions) && p.preferred_regions.length ? p.preferred_regions.join(', ') : '전국';
+          const specials = Array.isArray(p.special_types) && p.special_types.length ? p.special_types.join(', ') : '-';
+          return `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><code>${esc(p.chat_id_masked)}</code> · 거주 <b>${esc(p.residence_sido || '미입력')}</b></span>
+              <span class="hist-badge ${p.custom_alert_enabled ? 'ok' : 'bad'}">맞춤 ${p.custom_alert_enabled ? 'ON' : 'OFF'}</span>
+            </div>
+            <div class="hist-diff-line">무주택 ${esc(chungyakTri(p.is_homeless, '예', '아니오'))} · 세대주 ${esc(chungyakTri(p.is_household_head, '예', '아니오'))} · 예산 ${esc(p.max_price_eok ? p.max_price_eok + '억' : '제한없음')}</div>
+            <div class="hist-meta">관심지역 ${esc(regions)} · 특공 ${esc(specials)} · 입력 ${esc(p.answered_fields)}항목${p.is_empty ? ' (미입력 → 정보 부족)' : ''}</div>
+          </div>`;
+        }).join('') || '<div class="hist-meta">등록된 맞춤 조건이 없습니다.</div>';
+
+        noticeEl.innerHTML = nt.map(n => `
+          <div class="hist-card">
+            <div class="hist-card-top">
+              <span><b>${esc(n.house_name)}</b> <span class="hist-meta">${esc(n.notice_type)}</span></span>
+              <span class="hist-meta">rev ${esc(n.revision)}</span>
+            </div>
+            <div class="hist-meta">${esc(n.region_sido || '-')} · 접수 ${esc(n.receipt_start || '미정')}~${esc(n.receipt_end || '미정')} · 최저 ${esc(n.min_price_eok ? n.min_price_eok + '억' : '-')}</div>
+          </div>`).join('') || '<div class="hist-meta">수집된 청약 공고가 없습니다.</div>';
+      } catch (e) {
+        statsEl.innerHTML = '';
+        delivEl.innerHTML = `<div style="color:var(--danger);">청약 현황 로드 실패: ${esc(e.message)}</div>`;
+        profEl.innerHTML = '';
+        noticeEl.innerHTML = '';
+      }
+    }
+
+    (function bindChungyakUi() {
+      const bind = (id, evt, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); };
+      bind('chungyakRefreshBtn', 'click', () => loadChungyakPanel());
+      bind('chungyakStatusSel', 'change', () => loadChungyakPanel());
     })();
 
     async function loadDispatchHistory() {
