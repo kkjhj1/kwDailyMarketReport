@@ -1660,6 +1660,217 @@ class MarketBriefDatabase:
 
         return context
 
+    # =========================================================================
+    # Admin Sync: Chungyak bot sidecar (`chungyak_brief.sqlite3`) — strictly read-only.
+    #   Admin never instantiates the chungyak sidecar DB class (that would CREATE its tables). Missing file/table -> [].
+    # =========================================================================
+
+    CHUNGYAK_DB_FILE = "chungyak_brief.sqlite3"
+    CHUNGYAK_DELIVERY_STATUSES = ("PENDING", "SENT", "UNKNOWN", "FAILED", "QUEUED_MORNING")
+    _CHUNGYAK_STATUS_LABELS = {
+        "QUEUED_MORNING": "야간 대기 (08:00 발송 예약)",
+        "UNKNOWN": "결과 불명 (재발송 금지)",
+        "PENDING": "발송 중 (리스 보유)",
+        "SENT": "발송 성공",
+        "FAILED": "발송 실패",
+    }
+
+    @staticmethod
+    def _mask_chat_id(value: Any) -> str:
+        raw = "" if value is None else str(value).strip()
+        if len(raw) <= 4:
+            return "*" * len(raw)
+        return raw[:2] + "*" * (len(raw) - 4) + raw[-2:]
+
+    @staticmethod
+    def _json_list(value: Any) -> list[Any] | None:
+        if value is None:
+            return None
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return list(parsed) if isinstance(parsed, list) else None
+
+    @staticmethod
+    def _tri_bool(value: Any) -> bool | None:
+        return None if value is None else bool(value)
+
+    def _chungyak_query(self, table: str, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        """Runs one read-only query on the chungyak sidecar; [] when the file / table is absent or unreadable."""
+        conn = self._open_readonly_sidecar(self.CHUNGYAK_DB_FILE)
+        if conn is None:
+            return []
+        try:
+            if not self._table_exists(conn, table):
+                return []
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        except sqlite3.Error:
+            return []
+        finally:
+            conn.close()
+
+    def list_chungyak_notices(self, limit: int = 50, include_samples: bool = False) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit or 50), 200))
+        where = "" if include_samples else "WHERE is_sample = 0"
+        rows = self._chungyak_query(
+            "chungyak_notices",
+            f"SELECT * FROM chungyak_notices {where} ORDER BY updated_at DESC, notice_key LIMIT ?",
+            (limit,),
+        )
+        items = []
+        for r in rows:
+            items.append({
+                "notice_key": r.get("notice_key"),
+                "notice_type": r.get("notice_type"),
+                "house_type": r.get("house_type"),
+                "house_name": r.get("house_name"),
+                "region_sido": r.get("region_sido"),
+                "region_sigungu": r.get("region_sigungu"),
+                "supply_households": r.get("supply_households"),
+                "receipt_start": r.get("receipt_start"),
+                "receipt_end": r.get("receipt_end"),
+                "winner_date": r.get("winner_date"),
+                "min_price_eok": self._fmt_decimal_text(r.get("min_price_eok")),
+                "min_area_m2": self._fmt_decimal_text(r.get("min_area_m2")),
+                "max_area_m2": self._fmt_decimal_text(r.get("max_area_m2")),
+                "is_regulated": self._tri_bool(r.get("is_regulated")),
+                "special_supply_types": self._json_list(r.get("special_supply_types")) or [],
+                "is_sample": bool(r.get("is_sample")),
+                "revision": int(r.get("revision") or 1),
+                "content_hash": str(r.get("content_hash") or "")[:12],
+                "first_seen_at": r.get("first_seen_at"),
+                "updated_at": r.get("updated_at"),
+            })
+        return items
+
+    def list_chungyak_user_profiles(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Custom-match conditions per user. chat_id is masked (full ids only via the fail-closed PII API)."""
+        limit = max(1, min(int(limit or 100), 500))
+        rows = self._chungyak_query(
+            "chungyak_user_profiles",
+            "SELECT * FROM chungyak_user_profiles ORDER BY updated_at DESC, chat_id LIMIT ?",
+            (limit,),
+        )
+        answer_cols = (
+            "residence_sido", "residence_years", "is_homeless", "is_household_head", "account_months",
+            "deposit_manwon", "payment_count", "preferred_regions", "max_price_eok", "desired_area_m2", "special_types",
+        )
+        items = []
+        for r in rows:
+            regions = self._json_list(r.get("preferred_regions"))
+            specials = self._json_list(r.get("special_types"))
+            answered = sum(1 for c in answer_cols if r.get(c) not in (None, "", "[]"))
+            items.append({
+                "chat_id_masked": self._mask_chat_id(r.get("chat_id")),
+                "residence_sido": r.get("residence_sido"),
+                "residence_years": r.get("residence_years"),
+                "is_homeless": self._tri_bool(r.get("is_homeless")),
+                "is_household_head": self._tri_bool(r.get("is_household_head")),
+                "account_months": r.get("account_months"),
+                "deposit_manwon": r.get("deposit_manwon"),
+                "payment_count": r.get("payment_count"),
+                "preferred_regions": regions,
+                "max_price_eok": self._fmt_decimal_text(r.get("max_price_eok")),
+                "desired_area_m2": self._fmt_decimal_text(r.get("desired_area_m2")),
+                "special_types": specials,
+                "include_officetel": self._tri_bool(r.get("include_officetel")),
+                "custom_alert_enabled": r.get("custom_alert_enabled") is None or bool(r.get("custom_alert_enabled")),
+                "answered_fields": answered,
+                "is_empty": answered == 0,
+                "updated_at": r.get("updated_at"),
+            })
+        return items
+
+    def list_chungyak_regular_subs(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Regular digest subscribers with raw chat_id (PII) — served only behind the fail-closed token."""
+        limit = max(1, min(int(limit or 200), 1000))
+        rows = self._chungyak_query(
+            "chungyak_regular_subs",
+            "SELECT chat_id, is_enabled, send_time_kst, created_at, updated_at FROM chungyak_regular_subs "
+            "ORDER BY updated_at DESC, chat_id LIMIT ?",
+            (limit,),
+        )
+        names: dict[str, str] = {}
+        if rows:
+            try:
+                with self._connect() as db:
+                    if self._table_exists(db, "users"):
+                        ids = [str(r["chat_id"]) for r in rows]
+                        marks = ",".join("?" for _ in ids)
+                        for u in db.execute(
+                            f"SELECT telegram_user_id, full_name FROM users WHERE telegram_user_id IN ({marks})", ids
+                        ).fetchall():
+                            if u["full_name"] and str(u["full_name"]).strip():
+                                names[str(u["telegram_user_id"])] = str(u["full_name"]).strip()
+            except sqlite3.Error:
+                names = {}
+        return [
+            {
+                "chat_id": str(r.get("chat_id")),
+                "display_name": names.get(str(r.get("chat_id"))) or str(r.get("chat_id")),
+                "is_enabled": bool(r.get("is_enabled")),
+                "send_time_kst": r.get("send_time_kst"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+            for r in rows
+        ]
+
+    def list_chungyak_deliveries(
+        self, status: str | None = None, limit: int = 50
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Newest-first chungyak delivery ledger (masked chat_id). Returns (items, has_more)."""
+        limit = max(1, min(int(limit or 50), 100))
+        status_norm = str(status).strip().upper() if status and str(status).strip() else None
+        where, params = "", []
+        if status_norm:
+            where = "WHERE d.status = ?"
+            params.append(status_norm)
+        conn = self._open_readonly_sidecar(self.CHUNGYAK_DB_FILE)
+        if conn is None:
+            return [], False
+        try:
+            if not self._table_exists(conn, "chungyak_deliveries"):
+                return [], False
+            join_name = self._table_exists(conn, "chungyak_notices")
+            name_sql = "n.house_name" if join_name else "NULL"
+            join_sql = "LEFT JOIN chungyak_notices n ON n.notice_key = d.notice_key" if join_name else ""
+            rows = conn.execute(
+                f"""SELECT d.*, {name_sql} AS house_name
+                      FROM chungyak_deliveries d {join_sql}
+                      {where}
+                     ORDER BY d.created_at DESC, d.delivery_key DESC
+                     LIMIT ?""",
+                (*params, limit + 1),
+            ).fetchall()
+        except sqlite3.Error:
+            return [], False
+        finally:
+            conn.close()
+        has_more = len(rows) > limit
+        items = []
+        for row in rows[:limit]:
+            r = dict(row)
+            st = str(r.get("status") or "").upper()
+            items.append({
+                "bot_id": "chungyak_bot",
+                "delivery_key_short": str(r.get("delivery_key") or "").split(":")[0],
+                "chat_id_masked": self._mask_chat_id(r.get("chat_id")),
+                "notice_key": r.get("notice_key"),
+                "house_name": r.get("house_name"),
+                "channel_type": r.get("channel_type"),
+                "status": st,
+                "status_label": self._CHUNGYAK_STATUS_LABELS.get(st, st),
+                "attempt_no": r.get("attempt_no"),
+                "scheduled_at_kst": r.get("scheduled_at_kst"),
+                "trigger_context": r.get("trigger_context"),
+                "error_detail": r.get("error_detail"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            })
+        return items, has_more
+
     @staticmethod
     def _fmt_krw(value: Any) -> str | None:
         if value is None or isinstance(value, bool):

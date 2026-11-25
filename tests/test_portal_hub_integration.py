@@ -73,10 +73,10 @@ class PortalHubUnitTests(unittest.TestCase):
         self.assertEqual(build_slot_gauge(3, UserTier.BLACK), "[ ⬛ ⬛ ⬛ ★ ] 3개 활성화 (무제한)")
 
     def test_hidden_bots_keep_enum_but_are_not_public(self):
-        """All 6 enum members stay for DB/backend compat; only BRIEF/TRAVEL/KIDS are public."""
+        """All 7 enum members stay for DB/backend compat; only BRIEF/TRAVEL/KIDS are public (chungyak_bot WIP)."""
         self.assertEqual(
             {b.value for b in BotServiceType},
-            {"brief_bot", "admission_bot", "travel_bot", "silver_bot", "kids_bot", "yolo_bot"},
+            {"brief_bot", "admission_bot", "travel_bot", "silver_bot", "kids_bot", "yolo_bot", "chungyak_bot"},
         )
         public = {b for b in BotServiceType if b.is_public}
         self.assertEqual(public, {BotServiceType.BRIEF, BotServiceType.TRAVEL, BotServiceType.KIDS})
@@ -112,14 +112,14 @@ class PortalHubUnitTests(unittest.TestCase):
         main_text, _ = render_main_menu(user, all_subs)
         self.assertIn("내 활성 구독 (3개)", main_text)
         self.assertIn(
-            "📊 <b>구독 슬롯</b>: <b>[ ⬛ ⬛ ⬛ ★ ] 6개 활성화 (무제한)</b>",
+            "📊 <b>구독 슬롯</b>: <b>[ ⬛ ⬛ ⬛ ★ ] 7개 활성화 (무제한)</b>",
             main_text,
         )
         for name in hidden_names:
             self.assertNotIn(name, main_text)
         _, sub_markup = render_subscription_view(user, all_subs)
         cbs = [b.get("callback_data", "") for row in sub_markup["inline_keyboard"] for b in row]
-        for hidden in ("admission_bot", "silver_bot", "yolo_bot"):
+        for hidden in ("admission_bot", "silver_bot", "yolo_bot", "chungyak_bot"):
             self.assertFalse(any(hidden in cb for cb in cbs), hidden)
 
         edu_text, _ = render_category_view(BotCategory.EDU, user, subs)
@@ -127,7 +127,7 @@ class PortalHubUnitTests(unittest.TestCase):
 
         _, search_markup = render_search_results_view("x", list(BotServiceType), user, subs)
         cbs = [b.get("callback_data", "") for row in search_markup["inline_keyboard"] for b in row]
-        for hidden in ("admission_bot", "silver_bot", "yolo_bot"):
+        for hidden in ("admission_bot", "silver_bot", "yolo_bot", "chungyak_bot"):
             self.assertFalse(any(hidden in cb for cb in cbs), hidden)
 
     def test_html_safety_and_xss_escaping(self):

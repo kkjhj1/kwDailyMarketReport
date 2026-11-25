@@ -96,11 +96,14 @@ _DISPATCH_COOLDOWN_SEC: float = 5.0
 _dispatch_last_sent: dict[tuple[str, str], float] = {}
 
 
-def verify_admin_token(request: Request) -> None:
+def verify_admin_token(request: Request, fail_closed: bool = False) -> None:
     """Validates X-Admin-Token or query parameter 'admin_token' against ADMIN_API_TOKEN.
-    Fails-open (no-op) if ADMIN_API_TOKEN is not configured in environment."""
+    Fails-open (no-op) if ADMIN_API_TOKEN is not configured in environment, unless `fail_closed=True`
+    (PII endpoints), in which case an unset token rejects the request with 503."""
     expected = os.environ.get("ADMIN_API_TOKEN", "").strip()
     if not expected:
+        if fail_closed:
+            raise HTTPException(status_code=503, detail="ADMIN_API_TOKEN 미설정: 개인정보 API는 토큰 설정 후에만 조회할 수 있습니다.")
         return
     token = request.headers.get("X-Admin-Token", "").strip()
     if not token:
@@ -1577,6 +1580,39 @@ def create_admin_app(
             "deactivated": res["deactivated"],
             "already_inactive": not res["deactivated"],
         }
+
+    # =========================================================================
+    # 🏠 Chungyak bot (sidecar chungyak_brief.sqlite3; read-only, 200 + [] when DB/table absent)
+    # =========================================================================
+
+    @app.get("/api/chungyak/notices")
+    def list_chungyak_notices_api(request: Request, limit: int = 50):
+        verify_admin_token(request)
+        limit = max(1, min(int(limit), 200))
+        return db.list_chungyak_notices(limit=limit)
+
+    @app.get("/api/chungyak/watches")
+    def list_chungyak_watches_api(request: Request, limit: int = 100):
+        verify_admin_token(request)
+        limit = max(1, min(int(limit), 500))
+        return db.list_chungyak_user_profiles(limit=limit)
+
+    @app.get("/api/chungyak/subscribers")
+    def list_chungyak_subscribers_api(request: Request, limit: int = 200):
+        verify_admin_token(request, fail_closed=True)  # raw chat_id list (PII)
+        limit = max(1, min(int(limit), 1000))
+        return db.list_chungyak_regular_subs(limit=limit)
+
+    @app.get("/api/chungyak/deliveries")
+    def list_chungyak_deliveries_api(request: Request, status: str = "", limit: int = 50):
+        verify_admin_token(request)
+        status_norm = (status or "").strip().upper()
+        allowed = MarketBriefDatabase.CHUNGYAK_DELIVERY_STATUSES
+        if status_norm and status_norm not in allowed:
+            raise HTTPException(status_code=400, detail=f"status는 {', '.join(allowed)} 중 하나여야 합니다.")
+        limit = max(1, min(int(limit), 100))
+        items, _has_more = db.list_chungyak_deliveries(status=status_norm or None, limit=limit)
+        return items
 
     @app.get("/api/settings")
     def get_settings():

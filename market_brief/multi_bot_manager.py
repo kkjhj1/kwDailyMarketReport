@@ -398,6 +398,13 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "curation", "description": "🎯 나홀로 라이프스타일 큐레이션"},
         {"command": "help", "description": "❓ 이용 가이드"},
     ],
+    "chungyak_bot": [
+        {"command": "start", "description": "🏠 청약 알림 홈"},
+        {"command": "custom", "description": "🎯 내 맞춤 청약 조건"},
+        {"command": "today", "description": "📋 오늘 진행중 공고"},
+        {"command": "regular", "description": "📰 08:00 정기 다이제스트"},
+        {"command": "help", "description": "❓ 이용 가이드"},
+    ],
 }
 
 TARGET_SELECTION_CONFIG: dict[str, dict[str, Any]] = {
@@ -2644,6 +2651,46 @@ class DynamicBotManager:
             if yolo_db_path != ":memory:" and not yolo_cached:
                 yolo_db.close()
 
+    def _dispatch_chungyak_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
+        """Dispatches Chungyak Bot callbacks (`cy:`) and domain commands to ChungyakInteractiveBot.
+
+        The subscription access gate has already run upstream; ChungyakInteractiveBot ACKs every callback
+        first (once) per [TG-04]. Live alert dispatch is NOT triggered here ([PROD-LIVE]: cron runner only)."""
+        try:
+            from pathlib import Path
+            from chungyak_brief import DB_FILENAME as CHUNGYAK_DB_FILENAME
+            from chungyak_brief.channels.telegram import ChungyakTelegramChannel
+            from chungyak_brief.interactive_bot import COMMANDS_ALL, ChungyakInteractiveBot
+            from chungyak_brief.storage.db import ChungyakDatabase
+        except ImportError:
+            return False, "chungyak_interactive_not_available"
+
+        is_callback = "callback_query" in item
+        if is_callback:
+            if not str((item["callback_query"] or {}).get("data") or "").startswith("cy:"):
+                return False, "not_chungyak_domain_callback"
+        elif "message" in item:
+            text = str((item.get("message") or {}).get("text") or "").strip()
+            cmd = text.split()[0].lower().split("@")[0] if text else ""
+            if cmd == "/start" or cmd not in COMMANDS_ALL:
+                return False, "not_chungyak_interactive_event"  # /start keeps the shared onboarding flow
+        else:
+            return False, "not_chungyak_interactive_event"
+
+        base_path = getattr(self.engine.db, "db_path", None)
+        cy_db_path = (
+            ":memory:" if (not base_path or str(base_path) == ":memory:")
+            else str(Path(str(base_path)).with_name(CHUNGYAK_DB_FILENAME))
+        )
+        cy_db, cy_cached = self._domain_db(ChungyakDatabase, cy_db_path)
+        try:
+            channel = ChungyakTelegramChannel(token=bot_token, opener=opener)
+            ChungyakInteractiveBot(db=cy_db, channel=channel).handle_update(item)
+            return True, "chungyak_callback_handled" if is_callback else "chungyak_message_handled"
+        finally:
+            if not cy_cached:  # :memory: or uncached wrapper; cached physical-path wrappers stay for reuse
+                cy_db.close()
+
     def sync_bot_updates_once(
         self, bot_id: str, opener=None, timeout: int = 1, parallel_callbacks: bool = False
     ) -> dict[str, Any]:
@@ -2931,6 +2978,11 @@ class DynamicBotManager:
             handled, reason = self._dispatch_yolo_bot_update(bot.token, item, opener=opener)
             if handled:
                 return {"user_id": "yolo", "type": "yolo_integrated", "code": reason}
+
+        if bot.bot_id == "chungyak_bot":
+            handled, reason = self._dispatch_chungyak_bot_update(bot.token, item, opener=opener)
+            if handled:
+                return {"user_id": "chungyak", "type": "chungyak_integrated", "code": reason}
 
         if "callback_query" in item:
             cq = item["callback_query"]
