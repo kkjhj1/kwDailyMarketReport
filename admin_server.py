@@ -1753,11 +1753,18 @@ def create_admin_app(
             subscribers = adm_db.list_subscribers(active_only=True)
             events = adm_db.list_all_events()
             token = os.environ.get("ADMISSION_TELEGRAM_BOT_TOKEN") or get_bot_token()
+            ack_summary = adm_db.personalized_ack_summary()
             return {
                 "status": "ONLINE",
                 "subscribers_total": len(subscribers),
                 "events_total": len(events),
                 "has_token": bool(token),
+                "preference_summary": {
+                    "weekly_guide_enabled": sum(bool(s.weekly_guide_enabled) for s in subscribers),
+                    "event_dday_enabled": sum(bool(s.event_dday_enabled) for s in subscribers),
+                    "policy_breaking_enabled": sum(bool(s.policy_breaking_enabled) for s in subscribers),
+                },
+                "ack_summary": ack_summary,
                 "grade_breakdown": {
                     "MIDDLE": len([s for s in subscribers if s.target_grade == TargetGrade.MIDDLE]),
                     "HIGH_1_2": len([s for s in subscribers if s.target_grade == TargetGrade.HIGH_1_2]),
@@ -1775,7 +1782,12 @@ def create_admin_app(
 
         @app.get("/api/admission/subscribers")
         def list_admission_subscribers(_auth: None = Depends(verify_admission_admin_token)):
-            return {"subscribers": [s.to_dict() for s in adm_db.list_subscribers(active_only=False)]}
+            result = []
+            for subscriber in adm_db.list_subscribers(active_only=False):
+                item = subscriber.to_dict()
+                item["personalized_ack_summary"] = adm_db.personalized_user_summary(subscriber.chat_id)
+                result.append(item)
+            return {"subscribers": result}
 
         @app.get("/api/admission/events")
         def list_admission_events(_auth: None = Depends(verify_admission_admin_token)):

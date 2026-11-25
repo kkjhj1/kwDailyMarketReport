@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from admission_brief.channels.telegram import TelegramChannel, TelegramRateLimitError
 from admission_brief.models import AdmissionBriefing
+from admission_brief.push_engine import PersonalizedPush
 from admission_brief.storage.db import AdmissionDatabase
 
 logger = logging.getLogger(__name__)
@@ -176,4 +177,100 @@ class SafeTelegramDispatcher:
                     db.update_dispatch_status(briefing.briefing_id, chat_id, "FAILED")
                     break
 
+        return stats
+
+    def dispatch_personalized(
+        self,
+        pushes: list[PersonalizedPush],
+        db: AdmissionDatabase,
+        channel: TelegramChannel,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Safely deliver pre-built personalized pushes.
+
+        A dispatch-log claim is made before network I/O.  Only a confirmed send
+        advances the claim to ``SENT`` and writes per-item history.  ``UNKNOWN``
+        is terminal so an ambiguous network result is never automatically retried.
+        """
+        stats: dict[str, Any] = {
+            "total": len(pushes), "success": 0, "sent": 0, "skipped": 0,
+            "failed": 0, "unknown": 0, "dry_run": dry_run, "errors": {},
+        }
+        for push in pushes:
+            chat_id = str(push.chat_id).strip()
+            if not chat_id:
+                stats["skipped"] += 1
+                continue
+            authorized = db.is_active_platform_subscriber(chat_id)
+            if not dry_run and authorized is False:
+                stats["skipped"] += 1
+                stats["errors"][chat_id] = "NOT_SUBSCRIBED"
+                continue
+            if dry_run:
+                stats["skipped"] += 1
+                continue
+            if not db.claim_dispatch_slot(push.briefing.briefing_id, chat_id):
+                stats["skipped"] += 1
+                continue
+
+            self.limiter.wait_before_send(chat_id)
+            attempt = 0
+            while attempt <= self.max_429_retries:
+                try:
+                    channel.send(
+                        chat_id,
+                        push.briefing,
+                        reply_markup=push.reply_markup,
+                        disable_notification=push.briefing.silent,
+                    )
+                    if not db.update_dispatch_status(push.briefing.briefing_id, chat_id, "SENT"):
+                        stats["failed"] += 1
+                        stats["errors"][chat_id] = "DISPATCH_STATUS_UPDATE_FAILED"
+                        break
+                    for item_id in push.item_ids:
+                        db.record_content_sent(chat_id, item_id, push.item_kind, push.stream)
+                    stats["success"] += 1
+                    stats["sent"] += 1
+                    break
+                except TelegramRateLimitError as exc:
+                    attempt += 1
+                    if attempt > self.max_429_retries:
+                        db.update_dispatch_status(push.briefing.briefing_id, chat_id, "FAILED")
+                        stats["failed"] += 1
+                        stats["errors"][chat_id] = "429_EXCEEDED"
+                        break
+                    time.sleep(exc.retry_after)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        attempt += 1
+                        if attempt > self.max_429_retries:
+                            db.update_dispatch_status(push.briefing.briefing_id, chat_id, "FAILED")
+                            stats["failed"] += 1
+                            stats["errors"][chat_id] = "429_EXCEEDED"
+                            break
+                        retry_after = 1.0
+                        if exc.headers:
+                            try:
+                                retry_after = float(exc.headers.get("Retry-After", "1"))
+                            except (TypeError, ValueError):
+                                pass
+                        time.sleep(retry_after)
+                    else:
+                        db.update_dispatch_status(push.briefing.briefing_id, chat_id, "FAILED")
+                        if exc.code in {400, 403}:
+                            stats["errors"][chat_id] = f"HTTP_{exc.code}"
+                        else:
+                            stats["errors"][chat_id] = f"HTTP_{exc.code}"
+                        stats["failed"] += 1
+                        break
+                except (TimeoutError, socket.timeout, urllib.error.URLError, ConnectionError) as exc:
+                    db.update_dispatch_status(push.briefing.briefing_id, chat_id, "UNKNOWN")
+                    stats["unknown"] += 1
+                    stats["errors"][chat_id] = str(exc)
+                    break
+                except Exception as exc:
+                    db.update_dispatch_status(push.briefing.briefing_id, chat_id, "FAILED")
+                    stats["failed"] += 1
+                    stats["errors"][chat_id] = str(exc)
+                    break
         return stats

@@ -14,6 +14,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Set console encoding on Windows to prevent UnicodeEncodeError
 if sys.platform == "win32":
@@ -38,9 +39,15 @@ if env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
 from admission_brief.ai_curator import AICurator
+from admission_brief.catalog import KnowledgeCatalog
 from admission_brief.collector import AdmissionCollector
 from admission_brief.channels.telegram import TelegramChannel, format_admission_html, measure_message
 from admission_brief.channels.telegram_limiter import SafeTelegramDispatcher
+from admission_brief.push_engine import (
+    build_event_dday_pushes,
+    build_policy_pushes,
+    build_weekly_personalized_pushes,
+)
 from admission_brief.interactive_bot import AdmissionInteractiveBot
 from admission_brief.models import (
     AdmissionBriefing,
@@ -167,9 +174,9 @@ class _ConsoleDemoChannel:
         self._print(f"editMessageText #{message_id}", text, reply_markup)
         return True
 
-    def send(self, recipient, briefing, disable_notification=None) -> str:
+    def send(self, recipient, briefing, disable_notification=None, reply_markup=None) -> str:
         self._next_id += 1
-        self._print(f"send #{self._next_id}", format_admission_html(briefing))
+        self._print(f"send #{self._next_id}", format_admission_html(briefing), reply_markup)
         return str(self._next_id)
 
     def answer_callback_query(self, callback_query_id, text="") -> bool:
@@ -195,7 +202,6 @@ def run_demo() -> None:
                 "message": {"message_id": 1001, "chat": chat},
             }
         })
-
     # Phase B: Glossary & One-Touch Share Walkthrough
     bot.handle_update({"message": {"chat": chat, "text": "📖 1초 입시용어 사전"}})
     bot.handle_update({
@@ -214,15 +220,29 @@ def run_demo() -> None:
     })
 
 
+def personalized_dispatch_window(stream: str, now_kst: datetime) -> bool:
+    """Return whether a live personalized stream is in its approved KST window."""
+    now = now_kst if now_kst.tzinfo else now_kst.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    now = now.astimezone(ZoneInfo("Asia/Seoul"))
+    minute = now.hour * 60 + now.minute
+    if stream == "weekly":
+        return now.weekday() == 6 and 19 * 60 + 45 <= minute <= 20 * 60 + 15
+    if stream == "dday":
+        return 8 * 60 + 45 <= minute <= 9 * 60 + 15
+    return True
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Admission Briefing Telegram Bot Runner")
     parser.add_argument("--poll", action="store_true", help="Start interactive long-polling bot")
     parser.add_argument("--dispatch", action="store_true", help="Dispatch briefing to registered subscribers")
+    parser.add_argument("--dispatch-personalized", action="store_true", help="Dispatch the audited personalized stream")
+    parser.add_argument("--stream", choices=["weekly", "dday", "policy"], help="Personalized stream")
     parser.add_argument("--dry-run", action="store_true", help="Preview output without making Telegram API calls")
     parser.add_argument("--seed-sample", action="store_true", help="Seed sample admission events into database")
     parser.add_argument("--collect", action="store_true", help="Run automated crawler for public & academy notices")
     parser.add_argument("--recipients", type=str, default="", help="Comma-separated explicit chat IDs (preview or subscribed live targets)")
     parser.add_argument("--confirm-live", action="store_true", help="Explicitly authorize a live Telegram dispatch")
+    parser.add_argument("--ignore-window", action="store_true", help="Override a personalized KST window (live approval required)")
     parser.add_argument("--grade", type=str, default="MIDDLE", choices=["MIDDLE", "HIGH_1_2", "HIGH_3_N", "ALL"],
                         help="Target student grade for weekly briefing")
     parser.add_argument("--db-path", type=str, default=None, help="SQLite database path (defaults to ADMISSION_DB_PATH or alerts.sqlite3)")
@@ -248,6 +268,38 @@ def main() -> None:
         collector = AdmissionCollector(db=db, curator=curator)
         results = collector.run_collection()
         print(f"✅ Automated collection completed: {results['total_saved']} event(s) saved (Public: {results['public_count']}, Academy: {results['academy_count']}).")
+        return
+
+    if args.dispatch_personalized:
+        if not args.stream:
+            print("❌ --dispatch-personalized requires --stream weekly|dday|policy.")
+            sys.exit(2)
+        if args.ignore_window and not args.dry_run and not args.confirm_live:
+            print("❌ --ignore-window requires --confirm-live for live dispatch.")
+            sys.exit(2)
+        if not args.dry_run and not args.confirm_live:
+            print("❌ Live personalized dispatch requires --confirm-live; no message was sent.")
+            sys.exit(2)
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+        if not args.dry_run and not args.ignore_window and not personalized_dispatch_window(args.stream, now_kst):
+            print("❌ Personalized dispatch is outside its approved KST window; no message was sent.")
+            sys.exit(2)
+        if not args.dry_run and not token:
+            print("❌ Error: ADMISSION_TELEGRAM_BOT_TOKEN is not configured.")
+            sys.exit(1)
+        catalog = KnowledgeCatalog()
+        if args.stream == "weekly":
+            pushes = build_weekly_personalized_pushes(db, catalog, now_kst)
+        elif args.stream == "dday":
+            pushes = build_event_dday_pushes(db, now_kst)
+        else:
+            pushes = build_policy_pushes(db, catalog, now_kst)
+        stats = SafeTelegramDispatcher().dispatch_personalized(
+            pushes, db, channel, dry_run=args.dry_run
+        )
+        print(f"📊 Personalized [{args.stream}] total={stats['total']} sent={stats['sent']} "
+              f"skipped={stats['skipped']} failed={stats['failed']} unknown={stats['unknown']} "
+              f"dry_run={args.dry_run}")
         return
 
     target_grade = TargetGrade(args.grade)

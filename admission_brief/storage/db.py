@@ -130,6 +130,9 @@ class AdmissionDatabase:
                     username TEXT,
                     first_name TEXT,
                     alert_enabled INTEGER NOT NULL DEFAULT 1,
+                    weekly_guide_enabled INTEGER NOT NULL DEFAULT 1,
+                    event_dday_enabled INTEGER NOT NULL DEFAULT 1,
+                    policy_breaking_enabled INTEGER NOT NULL DEFAULT 1,
                     registered_at TEXT NOT NULL,
                     last_active_at TEXT NOT NULL
                 )
@@ -156,6 +159,13 @@ class AdmissionDatabase:
                 cursor.execute("ALTER TABLE admission_subscribers ADD COLUMN grade_level TEXT NOT NULL DEFAULT 'ALL'")
             except sqlite3.OperationalError:
                 pass
+            for column in ("weekly_guide_enabled", "event_dday_enabled", "policy_breaking_enabled"):
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE admission_subscribers ADD COLUMN {column} INTEGER NOT NULL DEFAULT 1"
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             # 2. Admission events table
             cursor.execute(
@@ -224,20 +234,47 @@ class AdmissionDatabase:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admission_card_acks (
+                    chat_id TEXT NOT NULL,
+                    content_id TEXT NOT NULL,
+                    acked_at TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, content_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admission_content_sent_history (
+                    chat_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    stream TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, item_id, stream)
+                )
+                """
+            )
             conn.commit()
 
     # --- Subscriber Methods ---
 
     def upsert_subscriber(self, profile: ParentUserProfile) -> None:
-        """Full profile upsert, including preferences and child data."""
+        """Upsert profile data while preserving alert preferences on conflict.
+
+        Alert preferences are intentionally excluded from the conflict update.  They
+        are user-owned state and may only be changed by ``update_alert_preferences``.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO admission_subscribers (
-                    chat_id, target_grade, target_region, education_stage, grade_level, username, first_name, alert_enabled, registered_at, last_active_at,
+                    chat_id, target_grade, target_region, education_stage, grade_level, username, first_name, alert_enabled,
+                    weekly_guide_enabled, event_dday_enabled, policy_breaking_enabled, registered_at, last_active_at,
                     children_json, active_child_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     target_grade = excluded.target_grade,
                     target_region = excluded.target_region,
@@ -260,6 +297,9 @@ class AdmissionDatabase:
                     profile.username,
                     profile.first_name,
                     1 if profile.alert_enabled else 0,
+                    1 if profile.weekly_guide_enabled else 0,
+                    1 if profile.event_dday_enabled else 0,
+                    1 if profile.policy_breaking_enabled else 0,
                     profile.registered_at.isoformat(),
                     profile.last_active_at.isoformat(),
                     json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
@@ -267,6 +307,37 @@ class AdmissionDatabase:
                 ),
             )
             conn.commit()
+
+    def update_alert_preferences(
+        self,
+        chat_id: str,
+        *,
+        weekly: Optional[bool] = None,
+        dday: Optional[bool] = None,
+        policy: Optional[bool] = None,
+    ) -> bool:
+        """Change only explicitly supplied personalized-alert preferences."""
+        assignments: list[str] = []
+        values: list[object] = []
+        for column, value in (
+            ("weekly_guide_enabled", weekly),
+            ("event_dday_enabled", dday),
+            ("policy_breaking_enabled", policy),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(1 if bool(value) else 0)
+        if not assignments:
+            return False
+        values.append(str(chat_id))
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE admission_subscribers SET {', '.join(assignments)}, last_active_at = ? WHERE chat_id = ?",
+                (*values[:-1], datetime.now(KST).isoformat(), values[-1]),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def create_subscriber_if_absent(self, profile: ParentUserProfile) -> bool:
         """Create a subscriber without overwriting an existing profile."""
@@ -276,8 +347,9 @@ class AdmissionDatabase:
                 """
                 INSERT OR IGNORE INTO admission_subscribers (
                     chat_id, target_grade, target_region, education_stage, grade_level, username, first_name, alert_enabled,
+                    weekly_guide_enabled, event_dday_enabled, policy_breaking_enabled,
                     registered_at, last_active_at, children_json, active_child_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(profile.chat_id),
@@ -288,6 +360,9 @@ class AdmissionDatabase:
                     profile.username,
                     profile.first_name,
                     1 if profile.alert_enabled else 0,
+                    1 if profile.weekly_guide_enabled else 0,
+                    1 if profile.event_dday_enabled else 0,
+                    1 if profile.policy_breaking_enabled else 0,
                     profile.registered_at.isoformat(),
                     profile.last_active_at.isoformat(),
                     json.dumps([c.to_dict() for c in profile.children], ensure_ascii=False),
@@ -537,6 +612,9 @@ class AdmissionDatabase:
             active_child_index=active_index,
             education_stage=row_stage,
             grade_level=row_level,
+            weekly_guide_enabled=bool(r["weekly_guide_enabled"]) if "weekly_guide_enabled" in keys else True,
+            event_dday_enabled=bool(r["event_dday_enabled"]) if "event_dday_enabled" in keys else True,
+            policy_breaking_enabled=bool(r["policy_breaking_enabled"]) if "policy_breaking_enabled" in keys else True,
         )
 
     def get_subscriber(self, chat_id: str) -> Optional[ParentUserProfile]:
@@ -922,3 +1000,91 @@ class AdmissionDatabase:
                 (briefing_id, str(chat_id)),
             )
             return cursor.fetchone() is not None
+
+    # --- Personalized push acknowledgement/history ---
+
+    def record_card_ack(
+        self, chat_id: str, content_id: str, acked_at: Optional[datetime] = None
+    ) -> bool:
+        """Record an owned card acknowledgement exactly once."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO admission_card_acks (chat_id, content_id, acked_at)
+                VALUES (?, ?, ?)
+                """,
+                (str(chat_id), str(content_id), (acked_at or datetime.now(KST)).isoformat()),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    ack_card = record_card_ack
+
+    def is_card_acked(self, chat_id: str, content_id: str) -> bool:
+        with self._get_connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM admission_card_acks WHERE chat_id = ? AND content_id = ?",
+                (str(chat_id), str(content_id)),
+            ).fetchone() is not None
+
+    def record_content_sent(
+        self,
+        chat_id: str,
+        item_id: str,
+        item_kind: str,
+        stream: str,
+        sent_at: Optional[datetime] = None,
+    ) -> bool:
+        """Append successful personalized content delivery history only."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO admission_content_sent_history
+                    (chat_id, item_id, item_kind, stream, sent_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(chat_id), str(item_id), str(item_kind), str(stream), (sent_at or datetime.now(KST)).isoformat()),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    record_content_sent_history = record_content_sent
+
+    def has_content_been_sent(self, chat_id: str, item_id: str, stream: str) -> bool:
+        with self._get_connection() as conn:
+            return conn.execute(
+                """
+                SELECT 1 FROM admission_content_sent_history
+                WHERE chat_id = ? AND item_id = ? AND stream = ?
+                """,
+                (str(chat_id), str(item_id), str(stream)),
+            ).fetchone() is not None
+
+    has_sent_content = has_content_been_sent
+
+    def personalized_ack_summary(self) -> dict[str, int]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total, COUNT(DISTINCT chat_id) AS users FROM admission_card_acks"
+            ).fetchone()
+            sent = conn.execute(
+                "SELECT COUNT(*) AS total, COUNT(DISTINCT chat_id) AS users FROM admission_content_sent_history"
+            ).fetchone()
+            return {
+                "acks_total": int(row["total"]),
+                "ack_users": int(row["users"]),
+                "sent_history_total": int(sent["total"]),
+                "sent_history_users": int(sent["users"]),
+            }
+
+    def personalized_user_summary(self, chat_id: str) -> dict[str, int]:
+        with self._get_connection() as conn:
+            ack = conn.execute(
+                "SELECT COUNT(*) FROM admission_card_acks WHERE chat_id = ?", (str(chat_id),)
+            ).fetchone()[0]
+            sent = conn.execute(
+                "SELECT COUNT(*) FROM admission_content_sent_history WHERE chat_id = ?", (str(chat_id),)
+            ).fetchone()[0]
+            return {"acks": int(ack), "sent_history": int(sent)}

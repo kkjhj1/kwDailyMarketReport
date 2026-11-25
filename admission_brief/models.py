@@ -506,6 +506,9 @@ class ParentUserProfile:
     active_child_index: int = 0
     education_stage: EducationStage | None = None
     grade_level: GradeLevel | None = None
+    weekly_guide_enabled: bool = True
+    event_dday_enabled: bool = True
+    policy_breaking_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.children and 0 <= self.active_child_index < len(self.children):
@@ -554,6 +557,9 @@ class ParentUserProfile:
             "active_child_index": self.active_child_index,
             "education_stage": self.education_stage.value,
             "grade_level": self.grade_level.value,
+            "weekly_guide_enabled": self.weekly_guide_enabled,
+            "event_dday_enabled": self.event_dday_enabled,
+            "policy_breaking_enabled": self.policy_breaking_enabled,
         }
 
     @classmethod
@@ -583,4 +589,7 @@ class ParentUserProfile:
             alert_enabled=bool(data.get("alert_enabled", True)), children=children,
             active_child_index=int(data.get("active_child_index", 0) or 0),
             education_stage=stage, grade_level=level,
+            weekly_guide_enabled=bool(data.get("weekly_guide_enabled", True)),
+            event_dday_enabled=bool(data.get("event_dday_enabled", True)),
+            policy_breaking_enabled=bool(data.get("policy_breaking_enabled", True)),
         )

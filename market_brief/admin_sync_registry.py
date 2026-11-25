@@ -17,6 +17,7 @@ SCHEMA_SOURCES: tuple[str, ...] = (
     "market_brief/storage/db.py",
     "travel_brief/storage/db.py",
     "chungyak_brief/storage/db.py",
+    "admission_brief/storage/db.py",
 )
 
 ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
@@ -167,6 +168,42 @@ ADMIN_SYNC_REGISTRY: dict[str, dict[str, Any]] = {
         "admin_api": ["GET /api/chungyak/deliveries"],
         "db_reader": "MarketBriefDatabase.list_chungyak_deliveries",
         "description": "청약봇 발송 원장(CUSTOM_MATCH/REGULAR_DAILY, QUEUED_MORNING vs UNKNOWN) — 청약 알림 현황",
+    },
+    # --- Admission personalized push state ----------------------------------------------------------
+    "admission_subscribers": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/admission/subscribers"],
+        "db_reader": "AdmissionDatabase.list_subscribers",
+        "description": "입시봇 활성/비활성 구독자와 세 스트림 선호도",
+    },
+    "admission_events": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/admission/events"],
+        "db_reader": "AdmissionDatabase.list_all_events",
+        "description": "입시 설명회·박람회·정책 이벤트 원장",
+    },
+    "admission_dispatch_logs": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/admission/status"],
+        "db_reader": "AdmissionDatabase.personalized_ack_summary",
+        "description": "입시 맞춤 발송 슬롯의 SENT/UNKNOWN/FAILED 상태 요약",
+    },
+    "admission_card_acks": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/admission/status", "GET /api/admission/subscribers"],
+        "db_reader": "AdmissionDatabase.personalized_ack_summary",
+        "description": "학부모별 맞춤 카드 확인(ACK) 요약",
+    },
+    "admission_content_sent_history": {
+        "bot_id": "admission_bot",
+        "db_file": "alerts.sqlite3",
+        "admin_api": ["GET /api/admission/status", "GET /api/admission/subscribers"],
+        "db_reader": "AdmissionDatabase.personalized_ack_summary",
+        "description": "성공한 카드·이벤트의 스트림별 재발송 방지 이력 요약",
     },
 }
 

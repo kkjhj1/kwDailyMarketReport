@@ -522,6 +522,9 @@ class AdmissionInteractiveBot:
         lines.extend([
             f"• <b>자녀 학년:</b> {html.escape(current_grade)}",
             f"• <b>관심 지역:</b> {html.escape(current_region)}",
+            f"• <b>주간 가이드:</b> {'켜짐' if profile is None or profile.weekly_guide_enabled else '꺼짐'}",
+            f"• <b>행사 D-Day:</b> {'켜짐' if profile is None or profile.event_dday_enabled else '꺼짐'}",
+            f"• <b>정책·긴급:</b> {'켜짐' if profile is None or profile.policy_breaking_enabled else '꺼짐'}",
             "",
             "변경을 원하시는 항목의 버튼을 선택해 주세요:",
         ])
@@ -529,7 +532,12 @@ class AdmissionInteractiveBot:
             [
                 {"text": "🎓 학년 변경하기", "callback_data": cb("menu:grade")},
                 {"text": "📍 지역/온라인 변경하기", "callback_data": cb("menu:region")},
-            ]
+            ],
+            [
+                {"text": "📋 주간 가이드 켜기/끄기", "callback_data": cb("adm:pref:weekly")},
+                {"text": "⏰ 행사 D-Day 켜기/끄기", "callback_data": cb("adm:pref:dday")},
+            ],
+            [{"text": "🚨 정책·긴급 알림 켜기/끄기", "callback_data": cb("adm:pref:policy")}],
         ]
         children = profile.children if profile else []
         if len(children) >= 2:
@@ -886,6 +894,10 @@ class AdmissionInteractiveBot:
                 return "📍 지역 선택 메뉴를 불러옵니다."
             if data == "adm:settings":
                 return "⚙️ 맞춤 알림 설정을 불러옵니다."
+            if data.startswith("adm:pref:"):
+                return "✅ 맞춤 알림 설정을 변경했습니다."
+            if data.startswith("adm:ack:"):
+                return "✅ 확인했습니다."
         except (ValueError, IndexError):
             return "⚠️ 알 수 없는 선택입니다."
         return ""
@@ -911,6 +923,12 @@ class AdmissionInteractiveBot:
         chat = msg.get("chat") or {}
         chat_id = str(chat.get("id") or callback.get("from", {}).get("id") or "")
         message_id = msg.get("message_id")
+
+        # A callback received from a different Telegram user must never be able
+        # to mutate the owner's acknowledgement or preferences.
+        from_id = str((callback.get("from") or {}).get("id") or "")
+        if from_id and chat.get("id") is not None and from_id != str(chat.get("id")):
+            return
 
         # Ensure subscriber profile exists in DB before updating preferences
         profile = self.db.get_subscriber(chat_id)
@@ -1039,6 +1057,21 @@ class AdmissionInteractiveBot:
         elif data == "adm:settings":
             self._cmd_settings(chat_id, message_id)
 
+        # 4-0. Personalized alert preferences (ACK-first above, DB write here)
+        elif data.startswith("adm:pref:"):
+            preference = data.split(":", 2)[2]
+            profile = self.db.get_subscriber(chat_id)
+            if profile is None or preference not in {"weekly", "dday", "policy"}:
+                self._cmd_settings(chat_id, message_id, notice="⚠️ 설정을 찾을 수 없습니다.")
+            else:
+                kwargs = {
+                    "weekly": {"weekly": not profile.weekly_guide_enabled},
+                    "dday": {"dday": not profile.event_dday_enabled},
+                    "policy": {"policy": not profile.policy_breaking_enabled},
+                }[preference]
+                self.db.update_alert_preferences(chat_id, **kwargs)
+                self._cmd_settings(chat_id, message_id, notice="✅ 맞춤 알림 설정이 변경되었습니다.")
+
         # 4-1. Multi-child switch / add (adm:child:toggle[:<IDX>:<GRADE>], adm:child:add, adm:cadd:<GRADE>[:<SLOT>])
         elif data.startswith("adm:child:toggle"):
             self._toggle_child(chat_id, message_id, data)
@@ -1056,6 +1089,27 @@ class AdmissionInteractiveBot:
             self._cmd_factcheck(chat_id)
         elif data == "adm:help":
             self._cmd_help(chat_id)
+        elif data.startswith("adm:ack:"):
+            content_id = data.split(":", 2)[2]
+            valid_id = bool(content_id) and content_id.isascii() and len(content_id) <= 24 and all(
+                char.isalnum() or char == "-" for char in content_id
+            )
+            owned = any(
+                self.db.has_content_been_sent(chat_id, content_id, stream)
+                for stream in ("weekly", "policy", "dday")
+            ) if valid_id else False
+            if owned and self.db.record_card_ack(chat_id, content_id):
+                self._safe_edit_or_send(
+                    chat_id, message_id,
+                    "✅ <b>확인 완료</b>\n\n이 맞춤 알림을 확인 목록에 기록했습니다.",
+                    {"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]]},
+                )
+            else:
+                self._safe_edit_or_send(
+                    chat_id, message_id,
+                    "⚠️ 이 알림은 이미 처리되었거나 확인 권한이 없습니다.",
+                    {"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]]},
+                )
         elif data == "adm:guide:menu":
             self._cmd_guide_menu(chat_id, message_id)
         elif data.startswith("adm:guide:"):

@@ -39,7 +39,10 @@ case "$TASK" in
         ;;
     admission_weekly)
         "$APP_DIR/venv/bin/python" admission_bot_runner.py --collect >> "$LOG_FILE" 2>&1
-        "$APP_DIR/venv/bin/python" admission_bot_runner.py --dispatch --grade ALL --confirm-live >> "$LOG_FILE" 2>&1
+        "$APP_DIR/venv/bin/python" admission_bot_runner.py --dispatch-personalized --stream weekly --confirm-live >> "$LOG_FILE" 2>&1
+        ;;
+    admission_dday)
+        "$APP_DIR/venv/bin/python" admission_bot_runner.py --dispatch-personalized --stream dday --confirm-live >> "$LOG_FILE" 2>&1
         ;;
     kids_milestone)
         "$APP_DIR/venv/bin/python" kids_bot_runner.py --dispatch-milestone >> "$LOG_FILE" 2>&1

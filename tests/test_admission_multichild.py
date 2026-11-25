@@ -237,7 +237,7 @@ def test_dday_label():
 
 # --- interactive bot ---
 
-def test_settings_legacy_shows_add_but_no_toggle():
+def test_settings_legacy_shows_add_and_personalized_toggles():
     db = AdmissionDatabase(db_path=":memory:")
     db.upsert_subscriber(ParentUserProfile(chat_id="888", target_grade=TargetGrade.HIGH_3_N))
     bot, ch = _bot(db)
@@ -245,7 +245,10 @@ def test_settings_legacy_shows_add_but_no_toggle():
     text = ch.send_message.call_args[0][1]
     markup = ch.send_message.call_args[1]["reply_markup"]
     assert "맞춤 알림 설정 현황" in text and "등록 자녀" not in text
-    assert _callbacks(markup) == ["menu:grade", "menu:region", "adm:child:add"]
+    callbacks = _callbacks(markup)
+    assert callbacks[:2] == ["menu:grade", "menu:region"]
+    assert "adm:child:add" in callbacks
+    assert {"adm:pref:weekly", "adm:pref:dday", "adm:pref:policy"}.issubset(callbacks)
 
 
 def test_add_child_flow_then_toggle_in_place():
