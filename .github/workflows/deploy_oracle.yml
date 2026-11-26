@@ -1,62 +1,136 @@
 name: Deploy to Oracle Cloud VM
 
+# Deploy only after the "Python unit tests" gate succeeds on main, or via manual dispatch
+# (which re-runs the same gate in the `tests` job below). No raw `push` trigger.
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'README.md'
-      - 'PORTAL_BOT_GUIDE.md'
-      - '.gitignore'
-      - 'reports/**'
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Python unit tests"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
 
 concurrency:
   group: deploy-oracle-cloud
   cancel-in-progress: true
 
 jobs:
+  tests:
+    name: Test gate (manual dispatch)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt && pip install httpx pytest tzdata pyyaml
+      - name: Compile check
+        run: python -m compileall -q auto_factory market_brief travel_brief silver_care admission_brief kids_compass yolo_brief chungyak_brief portal_hub scripts
+      - name: Run offline tests
+        run: python -m pytest -v
+      - name: Run holdout eval
+        run: python -m pytest holdout_eval -v
+      - name: Audit test quality
+        run: python scripts/audit_test_quality.py
+
   deploy:
     name: Deploy to Oracle Server
+    needs: [tests]
+    if: ${{ !cancelled() && ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') || (github.event_name == 'workflow_dispatch' && needs.tests.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
       - name: Check Oracle Secrets Availability
         id: check_secrets
+        env:
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
         run: |
-          if [ -n "${{ secrets.ORACLE_SSH_KEY }}" ] && [ -n "${{ secrets.ORACLE_HOST }}" ]; then
-            echo "has_secrets=true" >> $GITHUB_OUTPUT
+          if [ -n "$ORACLE_SSH_KEY" ] && [ -n "$ORACLE_HOST" ]; then
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
             echo "✅ Oracle secrets configured. Proceeding with deployment."
           else
-            echo "has_secrets=false" >> $GITHUB_OUTPUT
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ ORACLE_SSH_KEY or ORACLE_HOST not set in GitHub Secrets. Skipping automatic SSH deploy (Use local deploy_to_oracle.ps1 instead)."
           fi
 
       - name: Execute Remote Deploy on Oracle VM
         if: steps.check_secrets.outputs.has_secrets == 'true'
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         with:
           host: ${{ secrets.ORACLE_HOST }}
           username: ${{ secrets.ORACLE_USER || 'ubuntu' }}
           key: ${{ secrets.ORACLE_SSH_KEY }}
           port: 22
+          envs: DEPLOY_SHA
           script: |
-            set -e
-            cd /home/ubuntu/kwDailyMarketReport
-            mkdir -p backups
-            if [ -f "alerts.sqlite3" ]; then
-              cp -p alerts.sqlite3 backups/alerts_pre_deploy.sqlite3
+            set -Eeuo pipefail
+            APP_DIR=/home/ubuntu/kwDailyMarketReport
+            cd "$APP_DIR"
+
+            if ! [[ "${DEPLOY_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "❌ DEPLOY_SHA missing or malformed"; exit 1
             fi
+            echo "▶ Deploy target DEPLOY_SHA=$DEPLOY_SHA"
+
+            # 1) Refuse to deploy over local drift (reports/ is runtime output and excluded).
+            git update-index -q --refresh >/dev/null 2>&1 || true
+            DIRTY_BYTES=$(git diff --name-only -z HEAD -- ':!reports/' | wc -c)
+            if [ "$DIRTY_BYTES" -ne 0 ]; then
+              echo "❌ Tracked files modified on server; aborting deploy:"
+              git diff --name-only HEAD -- ':!reports/'
+              exit 1
+            fi
+            if git ls-files -z --others --exclude-standard | grep -zq '\.py$'; then
+              echo "❌ Untracked .py files present on server; aborting deploy"
+              exit 1
+            fi
+
+            # 2) Verify the target commit exists and belongs to origin/main.
             git fetch origin main
-            git reset --hard origin/main
-            if [ -f "backups/alerts_pre_deploy.sqlite3" ] && [ ! -f "alerts.sqlite3" ]; then
-              cp -p backups/alerts_pre_deploy.sqlite3 alerts.sqlite3
+            git cat-file -e "${DEPLOY_SHA}^{commit}"
+            git merge-base --is-ancestor "$DEPLOY_SHA" origin/main
+
+            # 3) Quiesce: wait up to 20s for in-flight jobs, then stop the service.
+            for _ in $(seq 1 20); do
+              pgrep -f 'run_cron\.sh|_bot_runner\.py' >/dev/null 2>&1 || break
+              sleep 1
+            done
+            sudo systemctl stop multibot
+
+            # 4) Backup reports/ and all *.sqlite3* (retained on failure).
+            BACKUP_DIR="$APP_DIR/backups/pre_deploy_$(date +%Y%m%d_%H%M%S)" && mkdir -p "$BACKUP_DIR"
+            trap 'echo "❌ Deploy failed; backup retained at $BACKUP_DIR"' ERR
+            if [ -d reports ]; then
+              cp -a reports "$BACKUP_DIR/reports"
             fi
-            if [ -f "requirements.txt" ]; then
-              ./venv/bin/pip install -r requirements.txt --quiet
+            shopt -s nullglob
+            for f in "$APP_DIR"/*.sqlite3*; do
+              cp -a "$f" "$BACKUP_DIR/"
+            done
+
+            # 5) Move code to the verified commit.
+            git reset --hard "$DEPLOY_SHA"
+
+            # 6) Unconditionally restore runtime data.
+            if [ -d "$BACKUP_DIR/reports" ]; then
+              rm -rf reports && cp -a "$BACKUP_DIR/reports" reports
             fi
-            sudo systemctl restart multibot
-            sleep 2
-            sudo systemctl is-active multibot
-            curl -s http://127.0.0.1:8002/healthz
+            for f in "$BACKUP_DIR"/*.sqlite3*; do
+              cp -a "$f" "$APP_DIR/"
+            done
+            shopt -u nullglob
+
+            # 7) Dependencies + compile gate.
+            ./venv/bin/pip install -r requirements.txt --quiet
+            ./venv/bin/python -m compileall -q auto_factory market_brief travel_brief silver_care admission_brief kids_compass yolo_brief chungyak_brief portal_hub scripts
+
+            # 8) Start and health-check.
+            sudo systemctl start multibot && sleep 2 && sudo systemctl is-active --quiet multibot && curl -fsS http://127.0.0.1:8002/healthz
+            echo "✅ Deployed $DEPLOY_SHA (backup: $BACKUP_DIR)"

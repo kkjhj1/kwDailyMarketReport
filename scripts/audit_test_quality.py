@@ -84,8 +84,25 @@ def _walk_own_body(func: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
+def _is_fixture_func(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """`@pytest.fixture`, `@pytest.fixture(...)`, `@fixture`, `@fixture(...)` 데코레이터 여부.
+
+    fixture 는 test_ 접두사가 붙어도 pytest 가 테스트로 수집하지 않으므로 검사에서 제외한다.
+    """
+    for dec in func.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Name) and target.id == "fixture":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "fixture":
+            return True
+    return False
+
+
 def audit_function(path: Path, func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[Violation]:
     violations: list[Violation] = []
+
+    if _is_fixture_func(func):
+        return violations
 
     if all(_is_trivial_stmt(s) for s in func.body):
         violations.append(Violation(path, func.lineno, name, "PASS_ONLY", "본문이 비어 있음(pass/docstring/...)"))
@@ -109,10 +126,15 @@ def audit_function(path: Path, func: ast.FunctionDef | ast.AsyncFunctionDef, nam
 def _iter_tests(tree: ast.Module):
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            yield node, node.name
+            if not _is_fixture_func(node):
+                yield node, node.name
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name.startswith("test")
+                    and not _is_fixture_func(item)
+                ):
                     yield item, f"{node.name}.{item.name}"
 
 

@@ -177,6 +177,69 @@ def test_valid_tests_have_no_violations(tmp_path):
     assert aq.audit_file(path) == []
 
 
+# ---------------------------------------------------------------- fixtures
+@pytest.mark.parametrize(
+    "decorator",
+    ["@pytest.fixture", "@pytest.fixture()", "@fixture", '@fixture(scope="module")'],
+)
+def test_module_level_fixture_named_test_is_skipped(tmp_path, decorator):
+    path = _write(
+        tmp_path,
+        "import pytest\nfrom pytest import fixture\n\n"
+        f"{decorator}\ndef test_fx():\n    return 1\n",
+    )
+    assert aq.audit_file(path) == []
+    tree = aq.ast.parse(path.read_text(encoding="utf-8"))
+    assert list(aq._iter_tests(tree)) == []
+
+
+def test_class_level_fixture_named_test_is_skipped(tmp_path):
+    path = _write(tmp_path, """
+        import pytest
+
+        class TestFoo:
+            @pytest.fixture
+            def test_fx(self):
+                return 1
+    """)
+    assert aq.audit_file(path) == []
+
+
+def test_async_fixture_named_test_is_skipped(tmp_path):
+    path = _write(tmp_path, """
+        import pytest
+
+        @pytest.fixture
+        async def test_async_fx():
+            return 1
+    """)
+    assert aq.audit_file(path) == []
+
+
+def test_audit_function_returns_empty_for_fixture(tmp_path):
+    source = "import pytest\n\n@pytest.fixture\ndef test_fx():\n    pass\n"
+    func = aq.ast.parse(source).body[1]
+    assert aq._is_fixture_func(func) is True
+    assert aq.audit_function(tmp_path / "x.py", func, "test_fx") == []
+
+
+def test_non_fixture_test_still_flagged_no_assert(tmp_path):
+    path = _write(tmp_path, """
+        import pytest
+
+        @pytest.fixture
+        def test_fx():
+            return 1
+
+        @pytest.mark.slow
+        def test_plain_no_assert():
+            x = 1
+    """)
+    violations = aq.audit_file(path)
+    assert _codes(violations) == ["NO_ASSERT"]
+    assert violations[0].test == "test_plain_no_assert"
+
+
 def test_syntax_error_reported(tmp_path):
     path = _write(tmp_path, "def test_broken(:\n    pass\n")
     violations = aq.audit_file(path)

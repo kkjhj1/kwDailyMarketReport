@@ -1,7 +1,5 @@
 name: Python unit tests
-on:
-  push:
-  pull_request:
+on: [push, pull_request]
 jobs:
   tests:
     runs-on: ubuntu-latest
@@ -14,6 +12,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install httpx pytest tzdata
+          pip install httpx pytest tzdata pyyaml
+      - name: Compile check
+        run: python -m compileall -q auto_factory market_brief travel_brief silver_care admission_brief kids_compass yolo_brief chungyak_brief portal_hub scripts
       - name: Run offline tests
         run: python -m pytest -v
+      - name: Run holdout eval
+        run: python -m pytest holdout_eval -v
+      - name: Audit test quality
+        run: python scripts/audit_test_quality.py
