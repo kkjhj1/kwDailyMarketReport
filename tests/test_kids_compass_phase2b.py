@@ -684,6 +684,18 @@ def test_manager_does_not_intercept_start(tmp_path):
     assert _route(mgr, "/start") == ((False, "not_kids_interactive_event"), 0)
 
 
+@pytest.mark.parametrize("cmd", ["/menu", "/menu@KidsBot"])
+def test_manager_menu_is_start_alias_owned_by_router(tmp_path, cmd):
+    """`/menu` follows `/start`: not intercepted by the kids dispatcher -> portal router home flow."""
+    from kids_compass.channels.telegram import KIDS_COMMANDS
+    from market_brief.multi_bot_manager import OFFICIAL_BOT_COMMANDS
+
+    mgr, _ = _kids_mgr(tmp_path)
+    assert _route(mgr, cmd) == _route(mgr, "/start") == ((False, "not_kids_interactive_event"), 0)
+    assert "menu" in {c["command"] for c in OFFICIAL_BOT_COMMANDS["kids_bot"]}
+    assert {"start", "menu", "help"} <= {c["command"] for c in KIDS_COMMANDS}
+
+
 def test_manager_routes_onboarding_text_only_while_flow_open(tmp_path):
     mgr, kc_path = _kids_mgr(tmp_path)
     # no open flow -> plain text is not claimed

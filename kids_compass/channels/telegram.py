@@ -1,7 +1,8 @@
 """Telegram transport, [TG-05] dispatcher and HTML card formatters for Kids Compass.
 
 [TG-01] every card stays within 1,800 visible / 3,500 HTML chars (see measure_message).
-[TG-02] every dynamic value goes through esc(); only <b>, <i>, <code>, <a href> are emitted.
+[TG-02] every dynamic value goes through esc(); only <b>, <i>, <code>, <a href> and plain
+        <blockquote> are emitted.
 [TG-03] links are rendered as anchor labels — raw URLs are never shown.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ from datetime import date, datetime
 from typing import Any, Callable, Iterable, Optional
 
 from market_brief.channels.http_keepalive import open_request
+from market_brief.channels.tg_ui_style import TG_DIVIDER, tg_quote, tg_quote_html
 from kids_compass.collector import WALK_IN_TIPS
 from kids_compass.food_safety import (
     FOOD_DISCLAIMER,
@@ -67,12 +69,14 @@ HOSPITAL_PHONE_WARNING = "⚠️ 출발 전 반드시 유선 전화로 당일 �
 EMERGENCY_FALLBACK = "📞 위급하면 <b>119</b> · 병원·약국 안내도 119에서 받을 수 있어요"
 
 KIDS_COMMANDS = [
-    {"command": "start", "description": "키즈 나침반 홈"},
-    {"command": "fever", "description": "해열제 용량 계산기"},
-    {"command": "hospital", "description": "달빛어린이병원 찾기"},
-    {"command": "weekend", "description": "주말 나들이 3-Pick"},
-    {"command": "preg", "description": "임신기 태교·바우처"},
-    {"command": "food", "description": "이유식·음식 안전 사전"},
+    {"command": "start", "description": "🏠 키즈 나침반 홈"},
+    {"command": "menu", "description": "🧭 메인 메뉴"},
+    {"command": "fever", "description": "🌡️ 해열제 용량 계산기"},
+    {"command": "hospital", "description": "🏥 달빛어린이병원 찾기"},
+    {"command": "weekend", "description": "🎪 주말 나들이 3-Pick"},
+    {"command": "preg", "description": "🤰 임신기 태교·바우처"},
+    {"command": "food", "description": "🥣 이유식·음식 안전 사전"},
+    {"command": "help", "description": "❓ 이용 가이드"},
 ]
 
 WALK_IN_HEADER = "⚡ 예약 없이 바로 출발 3-Pick"
@@ -120,8 +124,8 @@ def format_food_hub_html(subject_label: str, age_months: Optional[int],
     return "\n".join([
         "🥣 <b>먹거리·이유식·음식 안전 사전</b>",
         f"👧 기준: <b>{esc(subject_label)}</b>",
-        summary,
-        "",
+        TG_DIVIDER,
+        tg_quote(summary),
         "카테고리를 고르거나 음식 이름으로 검색해 보세요 👇",
     ])
 
@@ -173,13 +177,13 @@ def _on_off(profile: Optional[dict], column: str) -> str:
 
 def format_home_html(children: list[ChildProfile], profile: Optional[dict] = None,
                      pregnancy: Optional[PregnancyProfile] = None, today: Optional[date] = None) -> str:
-    lines = ["🍼 <b>키즈 나침반</b>", "평일엔 응급육아 · 주말엔 체험 나들이", ""]
+    lines = ["🍼 <b>키즈 나침반</b>", "평일엔 응급육아 · 주말엔 체험 나들이", TG_DIVIDER]
     if not children and pregnancy is None:
         lines += [
             "👋 <b>5초 간편 등록</b>으로 우리 아이 맞춤 비서를 시작하세요",
             "아래 <b>[➕ 아이 등록]</b> 또는 <b>[🤰 임신 중이에요]</b>를 눌러 주세요.",
             "",
-            "🚨 급하면 등록 없이 바로 <b>해열제 계산</b> · <b>달빛병원</b>을 누르세요.",
+            tg_quote_html("🚨 급하면 등록 없이 바로 <b>해열제 계산</b> · <b>달빛병원</b>을 누르세요."),
         ]
     else:
         if pregnancy is not None:

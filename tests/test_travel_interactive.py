@@ -1449,8 +1449,8 @@ class TestTravelMenuCommands(unittest.TestCase):
         self.assertEqual([c["command"] for c in cmds], ["start", "menu", "search", "watch", "settings", "help"])
         self.assertEqual(
             {c["command"]: c["description"] for c in cmds},
-            {"start": "여행봇 시작·온보딩", "menu": "메인 메뉴", "search": "국가·도시 검색",
-             "watch": "내 알림 관리", "settings": "발송 설정", "help": "도움말"},
+            {"start": "🏠 여행봇 시작·온보딩", "menu": "🧭 메인 메뉴", "search": "🔍 국가·도시 검색",
+             "watch": "🔔 내 알림 관리", "settings": "⚙️ 발송 설정", "help": "❓ 도움말"},
         )
         for c in cmds:
             self.assertRegex(c["command"], r"^[a-z0-9_]{1,32}$")

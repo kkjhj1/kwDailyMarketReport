@@ -6,6 +6,7 @@ Equipped with:
 4. Immediate Callback Acknowledgement to eliminate button spinner lag.
 """
 from __future__ import annotations
+from market_brief.channels.tg_ui_style import NAV_HOME, TG_DIVIDER
 from datetime import datetime
 import html
 import logging
@@ -152,7 +153,7 @@ def render_hidden_unsub_confirm_view(
     """Standalone 2-button unsubscribe confirm card for a hidden bot (it is not listed in any public view)."""
     text = (
         f"⚠️ <b>[{html.escape(bot_type.short_name)}] 구독을 정말 해지하시겠습니까?</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"<i>아래 [🔴 해지 확정] 또는 [↩️ 취소]를 선택해 주세요.</i>"
     )
     keyboard = [[
@@ -202,11 +203,11 @@ def render_main_menu(
     text = (
         f"👋 안녕하세요, <b>{name}</b>님!\n"
         f"<b>통합 인텔리전스 허브(Hub)</b>에 오신 것을 환영합니다.\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"🏅 <b>나의 회원 등급</b>: {user.tier.badge}\n"
         f"{slot_line}"
         f"{active_line}"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{TG_DIVIDER}\n\n"
         f"💡 <i>전체 봇을 둘러보시려면 아래 버튼을 누르거나, 찾으시는 단어(예: '시황', '여행', '키즈')를 입력하세요!</i>"
     )
 
@@ -267,12 +268,12 @@ def render_subscription_view(
 
     text = (
         f"📋 <b>[{name}] 님의 구독 센터</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"🏅 <b>회원 등급</b>: {user.tier.badge}\n"
         f"📊 <b>구독 슬롯</b>: <b>{gauge_display}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"{bot_block}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{TG_DIVIDER}"
         f"{notice_part}\n"
         f"💡 <i>버튼을 누르면 2단계 확인 후 구독 또는 해지가 진행됩니다.</i>"
     )
@@ -300,7 +301,7 @@ def render_subscription_view(
             {"text": "💬 고객센터", "callback_data": "support:home"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ])
 
@@ -319,7 +320,7 @@ def render_category_view(
 
     lines = [
         f"<b>{html.escape(category.title)} 봇 카탈로그</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
     ]
 
     if confirming_bot_id:
@@ -343,7 +344,7 @@ def render_category_view(
             lines.append(f"<b>{i}. {b.icon} {html.escape(b.short_name)}</b> {status_chip}")
             lines.append(f"   • {html.escape(b.one_line_desc)}")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(TG_DIVIDER)
 
     keyboard = []
     for b in bots:
@@ -368,7 +369,7 @@ def render_category_view(
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ])
 
@@ -379,13 +380,13 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
     """Renders all categories overview."""
     text = (
         f"📂 <b>전체 카테고리 탐색</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"원하시는 분야를 선택하시면 세부 봇 목록을 확인하실 수 있습니다.\n\n"
         f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율 등 (시황 브리핑)\n"
         f"• 🎓 <b>교육 / 입시</b>: 신규 교육 봇 출시 예정 (준비중)\n"
         f"• ✈️ <b>라이프 / 여가</b>: 특가 항공권, 주말 나들이·육아 등 (여행, 키즈)\n"
         f"• 💼 <b>업무 / 생산성</b>: 뉴스 클리핑, 생산성 도구 등 (준비중)\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{TG_DIVIDER}"
     )
     keyboard = [
         [
@@ -400,7 +401,7 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
             {"text": "📋 전체 봇 둘러보기", "callback_data": "cat:all"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -438,7 +439,7 @@ def render_catalog_all_view(
     active_count = sum(1 for v in subs.values() if v)
     lines = [
         "📋 <b>전체 봇 한눈에 보기</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
         f"📊 <b>구독 슬롯</b>: <b>{build_slot_gauge(active_count, user.tier)}</b>",
     ]
 
@@ -458,7 +459,7 @@ def render_catalog_all_view(
         status_chip = "[🟢 구독중]" if subs.get(b, False) else "[⚪ 미구독]"
         lines.append(f"<b>{i}. {b.icon} {html.escape(b.short_name)}</b> {status_chip}")
         lines.append(f"   • {html.escape(b.one_line_desc)}")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(TG_DIVIDER)
 
     keyboard = []
     for b in CATALOG_ALL_ORDER:
@@ -483,7 +484,7 @@ def render_catalog_all_view(
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ])
     return "\n".join(lines), {"inline_keyboard": keyboard}
@@ -506,7 +507,7 @@ def _onboarding_keyboard(bot_type: BotServiceType, context_str: str) -> dict[str
         keyboard.append([{"text": f"🚀 {bot_type.short_name} 대화방 바로가기", "url": deep_link}])
     keyboard.append([
         {"text": "📋 구독 관리", "callback_data": "nav:subs"},
-        {"text": "🏠 홈으로", "callback_data": "nav:main"},
+        {"text": NAV_HOME, "callback_data": "nav:main"},
     ])
     back_row = _context_return_buttons(bot_type, context_str)
     if back_row:
@@ -529,9 +530,9 @@ def render_subscribe_onboarding_view(
     sched = schedule_map.get(bot_type, "정기 발행 스케줄에 맞춰 발송")
     text = (
         f"🎉 <b>{html.escape(bot_type.title)} 구독 완료!</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"⏰ <b>정규 발송 시점</b>: {sched}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"💡 <i>대화방으로 이동하신 후, 화면 하단의 <b>[시작(START)]</b> 버튼을 꼭 눌러주세요. 그래야 알림이 정상 도착합니다!</i>"
     )
     return text, _onboarding_keyboard(bot_type, context_str)
@@ -600,7 +601,7 @@ def render_search_results_view(
     cb_q = fit_search_query_for_callback(query)
     lines = [
         f"🔍 <b>'{clean_q}' 검색 결과 (총 {len(matched_bots)}건)</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
     ]
 
     if confirming_bot_id:
@@ -624,7 +625,7 @@ def render_search_results_view(
             lines.append(f"<b>{i}. {b.icon} {html.escape(b.title)}</b> {status_chip}")
             lines.append(f"   • {html.escape(b.one_line_desc)}")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(TG_DIVIDER)
 
     keyboard = []
     for b in matched_bots:
@@ -649,7 +650,7 @@ def render_search_results_view(
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ])
 
@@ -663,7 +664,7 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     """Renders tier level comparison table and upgrade guidance."""
     text = (
         f"💎 <b>멤버십 등급별 혜택 및 슬롯 안내</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"현재 고객님의 등급은 <b>{user.tier.display_name}</b> 입니다.\n\n"
         f"⚪ <b>프리 (FREE)</b>\n"
         f"• 구독 슬롯: <b>최대 1개</b>\n"
@@ -677,7 +678,7 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
         f"⚫ <b>블랙 (BLACK VIP)</b>\n"
         f"• 구독 슬롯: <b>무제한 (All-Access)</b>\n"
         f"• 신규 베타 봇 우선 초대 & 1:1 전담 문의\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"💡 등급 변경 및 문의는 아래 버튼을 이용해 주세요."
     )
 
@@ -690,7 +691,7 @@ def render_tier_benefits_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -701,12 +702,12 @@ def render_support_center_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     name = html.escape(user.first_name or user.username or "회원")
     text = (
         f"💬 <b>고객센터 & 관리자 문의 창구</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"안녕하세요, <b>{name}</b>님! 무엇을 도와드릴까요?\n\n"
         f"• 💎 <b>등급 업그레이드 신청</b>: 원클릭으로 상향 접수\n"
         f"• ✉️ <b>1:1 문의사항 작성</b>: 운영팀에 직접 메시지 전송\n"
         f"• ❓ <b>자주 묻는 질문</b>: 이용 방법 및 FAQ\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"원하시는 메뉴를 선택해 주세요."
     )
     keyboard = [
@@ -718,7 +719,7 @@ def render_support_center_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
         ],
         [
             {"text": "❓ 이용안내", "callback_data": "nav:help"},
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -746,10 +747,10 @@ def render_upgrade_request_view(user: UserProfile) -> tuple[str, dict[str, Any]]
         )
     text = (
         f"💎 <b>등급 업그레이드 신청</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"✅ 현재 이용 중인 등급: {user.tier.badge}\n\n"
         f"{guide}"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{TG_DIVIDER}"
     )
     keyboard = [
         [{"text": label, "callback_data": f"support:req_tier:{tier.value}"}]
@@ -759,7 +760,7 @@ def render_upgrade_request_view(user: UserProfile) -> tuple[str, dict[str, Any]]
     keyboard.extend([
         [
             {"text": "💬 고객센터", "callback_data": "support:home"},
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ])
     return text, {"inline_keyboard": keyboard}
@@ -769,11 +770,11 @@ def render_inquiry_prompt_view(user: UserProfile) -> tuple[str, dict[str, Any]]:
     """Prompts user to type inquiry message."""
     text = (
         f"✉️ <b>1:1 문의사항 작성</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"운영팀에 전달하실 <b>문의 내용이나 제휴/건의사항</b>을\n"
         f"채팅창에 메시지로 자유롭게 입력해 주세요. ✍️\n\n"
         f"입력하신 즉시 운영팀 텔레그램으로 안전하게 전달됩니다.\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{TG_DIVIDER}"
     )
     keyboard = [
         [
@@ -787,14 +788,14 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
     """Renders FAQ and help tips."""
     text = (
         f"❓ <b>포털 봇 이용 가이드</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{TG_DIVIDER}\n"
         f"<b>Q. 원하는 봇을 가장 빠르게 찾는 방법은?</b>\n"
         f"A. 채팅창에 '환율', '여행', '키즈' 등 찾으시는 단어를 그냥 입력하시면 0.1초 만에 봇을 찾아드립니다!\n\n"
         f"<b>Q. 실수로 해지 버튼을 눌렀는데 바로 해지되나요?</b>\n"
         f"A. 아닙니다! 실수 방지를 위해 [해지 확정] / [취소] 버튼이 펼쳐지며, [취소]를 누르면 안전하게 구독이 유지됩니다.\n\n"
         f"<b>Q. 알림은 어디로 오나요?</b>\n"
         f"A. 구독을 켜시면 지정된 발송 시간에 각 전문 봇 채널을 통해 고품질 브리핑이 발송됩니다.\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"{TG_DIVIDER}"
     )
     keyboard = [
         [
@@ -802,7 +803,7 @@ def render_help_view() -> tuple[str, dict[str, Any]]:
             {"text": "📋 구독 관리", "callback_data": "nav:subs"},
         ],
         [
-            {"text": "🏠 홈으로", "callback_data": "nav:main"},
+            {"text": NAV_HOME, "callback_data": "nav:main"},
         ],
     ]
     return text, {"inline_keyboard": keyboard}
@@ -865,13 +866,13 @@ def send_admin_new_user_alert(
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         text = (
             f"👋 <b>[신규 회원 가입 알림]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"• 회원명: <b>{name}</b> ({handle})\n"
             f"• 유저 ID: <code>{html.escape(str(user.user_id))}</code>\n"
             f"• 기본 등급: {html.escape(user.tier.badge)}\n"
             f"• 유입 채널: {html.escape(source[:60])}\n"
             f"• 가입 일시: <code>{now_str}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
+            f"{TG_DIVIDER}"
         )
         if not _within_tg_limits(text):
             logger.warning("New-user admin alert exceeds TG limits for %s; skipped", user.user_id)
@@ -902,13 +903,13 @@ def send_admin_tier_upgrade_alert(
         title = "💎 [회원 등업 신청 접수]" if status_code == "CREATED" else "🔄 [회원 등업 신청 변경]"
         text = (
             f"<b>{title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"• 신청자: <b>{name}</b> ({handle})\n"
             f"• 유저 ID: <code>{html.escape(str(user.user_id))}</code>\n"
             f"• 현재 등급: {html.escape(user.tier.badge)}\n"
             f"• 희망 등급: <b>{html.escape(str(requested_tier)[:20])}</b>\n"
             f"• 접수 시각: <code>{now_str}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
+            f"{TG_DIVIDER}"
         )
         if not _within_tg_limits(text):
             logger.warning("Upgrade admin alert exceeds TG limits for %s; skipped", user.user_id)
@@ -1212,10 +1213,10 @@ def _handle_callback_query_scoped(
             )
             done_text = (
                 f"🫡 <b>이미 신청이 접수되어 운영팀 심사 대기 중입니다!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{TG_DIVIDER}\n"
                 f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n\n"
                 f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
+                f"{TG_DIVIDER}"
             )
         else:
             client.answer_callback_query(
@@ -1223,18 +1224,18 @@ def _handle_callback_query_scoped(
             )
             done_text = (
                 f"🎉 <b>등급 업그레이드 신청 완료!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{TG_DIVIDER}\n"
                 f"• 희망 등급: <b>{html.escape(req_tier)}</b>\n"
                 f"• 접수 일시: <code>{now_str}</code>\n\n"
                 f"운영팀 관리자 페이지로 신청서가 안전하게 접수되었습니다. 🫡\n"
                 f"관리자 승인 즉시 봇을 통해 승인 완료 알림을 보내드리겠습니다.\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
+                f"{TG_DIVIDER}"
             )
         done_markup = {
             "inline_keyboard": [
                 [
                     {"text": "📋 구독 관리", "callback_data": "nav:subs"},
-                    {"text": "🏠 홈으로", "callback_data": "nav:main"},
+                    {"text": NAV_HOME, "callback_data": "nav:main"},
                 ]
             ]
         }

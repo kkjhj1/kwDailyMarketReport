@@ -11,6 +11,7 @@ profile uses an in-place 2-step confirm. The legacy 7-step wizard (SC:new) is st
 backward compatibility but is no longer offered from the menu.
 """
 from __future__ import annotations
+from market_brief.channels.tg_ui_style import NAV_HOME
 import logging
 import re
 from datetime import date
@@ -137,7 +138,7 @@ def build_list_keyboard(parent: ParentProfile, matches: list, page: int) -> dict
     if pager:
         rows.append(pager)
     rows.append([_btn("🎯 1순위 미션", cb("L", parent.id, 0))])
-    rows.append([_btn("🗑 정보 삭제", cb("x", parent.id)), _btn("🏠 메뉴", cb("m"))])
+    rows.append([_btn("🗑 정보 삭제", cb("x", parent.id)), _btn(NAV_HOME, cb("m"))])
     return _kb(rows)
 
 
@@ -149,7 +150,7 @@ def build_detail_keyboard(
         [_btn("📞 통화 대본", cb("t", pid, bid, page)), _btn("💌 카톡 전송문", cb("k", pid, bid, page))],
         [{"text": "📊 부모님 복지 상세 리포트 ↗", "url": url}],
         [_btn("⭐ 찜 해제" if bookmarked else "⭐ 찜하기", cb("b", pid, bid, page))],
-        [_btn("◀ 목록", cb("all", pid, page)), _btn("🏠 메뉴", cb("m"))],
+        [_btn("◀ 목록", cb("all", pid, page)), _btn(NAV_HOME, cb("m"))],
     ])
 
 
@@ -177,11 +178,11 @@ def build_mission_status_keyboard(pid: int, bid: int, current: str) -> dict[str,
 
 
 def build_back_to_mission_keyboard(pid: int, bid: int) -> dict[str, Any]:
-    return _kb([[_btn("◀ 미션 카드", cb("mc", pid, bid)), _btn("🏠 메뉴", cb("m"))]])
+    return _kb([[_btn("◀ 미션 카드", cb("mc", pid, bid)), _btn(NAV_HOME, cb("m"))]])
 
 
 def build_back_to_detail_keyboard(pid: int, bid: int, page: int) -> dict[str, Any]:
-    return _kb([[_btn("◀ 혜택 상세", cb("d", pid, bid, page)), _btn("🏠 메뉴", cb("m"))]])
+    return _kb([[_btn("◀ 혜택 상세", cb("d", pid, bid, page)), _btn(NAV_HOME, cb("m"))]])
 
 
 def build_delete_confirm_keyboard(pid: int) -> dict[str, Any]:
@@ -481,7 +482,7 @@ class SilverCareInteractiveBot:
             if parent and benefit:
                 items.append((parent, benefit))
                 rows.append([_btn(f"⭐ {_short(benefit.title)} · {parent_name(parent, self.ref_year)}", cb("d", pid, bid, 0))])
-        rows.append([_btn("🏠 메뉴", cb("m"))])
+        rows.append([_btn(NAV_HOME, cb("m"))])
         self._safe_edit_or_send(chat_id, mid, format_bookmarks(items), _kb(rows))
 
     def _confirm_delete(self, chat_id: int, mid: Optional[int], pid: int) -> None:

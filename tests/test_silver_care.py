@@ -230,9 +230,11 @@ class TestFormatting:
         parent = _parent()
         m = match_benefits(SEED_BENEFITS, parent, YEAR)[0]
         for text in (format_benefit_card(parent, m), format_phone_script(m.benefit, parent),
-                     format_kakao_share_html(m.benefit, "엄마")):
+                     format_kakao_share_html(m.benefit, "엄마"), format_single_mission_card(parent, m)):
             tags = {t.lower() for t in re.findall(r"</?([a-zA-Z]+)", text)}
-            assert tags <= {"b", "i", "code", "pre", "a"}
+            assert tags <= {"b", "i", "code", "pre", "a", "blockquote"}
+            assert re.search(r"<blockquote\s", text) is None  # [TG-02] plain <blockquote> only
+            assert "━━━━━━━━━━━━━━━" not in text and "───────────────" not in text  # 14-char divider
 
     def test_kakao_text_substitutes_alias(self):
         text = format_kakao_share_text(BY_ID[5], "아빠")
@@ -690,7 +692,8 @@ class TestMissionFormatting:
         for text in (format_single_mission_card(parent, m), format_proxy_action_kit(parent, evil),
                      format_parent_peace_card(evil)):
             assert "<script>" not in text and "<엄마>" not in text and "<b>기관</b>" not in text
-            assert {t.lower() for t in re.findall(r"</?([a-zA-Z]+)", text)} <= {"b", "i", "code", "pre", "a"}
+            assert {t.lower() for t in re.findall(r"</?([a-zA-Z]+)", text)} <= {"b", "i", "code", "pre", "a", "blockquote"}
+            assert re.search(r"<blockquote\s", text) is None  # [TG-02] plain <blockquote> only
         for p in (_parent(), _parent(sido_code="11", is_low_income=1, is_pension_receiver=1)):
             for m in match_benefits(SEED_BENEFITS, p, YEAR):
                 self._assert_limits(format_single_mission_card(p, m, None, 5, 5, 31, YEAR))

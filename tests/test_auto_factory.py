@@ -1064,6 +1064,28 @@ class TestSafeHtml:
         with pytest.raises(ValueError):
             SafeHtmlFormatter().finalize(bad)
 
+    def test_plain_blockquote_allowed_and_escaped(self):
+        f = SafeHtmlFormatter()
+        q = f.quote("<tip> & go")
+        assert q == "<blockquote>&lt;tip&gt; &amp; go</blockquote>"
+        assert f.finalize(f.b("h") + "\n" + q) == f.b("h") + "\n" + q
+        assert SafeHtmlFormatter.visible_len(q) == len("<tip> & go")
+
+    @pytest.mark.parametrize("bad", [
+        "<blockquote expandable>x</blockquote>", '<blockquote class="q">x</blockquote>',
+    ])
+    def test_blockquote_attributes_rejected(self, bad):
+        with pytest.raises(ValueError):
+            SafeHtmlFormatter().finalize(bad)
+
+    def test_ui_style_constants_match_shared_helper(self):
+        from market_brief.channels import tg_ui_style
+        assert dev_bot_mod.TG_DIVIDER == tg_ui_style.TG_DIVIDER and len(dev_bot_mod.TG_DIVIDER) == 14
+        assert dev_bot_mod.TG_BULLET == tg_ui_style.TG_BULLET
+        assert dev_bot_mod.NAV_HOME == tg_ui_style.NAV_HOME and dev_bot_mod.NAV_BACK == tg_ui_style.NAV_BACK
+        src = open(dev_bot_mod.__file__, encoding="utf-8").read()
+        assert "from market_brief" not in src and "import market_brief" not in src  # auto_factory stays independent
+
     def test_length_limits(self):
         f = SafeHtmlFormatter()
         f.finalize("x" * 1800)
@@ -6133,8 +6155,8 @@ class TestShortcutKeyboard:
     def test_boot_registers_menu_commands_and_button(self, tmp_path, repo, db):
         bot, tr = make_bot(tmp_path, repo, db)
         assert [(c["command"], c["description"]) for c in tr.commands] == [
-            ("menu", "메인 메뉴 열기"), ("status", "진행 현황 보기"),
-            ("bots", "봇 선택하기"), ("sessions", "실행 세션 확인")]
+            ("menu", "🏠 메인 메뉴 열기"), ("status", "📊 진행 현황 보기"),
+            ("bots", "🤖 봇 선택하기"), ("sessions", "🖥 실행 세션 확인")]
         assert tr.menu_button == {"type": "commands"}
         assert tr.send_attempts == 0  # boot never sends chat messages
 
@@ -6174,13 +6196,14 @@ class TestShortcutKeyboard:
     def test_shortcut_labels_route_directly(self, tmp_path, repo, db):
         bot, tr = make_bot(tmp_path, repo, db, unlocked_presets={"kids"})
         assert bot.handle_update(upd_cb("p", encode_preset_token("kids"))) == "callback:preset:kids"
-        assert dev_bot_mod.SHORTCUT_LABELS == ("📊 현황", "🤖 봇 선택", "🏠 메뉴")
+        assert dev_bot_mod.SHORTCUT_LABELS == ("📊 현황", "🤖 봇 선택", "🏠 홈")
         calls = []
         orig = bot._on_plain_text
         bot._on_plain_text = lambda *a, **k: calls.append(a) or orig(*a, **k)
         assert bot.handle_update(upd_msg("📊 현황")) == "cmd:status"
         assert bot.handle_update(upd_msg("  🤖 봇 선택 ")) == "cmd:bots:1"
-        assert bot.handle_update(upd_msg("🏠 메뉴")) == "cmd:menu"
+        assert bot.handle_update(upd_msg("🏠 메뉴")) == "cmd:menu"  # legacy pinned label still routes
+        assert bot.handle_update(upd_msg("🏠 홈")) == "cmd:menu"
         kb = tr.sent[-1]["reply_markup"]["inline_keyboard"]
         assert [b["callback_data"] for b in kb[0]] == ["af3|nav|tasks", "af3|nav|sess"]
         assert calls == [] and db.list_qa_requests() == [] and db.list_tasks() == []
@@ -6198,7 +6221,7 @@ class TestShortcutKeyboard:
         assert greet["text"] == dev_bot_mod.SHORTCUT_GREETING
         assert rk == dev_bot_mod.SHORTCUT_REPLY_KEYBOARD
         assert rk["resize_keyboard"] is True and rk["is_persistent"] is True
-        assert [[b["text"] for b in row] for row in rk["keyboard"]] == [["📊 현황", "🤖 봇 선택", "🏠 메뉴"]]
+        assert [[b["text"] for b in row] for row in rk["keyboard"]] == [["📊 현황", "🤖 봇 선택", "🏠 홈"]]
         assert "inline_keyboard" in hub["reply_markup"]
         n = tr.send_attempts  # /menu stays inline-only (single message)
         assert bot.handle_update(upd_msg("/menu")) == "cmd:menu" and tr.send_attempts == n + 1

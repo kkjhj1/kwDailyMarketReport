@@ -1,4 +1,5 @@
 """Telegram transport; supports rich HTML formatting, clickable hyperlinks, inline buttons, and file attachment."""
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 import html
 import json
 import re
@@ -23,7 +24,7 @@ def _is_public_button_url(url: str) -> bool:
 
 TG_MAX_VISIBLE_CHARS = 1800
 TG_MAX_HTML_CHARS = 3500
-_SEP = "━━━━━━━━━━━━━━━━━━"
+_SEP = TG_DIVIDER
 _TAG_RE = re.compile(r"<[^>]+>")
 
 

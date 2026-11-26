@@ -16,7 +16,8 @@ tags: ["telegram", "bot", "message", "callback"]
 
 ## [TG-02] Strict HTML Escape
 - 모든 동적·외부 수집 문자열은 예외 없이 `html.escape()` 처리 후 주입한다.
-- 허용 태그: `<b>`, `<i>`, `<code>`, `<pre>`, `<a href="...">` — 그 외 태그 사용 금지.
+- 허용 태그: `<b>`, `<i>`, `<code>`, `<pre>`, `<a href="...">`, `<blockquote>`(속성 없는 plain 형태만; `<blockquote expandable>` 등 속성 금지) — 그 외 태그 사용 금지.
+- UI 공통 규격: 메시지 구분선은 `TG_DIVIDER`(14자 `──────────────`), 목록 불릿은 `•`, 내비 버튼은 `🏠 홈` / `◀ 이전` / `🧭 통합 메뉴봇`으로 통일한다(일반 봇은 `market_brief/channels/tg_ui_style.py`, `auto_factory`는 독립성 유지를 위해 `dev_bot.py` 내부 상수 사용).
 
 ## [TG-03] 1행 1정보
 - 모바일 3초 스캔이 가능하도록 `이모지 + 핵심명사 + 수치(Bold)` 단문으로 구성한다.

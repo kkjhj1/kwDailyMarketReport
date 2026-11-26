@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 import html
 import re
 from typing import Any, Optional, Sequence
@@ -173,7 +174,7 @@ def render_plan_card(
         lines.append("☔ <b>악천후·기상 미확인으로 안전한 실내 코스로 전환했어요.</b>")
     if plan_result.relaxation_labels:
         lines.append("ℹ️ " + " · ".join(html.escape(label) for label in plan_result.relaxation_labels))
-    lines.append("───────────────────────")
+    lines.append(TG_DIVIDER)
     if not plan_result.items:
         lines.append("조건에 맞는 코스가 아직 없어요. 예산이나 시간 조건을 바꿔보세요.")
     else:
@@ -187,7 +188,7 @@ def render_plan_card(
             lines.append(
                 f"📍 {html.escape(item.location_name)} · ⏱ {html.escape(item.cost_or_duration)} · 💸 <b>{html.escape(budget_text)}</b>"
             )
-    lines.append("───────────────────────")
+    lines.append(TG_DIVIDER)
     lines.append("👇 조건을 바꾸거나 코스별 실행 가이드를 열어보세요.")
     full_html = "\n".join(lines)
     vis_len, html_len = measure_message(full_html)
@@ -251,7 +252,7 @@ def render_area_menu_card(user: YoloUserProfile) -> tuple[str, dict[str, Any]]:
     text = "\n".join(
         [
             "📍 <b>날씨 기준 지역 변경</b>",
-            "───────────────────────",
+            TG_DIVIDER,
             f"현재 지역: <b>{html.escape(area_label(user.weather_area_code))}</b>",
             "선택한 지역의 실시간 날씨로 야외/실내 코스를 판단해요.",
         ]
@@ -270,12 +271,12 @@ def render_onboarding_card(
         "혼자 있을 때 에너지를 얻는 나만의 방식을 골라주세요.",
         "사계절 날씨와 100% 1인 맞춤 코스가 실시간 연결됩니다.",
         "",
-        "───────────────────────",
+        TG_DIVIDER,
         "🏃 <b>액티브 챌린저</b> ｜ 땀·성취 (마라톤/등산/클라이밍)",
         "🎨 <b>어반 힙스터</b> ｜ 문화·미식 (전시/팝업/1인 LP바)",
         "✈️ <b>로드 노마드</b> ｜ 혼여·방랑 (KTX당일/섬/온천)",
         "🛋️ <b>웰니스 딥다이버</b> ｜ 홈바·휴식 (칵테일/북캉스/OTT)",
-        "───────────────────────",
+        TG_DIVIDER,
     ]
     if current_arc:
         lines.append(f"현재 선택: <b>{current_arc.emoji} {current_arc.label}</b>")
@@ -325,7 +326,7 @@ def render_curation_card(
     lines: list[str] = [
         title_line,
         f"🎯 <b>{esc_arc}</b>{profile_suffix} ｜ {weather_line}{slot_suffix}",
-        "───────────────────────",
+        TG_DIVIDER,
     ]
     if match.time_slot_relaxed:
         lines.append(f"ℹ️ <i>{html.escape(TIME_SLOT_RELAXED_NOTICE)}</i>")
@@ -362,7 +363,7 @@ def render_curation_card(
             if idx < len(match.items[:3]) - 1:
                 lines.append("")
 
-    lines.append("───────────────────────")
+    lines.append(TG_DIVIDER)
     lines.append("💡 <i>초보 실행 요령·준비물은 [📘 가이드], 사진·풀코스는 웹 매거진에서!</i>")
 
     full_html = "\n".join(lines)
@@ -373,7 +374,7 @@ def render_curation_card(
             title_line,
             f"🎯 성향: <b>{esc_arc}</b>",
             weather_line,
-            "──────────────────",
+            TG_DIVIDER,
         ]
         for idx, item in enumerate(match.items[:3]):
             badge = _NUMBER_BADGES[idx] if idx < len(_NUMBER_BADGES) else "•"
@@ -398,7 +399,7 @@ def render_unsub_confirm_card() -> tuple[str, dict[str, Any]]:
     """[TG-04] In-Place 2-step confirmation for unsubscribe action."""
     text = (
         "🔕 <b>나홀로 욜로봇 정기 브리핑 해지 확인</b>\n"
-        "──────────────────\n"
+        f"{TG_DIVIDER}\n"
         "주간 맞춤형 1인 라이프스타일 큐레이션 알림을 중단하시겠습니까?\n"
         "해지 후에도 언제든 <code>/start</code>로 다시 시작할 수 있습니다."
     )
@@ -443,7 +444,7 @@ def render_guide_card(
             [
                 "☔ <b>1인 실행 코치 · 기상 안전 가드</b>",
                 f"🌧 현재 날씨: <b>{esc_reason}</b>",
-                "───────────────────────",
+                TG_DIVIDER,
                 "선택하신 코스는 <b>야외 활동</b>이므로 현재 기상 조건에서는 안전을 위해 실행 가이드를 보류합니다.",
                 "👉 아래 버튼으로 오늘 날씨에 안전한 <b>1인 실내 스마트 대체 코스</b>를 확인해 보세요!",
             ]
@@ -468,7 +469,7 @@ def render_guide_card(
         f"📘 <b>1인 실행 코치 · {curation.emoji} {esc_title}</b>",
         f"🎚 난이도: <b>{esc_diff}</b> ｜ 🧩 <b>{mbti_str}</b> ({social_label}·{pace_label})",
         f"📍 {esc_loc} ｜ ⏱ {esc_cost}",
-        "───────────────────────",
+        TG_DIVIDER,
     ]
 
     if curation.how_to_steps:
@@ -503,7 +504,7 @@ def render_guide_card(
         slim = [
             f"📘 <b>1인 실행 코치 · {curation.emoji} {html.escape(curation.title[:50])}</b>",
             f"🎚 <b>{esc_diff}</b> ｜ 📍 {html.escape(curation.location_name[:30])}",
-            "──────────────────",
+            TG_DIVIDER,
         ]
         for idx, step in enumerate(curation.how_to_steps[:3]):
             badge = _NUMBER_BADGES[idx] if idx < len(_NUMBER_BADGES) else f"{idx + 1}."
@@ -566,7 +567,7 @@ def render_saved_locker_card(
         f"🧩 내 레벨: <b>{html.escape(user.solo_level_label)}</b>"
         + (f" · MBTI: <b>{html.escape(user.mbti)}</b>" if user.mbti else "")
         + f" ｜ 누적 완료: <b>{len(done_curations)}건</b>",
-        "───────────────────────",
+        TG_DIVIDER,
     ]
     if is_severe and hidden_outdoor > 0:
         lines.append(
@@ -650,13 +651,13 @@ def render_profile_card(user: YoloUserProfile) -> tuple[str, dict[str, Any]]:
 
     lines = [
         "🧩 <b>나홀로 욜로 · 내 성향 &amp; 혼자 레벨 설정</b>",
-        "───────────────────────",
+        TG_DIVIDER,
         f"• 주 성향: <b>{html.escape(arc_txt)}</b>",
         f"• 보조 성향: <b>{html.escape(sec_txt)}</b>",
         f"• 혼자 레벨: <b>{html.escape(user.solo_level_label)}</b>",
         f"• 나의 MBTI: <b>{html.escape(mbti_txt)}</b>",
         f"• 몰입 스타일: <b>{html.escape(energy_txt)} / {html.escape(pace_txt)}</b>",
-        "───────────────────────",
+        TG_DIVIDER,
         "👇 <i>혼자 레벨(Lv.1~5)과 MBTI를 선택하면 내 성향에 딱 맞는 난이도와 코스가 우선 추천됩니다.</i>",
     ]
     return "\n".join(lines), build_profile_keyboard(user)

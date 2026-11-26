@@ -827,6 +827,20 @@ class TestRouterAndManager(DbTestCase):
         self.assertIn("mbw:m", flat)
         self.assertIn("mbw:q3", flat)
 
+    def test_menu_command_is_home_alias_of_start(self):
+        start = self._watch(text="/start")
+        menu = self._watch(text="/menu")
+        self.assertEqual(menu["result_code"], "ALREADY_SUBSCRIBED")
+        self.assertEqual(menu["inline_keyboard"], start["inline_keyboard"])
+        self.assertEqual(menu["reply_html"], start["reply_html"])
+        self.assertEqual(self._watch(text="/menu@KwBriefBot")["result_code"], "ALREADY_SUBSCRIBED")
+        # Fail-closed: `/menu` never auto-subscribes an un-subscribed caller (only `/start`/`/구독` may).
+        outsider = "700000777"
+        locked = self.router.handle_interaction("brief_bot", outsider, text="/menu")
+        self.assertNotIn(locked["result_code"], {"SUBSCRIBED", "ALREADY_SUBSCRIBED"})
+        self.assertFalse(self.engine.is_user_subscribed(outsider, "brief_bot"))
+        self.assertIn("menu", {c["command"] for c in OFFICIAL_BOT_COMMANDS["brief_bot"]})
+
     def test_menu_unsubscribe_and_swap_deactivate(self):
         self._watch(cb="mbw:q3")
         self.router.handle_interaction("menu_bot", self.uid, callback_data="menu:unsub:brief_bot")

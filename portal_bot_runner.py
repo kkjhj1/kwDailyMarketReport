@@ -59,6 +59,7 @@ from portal_hub.interactive import (
     build_slot_gauge,
     send_admin_new_user_alert,
 )
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +74,17 @@ import re
 MENU_START_COMMANDS = {
     "/start", "/menu", "/home", "홈", "메인", "메인 메뉴", "메인메뉴", "시작", "🏠 메인 메뉴", "🏠 홈", "🏠 메인", "🏠 메인 홈"
 }
+# Blue [/] menu commands — must stay identical to OFFICIAL_BOT_COMMANDS["menu_bot"]
+# (market_brief/multi_bot_manager.py); kept literal here to avoid importing the manager.
+PORTAL_BOT_COMMANDS: tuple[dict[str, str], ...] = (
+    {"command": "start", "description": "🏠 메인 포털 홈"},
+    {"command": "menu", "description": "🧭 통합 메뉴 열기"},
+    {"command": "subs", "description": "📋 내 구독 센터"},
+    {"command": "category", "description": "📂 카테고리 둘러보기"},
+    {"command": "tiers", "description": "💎 등급 혜택 안내"},
+    {"command": "support", "description": "💬 고객센터 / 문의"},
+    {"command": "help", "description": "❓ 이용 도움말"},
+)
 MENU_SUBS_COMMANDS = {
     "/subs", "/mysubs", "/sub", "내구독", "내 구독", "내구독관리", "내 구독 관리", "📋 내 구독 관리",
     "내구독센터", "내 구독 센터", "📋 내 구독 센터", "구독 관리", "구독관리", "구독 센터", "구독센터",
@@ -265,14 +277,7 @@ def run_polling(token: str) -> None:
         logger.warning("chungyak_bot registration skipped: %s", type(exc).__name__)
 
     # Register blue menu button commands
-    client.set_my_commands([
-        {"command": "start", "description": "🏠 메인 포털 홈"},
-        {"command": "subs", "description": "📋 내 구독 센터"},
-        {"command": "category", "description": "📂 카테고리 둘러보기"},
-        {"command": "tiers", "description": "💎 등급 혜택 안내"},
-        {"command": "support", "description": "💬 고객센터 / 문의"},
-        {"command": "help", "description": "❓ 이용 도움말"},
-    ])
+    client.set_my_commands([dict(c) for c in PORTAL_BOT_COMMANDS])
 
     logger.info("🚀 [Portal Hub Bot v2.0] 롱폴링 시작... (카테고리 2-Tap & 키워드 검색 엔진 탑재)")
 
@@ -340,15 +345,15 @@ def run_polling(token: str) -> None:
                             if admin_chat:
                                 admin_forward = (
                                     f"📩 <b>[1:1 고객 문의 접수]</b>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"{TG_DIVIDER}\n"
                                     f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
                                     f"• 핸들: {u_handle}\n"
                                     f"• 회원 등급: {user.tier.display_name}\n"
                                     f"• 접수 시각: <code>{now_str}</code>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"{TG_DIVIDER}\n"
                                     f"<b>【문의 내용】</b>\n"
                                     f"<i>{html.escape(text)}</i>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━"
+                                    f"{TG_DIVIDER}"
                                 )
                                 try:
                                     client.send_message(admin_chat, admin_forward)
@@ -357,11 +362,11 @@ def run_polling(token: str) -> None:
 
                             ack_text = (
                                 f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"{TG_DIVIDER}\n"
                                 f"작성하신 내용:\n"
                                 f"<i>\"{html.escape(text)}\"</i>\n\n"
                                 f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏\n"
-                                f"━━━━━━━━━━━━━━━━━━━━"
+                                f"{TG_DIVIDER}"
                             )
                             ack_markup = {
                                 "inline_keyboard": [

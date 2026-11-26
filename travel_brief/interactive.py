@@ -12,6 +12,7 @@ Equipped with:
 """
 from __future__ import annotations
 
+from market_brief.channels.tg_ui_style import NAV_HOME, NAV_PORTAL, TG_DIVIDER
 import concurrent.futures
 import html
 import io
@@ -650,7 +651,7 @@ class TravelInteractiveHandler:
                 ],
                 [
                     {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
-                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+                    {"text": NAV_HOME, "callback_data": "trv:m:home"},
                 ],
                 [
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
@@ -695,11 +696,11 @@ class TravelInteractiveHandler:
         return [f"📰 정기발송: <b>{weekly}</b>", f"🔔 맞춤발송: <b>{watch}</b>"]
 
     def build_menu_hub_card(self, chat_id: Optional[str] = None) -> tuple[str, dict[str, Any]]:
-        lines = ["🧭 <b>[트래블 패스파인더 메인 메뉴]</b>", "━━━━━━━━━━━━━━━━━━"]
+        lines = ["🧭 <b>[트래블 패스파인더 메인 메뉴]</b>", TG_DIVIDER]
         badge = self._format_status_badge(chat_id)
         if badge:
             lines.extend(badge)
-            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(TG_DIVIDER)
         lines.extend([
             "⚙️ <b>정기발송 설정</b>: 발송 주기·관심 권역·여행 스타일 변경",
             "🔔 <b>맞춤발송 설정</b>: 인천 직항 116개 도시 · 8대 권역 목표가 알림 관리",
@@ -729,7 +730,7 @@ class TravelInteractiveHandler:
     def build_popular_cities_card(self) -> tuple[str, dict[str, Any]]:
         text = (
             "🏙️ <b>[인기 도시 실시간 특가]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             "도시를 누르면 6개월 주말 최저가·예산을 바로 조회해요.\n"
             "🔍 목록에 없는 곳은 [권역·도시 찾기]로 찾아보세요."
         )
@@ -739,7 +740,7 @@ class TravelInteractiveHandler:
         ]
         rows.append([
             {"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
-            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+            {"text": NAV_HOME, "callback_data": "trv:m:home"},
         ])
         return text, {"inline_keyboard": rows}
 
@@ -755,7 +756,7 @@ class TravelInteractiveHandler:
         status = "🟢 받는 중" if freq != "OFF" else "🔴"
         lines += [
             "📰 <b>[정기발송 설정]</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             "원하는 주기·권역·스타일을 누르면 바로 저장돼요.",
             f"📰 정기발송: <b>{WEEKLY_FREQ_STATUS[freq]}</b> {status}",
             f"🧭 관심권역: <b>{html.escape(region_label(region))}</b>",
@@ -782,7 +783,7 @@ class TravelInteractiveHandler:
                 ],
                 [
                     {"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
-                    {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+                    {"text": NAV_HOME, "callback_data": "trv:m:home"},
                 ],
             ]
         }
@@ -794,7 +795,7 @@ class TravelInteractiveHandler:
         current = str(prefs.get("weekly_brief_region") or "ALL").upper()
         text = (
             "🧭 <b>[관심권역 선택]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"현재: <b>{html.escape(region_label(current))}</b>\n"
             "정기발송 TOP 3를 고른 권역 기준으로 추천해 드려요."
         )
@@ -861,14 +862,14 @@ class TravelInteractiveHandler:
         if mode == "s":
             text = (
                 f"🗺️ <b>[{region_name} 도시 선택]</b> ({page + 1}/{pages})\n"
-                "━━━━━━━━━━━━━━━━━━\n"
+                f"{TG_DIVIDER}\n"
                 "도시를 누르면 실시간 특가를 바로 조회해요. (인기순 · 가나다순)"
             )
         else:
             text = (
                 f"{WATCH_STEP1_HEADER}\n"
                 f"🗺️ {region_name} 도시 선택 ({page + 1}/{pages})\n"
-                "━━━━━━━━━━━━━━━━━━\n"
+                f"{TG_DIVIDER}\n"
                 "알림 받을 도시를 누르면 다음 단계에서 목표가를 정해요. (인기순 · 가나다순)"
             )
         return text, {"inline_keyboard": rows}
@@ -898,7 +899,7 @@ class TravelInteractiveHandler:
         except Exception as exc:
             logger.error("Menu action %s failed for %s: %s", sub, chat_id, exc, exc_info=True)
             text = "⚠️ 메뉴를 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-            markup = {"inline_keyboard": [[{"text": "🏠 메뉴", "callback_data": "trv:m:home"}]]}
+            markup = {"inline_keyboard": [[{"text": NAV_HOME, "callback_data": "trv:m:home"}]]}
         self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
 
     def _watch_entry_button(self, scope: str, chat_id: Optional[str] = None) -> dict[str, Any]:
@@ -937,7 +938,7 @@ class TravelInteractiveHandler:
                 ],
                 [
                     {"text": "📊 웹 리포트 ↗", "url": self.report_url},
-                    {"text": "🏠 통합 메뉴봇 ↗", "url": "https://t.me/KwMenu_bot?start=from_sub"},
+                    {"text": NAV_PORTAL, "url": "https://t.me/KwMenu_bot?start=from_sub"},
                 ],
             ]
         }
@@ -968,7 +969,7 @@ class TravelInteractiveHandler:
                     {"text": "📊 6개월 특가 웹 리포트 ↗", "url": self.report_url},
                 ],
                 [
-                    {"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"},
+                    {"text": NAV_PORTAL, "url": "https://t.me/KwMenu_bot?start=from_sub"},
                 ],
             ]
         }
@@ -1145,7 +1146,7 @@ class TravelInteractiveHandler:
             label = self.label_for(target_city)
         return (
             f"✈️ <b>[{html.escape(label)} 실시간 특가 검색 중...]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"⏳ 네이버 항공권 실시간 최저가를 조회하고 있습니다.\n"
             f"💡 조회가 끝나면 최신 요금과 예약 링크로 자동 갱신됩니다."
         )
@@ -1154,7 +1155,7 @@ class TravelInteractiveHandler:
         label = self.label_for(target_city)
         return (
             f"⚠️ <b>[{html.escape(label)} 특가 조회 실패]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"{html.escape(reason)}\n"
             f"🔄 잠시 후 아래 버튼으로 다시 시도해 주세요."
         )
@@ -1163,7 +1164,7 @@ class TravelInteractiveHandler:
         label = self.label_for(target_city)
         return (
             f"⌛ <b>[{html.escape(label)} 조회 시간 초과]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"네이버 항공권 응답이 지연되고 있습니다 ({int(self.watchdog_seconds)}초 초과).\n"
             f"🔄 잠시 후 아래 버튼으로 다시 시도해 주세요."
         )
@@ -1172,7 +1173,7 @@ class TravelInteractiveHandler:
         names = " · ".join(self.catalog.suggestion_names(8))
         return (
             "🔍 <b>[기타 지역 직접 검색]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             "가고 싶은 <b>도시 이름</b>을 채팅창에 그대로 입력해 주세요.\n"
             f"예) {html.escape(names)}\n"
             "🗺️ 아래 8대 권역 버튼으로 직항 도시 목록에서 골라도 돼요.\n"
@@ -1184,7 +1185,7 @@ class TravelInteractiveHandler:
         rows = self.build_region_grid("s")
         rows.append([
             {"text": "🏙️ 인기 도시", "callback_data": "trv:m:popular"},
-            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+            {"text": NAV_HOME, "callback_data": "trv:m:home"},
         ])
         return {"inline_keyboard": rows}
 
@@ -1202,7 +1203,7 @@ class TravelInteractiveHandler:
 
     def build_help_card(self, unknown_text: str = "", suggestions: Optional[list[Any]] = None) -> str:
         names = " · ".join(self.catalog.suggestion_names(12))
-        lines = ["🧭 <b>[트래블 패스파인더 지역 검색 도움말]</b>", "━━━━━━━━━━━━━━━━━━"]
+        lines = ["🧭 <b>[트래블 패스파인더 지역 검색 도움말]</b>", TG_DIVIDER]
         if unknown_text:
             shown = unknown_text if len(unknown_text) <= 20 else unknown_text[:19] + "…"
             lines.append(f"❓ '<b>{html.escape(shown)}</b>'은(는) 아직 지원하지 않는 지역이에요.")
@@ -1223,7 +1224,7 @@ class TravelInteractiveHandler:
             return self.build_help_card(), self.build_inline_keyboard("ALL")
         text = (
             f"{meta['flag']} <b>[{html.escape(meta['name'])} 주요 도시 선택]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             "어느 도시의 실시간 항공권을 조회할까요? 도시를 누르면 바로 최저가·예산을 알려드려요."
         )
         city_buttons = [
@@ -1240,16 +1241,16 @@ class TravelInteractiveHandler:
 
     def build_onboarding_card(self, chat_id: Optional[str] = None) -> str:
         badge = self._format_status_badge(chat_id)
-        status = ("\n".join(["📍 <b>내 발송 상태</b>", *badge]) + "\n━━━━━━━━━━━━━━━━━━\n") if badge else ""
+        status = ("\n".join(["📍 <b>내 발송 상태</b>", *badge]) + "\n──────────────\n") if badge else ""
         return (
             "🎉 <b>[✈️ 트래블 패스파인더] 구독이 시작되었습니다!</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"{status}"
             "1️⃣ 📰 <b>정기발송 (매주 목 12:00 기본)</b>\n"
             "관심 권역·여행 스타일(휴양/관광)에 맞춘 TOP 3 브리핑\n"
             "2️⃣ 🔔 <b>맞춤발송 (목표가 도달 시)</b>\n"
             "원하는 직항 도시·일정·가격 등록 시 하루 3회 체크 후 알림 (최대 4개)\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             "💬 채팅창에 도시 이름(예: 오사카, 밴쿠버)을 바로 입력하면 실시간 특가를 즉시 조회할 수 있어요.\n"
             "⚙️ 설정은 /settings 에서 언제든 바꿀 수 있어요 👇"
         )
@@ -1397,7 +1398,7 @@ class TravelInteractiveHandler:
             self._answer(cq_id, f"🎯 {city_label} 선택 완료! [직전 발송 특가 정보 보기] 버튼을 눌러주세요.")
             confirm_html = (
                 f"✅ <b>[트래블 패스파인더 맞춤 여행지 선택 완료]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{TG_DIVIDER}\n"
                 f"🎯 <b>선택하신 여행지:</b> <b>{html.escape(city_label)}</b>\n\n"
                 f"👇 아래 <b>[📋 직전 발송 특가 정보 보기]</b> 버튼을 누르시면 "
                 f"구독 직전에 발송되었던 최신 주말 항공·숙박 특가 브리핑을 즉시 확인하실 수 있습니다!"
@@ -1448,7 +1449,7 @@ class TravelInteractiveHandler:
         except Exception as exc:
             logger.error("Region page %s/%s failed for %s: %s", region, page, chat_id, exc, exc_info=True)
             text = "⚠️ 도시 목록을 불러오는 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-            markup = {"inline_keyboard": [[{"text": "🏠 메뉴", "callback_data": "trv:m:home"}]]}
+            markup = {"inline_keyboard": [[{"text": NAV_HOME, "callback_data": "trv:m:home"}]]}
         self._render_watch_card(chat_id, message_id, text, markup, edit=in_place)
 
     def handle_text_message(
@@ -1936,7 +1937,7 @@ class TravelInteractiveHandler:
         lines = [notice] if notice else []
         lines += [
             f"⏱ <b>[{html.escape(label)} · {WATCH_TIME_DIR_TITLES[direction]}]</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"현재: {html.escape(format_time_window(cur_f, cur_t))}",
             html.escape(time_window_bar(cur_f, cur_t)),
             "원하는 시간대를 한 번 눌러 고르세요. 다른 구간은 ✍️ 직접 입력으로 정할 수 있어요.",
@@ -1964,7 +1965,7 @@ class TravelInteractiveHandler:
         lines = [notice] if notice else []
         lines += [
             f"✍️ <b>[{html.escape(label)} · {WATCH_TIME_DIR_TITLES[direction]} 직접 입력]</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"원하는 시간대를 채팅창에 입력해 주세요 ({minutes}분 안에).",
             "예) <code>9-12</code> · <code>09:30-13:00</code> · <code>0930-1330</code> · <code>18-24</code> · <code>22-02</code>",
             "• <code>무관</code> 입력 시 시간 조건 해제 · 취소: /cancel",
@@ -2124,7 +2125,7 @@ class TravelInteractiveHandler:
         lines = [notice] if notice else []
         lines += [
             WATCH_STEP1_HEADER,
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"⌨️ 알림 받을 도시 이름을 채팅창에 입력해 주세요 ({minutes}분 안에).",
             f"예) {html.escape(names)}",
             "• 국가 전체 알림은 지원하지 않아요 · 취소: /cancel",
@@ -2590,7 +2591,7 @@ class TravelInteractiveHandler:
         lines = []
         if notice:
             lines.append(notice)
-        lines += [f"🔔 <b>[{html.escape(label)} 특가 알림 설정]</b>", "━━━━━━━━━━━━━━━━━━"]
+        lines += [f"🔔 <b>[{html.escape(label)} 특가 알림 설정]</b>", TG_DIVIDER]
         if refs:
             basis = "" if (res and res.metadata_quality == "CURATED") else " · 기본 메타 기준 추정"
             lines.append(f"📊 <b>참고 시세</b> (왕복 직항 1인{basis})")
@@ -2641,7 +2642,7 @@ class TravelInteractiveHandler:
         lines = [
             f"{title}",
             f"🔔 <b>[{html.escape(label)}]</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"🎯 목표가: <b>{int(watch['target_price_krw']):,}원 이하</b>" + (f" ({kind})" if kind else ""),
         ]
         lines += self._watch_schedule_lines(watch)
@@ -2682,7 +2683,7 @@ class TravelInteractiveHandler:
             lines.append(notice)
         lines += [
             f"🔔 <b>[맞춤발송 설정]</b> ({len(watches)}/{WATCH_MAX_ACTIVE_PER_CHAT})",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
         ]
         if not watches:
             # Never "일시중지"/"켜짐" with 0 watches, even if the paused flag is still set.
@@ -2692,7 +2693,7 @@ class TravelInteractiveHandler:
         else:
             lines.append(f"🟢 아래 도시의 목표가 도달 시 매일 3회({WATCH_CHECK_SCHEDULE}) 체크해 알려드려요.")
         if watches:
-            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(TG_DIVIDER)
         rows: list[list[dict[str, Any]]] = []
         for i, w in enumerate(watches, 1):
             label = self.label_for(w["dest_code"])
@@ -2718,7 +2719,7 @@ class TravelInteractiveHandler:
             ])
         rows.append([
             {"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
-            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+            {"text": NAV_HOME, "callback_data": "trv:m:home"},
         ])
         return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -2741,7 +2742,7 @@ class TravelInteractiveHandler:
         count = len(self.db.list_travel_watches(chat_id=chat_id, active_only=True))
         text = (
             "🧹 <b>[맞춤 특가 알림 초기화]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"설정된 알림 <b>{count}개</b>를 모두 끄고 일시중지 상태도 풀어요.\n"
             "📰 정기 여행정보 발송 설정(주기·권역·스타일)은 그대로 유지돼요.\n"
             "정말 초기화할까요?"
@@ -2759,14 +2760,14 @@ class TravelInteractiveHandler:
         lines = [notice] if notice else []
         lines += [
             WATCH_STEP1_HEADER,
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             WATCH_STEP1_GUIDE,
             "🗺️ 권역을 고르면 인천 직항 도시 목록이 나와요.",
         ]
         rows = self.build_region_grid("w")
         rows.append([
             {"text": "📋 내 알림", "callback_data": "trv:w:l"},
-            {"text": "🏠 메뉴", "callback_data": "trv:m:home"},
+            {"text": NAV_HOME, "callback_data": "trv:m:home"},
         ])
         return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -2782,11 +2783,11 @@ class TravelInteractiveHandler:
         country = is_country_watch_code(code)
         lines = [notice] if notice else []
         if active:
-            lines += [f"🔔 <b>[맞춤발송 수정 · {html.escape(label)}]</b>", "━━━━━━━━━━━━━━━━━━"]
+            lines += [f"🔔 <b>[맞춤발송 수정 · {html.escape(label)}]</b>", TG_DIVIDER]
         else:
             lines += [
                 f"🔔 <b>[맞춤발송 등록 · 2/2단계: {html.escape(label)} 목표가 입력]</b>",
-                "━━━━━━━━━━━━━━━━━━",
+                TG_DIVIDER,
                 WATCH_STEP2_GUIDE,
             ]
         if country:
@@ -2900,7 +2901,7 @@ class TravelInteractiveHandler:
         lines = [notice] if notice else []
         lines += [
             f"🗓️ <b>[{html.escape(label)} 여행 날짜 입력]</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"출발일~귀국일을 채팅창에 입력해 주세요 ({minutes}분 안에).",
             "예) <code>2027-05-01~2027-05-04</code> · <code>5.1~5.4</code> · <code>270501 270504</code>",
             "• 오늘 이후 출발 · 1~30박 · 연도를 생략하면 가장 가까운 미래 날짜",
@@ -2922,7 +2923,7 @@ class TravelInteractiveHandler:
         minutes = max(1, int(self.chat_state_ttl // 60))
         text = (
             f"✍️ <b>[{html.escape(label)} 목표가 직접 입력]</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
+            f"{TG_DIVIDER}\n"
             f"왕복 항공권 목표가를 채팅창에 입력해 주세요 ({minutes}분 안에).\n"
             "예) <code>25</code> · <code>25만</code> · <code>250000</code>\n"
             "• 허용 범위: 5만 ~ 500만 원\n"

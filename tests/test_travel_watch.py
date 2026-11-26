@@ -1790,7 +1790,7 @@ def test_watch_list_card_status_and_compact_two_column_rows(handler, mem_db):
     assert rows[-2] == [{"text": "⏸️ 일시중지", "callback_data": "trv:w:wp"},
                         {"text": "🧹 초기화", "callback_data": "trv:w:z"}]
     assert rows[-1] == [{"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
-                        {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
+                        {"text": "🏠 홈", "callback_data": "trv:m:home"}]
     assert not {"trv:w:wb", "trv:w:wb:s", "trv:w:wp:s", "trv:c:guide"} & set(all_callbacks(markup))
     mem_db.set_weekly_brief_enabled("c1", False)
     mem_db.set_watches_paused("c1", True)
@@ -1919,7 +1919,7 @@ def test_slim_result_keyboard_four_rows_preserves_contract(handler, mem_db):
         assert rows[0] == [{"text": "🔄 최신 특가 새로고침", "callback_data": f"trv:r:{scope}"}]
         assert rows[-3][1] == {"text": "⚙️ 정기발송 설정", "callback_data": "trv:m:settings"}
         assert rows[-2] == [{"text": "🔍 권역·도시 찾기", "callback_data": "trv:c:guide"},
-                            {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
+                            {"text": "🏠 홈", "callback_data": "trv:m:home"}]
         assert rows[-1] == [{"text": "📊 6개월 특가 웹 리포트 ↗", "url": handler.report_url}]
     assert handler.build_inline_keyboard("ALL")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:l"
     assert handler.build_inline_keyboard("FUK", chat_id="c1")["inline_keyboard"][-3][0]["callback_data"] == "trv:w:m:FUK"
@@ -1966,7 +1966,7 @@ def test_menu_cards_layout_and_callbacks_fit(handler, mem_db):
         [{"text": "✅ ✨ 전체", "callback_data": "trv:w:th:A"}, {"text": "🏖️ 휴양", "callback_data": "trv:w:th:R"},
          {"text": "🏙️ 관광", "callback_data": "trv:w:th:C"}],
         [{"text": "🔔 맞춤발송 설정", "callback_data": "trv:m:watch"},
-         {"text": "🏠 메뉴", "callback_data": "trv:m:home"}],
+         {"text": "🏠 홈", "callback_data": "trv:m:home"}],
     ]
     for mk in (hub, pop, settings, handler.build_inline_keyboard("ALL", chat_id="c1")):
         for cb in all_callbacks(mk):
@@ -2334,7 +2334,7 @@ def test_zero_watches_with_paused_flag_reads_unregistered_never_paused(handler, 
     assert "trv:w:wp" not in cbs and "trv:w:z" not in cbs  # pause / reset hidden with 0 watches
     assert "trv:w:g" in cbs and markup["inline_keyboard"][-1] == [
         {"text": "📰 정기발송 설정", "callback_data": "trv:m:settings"},
-        {"text": "🏠 메뉴", "callback_data": "trv:m:home"}]
+        {"text": "🏠 홈", "callback_data": "trv:m:home"}]
 
     # one watch while the flag is still set -> paused wording + resume button
     mem_db.upsert_travel_watch("c1", "FUK", 250_000)

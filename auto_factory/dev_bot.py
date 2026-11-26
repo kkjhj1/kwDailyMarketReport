@@ -667,10 +667,20 @@ def cancellable_state(state: str) -> bool:
     return state not in TERMINAL_STATES and state != "CANCEL_REQUESTED"
 
 
-class SafeHtmlFormatter:
-    """[TG-01]/[TG-02]: escape every dynamic value; allow only b/i/code/pre/a; enforce limits."""
+# Telegram UI style (kept in sync with market_brief/channels/tg_ui_style.py; auto_factory stays
+# independent of market_brief, so the values are duplicated here on purpose).
+TG_DIVIDER = "──────────────"
+TG_BULLET = "•"
+NAV_HOME = "\U0001f3e0 홈"
+NAV_BACK = "◀ 이전"
 
-    ALLOWED_TAGS = frozenset({"b", "i", "code", "pre", "a"})
+
+class SafeHtmlFormatter:
+    """[TG-01]/[TG-02]: escape every dynamic value; allow only b/i/code/pre/a/blockquote; enforce limits.
+
+    `<blockquote>` is allowed only in its plain form (attributes such as `expandable` are rejected)."""
+
+    ALLOWED_TAGS = frozenset({"b", "i", "code", "pre", "a", "blockquote"})
     _TAG_RE = re.compile(r"<(/?)([A-Za-z0-9]+)((?:\s[^>]*)?)>")
     _HREF_RE = re.compile(r'^\s+href="https://[^"\s<>]+"$')
 
@@ -732,6 +742,10 @@ class SafeHtmlFormatter:
 
     def pre(self, v: Any, limit: int = 1000) -> str:
         return f"<pre>{self.esc(v, limit)}</pre>"
+
+    def quote(self, v: Any, limit: int = 300) -> str:
+        """Plain `<blockquote>` around escaped text (no attributes, [TG-02])."""
+        return f"<blockquote>{self.esc(v, limit)}</blockquote>"
 
     def link(self, href: str, label: Any) -> str:
         if not re.match(r"^https://[^\s\"<>]+$", href or ""):
@@ -1293,15 +1307,17 @@ HELP_TEXT = (
 
 # Left-bottom Telegram menu (≡): only the essentials.
 BOT_COMMANDS: tuple[dict[str, str], ...] = (
-    {"command": "menu", "description": "메인 메뉴 열기"},
-    {"command": "status", "description": "진행 현황 보기"},
-    {"command": "bots", "description": "봇 선택하기"},
-    {"command": "sessions", "description": "실행 세션 확인"},
+    {"command": "menu", "description": "\U0001f3e0 메인 메뉴 열기"},
+    {"command": "status", "description": "\U0001f4ca 진행 현황 보기"},
+    {"command": "bots", "description": "\U0001f916 봇 선택하기"},
+    {"command": "sessions", "description": "\U0001f5a5 실행 세션 확인"},
 )
 # Persistent bottom shortcut bar: 1 row, 3 buttons. Tapping sends the label as plain text.
 SHORTCUT_STATUS = "\U0001f4ca 현황"
 SHORTCUT_BOTS = "\U0001f916 봇 선택"
-SHORTCUT_MENU = "\U0001f3e0 메뉴"
+SHORTCUT_MENU = NAV_HOME
+# Pre-unification label still pinned on existing clients until their next /start.
+SHORTCUT_MENU_LEGACY = "\U0001f3e0 메뉴"
 SHORTCUT_LABELS: tuple[str, ...] = (SHORTCUT_STATUS, SHORTCUT_BOTS, SHORTCUT_MENU)
 SHORTCUT_REPLY_KEYBOARD: dict[str, Any] = {
     "keyboard": [[{"text": SHORTCUT_STATUS}, {"text": SHORTCUT_BOTS}, {"text": SHORTCUT_MENU}]],
@@ -1534,7 +1550,7 @@ class DevBot:
                 return self._cmd_status(chat_id, "")
             if shortcut == SHORTCUT_BOTS:
                 return self._cmd_bots(chat_id)
-            if shortcut == SHORTCUT_MENU:
+            if shortcut in (SHORTCUT_MENU, SHORTCUT_MENU_LEGACY):
                 self._send(chat_id, *self._hub_view(chat_id, from_id))
                 return "cmd:menu"
             return self._on_plain_text(chat_id, text, msg.get("message_id"))
@@ -2629,7 +2645,7 @@ class DevBot:
     def _pager(self, op: str, page: int, pages: int) -> list[dict[str, str]]:
         row = []
         if page > 0:
-            row.append(af3_button("◀️ 이전", op, str(page - 1)))
+            row.append(af3_button(NAV_BACK, op, str(page - 1)))
         if pages > 1:
             row.append(af3_button(f"{page + 1}/{pages}", op, str(page)))
         if page + 1 < pages:

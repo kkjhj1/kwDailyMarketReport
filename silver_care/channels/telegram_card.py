@@ -8,6 +8,7 @@ import re
 from datetime import date
 from typing import Optional, Sequence
 
+from market_brief.channels.tg_ui_style import TG_BULLET, TG_DIVIDER, tg_hint, tg_quote
 from silver_care.models import (
     BenefitCategory,
     BenefitMatch,
@@ -29,7 +30,7 @@ LIST_PAGE_SIZE = 6
 WEEKLY_MAX_PARENTS = 3
 WEEKLY_ITEMS_PER_PARENT = 3
 
-DIVIDER = "━━━━━━━━━━━━"
+DIVIDER = TG_DIVIDER
 _TAG_RE = re.compile(r"<[^>]+>")
 
 # 자녀 대리신청 4대 지참물 (주민센터·보건소 공통)
@@ -187,7 +188,7 @@ def format_benefit_card(
     if match.cautions:
         lines.extend(["", "⚠️ <b>필수 주의사항</b>"])
         lines.extend(esc(c) for c in match.cautions)
-    lines.extend(["", "📝 <b>안내</b>", esc(b.detail_guide), "", "🎒 <b>자녀 대리신청 지참물</b>"])
+    lines.extend(["", "📝 <b>안내</b>", tg_quote(b.detail_guide), "", "🎒 <b>자녀 대리신청 지참물</b>"])
     docs = list(PROXY_DOCS)
     if b.requires_prescription:
         docs.append("의사 진단서·처방전")
@@ -234,7 +235,8 @@ def format_single_mission_card(
         lines.append(PRE_APPROVAL_WARNING)
     lines.extend([
         "",
-        "💡 <i>\"부모님이 가실 필요 없이, 직장인 자녀가 서류를 챙겨 주민센터/공단에서 대신 신청할 수 있어요.\"</i>",
+        "💡 <b>대리신청 팁</b>",
+        tg_quote("부모님이 가실 필요 없이, 직장인 자녀가 서류를 챙겨 주민센터/공단에서 대신 신청할 수 있어요."),
         "",
         f"📚 전체 혜택 <b>{total_matches}개</b>",
     ])
@@ -367,7 +369,7 @@ def format_bookmarks(items: Sequence[tuple[ParentProfile, SilverBenefit]]) -> st
     if not items:
         lines.append("아직 찜한 혜택이 없어요. 혜택 상세에서 ⭐를 눌러주세요.")
     for p, b in items:
-        lines.append(f"▪ <b>{esc(b.title)}</b> · {esc(parent_name(p))}")
+        lines.append(f"{TG_BULLET} <b>{esc(b.title)}</b> · {esc(parent_name(p))}")
     return "\n".join(lines)
 
 
@@ -390,7 +392,7 @@ def format_weekly_briefing(
         lines.append("")
     if bookmarked_titles:
         lines.append("⭐ <b>찜해둔 혜택 신청하셨나요?</b>")
-        lines.extend(f"▪ {esc(t)}" for t in list(bookmarked_titles)[:3])
+        lines.extend(f"{TG_BULLET} {esc(t)}" for t in list(bookmarked_titles)[:3])
         lines.append("")
-    lines.append("📞 이번 주 부모님께 안부 전화 한 통 어떠세요?")
+    lines.append("📞 " + tg_hint("이번 주 부모님께 안부 전화 한 통 어떠세요?"))
     return "\n".join(lines)

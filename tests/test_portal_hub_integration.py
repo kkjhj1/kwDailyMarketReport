@@ -1109,7 +1109,7 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
             {"text": "💎 등급 혜택", "callback_data": "nav:tiers"},
             {"text": "💬 고객센터", "callback_data": "support:home"},
         ])
-        self.assertEqual(rows[-1], [{"text": "🏠 홈으로", "callback_data": "nav:main"}])
+        self.assertEqual(rows[-1], [{"text": "🏠 홈", "callback_data": "nav:main"}])
         self.assertNotIn("📂 카테고리", [b["text"] for b in _all_buttons(markup)])
         self.assertLessEqual(len(text), 3500)
         self.assertLessEqual(_visible_len(text), 1800)

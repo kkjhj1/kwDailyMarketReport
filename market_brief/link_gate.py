@@ -8,6 +8,7 @@ Enforces GPT architecture audit:
 """
 from __future__ import annotations
 
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 import hashlib
 import html
 import logging
@@ -224,7 +225,7 @@ def render_confirmation_card(target: LinkTarget) -> tuple[str, list[list[dict[st
     desc_esc = html.escape(target.description) if target.description else "상세 정보 페이지로 연결됩니다."
     lines = [
         "🌐 <b>[페이지 이동 안내]</b>",
-        "━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
         f"<b>'{name_esc}'</b>(으)로 이동하시겠습니까?",
         "",
         f"💡 <i>{desc_esc}</i>",

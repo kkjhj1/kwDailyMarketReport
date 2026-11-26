@@ -16,6 +16,7 @@ Invariants:
 """
 from __future__ import annotations
 
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -447,7 +448,7 @@ def render_watch_alert_html(
         stamp = now.astimezone(KST).strftime("%Y-%m-%d %H:%M")
     except Exception:
         stamp = "-"
-    header = ["🔔 <b>[내 변동성 타겟 알림]</b>", "━━━━━━━━━━━━━━━━━━"]
+    header = ["🔔 <b>[내 변동성 타겟 알림]</b>", TG_DIVIDER]
     footer = ["", f"🕒 {_esc(stamp)} KST 실시간 기준", "⚙️ 조건 변경·삭제: /watch"]
     ctx = _context_lines(items, context_quotes)
     nws = _news_lines(news)
@@ -932,7 +933,7 @@ class MarketWatchService:
         limit = self._limit(uid)
         lines = []
         if notice:
-            lines += [notice, "━━━━━━━━━━━━━━━━━━"]
+            lines += [notice, TG_DIVIDER]
         lines += ["🔔 <b>[내 장중 변동성 타겟]</b>", f"📊 사용 중: <b>{len(watches)} / {limit}</b>개", ""]
         kb: list[list[dict[str, Any]]] = []
         if watches:
