@@ -24,6 +24,8 @@ _FIELDS = {
     "topic", "headline", "summary_3lines", "so_what", "action_todos",
     "source_name", "source_url", "reviewed_at", "valid_until", "status",
 }
+# Optional keys: absent in legacy JSON, defaulted on load; any other extra key is rejected.
+_OPTIONAL_FIELDS = {"version"}
 
 
 class CatalogValidationError(ValueError):
@@ -64,13 +66,17 @@ class KnowledgeCard:
     reviewed_at: date
     valid_until: date
     status: str
+    version: int = 1
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "KnowledgeCard":
-        if not isinstance(raw, dict) or set(raw) != _FIELDS:
+        if not isinstance(raw, dict) or not (_FIELDS <= set(raw) <= _FIELDS | _OPTIONAL_FIELDS):
             missing = sorted(_FIELDS - set(raw or {})) if isinstance(raw, dict) else sorted(_FIELDS)
-            extra = sorted(set(raw or {}) - _FIELDS) if isinstance(raw, dict) else []
+            extra = sorted(set(raw or {}) - _FIELDS - _OPTIONAL_FIELDS) if isinstance(raw, dict) else []
             raise CatalogValidationError(f"card schema mismatch; missing={missing}, extra={extra}")
+        version = raw.get("version", 1)
+        if type(version) is not int or version < 1:
+            raise CatalogValidationError("version must be a positive integer")
         content_id = raw["content_id"]
         if not isinstance(content_id, str) or not content_id.isascii() or len(content_id) > 24 or not _SLUG.fullmatch(content_id):
             raise CatalogValidationError("content_id must be an ASCII slug of at most 24 characters")
@@ -117,6 +123,7 @@ class KnowledgeCard:
             headline=headline.strip(), summary_3lines=summary, so_what=so_what.strip(),
             action_todos=todos, source_name=source_name.strip(), source_url=source_url,
             reviewed_at=reviewed_at, valid_until=valid_until, status=status,
+            version=version,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +143,7 @@ class KnowledgeCard:
             "reviewed_at": self.reviewed_at.isoformat(),
             "valid_until": self.valid_until.isoformat(),
             "status": self.status,
+            "version": self.version,
         }
 
 

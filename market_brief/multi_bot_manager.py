@@ -16,6 +16,7 @@ Supports:
 """
 from __future__ import annotations
 
+from market_brief.channels.tg_ui_style import NAV_HOME, NAV_PORTAL, TG_DIVIDER
 import asyncio
 from datetime import datetime
 import functools
@@ -39,6 +40,7 @@ from market_brief.link_gate import GATE_REGISTRY, LinkGateRouter, build_gate_but
 from market_brief.storage.models import BotRecord, BotType
 from market_brief.bot_visibility import BOT_WIP_CODE, BOT_WIP_MESSAGE, is_wip_bot_id
 from market_brief.subscription_engine import SubscriptionEngine, normalize_bot_id
+from admission_brief.channels.telegram import admission_bot_commands as _admission_bot_commands
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +347,7 @@ COMMON_BRIEFING_BOTS: set[str] = {"brief_bot"}
 OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
     "menu_bot": [
         {"command": "start", "description": "🏠 메인 포털 홈"},
+        {"command": "menu", "description": "🧭 통합 메뉴 열기"},
         {"command": "subs", "description": "📋 내 구독 센터"},
         {"command": "category", "description": "📂 카테고리 둘러보기"},
         {"command": "tiers", "description": "💎 등급 혜택 안내"},
@@ -353,6 +356,7 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
     ],
     "brief_bot": [
         {"command": "start", "description": "🏠 시황 브리핑 홈"},
+        {"command": "menu", "description": "🧭 메인 메뉴"},
         {"command": "briefing", "description": "📈 모닝/마감 시황 요약"},
         {"command": "market", "description": "📊 글로벌 증시 현황"},
         {"command": "watch", "description": "🔔 내 변동성 타겟 설정"},
@@ -360,23 +364,15 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "help", "description": "❓ 이용 안내"},
     ],
     "travel_bot": [
-        {"command": "start", "description": "여행봇 시작·온보딩"},
-        {"command": "menu", "description": "메인 메뉴"},
-        {"command": "search", "description": "국가·도시 검색"},
-        {"command": "watch", "description": "내 알림 관리"},
-        {"command": "settings", "description": "발송 설정"},
-        {"command": "help", "description": "도움말"},
+        {"command": "start", "description": "🏠 여행봇 시작·온보딩"},
+        {"command": "menu", "description": "🧭 메인 메뉴"},
+        {"command": "search", "description": "🔍 국가·도시 검색"},
+        {"command": "watch", "description": "🔔 내 알림 관리"},
+        {"command": "settings", "description": "⚙️ 발송 설정"},
+        {"command": "help", "description": "❓ 도움말"},
     ],
-    "admission_bot": [
-        {"command": "start", "description": "🏠 입시 나침반 홈"},
-        {"command": "briefing", "description": "📊 이번 주 추천 리포트"},
-        {"command": "todo", "description": "📋 학년별 To-Do 체크리스트"},
-        {"command": "events", "description": "🎪 설명회·박람회 일정"},
-        {"command": "glossary", "description": "📖 1초 입시용어 사전"},
-        {"command": "guide", "description": "📚 학습 가이드"},
-        {"command": "settings", "description": "⚙️ 자녀 및 맞춤 설정"},
-        {"command": "help", "description": "❓ 이용 가이드"},
-    ],
+    # SSOT: admission_brief.channels.telegram.ADMISSION_BOT_COMMANDS
+    "admission_bot": _admission_bot_commands(),
     "silver_bot": [
         {"command": "start", "description": "🏠 실버케어 홈"},
         {"command": "parents", "description": "📋 부모님 등록/관리"},
@@ -385,6 +381,7 @@ OFFICIAL_BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
     ],
     "kids_bot": [
         {"command": "start", "description": "🏠 자녀 안심 홈"},
+        {"command": "menu", "description": "🧭 메인 메뉴"},
         {"command": "fever", "description": "🌡️ 열나요 응급 가이드"},
         {"command": "hospital", "description": "🏥 달빛어린이병원 찾기"},
         {"command": "weekend", "description": "🎪 주말 체험/나들이"},
@@ -754,7 +751,7 @@ class MultiBotInteractionRouter:
         lines = []
         if banner_notice:
             lines.append(banner_notice.strip())
-            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(TG_DIVIDER)
         lines.extend(
             [
                 f"{menu_bot.icon_emoji} <b>[{html.escape(menu_bot.name)}]</b>",
@@ -769,7 +766,7 @@ class MultiBotInteractionRouter:
         if user.get("status") == "GRACE_PERIOD":
             lines.append("⚠️ <i>등급 변경으로 인해 초과 구독 정리 대기 중입니다. [내 구독 관리]에서 유지할 봇을 정리해 주세요.</i>")
 
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(TG_DIVIDER)
         lines.append("📡 <b>[구독 가능한 정보봇 목록]</b>")
 
         keyboard: list[list[dict[str, Any]]] = []
@@ -820,7 +817,7 @@ class MultiBotInteractionRouter:
         lines = []
         if notice:
             lines.append(f"<b>{html.escape(notice)}</b>")
-            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(TG_DIVIDER)
         lines.extend(
             [
                 f"{target.icon_emoji} <b>[{html.escape(target.name)}]</b>",
@@ -871,12 +868,12 @@ class MultiBotInteractionRouter:
         lines = []
         if banner_notice:
             lines.append(banner_notice.strip())
-            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(TG_DIVIDER)
         lines.extend(
             [
                 "📦 <b>[내 구독 현황 및 탈퇴 관리]</b>",
                 f"👤 등급: {tier_icon} <b>{html.escape(user.get('tier_name', '화이트'))}</b> ({html.escape(slot_str)})",
-                "━━━━━━━━━━━━━━━━━━",
+                TG_DIVIDER,
             ]
         )
 
@@ -907,7 +904,7 @@ class MultiBotInteractionRouter:
         lines = [
             "👑 <b>[회원 등급별 봇 구독 가능 개수 안내]</b>",
             f"현재 회원님 등급: <b>{TIER_ICONS.get(user.get('tier', 'WHITE'), '⚪')} {html.escape(user.get('tier_name', '화이트'))}</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
         ]
         for t in tiers:
             icon = TIER_ICONS.get(t["tier_code"], "⚪")
@@ -915,7 +912,7 @@ class MultiBotInteractionRouter:
             lines.append(f"{icon} <b>{html.escape(t['name'])}</b> : {limit_txt}")
         lines.extend(
             [
-                "━━━━━━━━━━━━━━━━━━",
+                TG_DIVIDER,
                 "💡 <i>예시: 화이트(무료) 등급에서 [시황봇]을 선택 중일 때 [트렌드봇]을 이용하시려면, 기존 [시황봇]을 탈퇴하거나 원클릭 교체 버튼을 통해 전환하실 수 있습니다.</i>",
             ]
         )
@@ -981,7 +978,7 @@ class MultiBotInteractionRouter:
 
         kb.append([{"text": f"❌ {bot.name} 구독 탈퇴(해지)", "callback_data": f"info:unsub:{bot.bot_id}"}])
         menu_handle = menu_uname or os.environ.get("PORTAL_BOT_USERNAME") or "KwMenu_bot"
-        kb.append([{"text": "🏠 통합 메뉴봇 바로가기", "url": f"https://t.me/{menu_handle}?start=from_sub"}])
+        kb.append([{"text": NAV_PORTAL, "url": f"https://t.me/{menu_handle}?start=from_sub"}])
         return kb
 
     def _resolve_target_short_label(self, bot: BotRecord, target_code: str) -> str:
@@ -1127,7 +1124,7 @@ class MultiBotInteractionRouter:
                     news=news,
                 )
                 body_html = format_telegram_html(briefing)
-                header_banner = "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n━━━━━━━━━━━━━━━━━━\n"
+                header_banner = "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n──────────────\n"
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 GATE_REGISTRY.update_preset_url("bf_rep", report_url)
                 kb = [
@@ -1138,7 +1135,7 @@ class MultiBotInteractionRouter:
                 logger.warning("brief_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     "📢 <b>[직전 발송 최신 시황 브리핑]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "📈 <b>주요 지수 및 환율 요약</b>\n"
                     "• <b>KOSPI</b> / <b>S&amp;P 500</b> / <b>USD/KRW</b> 최신 장전·마감 시황 브리핑이 제공됩니다.\n"
                     "• 매일 <b>07:50 모닝 시황</b>, <b>15:40 마감 시황</b> 및 장중 급등락 알림이 발송됩니다."
@@ -1167,7 +1164,7 @@ class MultiBotInteractionRouter:
                 body_html = format_admission_html(briefing)
                 header_banner = (
                     f"📋 <b>[직전 발송 맞춤 입시 브리핑 — {html.escape(grade.label)}]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 btn_url = briefing.booking_url or admission_url
@@ -1185,7 +1182,7 @@ class MultiBotInteractionRouter:
                 logger.warning("admission_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     f"📋 <b>[직전 발송 맞춤 입시 브리핑 ({html.escape(norm_target)})]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "🎓 선택한 학년에 맞춘 이번 주 필수 입시 체크리스트(To-Do) 및 주요 설명회 일정입니다."
                 )
                 GATE_REGISTRY.update_preset_url("adm_rep", admission_url)
@@ -1228,7 +1225,7 @@ class MultiBotInteractionRouter:
                 short_lbl = self._resolve_target_short_label(bot, norm_target)
                 header_banner = (
                     f"✈️ <b>[직전 발송 맞춤 여행 특가 — {html.escape(short_lbl)}]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 GATE_REGISTRY.update_preset_url("trv_rep", travel_report_url)
@@ -1240,7 +1237,7 @@ class MultiBotInteractionRouter:
                 logger.warning("travel_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     f"✈️ <b>[직전 발송 맞춤 여행 특가 ({html.escape(norm_target)})]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "선택하신 여행지의 주말 3박 4일 왕복 항공권 및 숙박 가성비 특가 브리핑입니다."
                 )
                 kb = [[{"text": "🔄 관심 여행지 다시 선택하기", "callback_data": "info:retarget:travel_bot"}]]
@@ -1286,7 +1283,7 @@ class MultiBotInteractionRouter:
                 mem_db.close()
                 header_banner = (
                     f"👵 <b>[직전 발송 실버케어 브리핑 — {html.escape(short_lbl)}]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 kb = [
@@ -1297,7 +1294,7 @@ class MultiBotInteractionRouter:
                 logger.warning("silver_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     f"👵 <b>[직전 발송 실버케어 브리핑 ({html.escape(norm_target)})]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "선택하신 부모님 세대 유형에 맞춘 동사무소·보건소 복지 혜택 및 효도 안부 가이드입니다."
                 )
                 kb = [
@@ -1336,7 +1333,7 @@ class MultiBotInteractionRouter:
                 mem_db.close()
                 header_banner = (
                     f"👶 <b>[직전 발송 키즈 나침반 브리핑 — {html.escape(short_lbl)}]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 kb = [
@@ -1353,7 +1350,7 @@ class MultiBotInteractionRouter:
                 logger.warning("kids_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     f"👶 <b>[직전 발송 키즈 나침반 브리핑 ({html.escape(norm_target)})]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "선택하신 자녀 연령대에 맞춘 이번 주말 나들이 추천 및 예약 오픈 D-Day 안내입니다."
                 )
                 kb = [
@@ -1389,7 +1386,7 @@ class MultiBotInteractionRouter:
                 short_lbl = self._resolve_target_short_label(bot, norm_target)
                 header_banner = (
                     f"🏄 <b>[직전 발송 욜로봇 큐레이션 — {html.escape(short_lbl)}]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                 )
                 content_html = self._enforce_tg01_limits(header_banner + body_html)
                 kb = [
@@ -1403,7 +1400,7 @@ class MultiBotInteractionRouter:
                 logger.warning("yolo_bot onboarding preview fallback: %s", exc)
                 content_html = (
                     f"🏄 <b>[직전 발송 욜로봇 큐레이션 ({html.escape(norm_target)})]</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     "선택하신 1인 라이프 성향에 맞춘 이번 주 솔로 인증 액티비티·전시·미식 큐레이션입니다."
                 )
                 kb = [
@@ -1422,7 +1419,7 @@ class MultiBotInteractionRouter:
             except Exception:
                 content_html = (
                     f"📋 <b>[{html.escape(bot.icon_emoji + ' ' + bot.name)}] 직전 발송 브리핑</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{TG_DIVIDER}\n"
                     f"{html.escape(bot.description or '최신 맞춤 브리핑 정보입니다.')}"
                 )
                 kb = []
@@ -1563,7 +1560,7 @@ class MultiBotInteractionRouter:
             user = self.engine.get_user_profile(uid)
             lines = [
                 f"✅ <b>[{html.escape(bot.icon_emoji + ' ' + bot.name)}] 맞춤 대상 선택 완료!</b>",
-                "━━━━━━━━━━━━━━━━━━",
+                TG_DIVIDER,
                 f"🎯 <b>선택하신 대상:</b> <b>{html.escape(full_label)}</b>",
                 "",
                 "👇 아래 <b>[📋 직전 발송 정보 보기]</b> 버튼을 누르시면 구독 직전에 발송되었던 최신 맞춤 브리핑을 즉시 확인하실 수 있습니다!",
@@ -1715,7 +1712,7 @@ class MultiBotInteractionRouter:
         lines = [
             header,
             sub_note,
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"👤 <b>회원 등급:</b> {tier_icon} <b>{html.escape(tier_info['name'])}</b>",
             f"📊 <b>구독 현황:</b> <code>{html.escape(slot_str)}</code>",
         ]
@@ -1775,7 +1772,7 @@ class MultiBotInteractionRouter:
         label = html.escape(f"{bot.icon_emoji} {bot.name}")
         lines = [
             html.escape(BOT_WIP_MESSAGE),
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             f"<b>[{label}]</b>은(는) 아직 신규 구독을 받지 않습니다.",
             "👇 메뉴봇에서 현재 이용 가능한 정보봇을 확인해 주세요.",
         ]
@@ -1802,7 +1799,7 @@ class MultiBotInteractionRouter:
         label = html.escape(f"{bot.icon_emoji} {bot.name}")
         lines = [
             f"🔒 <b>[{label}] 구독 중인 봇이 아닙니다</b>",
-            "━━━━━━━━━━━━━━━━━━",
+            TG_DIVIDER,
             "이 봇의 브리핑·알림·메뉴는 <b>구독 중인 회원</b>만 이용할 수 있습니다.",
             "👇 메뉴봇에서 구독하거나 아래 버튼으로 이 봇을 다시 구독해 주세요.",
         ]
@@ -2162,15 +2159,15 @@ class DynamicBotManager:
                     if admin_chat:
                         admin_forward = (
                             f"📩 <b>[1:1 고객 문의 접수]</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"{TG_DIVIDER}\n"
                             f"• 문의자: <b>{u_name}</b> (ID: <code>{user_id}</code>)\n"
                             f"• 핸들: {u_handle}\n"
                             f"• 회원 등급: {user.tier.display_name}\n"
                             f"• 접수 시각: <code>{now_str}</code>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"{TG_DIVIDER}\n"
                             f"<b>【문의 내용】</b>\n"
                             f"<i>{html.escape(text)}</i>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━"
+                            f"{TG_DIVIDER}"
                         )
                         try:
                             portal_client.send_message(admin_chat, admin_forward)
@@ -2179,14 +2176,14 @@ class DynamicBotManager:
 
                     ack_text = (
                         f"✅ <b>문의사항이 운영팀에 정상 전달되었습니다!</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{TG_DIVIDER}\n"
                         f"작성하신 내용:\n"
                         f"<i>\"{html.escape(text)}\"</i>\n\n"
                         f"운영팀에서 확인 후 빠르게 조치 및 안내해 드리겠습니다. 감사합니다. 🙏"
                     )
                     portal_client.send_message(
                         chat_id, ack_text,
-                        reply_markup={"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": "nav:main"}]]}
+                        reply_markup={"inline_keyboard": [[{"text": NAV_HOME, "callback_data": "nav:main"}]]}
                     )
                     return True, "inquiry_forwarded"
                 else:
@@ -2195,14 +2192,7 @@ class DynamicBotManager:
             # Auto-register official bot commands menu (blue [/] button)
             if not getattr(self, "_menu_commands_registered", False):
                 try:
-                    portal_client.set_my_commands([
-                        {"command": "start", "description": "🏠 메인 포털 홈"},
-                        {"command": "subs", "description": "📋 내 구독 관리"},
-                        {"command": "category", "description": "📂 봇 둘러보기"},
-                        {"command": "tiers", "description": "💎 내 등급 혜택"},
-                        {"command": "support", "description": "💬 고객센터 / 문의"},
-                        {"command": "help", "description": "❓ 이용 도움말"},
-                    ])
+                    portal_client.set_my_commands([dict(c) for c in OFFICIAL_BOT_COMMANDS["menu_bot"]])
                     self._menu_commands_registered = True
                 except Exception as exc:
                     logger.debug("set_my_commands fallback: %s", exc)
@@ -2569,7 +2559,8 @@ class DynamicBotManager:
                 msg = item["message"]
                 text = (msg.get("text") or "").strip()
                 cmd = text.split()[0].lower().split("@")[0] if text else ""
-                # `/start` is intentionally NOT intercepted (portal subscription router owns it).
+                # `/start` and its home alias `/menu` are intentionally NOT intercepted
+                # (portal subscription router owns the home flow for both).
                 if cmd in ("/fever", "/hospital", "/weekend", "/dday", "/child", "/help", "/preg", "/food", "/cancel", "/settings"):
                     kc_channel = KidsTelegramChannel(bot_token=bot_token, opener=opener)
                     kc_bot = KidsCompassInteractiveBot(channel=kc_channel, db=kc_db)

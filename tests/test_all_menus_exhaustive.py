@@ -581,6 +581,41 @@ class ExhaustiveAdmissionBotMenuTests(unittest.TestCase):
             if expected:
                 self.assertIn(expected, self.channel.send_message.call_args[0][1])
 
+    def test_three_pillar_main_menu_callbacks_all_route(self):
+        """Every main-menu button (3 pillars + settings/help) answers once and renders a screen."""
+        cbs = [b["callback_data"] for row in build_admission_main_menu()["inline_keyboard"] for b in row]
+        self.assertEqual(cbs, ["adm:essentials", "adm:menu", "adm:knowledge", "adm:settings", "adm:help"])
+        # Legacy callbacks remain routable alongside the new pillars.
+        for data in cbs + ["adm:todo", "adm:hot", "adm:fact", "adm:gl:menu", "adm:guide:menu", "adm:main"]:
+            self.channel.reset_mock()
+            self.channel.edit_message_text.return_value = True
+            cb = {
+                "id": f"cb_{data}",
+                "data": data,
+                "from": {"id": int(self.chat_id)},
+                "message": {"message_id": 504, "chat": {"id": int(self.chat_id)}},
+            }
+            self.bot.handle_update({"callback_query": cb})
+            self.channel.answer_callback_query.assert_called_once()
+            rendered = (
+                self.channel.send.call_args_list
+                + self.channel.send_message.call_args_list
+                + self.channel.edit_message_text.call_args_list
+            )
+            self.assertTrue(rendered, f"{data} produced no screen")
+
+        # adm:essentials -> To-Do + guide / grade shortcuts; adm:knowledge -> factcheck + glossary
+        for data, must_have in (("adm:essentials", {"adm:guide:menu", "menu:grade"}), ("adm:knowledge", {"adm:gl:menu"})):
+            self.channel.reset_mock()
+            self.bot.handle_update({"callback_query": {
+                "id": f"cb2_{data}", "data": data, "from": {"id": int(self.chat_id)},
+                "message": {"message_id": 505, "chat": {"id": int(self.chat_id)}},
+            }})
+            self.channel.send.assert_called_once()
+            markup = self.channel.send.call_args[1]["reply_markup"]
+            got = {b.get("callback_data") for row in markup["inline_keyboard"] for b in row}
+            self.assertTrue(must_have <= got, data)
+
 
 def clean_text_in_set(clean: str, target_set: set[str]) -> bool:
     return clean in target_set or any(clean == s.lower() for s in target_set)

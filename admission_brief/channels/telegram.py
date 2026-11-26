@@ -2,6 +2,7 @@
 Supports mobile-optimized HTML formatting, inline keyboards, PDF attachments, and callback queries.
 """
 from __future__ import annotations
+from market_brief.channels.tg_ui_style import TG_DIVIDER
 import html
 import json
 import logging
@@ -24,6 +25,24 @@ from admission_brief.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# SSOT for the admission bot's Telegram command menu (standalone channel and
+# DynamicBotManager both register exactly this list).  Immutable on purpose;
+# call ``admission_bot_commands()`` for a mutable copy.
+ADMISSION_BOT_COMMANDS: tuple[dict[str, str], ...] = (
+    {"command": "start", "description": "🏠 입시 나침반 홈"},
+    {"command": "todo", "description": "📅 지금 우리 아이 필수 To-Do"},
+    {"command": "events", "description": "🎪 설명회·모집일정"},
+    {"command": "guide", "description": "📚 학년별 학습 가이드"},
+    {"command": "glossary", "description": "📖 1초 입시용어 사전"},
+    {"command": "settings", "description": "⚙️ 내 설정 (자녀·알림)"},
+    {"command": "help", "description": "❓ 도움말"},
+)
+
+
+def admission_bot_commands() -> list[dict[str, str]]:
+    """Fresh list-of-dict copy of ``ADMISSION_BOT_COMMANDS`` (safe to mutate/serialize)."""
+    return [dict(item) for item in ADMISSION_BOT_COMMANDS]
 
 
 def _is_valid_url(url: str | None) -> bool:
@@ -96,7 +115,16 @@ TG_MAX_VISIBLE_LEN = 1800    # [TG-01] 태그 제외 가시 텍스트 상한
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _HTML_TOKEN_RE = re.compile(r"(<[^>]+>|&(?:#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);|.)", re.DOTALL)
-_SUPPORTED_TAG_RE = re.compile(r"^<(\/)?(b|i|a|code)(?:\s[^>]*)?>$", re.IGNORECASE)
+_SUPPORTED_TAG_RE = re.compile(r"^<(\/)?(b|i|a|code|pre|blockquote)(\s[^>]*)?>$", re.IGNORECASE)
+# [TG-02] Only attribute-less <blockquote> is allowed (no `expandable` etc.).
+_BLOCKQUOTE_ATTR_RE = re.compile(r"<blockquote\s[^>]*>", re.IGNORECASE)
+
+
+def sanitize_admission_html(html_text: str) -> str:
+    """Strip attributes from <blockquote ...> so only plain <blockquote> reaches Telegram."""
+    if not html_text:
+        return html_text
+    return _BLOCKQUOTE_ATTR_RE.sub("<blockquote>", html_text)
 
 
 class TelegramRateLimitError(RuntimeError):
@@ -112,7 +140,11 @@ def _tag_state(tag: str) -> tuple[str, bool] | None:
     match = _SUPPORTED_TAG_RE.match(tag)
     if not match:
         return None
-    return match.group(2).lower(), bool(match.group(1))
+    name = match.group(2).lower()
+    if name == "blockquote" and (match.group(3) or "").strip():
+        # Attributed blockquote is not a supported tag ([TG-02]).
+        return None
+    return name, bool(match.group(1))
 
 
 def split_admission_html(
@@ -123,6 +155,7 @@ def split_admission_html(
     """Split Telegram HTML without breaking supported tags or entities."""
     if not html_text:
         return [""]
+    html_text = sanitize_admission_html(html_text)
     if measure_message(html_text)[0] <= max_raw and measure_message(html_text)[1] <= max_visible:
         return [html_text]
 
@@ -214,7 +247,7 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
         f"{icon} <b>[{html.escape(type_title)}]</b>{urgency_badge}{category_badge} {grade_badge}{region_badge}",
         f"🕒 기준: <code>{html.escape(briefing.as_of)}</code>",
         f"📌 <b>{html.escape(briefing.headline)}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
     ]
 
     # 1. 3-line summary
@@ -247,7 +280,7 @@ def format_admission_html(briefing: AdmissionBriefing) -> str:
             lines.append(f"🏛 <b>공식 출처:</b> {html.escape(briefing.source_name)}")
         lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(TG_DIVIDER)
     lines.append("<i>에듀브리프 (EduBrief) 입시 인텔리전스</i>")
 
     text = "\n".join(lines)
@@ -376,14 +409,7 @@ class TelegramChannel:
     def set_my_commands(self, commands: Optional[list[dict[str, str]]] = None) -> bool:
         """Registers official command menu into Telegram app (left-side blue button)."""
         if commands is None:
-            commands = [
-                {"command": "todo", "description": "📋 이번 주 필수 To-Do"},
-                {"command": "hot", "description": "⚡ 긴급 속보 & 핫 행사 TOP 3"},
-                {"command": "fact", "description": "💡 1분 입시 팩트체크 (So-What)"},
-                {"command": "events", "description": "🎪 설명회·박람회 전체보기"},
-                {"command": "settings", "description": "⚙️ 학년 및 관심지역 설정"},
-                {"command": "help", "description": "❓ 이용 도움말"},
-            ]
+            commands = admission_bot_commands()
         try:
             res = self._api_call("setMyCommands", {"commands": commands})
             return bool(res.get("ok"))

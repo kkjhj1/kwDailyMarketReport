@@ -189,9 +189,102 @@ def test_main_menu_inline_keyboard_routes_to_known_callbacks():
     kb = build_main_menu_inline_keyboard()
     assert "keyboard" not in kb
     cbs = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
-    assert set(cbs) == {"adm:todo", "adm:hot", "adm:fact", "adm:menu", "adm:gl:menu", "adm:settings", "adm:guide:menu", "adm:help"}
+    # 3 pillars (필수 / 일정 / 지식) + settings & help
+    assert cbs == ["adm:essentials", "adm:menu", "adm:knowledge", "adm:settings", "adm:help"]
     assert all(len(row) <= 2 for row in kb["inline_keyboard"])
     assert all(len(cb.encode("utf-8")) <= 64 for cb in cbs)
+
+
+def _pillar_bot(chat_id="321", grade=TargetGrade.HIGH_1_2):
+    db = AdmissionDatabase(db_path=":memory:")
+    db.upsert_subscriber(ParentUserProfile(chat_id=chat_id, target_grade=grade))
+    channel = MagicMock(spec=TelegramChannel)
+    channel.edit_message_text.return_value = True
+    return AdmissionInteractiveBot(channel=channel, db=db), channel
+
+
+def _pillar_cb(data, chat_id=321):
+    return {"callback_query": {"id": f"cb_{data}", "data": data, "from": {"id": chat_id},
+                               "message": {"message_id": 9, "chat": {"id": chat_id}}}}
+
+
+def test_essentials_pillar_sends_active_todo_with_guide_and_grade_shortcuts():
+    bot, channel = _pillar_bot()
+    bot.handle_update(_pillar_cb("adm:essentials"))
+    channel.answer_callback_query.assert_called_once()
+    channel.send.assert_called_once()
+    chat_id, briefing = channel.send.call_args[0]
+    assert chat_id == "321"
+    assert briefing.briefing_type == BriefingType.WEEKLY_TODO
+    assert briefing.target_grade == TargetGrade.HIGH_1_2
+    cbs = _all_callback_data(channel.send.call_args[1]["reply_markup"])
+    assert "adm:guide:menu" in cbs and "menu:grade" in cbs and "adm:main" in cbs
+
+
+def test_knowledge_pillar_sends_factcheck_with_glossary_shortcut():
+    bot, channel = _pillar_bot()
+    bot.handle_update(_pillar_cb("adm:knowledge"))
+    channel.answer_callback_query.assert_called_once()
+    channel.send.assert_called_once()
+    _, briefing = channel.send.call_args[0]
+    assert briefing.briefing_type == BriefingType.POLICY_TRANSLATE
+    cbs = _all_callback_data(channel.send.call_args[1]["reply_markup"])
+    assert "adm:gl:menu" in cbs and "adm:main" in cbs
+
+
+def test_legacy_callbacks_still_route_after_pillar_redesign():
+    for data in ("adm:todo", "adm:fact"):
+        bot, channel = _pillar_bot()
+        bot.handle_update(_pillar_cb(data))
+        channel.send.assert_called_once()
+    for data in ("adm:menu", "adm:gl:menu", "adm:guide:menu"):
+        bot, channel = _pillar_bot()
+        bot.handle_update(_pillar_cb(data))
+        assert channel.edit_message_text.called or channel.send_message.called, data
+    bot, channel = _pillar_bot()
+    bot.handle_update(_pillar_cb("adm:hot"))  # no events -> clean empty state
+    channel.send_message.assert_called_once()
+
+
+def test_slash_commands_strip_bot_suffix_and_briefing_falls_back_to_essentials():
+    bot, channel = _pillar_bot()
+    bot.handle_update({"message": {"chat": {"id": 321}, "text": "/todo@EduBriefBot"}})
+    channel.send.assert_called_once()
+    assert channel.send.call_args[0][1].briefing_type == BriefingType.WEEKLY_TODO
+
+    bot, channel = _pillar_bot()
+    bot.handle_update({"message": {"chat": {"id": 321}, "text": "/briefing"}})
+    channel.send.assert_called_once()
+    assert channel.send.call_args[0][1].briefing_type == BriefingType.WEEKLY_TODO
+    assert "menu:grade" in _all_callback_data(channel.send.call_args[1]["reply_markup"])
+
+    bot, channel = _pillar_bot()
+    bot.handle_update({"message": {"chat": {"id": 321}, "text": "/glossary@EduBriefBot"}})
+    assert "용어" in channel.send_message.call_args[0][1]
+    assert any(d.startswith("adm:gl:") for d in _all_callback_data(channel.send_message.call_args[1]["reply_markup"]))
+
+    bot, channel = _pillar_bot()
+    bot.handle_update({"message": {"chat": {"id": 321}, "text": "/unknowncmd"}})
+    assert channel.send_message.call_args[1]["reply_markup"] == build_main_menu_inline_keyboard()
+
+
+def test_admission_command_ssot_shared_by_standalone_and_manager():
+    from admission_brief.channels.telegram import ADMISSION_BOT_COMMANDS, admission_bot_commands
+    from market_brief.multi_bot_manager import OFFICIAL_BOT_COMMANDS
+
+    assert isinstance(ADMISSION_BOT_COMMANDS, tuple)
+    names = [c["command"] for c in ADMISSION_BOT_COMMANDS]
+    assert names == ["start", "todo", "events", "guide", "glossary", "settings", "help"]
+    assert "briefing" not in names
+    assert OFFICIAL_BOT_COMMANDS["admission_bot"] == list(ADMISSION_BOT_COMMANDS)
+    assert admission_bot_commands() == list(ADMISSION_BOT_COMMANDS)
+
+    channel = TelegramChannel(bot_token="t")
+    channel._api_call = MagicMock(return_value={"ok": True})
+    assert channel.set_my_commands() is True
+    method, payload = channel._api_call.call_args[0]
+    assert method == "setMyCommands"
+    assert payload["commands"] == list(ADMISSION_BOT_COMMANDS)
 
 
 def test_legacy_reply_keyboard_texts_still_listed():
@@ -274,7 +367,7 @@ def _all_callback_data(markup):
 
 def test_events_menu_keyboard_and_callback_byte_limit():
     kb = build_events_category_keyboard()
-    assert _all_callback_data(kb) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0"]
+    assert _all_callback_data(kb) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:hot"]
     for cat in EventCategory:
         for page in (0, 5, 999):
             for data in _all_callback_data(build_events_page_keyboard(cat, page, 10_000)):
@@ -292,7 +385,7 @@ def test_events_menu_text_routing():
         bot.handle_update({"update_id": 1, "message": {"chat": {"id": 888}, "text": text}})
         mock_channel.send_message.assert_called_once()
         _, kwargs = mock_channel.send_message.call_args
-        assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:main"]
+        assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:hot", "adm:main"]
 
     # Existing hot-events button still routes to TOP 3; with no current data it returns a clean empty state.
     mock_channel.reset_mock()
@@ -357,7 +450,7 @@ def test_category_page_navigation_in_place():
     # Back to category list
     bot.handle_update(_cb("adm:menu"))
     _, kwargs = mock_channel.edit_message_text.call_args
-    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:main"]
+    assert _all_callback_data(kwargs["reply_markup"]) == ["adm:cat:EXPO:0", "adm:cat:BRIEF:0", "adm:cat:SEMI:0", "adm:hot", "adm:main"]
 
 
 def test_category_page_empty_and_edit_fallback():

@@ -3,6 +3,7 @@ Handles /start, persistent reply keyboards, inline grade/region selection, /todo
 and natural language keyword matching for effortless mobile touch UX.
 """
 from __future__ import annotations
+from market_brief.channels.tg_ui_style import NAV_HOME, NAV_PORTAL, TG_DIVIDER
 import html
 import logging
 import time
@@ -37,6 +38,7 @@ from admission_brief.models import (
     TargetGrade,
     TargetRegion,
 )
+from admission_brief.push_engine import ACK_OWNERSHIP_STREAMS
 from admission_brief.storage.db import AdmissionDatabase
 
 logger = logging.getLogger(__name__)
@@ -91,24 +93,54 @@ def build_persistent_reply_keyboard() -> dict[str, Any]:
     return build_remove_reply_keyboard()
 
 
+ESSENTIALS_MENU_TEXT = "📅 지금 우리 아이 필수"
+EVENTS_MENU_TEXT = "🎪 설명회·모집일정"
+KNOWLEDGE_MENU_TEXT = "📖 용어·팩트체크"
+
+
 def build_main_menu_inline_keyboard() -> dict[str, Any]:
-    """Builds the inline main menu card (2 columns) replacing the legacy bottom reply keyboard."""
+    """3-pillar inline main menu (필수 / 일정 / 지식) + settings & help.
+
+    Legacy callbacks (adm:todo, adm:hot, adm:fact, adm:gl:menu, adm:guide:menu)
+    stay routable and are reachable from inside each pillar.
+    """
     return {
         "inline_keyboard": [
             [
-                {"text": "📋 이번 주 To-Do", "callback_data": cb("adm:todo")},
-                {"text": "⚡ 핫 행사 TOP 3", "callback_data": cb("adm:hot")},
+                {"text": ESSENTIALS_MENU_TEXT, "callback_data": cb("adm:essentials")},
+                {"text": EVENTS_MENU_TEXT, "callback_data": cb("adm:menu")},
+            ],
+            [{"text": KNOWLEDGE_MENU_TEXT, "callback_data": cb("adm:knowledge")}],
+            [
+                {"text": "⚙️ 내 설정", "callback_data": cb("adm:settings")},
+                {"text": "❓ 도움말", "callback_data": cb("adm:help")},
+            ],
+        ]
+    }
+
+
+def build_essentials_keyboard() -> dict[str, Any]:
+    """Quick actions under the active child's To-Do (adm:essentials)."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📚 학년별 학습 가이드", "callback_data": cb("adm:guide:menu")},
+                {"text": "🔄 학년 변경", "callback_data": cb("menu:grade")},
             ],
             [
-                {"text": "💡 입시 팩트체크", "callback_data": cb("adm:fact")},
-                {"text": "🎪 설명회·박람회", "callback_data": cb("adm:menu")},
+                {"text": "📲 카톡 공유", "callback_data": cb("adm:sh:todo")},
+                {"text": NAV_HOME, "callback_data": cb("adm:main")},
             ],
-            [
-                {"text": "📖 입시용어 사전", "callback_data": cb("adm:gl:menu")},
-                {"text": "⚙️ 자녀·맞춤 설정", "callback_data": cb("adm:settings")},
-            ],
-            [{"text": GUIDE_MENU_TEXT, "callback_data": cb("adm:guide:menu")}],
-            [{"text": "❓ 이용 도움말", "callback_data": cb("adm:help")}],
+        ]
+    }
+
+
+def build_knowledge_keyboard() -> dict[str, Any]:
+    """Quick actions under the latest factcheck (adm:knowledge)."""
+    return {
+        "inline_keyboard": [
+            [{"text": GLOSSARY_MENU_TEXT, "callback_data": cb("adm:gl:menu")}],
+            [{"text": NAV_HOME, "callback_data": cb("adm:main")}],
         ]
     }
 
@@ -119,11 +151,12 @@ def build_events_category_keyboard(include_back: bool = False) -> dict[str, Any]
             [{"text": f"{EventCategory.EXPO.icon} {EventCategory.EXPO.title}", "callback_data": cb("adm:cat:EXPO:0")}],
             [{"text": f"{EventCategory.BRIEFING.icon} {EventCategory.BRIEFING.title}", "callback_data": cb("adm:cat:BRIEF:0")}],
             [{"text": f"{EventCategory.SEMINAR.icon} {EventCategory.SEMINAR.title}", "callback_data": cb("adm:cat:SEMI:0")}],
+            [{"text": "⚡ 핫 행사 TOP 3", "callback_data": cb("adm:hot")}],
     ]
     rows.append(
-        [{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]
+        [{"text": NAV_HOME, "callback_data": cb("adm:main")}]
         if include_back
-        else [{"text": "🏠 통합 메뉴봇 바로가기", "url": "https://t.me/KwMenu_bot?start=from_sub"}]
+        else [{"text": NAV_PORTAL, "url": "https://t.me/KwMenu_bot?start=from_sub"}]
     )
     return {
         "inline_keyboard": rows
@@ -185,7 +218,7 @@ def format_events_page_html(
     lines = [
         f"{category.icon} <b>{html.escape(category.title)}</b> · {page + 1}/{total_pages}쪽",
         f"🎯 필터: <b>{html.escape(grade.label)}</b> · {html.escape(region.label)}",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
     ]
     if not events:
         lines.append("현재 조건에 맞는 예정 행사가 없습니다.")
@@ -201,7 +234,7 @@ def format_events_page_html(
         if link and _is_valid_url(link):
             lines.append(f"🔗 <a href=\"{html.escape(link)}\">신청·상세 보기</a>")
         lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(TG_DIVIDER)
     lines.append(f"<i>총 {total}건 · 지난 행사는 자동 제외됩니다</i>")
     return "\n".join(lines)
 
@@ -241,7 +274,7 @@ def format_glossary_entry_html(entry: GlossaryEntry) -> str:
     """Term detail card: 개념 / 학부모 득실 / 주의사항."""
     return "\n".join([
         f"📖 <b>[1초 입시사전] {html.escape(entry.term)}</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
         "💡 <b>핵심 개념</b>",
         html.escape(entry.definition),
         "",
@@ -250,7 +283,7 @@ def format_glossary_entry_html(entry: GlossaryEntry) -> str:
         "",
         "⚠️ <b>주의사항 & 꿀팁</b>",
         html.escape(entry.caution),
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
     ])
 
 
@@ -314,7 +347,7 @@ def build_level_inline_keyboard(stage: EducationStage, include_back: bool = Fals
 
 def build_guide_menu_keyboard(cards: Iterable[KnowledgeCard]) -> dict[str, Any]:
     rows = [[{"text": card.headline[:40], "callback_data": cb(f"adm:guide:{card.content_id}")}] for card in cards]
-    rows.append([{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}])
+    rows.append([{"text": NAV_HOME, "callback_data": cb("adm:main")}])
     return {"inline_keyboard": rows}
 
 
@@ -322,7 +355,7 @@ def format_guide_card_html(card: KnowledgeCard) -> str:
     lines = [
         f"📚 <b>{html.escape(card.headline)}</b>",
         f"<i>{html.escape(card.topic)}</i>",
-        "━━━━━━━━━━━━━━━━━━━━",
+        TG_DIVIDER,
         *[f"• {html.escape(line)}" for line in card.summary_3lines],
         "",
         f"🎯 <b>그래서 중요한 점</b>\n{html.escape(card.so_what)}",
@@ -437,6 +470,12 @@ class AdmissionInteractiveBot:
         clean_text = text.strip()
         if clean_text.startswith("/start"):
             self._cmd_start(chat_id, first_name)
+        elif clean_text.startswith("/"):
+            self._route_slash_command(chat_id, clean_text, first_name)
+        elif clean_text == ESSENTIALS_MENU_TEXT:
+            self._cmd_essentials(chat_id)
+        elif clean_text == KNOWLEDGE_MENU_TEXT:
+            self._cmd_knowledge(chat_id)
         elif clean_text == GLOSSARY_MENU_TEXT or clean_text.startswith("/glossary") or "용어" in clean_text:
             self._cmd_glossary_menu(chat_id)
         elif clean_text == GUIDE_MENU_TEXT or clean_text.startswith("/guide") or "학습가이드" in clean_text or clean_text == "가이드":
@@ -463,13 +502,53 @@ class AdmissionInteractiveBot:
         elif clean_text.startswith("/help") or "도움말" in clean_text or "안내" in clean_text or "메뉴" in clean_text:
             self._cmd_help(chat_id)
         else:
-            # Fallback friendly response with the inline main menu card
-            self.channel.send_message(
-                chat_id,
-                "안녕하세요! 에듀브리프(EduBrief) 입시 비서입니다.\n"
-                "타자를 치실 필요 없이, 아래 메뉴 버튼을 손가락으로 탭해 주세요! 👇",
-                reply_markup=build_main_menu_inline_keyboard(),
-            )
+            self._send_main_menu_fallback(chat_id)
+
+    def _send_main_menu_fallback(self, chat_id: str) -> None:
+        """Fallback friendly response with the inline main menu card."""
+        self.channel.send_message(
+            chat_id,
+            "안녕하세요! 에듀브리프(EduBrief) 입시 비서입니다.\n"
+            "타자를 치실 필요 없이, 아래 메뉴 버튼을 손가락으로 탭해 주세요! 👇",
+            reply_markup=build_main_menu_inline_keyboard(),
+        )
+
+    @staticmethod
+    def _parse_command(text: str) -> str:
+        """'/Todo@EduBot arg' -> 'todo' (exact token; @BotName suffix and args stripped)."""
+        token = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+        if not token.startswith("/"):
+            return ""
+        return token[1:].split("@", 1)[0].lower()
+
+    def _route_slash_command(self, chat_id: str, text: str, first_name: str) -> None:
+        """Routes an exact command token; unknown commands get the main menu card."""
+        command = self._parse_command(text)
+        if command == "start":
+            self._cmd_start(chat_id, first_name)
+            return
+        handlers = {
+            "todo": self._cmd_todo,
+            # Retired /briefing (still cached in some Telegram clients) -> essentials pillar.
+            "briefing": self._cmd_essentials,
+            "essentials": self._cmd_essentials,
+            "knowledge": self._cmd_knowledge,
+            "events": self._cmd_events_menu,
+            "guide": self._cmd_guide_menu,
+            "glossary": self._cmd_glossary_menu,
+            "settings": self._cmd_settings,
+            "help": self._cmd_help,
+            "hot": self._cmd_hot_events,
+            "recap": self._cmd_hot_events,
+            "fact": self._cmd_factcheck,
+            "grade": self._cmd_grade,
+            "region": self._cmd_region,
+        }
+        handler = handlers.get(command)
+        if handler is None:
+            self._send_main_menu_fallback(chat_id)
+        else:
+            handler(chat_id)
 
     def _cmd_start(self, chat_id: str, first_name: str) -> None:
         """Sends welcome greeting with grade selection buttons and persistent bottom menu."""
@@ -600,7 +679,7 @@ class AdmissionInteractiveBot:
             chat_id, message_id, format_guide_card_html(card),
             {"inline_keyboard": [
                 [{"text": "📚 다른 가이드 보기", "callback_data": cb("adm:guide:menu")}],
-                [{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}],
+                [{"text": NAV_HOME, "callback_data": cb("adm:main")}],
             ]},
         )
 
@@ -666,8 +745,8 @@ class AdmissionInteractiveBot:
             notice = "⚠️ 자녀 추가에 실패했습니다. 다시 시도해 주세요."
         self._cmd_settings(chat_id, message_id, notice=notice)
 
-    def _cmd_todo(self, chat_id: str) -> None:
-        """Sends the active child's grade-specific weekly action To-Do list."""
+    def _active_todo_briefing(self, chat_id: str) -> AdmissionBriefing:
+        """The active child's grade-specific weekly To-Do briefing (silent)."""
         profile = self.db.get_subscriber(chat_id)
         grade = profile.get_active_child().grade if profile else TargetGrade.MIDDLE
         active = profile.get_active_child() if profile else ChildProfile(grade=grade)
@@ -677,8 +756,20 @@ class AdmissionInteractiveBot:
         if profile and len(profile.children) >= 2:
             briefing.headline = f"[{profile.get_active_child().alias}] {briefing.headline}"
         briefing.silent = True  # Silent push for regular digests
+        return briefing
+
+    def _cmd_todo(self, chat_id: str) -> None:
+        """Sends the active child's grade-specific weekly action To-Do list."""
         share_markup = {"inline_keyboard": [[{"text": "📲 카톡 공유", "callback_data": cb("adm:sh:todo")}]]}
-        self.channel.send(chat_id, briefing, reply_markup=share_markup)
+        self.channel.send(chat_id, self._active_todo_briefing(chat_id), reply_markup=share_markup)
+
+    def _cmd_essentials(self, chat_id: str) -> None:
+        """Pillar 1 (adm:essentials): active child's To-Do + guide / grade-change shortcuts."""
+        self.channel.send(chat_id, self._active_todo_briefing(chat_id), reply_markup=build_essentials_keyboard())
+
+    def _cmd_knowledge(self, chat_id: str) -> None:
+        """Pillar 3 (adm:knowledge): latest verified factcheck + glossary shortcut."""
+        self.channel.send(chat_id, self._factcheck_briefing(chat_id), reply_markup=build_knowledge_keyboard())
 
     def _cmd_glossary_menu(self, chat_id: str, message_id: Optional[int] = None) -> None:
         """Presents the 15-term glossary grid (in place when navigated back from a term card)."""
@@ -758,8 +849,7 @@ class AdmissionInteractiveBot:
             if idx < len(briefings):
                 time.sleep(0.3)
 
-    def _cmd_factcheck(self, chat_id: str) -> None:
-        """Presents the latest verified 1-minute admission policy factcheck."""
+    def _factcheck_briefing(self, chat_id: str) -> AdmissionBriefing:
         profile = self.db.get_subscriber(chat_id)
         grade = profile.get_active_child().grade if profile else TargetGrade.ALL
         active = profile.get_active_child() if profile else ChildProfile(grade=grade)
@@ -767,7 +857,11 @@ class AdmissionInteractiveBot:
             grade, education_stage=active.education_stage, grade_level=active.grade_level
         )
         briefing.silent = True
-        self.channel.send(chat_id, briefing)
+        return briefing
+
+    def _cmd_factcheck(self, chat_id: str) -> None:
+        """Presents the latest verified 1-minute admission policy factcheck."""
+        self.channel.send(chat_id, self._factcheck_briefing(chat_id))
 
     def _cmd_recap(self, chat_id: str) -> None:
         """Presents the latest admission seminar recap."""
@@ -792,11 +886,10 @@ class AdmissionInteractiveBot:
         help_text = (
             "📌 <b>에듀브리프 (EduBrief) 간편 사용 안내</b>\n\n"
             "타자를 치실 필요 없이, 아래 메뉴 버튼을 손가락으로 누르시면 됩니다!\n\n"
-            "▪ <b>📋 이번 주 필수 To-Do</b>: 내 아이 학년별 이번 주 꼭 실천해야 할 3가지\n"
-            "▪ <b>⚡ 긴급 속보 & 핫 행사 TOP 3</b>: 실시간 정책 발표 및 선착순 마감 임박 행사\n"
-            "▪ <b>💡 1분 입시 팩트체크</b>: 교육부 발표 및 대입 개편안의 실질 득실 (So-What)\n"
-            "▪ <b>🎪 설명회·박람회 전체보기</b>: 박람회·대형 설명회·테마 세미나 카테고리별 일정\n"
-            "▪ <b>🎓 학년/지역 설정</b>: 중등/고1·2/고3 및 서울·경기·온라인 맞춤 필터링\n\n"
+            "▪ <b>📅 지금 우리 아이 필수</b>: 자녀 학년별 이번 주 To-Do + 학년별 학습 가이드\n"
+            "▪ <b>🎪 설명회·모집일정</b>: 박람회·대형 설명회·테마 세미나 일정 + 핫 행사 TOP 3\n"
+            "▪ <b>📖 용어·팩트체크</b>: 최신 입시 팩트체크(So-What) + 1초 입시용어 사전\n"
+            "▪ <b>⚙️ 내 설정</b>: 자녀 학년·지역, 알림 켜기/끄기, 자녀 추가·전환\n\n"
             "🏛 <i>모든 정보는 교육부, 대교협, 교육청 등 100% 공인 출처에 기반합니다.</i>"
         )
         self.channel.send_message(
@@ -876,6 +969,10 @@ class AdmissionInteractiveBot:
                 return "🎓 학년 단계를 선택했습니다. 세부 학년을 골라 주세요."
             if data.startswith("adm:level:"):
                 return "✅ 세부 학년을 선택했습니다. 지역을 골라 주세요."
+            if data == "adm:essentials":
+                return "📅 우리 아이 필수 To-Do를 불러옵니다."
+            if data == "adm:knowledge":
+                return "📖 최신 입시 팩트체크를 불러옵니다."
             if data == "adm:guide:menu":
                 return "📚 학습 가이드를 불러옵니다."
             if data.startswith("adm:guide:"):
@@ -1018,8 +1115,8 @@ class AdmissionInteractiveBot:
                 grade = profile.get_active_child().grade if profile else TargetGrade.ALL
                 final_text = (
                     "🎉 <b>모든 맞춤 설정이 완료되었습니다!</b>\n\n"
-                    f"▪ <b>자녀 학년</b>: {html.escape(grade.label)}\n"
-                    f"▪ <b>희망 지역</b>: {html.escape(target_region.label)}\n\n"
+                    f"• <b>자녀 학년</b>: {html.escape(grade.label)}\n"
+                    f"• <b>희망 지역</b>: {html.escape(target_region.label)}\n\n"
                     "📋 아래 <b>[정보보기]</b> 버튼 및 자녀 맞춤 <b>이번 주 To-Do</b>를 바로 확인해 보세요 👇"
                 )
                 region_done_markup = {
@@ -1081,6 +1178,10 @@ class AdmissionInteractiveBot:
             self._add_child(chat_id, message_id, data)
 
         # 5. Welcome / preview shortcuts (manual requests are not logged as dispatches)
+        elif data == "adm:essentials":
+            self._cmd_essentials(chat_id)
+        elif data == "adm:knowledge":
+            self._cmd_knowledge(chat_id)
         elif data == "adm:hot":
             self._cmd_hot_events(chat_id)
         elif data == "adm:todo":
@@ -1094,21 +1195,24 @@ class AdmissionInteractiveBot:
             valid_id = bool(content_id) and content_id.isascii() and len(content_id) <= 24 and all(
                 char.isalnum() or char == "-" for char in content_id
             )
+            # Strict (no cooldown) history across every stream incl. dday:D3/dday:D1.
             owned = any(
                 self.db.has_content_been_sent(chat_id, content_id, stream)
-                for stream in ("weekly", "policy", "dday")
+                for stream in ACK_OWNERSHIP_STREAMS
             ) if valid_id else False
-            if owned and self.db.record_card_ack(chat_id, content_id):
+            card = self.curator.catalog.get(content_id) if owned else None
+            version = getattr(card, "version", 1) if card is not None else 1
+            if owned and self.db.record_card_ack(chat_id, content_id, version=version):
                 self._safe_edit_or_send(
                     chat_id, message_id,
                     "✅ <b>확인 완료</b>\n\n이 맞춤 알림을 확인 목록에 기록했습니다.",
-                    {"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]]},
+                    {"inline_keyboard": [[{"text": NAV_HOME, "callback_data": cb("adm:main")}]]},
                 )
             else:
                 self._safe_edit_or_send(
                     chat_id, message_id,
                     "⚠️ 이 알림은 이미 처리되었거나 확인 권한이 없습니다.",
-                    {"inline_keyboard": [[{"text": "🏠 메인 메뉴로", "callback_data": cb("adm:main")}]]},
+                    {"inline_keyboard": [[{"text": NAV_HOME, "callback_data": cb("adm:main")}]]},
                 )
         elif data == "adm:guide:menu":
             self._cmd_guide_menu(chat_id, message_id)

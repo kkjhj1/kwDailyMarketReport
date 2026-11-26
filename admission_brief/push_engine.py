@@ -27,6 +27,18 @@ from admission_brief.storage.db import AdmissionDatabase
 
 KST = ZoneInfo("Asia/Seoul")
 EXAM_SELECTION_MONTHS = frozenset({4, 5, 6, 7, 10, 11, 12})
+WEEKLY_COOLDOWN_DAYS = 28
+DDAY_OFFSETS = (3, 1)
+ACK_LABEL = "✅ 확인 완료"
+# Every stream an item can be recorded under; used for strict ACK ownership checks.
+ACK_OWNERSHIP_STREAMS: tuple[str, ...] = ("weekly", "policy", "dday") + tuple(
+    f"dday:D{offset}" for offset in DDAY_OFFSETS
+)
+
+
+def dday_stream(days_left: int) -> str:
+    """Per-offset history tag so one event can alert at D-3 and again at D-1."""
+    return f"dday:D{days_left}"
 
 
 @dataclass(frozen=True)
@@ -75,9 +87,23 @@ def _urgent(card: Any) -> bool:
     return bool(value) or str(getattr(card, "urgency", "")).upper() in {"URGENT", "HIGH", "BREAKING"}
 
 
-def _fresh_card(db: AdmissionDatabase, chat_id: str, card: Any, stream: str) -> bool:
-    return not db.is_card_acked(chat_id, card.content_id) and not db.has_content_been_sent(
-        chat_id, card.content_id, stream
+def _card_version(card: Any) -> int:
+    version = getattr(card, "version", 1)
+    return version if type(version) is int and version >= 1 else 1
+
+
+def _fresh_card(
+    db: AdmissionDatabase, chat_id: str, card: Any, stream: str, now: Optional[datetime] = None
+) -> bool:
+    """Un-ACKed (for this card version) and not recently sent on ``stream``.
+
+    Only the weekly stream uses a cooldown; every other stream stays strict.
+    """
+    if db.is_card_acked(chat_id, card.content_id, current_version=_card_version(card)):
+        return False
+    cooldown = WEEKLY_COOLDOWN_DAYS if stream == "weekly" else None
+    return not db.has_content_been_sent(
+        chat_id, card.content_id, stream, cooldown_days=cooldown, now=now
     )
 
 
@@ -92,13 +118,30 @@ def _target_grade_for_children(children: Iterable[ChildProfile]) -> TargetGrade:
     return next(iter(grades)) if len(grades) == 1 else TargetGrade.ALL
 
 
+def _fresh_dday_event(
+    db: AdmissionDatabase, chat_id: str, event: AdmissionEvent, days_left: int, today: date
+) -> bool:
+    """Fresh for this D-n offset: not ACKed, not sent under ``dday:D<n>``, and
+    not sent today under the plain ``dday`` tag (legacy or mixed-offset days)."""
+    if db.is_card_acked(chat_id, event.event_id):
+        return False
+    if db.has_content_been_sent(chat_id, event.event_id, dday_stream(days_left)):
+        return False
+    last = db.get_content_sent_at(chat_id, event.event_id, "dday")
+    return last is None or _kst(last).date() < today
+
+
 def _ack_markup(item_ids: Iterable[str], *, include_menu: bool = False) -> Optional[dict[str, Any]]:
     rows: list[list[dict[str, str]]] = []
-    for item_id in item_ids:
-        # Catalog ids are already validated as <=24 ASCII.  Event ids can be
-        # legacy/untrusted, so long IDs deliberately get the safe menu action.
-        if item_id.isascii() and len(item_id) <= 24 and all(ch.isalnum() or ch == "-" for ch in item_id):
-            rows.append([{"text": f"✅ 확인: {item_id[:18]}", "callback_data": f"adm:ack:{item_id}"}])
+    # Catalog ids are already validated as <=24 ASCII.  Event ids can be
+    # legacy/untrusted, so long IDs deliberately get the safe menu action.
+    ackable = [
+        item_id for item_id in item_ids
+        if item_id.isascii() and len(item_id) <= 24 and all(ch.isalnum() or ch == "-" for ch in item_id)
+    ]
+    for idx, item_id in enumerate(ackable, 1):
+        label = ACK_LABEL if len(ackable) == 1 else f"{ACK_LABEL} ({idx}/{len(ackable)})"
+        rows.append([{"text": label, "callback_data": f"adm:ack:{item_id}"}])
     if include_menu or not rows:
         rows.append([{"text": "📚 자세히 보기", "callback_data": "adm:menu"}])
     return {"inline_keyboard": rows} if rows else None
@@ -197,7 +240,7 @@ def build_weekly_personalized_pushes(
             if not _cadence_allows(child.education_stage, now, urgent):
                 continue
             for card in candidates:
-                if _fresh_card(db, profile.chat_id, card, "weekly"):
+                if _fresh_card(db, profile.chat_id, card, "weekly", now=now):
                     cards_by_id[card.content_id] = card
         cards = list(cards_by_id.values())
         if not cards:
@@ -256,16 +299,24 @@ def _event_date(event: AdmissionEvent) -> Optional[date]:
 
 
 def build_event_dday_pushes(db: AdmissionDatabase, now_kst: datetime) -> list[PersonalizedPush]:
-    """Build only D-3/D-1 event alerts using the KST calendar date."""
+    """Build D-3/D-1 event alerts using the KST calendar date.
+
+    At most one consolidated message per user per day (``push:dday:<YYYYMMDD>:<chat>``).
+    History is tagged ``dday:D<n>`` so the same event alerts once at D-3 and once
+    at D-1.  When one day's message mixes offsets the shared ``dday`` tag is used;
+    its ``sent_at`` blocks only same-day repeats, never the other offset.
+    """
     now = _kst(now_kst)
+    today = now.date()
     events: list[tuple[AdmissionEvent, int]] = []
     for event in db.list_all_events():
         event_date = _event_date(event)
         if event_date is None:
             continue
-        days_left = (event_date - now.date()).days
-        if days_left in (1, 3):
+        days_left = (event_date - today).days
+        if days_left in DDAY_OFFSETS:
             events.append((event, days_left))
+    events.sort(key=lambda pair: pair[1])  # D-1 (most urgent) first
     pushes: list[PersonalizedPush] = []
     for profile in db.list_subscribers(active_only=True):
         if not profile.event_dday_enabled:
@@ -273,15 +324,22 @@ def build_event_dday_pushes(db: AdmissionDatabase, now_kst: datetime) -> list[Pe
         briefing_id = f"push:dday:{now.strftime('%Y%m%d')}:{profile.chat_id}"
         if db.has_dispatched(briefing_id, profile.chat_id):
             continue
-        matched = [event for event, _ in events if any(_event_matches_child(event, child) for child in _children(profile))]
-        matched = [event for event in matched if _fresh_event(db, profile.chat_id, event, "dday")]
+        children = _children(profile)
+        matched = [
+            (event, days_left) for event, days_left in events
+            if any(_event_matches_child(event, child) for child in children)
+            and _fresh_dday_event(db, profile.chat_id, event, days_left, today)
+        ]
         if not matched:
             continue
-        briefing = _briefing_from_events(briefing_id, matched, now, stream="dday")
+        offsets = {days_left for _, days_left in matched}
+        stream = dday_stream(next(iter(offsets))) if len(offsets) == 1 else "dday"
+        matched_events = [event for event, _ in matched]
+        briefing = _briefing_from_events(briefing_id, matched_events, now, stream="dday")
         pushes.append(PersonalizedPush(
             chat_id=str(profile.chat_id), briefing=briefing,
-            item_ids=tuple(event.event_id for event in matched), item_kind="EVENT", stream="dday",
-            reply_markup=_ack_markup((event.event_id for event in matched), include_menu=True),
+            item_ids=tuple(event.event_id for event in matched_events), item_kind="EVENT", stream=stream,
+            reply_markup=_ack_markup((event.event_id for event in matched_events), include_menu=True),
         ))
     return pushes
 

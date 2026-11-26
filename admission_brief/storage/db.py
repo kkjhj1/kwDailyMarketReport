@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -240,10 +240,18 @@ class AdmissionDatabase:
                     chat_id TEXT NOT NULL,
                     content_id TEXT NOT NULL,
                     acked_at TEXT NOT NULL,
+                    acked_version INTEGER NOT NULL DEFAULT 1,
                     PRIMARY KEY(chat_id, content_id)
                 )
                 """
             )
+            try:
+                # Additive migration: version-aware ACKs (bumped card version re-activates it).
+                cursor.execute(
+                    "ALTER TABLE admission_card_acks ADD COLUMN acked_version INTEGER NOT NULL DEFAULT 1"
+                )
+            except sqlite3.OperationalError:
+                pass
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS admission_content_sent_history (
@@ -1004,28 +1012,52 @@ class AdmissionDatabase:
     # --- Personalized push acknowledgement/history ---
 
     def record_card_ack(
-        self, chat_id: str, content_id: str, acked_at: Optional[datetime] = None
+        self,
+        chat_id: str,
+        content_id: str,
+        acked_at: Optional[datetime] = None,
+        version: int = 1,
     ) -> bool:
-        """Record an owned card acknowledgement exactly once."""
+        """Record an owned card acknowledgement once per card version.
+
+        Returns True when a new ACK was stored or an older-version ACK was
+        upgraded; a repeated ACK of the same (or older) version is a no-op.
+        """
+        try:
+            version = max(1, int(version))
+        except (TypeError, ValueError):
+            version = 1
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO admission_card_acks (chat_id, content_id, acked_at)
-                VALUES (?, ?, ?)
+                INSERT INTO admission_card_acks (chat_id, content_id, acked_at, acked_version)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, content_id) DO UPDATE SET
+                    acked_at = excluded.acked_at,
+                    acked_version = excluded.acked_version
+                WHERE admission_card_acks.acked_version < excluded.acked_version
                 """,
-                (str(chat_id), str(content_id), (acked_at or datetime.now(KST)).isoformat()),
+                (str(chat_id), str(content_id), (acked_at or datetime.now(KST)).isoformat(), version),
             )
             conn.commit()
             return cursor.rowcount > 0
 
     ack_card = record_card_ack
 
-    def is_card_acked(self, chat_id: str, content_id: str) -> bool:
+    def is_card_acked(self, chat_id: str, content_id: str, current_version: int = 1) -> bool:
+        """True only when the stored ACK covers ``current_version`` (or newer)."""
+        try:
+            current_version = max(1, int(current_version))
+        except (TypeError, ValueError):
+            current_version = 1
         with self._get_connection() as conn:
             return conn.execute(
-                "SELECT 1 FROM admission_card_acks WHERE chat_id = ? AND content_id = ?",
-                (str(chat_id), str(content_id)),
+                """
+                SELECT 1 FROM admission_card_acks
+                WHERE chat_id = ? AND content_id = ? AND acked_version >= ?
+                """,
+                (str(chat_id), str(content_id), current_version),
             ).fetchone() is not None
 
     def record_content_sent(
@@ -1036,14 +1068,21 @@ class AdmissionDatabase:
         stream: str,
         sent_at: Optional[datetime] = None,
     ) -> bool:
-        """Append successful personalized content delivery history only."""
+        """Record successful personalized content delivery (latest send wins).
+
+        UPSERT keeps ``sent_at`` at the most recent delivery so a cooldown window
+        restarts after each re-send instead of re-triggering every week.
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO admission_content_sent_history
+                INSERT INTO admission_content_sent_history
                     (chat_id, item_id, item_kind, stream, sent_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, item_id, stream) DO UPDATE SET
+                    sent_at = excluded.sent_at,
+                    item_kind = excluded.item_kind
                 """,
                 (str(chat_id), str(item_id), str(item_kind), str(stream), (sent_at or datetime.now(KST)).isoformat()),
             )
@@ -1052,15 +1091,57 @@ class AdmissionDatabase:
 
     record_content_sent_history = record_content_sent
 
-    def has_content_been_sent(self, chat_id: str, item_id: str, stream: str) -> bool:
+    def get_content_sent_at(self, chat_id: str, item_id: str, stream: str) -> Optional[datetime]:
+        """Latest successful send time for (chat, item, stream), KST-aware; None if never sent."""
         with self._get_connection() as conn:
-            return conn.execute(
+            row = conn.execute(
                 """
-                SELECT 1 FROM admission_content_sent_history
+                SELECT sent_at FROM admission_content_sent_history
                 WHERE chat_id = ? AND item_id = ? AND stream = ?
                 """,
                 (str(chat_id), str(item_id), str(stream)),
-            ).fetchone() is not None
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = datetime.fromisoformat(str(row[0]))
+        except ValueError:
+            return None
+        return value.replace(tzinfo=KST) if value.tzinfo is None else value.astimezone(KST)
+
+    def has_content_been_sent(
+        self,
+        chat_id: str,
+        item_id: str,
+        stream: str,
+        cooldown_days: Optional[int] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Strict (permanent) history check by default.
+
+        With ``cooldown_days`` only a send within the last N days counts; an
+        unparsable timestamp is treated as recently sent (fail-closed).
+        """
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT sent_at FROM admission_content_sent_history
+                WHERE chat_id = ? AND item_id = ? AND stream = ?
+                """,
+                (str(chat_id), str(item_id), str(stream)),
+            ).fetchone()
+        if row is None:
+            return False
+        if cooldown_days is None:
+            return True
+        try:
+            sent_at = datetime.fromisoformat(str(row[0]))
+        except ValueError:
+            return True
+        sent_at = sent_at.replace(tzinfo=KST) if sent_at.tzinfo is None else sent_at.astimezone(KST)
+        current = now or datetime.now(KST)
+        current = current.replace(tzinfo=KST) if current.tzinfo is None else current.astimezone(KST)
+        return (current - sent_at) < timedelta(days=int(cooldown_days))
 
     has_sent_content = has_content_been_sent
 
