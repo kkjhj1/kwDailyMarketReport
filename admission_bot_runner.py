@@ -188,8 +188,9 @@ def run_demo() -> None:
     """[TG-06] Token-free console walkthrough of the events menu on an in-memory DB (no file writes)."""
     db = AdmissionDatabase(db_path=":memory:")
     curator = AICurator()
-    results = AdmissionCollector(db=db, curator=curator).run_collection()
-    print(f"✅ [DEMO] Collected {results['total_saved']} event(s) into :memory: DB")
+    # [TG-06] Offline sample data only — never run_collection() (live network) in --demo.
+    results = AdmissionCollector(db=db, curator=curator).seed_sample_collection()
+    print(f"✅ [DEMO] Seeded {results['total_saved']} sample event(s) into :memory: DB (offline)")
 
     bot = AdmissionInteractiveBot(channel=_ConsoleDemoChannel(), db=db, curator=curator)
     chat = {"id": 1, "first_name": "데모"}
@@ -239,7 +240,7 @@ def main() -> None:
     parser.add_argument("--stream", choices=["weekly", "dday", "policy"], help="Personalized stream")
     parser.add_argument("--dry-run", action="store_true", help="Preview output without making Telegram API calls")
     parser.add_argument("--seed-sample", action="store_true", help="Seed sample admission events into database")
-    parser.add_argument("--collect", action="store_true", help="Run automated crawler for public & academy notices")
+    parser.add_argument("--collect", action="store_true", help="Collect live official notices (서울시교육청 1069/1068, 교육부 보도자료)")
     parser.add_argument("--recipients", type=str, default="", help="Comma-separated explicit chat IDs (preview or subscribed live targets)")
     parser.add_argument("--confirm-live", action="store_true", help="Explicitly authorize a live Telegram dispatch")
     parser.add_argument("--ignore-window", action="store_true", help="Override a personalized KST window (live approval required)")
@@ -267,7 +268,12 @@ def main() -> None:
     if args.collect:
         collector = AdmissionCollector(db=db, curator=curator)
         results = collector.run_collection()
-        print(f"✅ Automated collection completed: {results['total_saved']} event(s) saved (Public: {results['public_count']}, Academy: {results['academy_count']}).")
+        print(
+            f"✅ Official collection completed: {results['total_saved']} event(s) saved "
+            f"(SEN: {results['sen_count']}, MOE: {results['moe_count']})."
+        )
+        for err in results.get("errors", []):
+            print(f"⚠️ Source error: {err}")
         return
 
     if args.dispatch_personalized:

@@ -1,18 +1,26 @@
 """Admission Information Auto-Collector & Web Scraper.
-Fetches official admission seminars, public education briefings, and major academy events.
+
+Live sources (official government boards only):
+  - 서울시교육청 게시판 1069 (고3·N수 대입 설명회) / 1068 (중등·고입 설명회)
+  - 교육부 보도자료 (boardID=294), title-keyword filtered
+
+The legacy hardcoded events are kept as offline sample/demo data
+(`collect_sample_events`) and are never mixed into the live pipeline.
 """
 from __future__ import annotations
-import json
+import html as html_lib
 import logging
 import re
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from admission_brief.ai_curator import AICurator
 from admission_brief.models import (
+    KST,
     AdmissionEvent,
     BriefingType,
     EventCategory,
@@ -22,6 +30,126 @@ from admission_brief.models import (
 from admission_brief.storage.db import AdmissionDatabase
 
 logger = logging.getLogger(__name__)
+
+ALLOWED_HOSTS = frozenset({"sen.go.kr", "www.sen.go.kr", "moe.go.kr", "www.moe.go.kr"})
+FRESHNESS_DAYS = 30
+
+SEN_LIST_URL = "https://www.sen.go.kr/user/bbs/BD_selectBbsList.do?q_bbsSn={bbs_sn}"
+SEN_DETAIL_URL = "https://www.sen.go.kr/user/bbs/BD_selectBbs.do?q_bbsSn={bbs_sn}&q_bbsDocNo={doc_no}"
+SEN_BOARDS: dict[str, tuple[TargetGrade, EventCategory]] = {
+    "1069": (TargetGrade.HIGH_3_N, EventCategory.BRIEFING),
+    "1068": (TargetGrade.MIDDLE, EventCategory.BRIEFING),
+}
+
+MOE_LIST_URL = "https://www.moe.go.kr/boardCnts/listRenew.do?boardID={board_id}&m=020402&s=moe"
+MOE_DETAIL_URL = (
+    "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID={board_id}&boardSeq={board_seq}"
+    "&lev=0&statusYN=W&s=moe&m=020402&opType=N"
+)
+MOE_TITLE_KEYWORDS = (
+    "수능", "대입", "고입", "고교학점제", "학생부", "장학",
+    "교육과정", "입학", "진학", "방학", "기초학력", "설명회",
+)
+
+_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
+_LI_RE = re.compile(r"<li\b[^>]*>(.*?)</li\s*>", re.IGNORECASE | re.DOTALL)
+_ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.*?)</a\s*>", re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+_TD_RE = re.compile(r"<td\b[^>]*>(.*?)</td\s*>", re.IGNORECASE | re.DOTALL)
+_HREF_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+_TITLE_ATTR_RE = re.compile(r"""title\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
+_SEN_SN_RE = re.compile(r"q_bbsSn\s*=\s*(\d+)", re.IGNORECASE)
+_SEN_DOC_RE = re.compile(r"q_bbsDocNo\s*=\s*([0-9A-Za-z]+)", re.IGNORECASE)
+_MOE_GOVIEW_RE = re.compile(
+    r"""goView\s*\(\s*["']?\s*(\d+)\s*["']?\s*,\s*["']?\s*(\d+)\s*["']?""", re.IGNORECASE
+)
+_DATE_RE = re.compile(r"(20\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})")
+_META_CHARSET_RE = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""", re.IGNORECASE)
+
+
+def is_official_url(url: str) -> bool:
+    """True only for https URLs on an allow-listed government host."""
+    try:
+        parsed = urlparse((url or "").strip())
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in ALLOWED_HOSTS
+
+
+_BADGE_RE = re.compile(
+    r"""<(span|em|i|b|strong)\b[^>]*class\s*=\s*["'][^"']*(?:new|ico|icon|badge)[^"']*["'][^>]*>.*?</\1\s*>""",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _clean_text(fragment: str) -> str:
+    """Strips "new"/icon badges and nested tags, unescapes entities and collapses whitespace."""
+    text = _BADGE_RE.sub(" ", fragment or "")
+    text = _TAG_RE.sub(" ", text)
+    text = html_lib.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_units(page_html: str) -> list[str]:
+    """Row-level units (<tr>, falling back to <li>) so each post is parsed in isolation."""
+    rows = _ROW_RE.findall(page_html or "")
+    return rows if rows else _LI_RE.findall(page_html or "")
+
+
+def _parse_ymd(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _row_date(row_html: str) -> Optional[date]:
+    """First valid YYYY-MM-DD / YYYY.MM.DD in visible row text (attributes excluded)."""
+    for match in _DATE_RE.finditer(_clean_text(row_html)):
+        parsed = _parse_ymd(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        if parsed:
+            return parsed
+    return None
+
+
+def _decode_html(raw: bytes, header_charset: Optional[str]) -> str:
+    """Decodes using header/meta charset, then UTF-8, then CP949 (EUC-KR superset)."""
+    candidates: list[str] = []
+    if header_charset:
+        candidates.append(header_charset)
+    meta = _META_CHARSET_RE.search(raw[:4096])
+    if meta:
+        candidates.append(meta.group(1).decode("ascii", errors="ignore"))
+    candidates += ["utf-8", "cp949"]
+    for enc in candidates:
+        enc = (enc or "").strip().lower()
+        if enc in ("euc-kr", "euc_kr", "ks_c_5601-1987", "ksc5601"):
+            enc = "cp949"
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _header_charset(resp: Any) -> Optional[str]:
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    getter = getattr(headers, "get_content_charset", None)
+    if callable(getter):
+        try:
+            value = getter()
+            if value:
+                return value
+        except Exception:
+            pass
+    try:
+        content_type = headers.get("Content-Type") or ""
+    except Exception:
+        return None
+    match = re.search(r"charset\s*=\s*([A-Za-z0-9_\-]+)", content_type, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 class AdmissionCollector:
@@ -38,9 +166,12 @@ class AdmissionCollector:
         self.db = db
         self.curator = curator or AICurator()
         self._opener = opener or urllib.request.urlopen
+        self.last_errors: list[str] = []
 
-    def fetch_url_html(self, url: str, timeout: int = 10) -> str:
-        """Safely fetches HTML content with desktop browser User-Agent."""
+    def _fetch_html_strict(self, url: str, timeout: int = 10) -> str:
+        """Fetches an allow-listed official URL; raises on policy/network failure."""
+        if not is_official_url(url):
+            raise ValueError(f"Rejected non-official URL: {url}")
         req = urllib.request.Request(
             url,
             headers={
@@ -51,13 +182,256 @@ class AdmissionCollector:
                 "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
             },
         )
+        with self._opener(req, timeout=timeout) as resp:
+            raw_bytes = resp.read()
+            return _decode_html(raw_bytes, _header_charset(resp))
+
+    def fetch_url_html(self, url: str, timeout: int = 10) -> str:
+        """Safely fetches HTML content (charset-aware); returns "" on any failure."""
         try:
-            with self._opener(req, timeout=timeout) as resp:
-                raw_bytes = resp.read()
-                return raw_bytes.decode("utf-8", errors="ignore")
+            return self._fetch_html_strict(url, timeout=timeout)
         except Exception as e:
             logger.warning("Failed to fetch %s: %s", url, e)
             return ""
+
+    # ------------------------------------------------------------------
+    # Live official sources
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _now_kst(now_kst: Optional[datetime]) -> datetime:
+        if now_kst is None:
+            return datetime.now(KST)
+        return now_kst.replace(tzinfo=KST) if now_kst.tzinfo is None else now_kst.astimezone(KST)
+
+    @staticmethod
+    def _freshness(post_date: date, now_kst: datetime) -> Optional[datetime]:
+        """Returns KST expires_at (post_date 00:00 KST + 30d) if still fresh, else None.
+
+        Using the same instant for the freshness cut and `expires_at` guarantees we
+        never save an event the DB would already treat as expired.
+        """
+        expires_at = datetime(post_date.year, post_date.month, post_date.day, tzinfo=KST) + timedelta(
+            days=FRESHNESS_DAYS
+        )
+        if expires_at <= now_kst:
+            return None
+        if post_date > now_kst.date() + timedelta(days=1):
+            return None  # implausible future-dated post
+        return expires_at
+
+    def _record_error(self, source: str, exc: Exception) -> None:
+        message = f"{source}: {type(exc).__name__}: {exc}"
+        logger.warning("Admission source failed — %s", message)
+        self.last_errors.append(message)
+
+    def collect_sen_board(
+        self,
+        bbs_sn: str,
+        default_grade: TargetGrade,
+        default_category: EventCategory,
+        now_kst: Optional[datetime] = None,
+    ) -> list[AdmissionEvent]:
+        """Parses a 서울시교육청 board list page into fresh AdmissionEvents."""
+        bbs_sn = str(bbs_sn).strip()
+        now = self._now_kst(now_kst)
+        try:
+            page = self._fetch_html_strict(SEN_LIST_URL.format(bbs_sn=bbs_sn))
+        except Exception as e:
+            self._record_error(f"sen_{bbs_sn}", e)
+            return []
+
+        events: list[AdmissionEvent] = []
+        seen: set[str] = set()
+        for row in _split_units(page):
+            title = ""
+            doc_no = ""
+            for raw_attrs, inner in _ANCHOR_RE.findall(row):
+                attrs = html_lib.unescape(raw_attrs)
+                doc_match = _SEN_DOC_RE.search(attrs)
+                if not doc_match:
+                    continue
+                sn_match = _SEN_SN_RE.search(attrs)
+                if sn_match and sn_match.group(1) != bbs_sn:
+                    continue
+                href = _HREF_RE.search(attrs)
+                href_value = next((g for g in href.groups() if g), "").strip() if href else ""
+                if href_value.lower().startswith(("http://", "https://", "//")):
+                    absolute = "https:" + href_value if href_value.startswith("//") else href_value
+                    if not is_official_url(absolute):
+                        logger.info("Skipped SEN row with non-official link: %s", href_value)
+                        continue
+                doc_no = doc_match.group(1)
+                title = _clean_text(inner)
+                if not title:
+                    title_attr = _TITLE_ATTR_RE.search(attrs)
+                    title = _clean_text(next((g for g in title_attr.groups() if g), "")) if title_attr else ""
+                break
+            if not doc_no or not title:
+                continue
+
+            post_date = None
+            if len(doc_no) >= 8 and doc_no[:8].isdigit():
+                post_date = _parse_ymd(int(doc_no[:4]), int(doc_no[4:6]), int(doc_no[6:8]))
+                if post_date and not (2000 <= post_date.year <= now.year + 1):
+                    post_date = None
+            post_date = post_date or _row_date(row)
+            if post_date is None:
+                continue
+            expires_at = self._freshness(post_date, now)
+            if expires_at is None:
+                continue
+
+            event_id = f"sen_{bbs_sn}_{doc_no}"
+            if event_id in seen:
+                continue
+            detail_url = SEN_DETAIL_URL.format(bbs_sn=bbs_sn, doc_no=doc_no)
+            if not is_official_url(detail_url):
+                continue
+            seen.add(event_id)
+            events.append(
+                self._build_official_event(
+                    event_id=event_id,
+                    title=title,
+                    organizer="서울시교육청",
+                    source_name="서울시교육청 공식 게시판",
+                    detail_url=detail_url,
+                    post_date=post_date,
+                    expires_at=expires_at,
+                    grade=default_grade,
+                    region=TargetRegion.SEOUL,
+                    category=default_category,
+                    event_type=BriefingType.BRIEFING_RECAP,
+                )
+            )
+        return events
+
+    def collect_moe_press(
+        self, board_id: str = "294", now_kst: Optional[datetime] = None
+    ) -> list[AdmissionEvent]:
+        """Parses 교육부 보도자료 list; keeps only posts whose TITLE matches admission keywords."""
+        board_id = str(board_id).strip()
+        now = self._now_kst(now_kst)
+        try:
+            page = self._fetch_html_strict(MOE_LIST_URL.format(board_id=board_id))
+        except Exception as e:
+            self._record_error(f"moe_{board_id}", e)
+            return []
+
+        events: list[AdmissionEvent] = []
+        seen: set[str] = set()
+        for row in _split_units(page):
+            board_seq = ""
+            title = ""
+            for raw_attrs, inner in _ANCHOR_RE.findall(row):
+                attrs = html_lib.unescape(raw_attrs)
+                view = _MOE_GOVIEW_RE.search(attrs)
+                if not view or view.group(1) != board_id:
+                    continue
+                board_seq = view.group(2)
+                title = _clean_text(inner)
+                if not title:
+                    title_attr = _TITLE_ATTR_RE.search(attrs)
+                    title = _clean_text(next((g for g in title_attr.groups() if g), "")) if title_attr else ""
+                break
+            if not board_seq or not title:
+                continue
+            # Title-only keyword filter (department columns often contain "교육").
+            if not any(kw in title for kw in MOE_TITLE_KEYWORDS):
+                continue
+
+            post_date = None
+            for cell in _TD_RE.findall(row):
+                cell_text = _clean_text(cell)
+                match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", cell_text)
+                if match:
+                    post_date = _parse_ymd(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                    if post_date:
+                        break
+            post_date = post_date or _row_date(row)
+            if post_date is None:
+                continue
+            expires_at = self._freshness(post_date, now)
+            if expires_at is None:
+                continue
+
+            event_id = f"moe_{board_id}_{board_seq}"
+            if event_id in seen:
+                continue
+            detail_url = MOE_DETAIL_URL.format(board_id=board_id, board_seq=board_seq)
+            if not is_official_url(detail_url):
+                continue
+            seen.add(event_id)
+            events.append(
+                self._build_official_event(
+                    event_id=event_id,
+                    title=title,
+                    organizer="교육부",
+                    source_name="교육부 보도자료",
+                    detail_url=detail_url,
+                    post_date=post_date,
+                    expires_at=expires_at,
+                    grade=TargetGrade.ALL,
+                    region=TargetRegion.ALL,
+                    category=EventCategory.BRIEFING,
+                    event_type=BriefingType.POLICY_TRANSLATE,
+                )
+            )
+        return events
+
+    def _build_official_event(
+        self,
+        *,
+        event_id: str,
+        title: str,
+        organizer: str,
+        source_name: str,
+        detail_url: str,
+        post_date: date,
+        expires_at: datetime,
+        grade: TargetGrade,
+        region: TargetRegion,
+        category: EventCategory,
+        event_type: BriefingType,
+    ) -> AdmissionEvent:
+        date_str = post_date.strftime("%Y-%m-%d")
+        return AdmissionEvent(
+            event_id=event_id,
+            title=title,
+            organizer=organizer,
+            target_grade=grade,
+            target_region=region,
+            is_online_live=False,
+            event_type=event_type,
+            event_date_str=date_str,
+            booking_url=detail_url,
+            summary_3lines=[
+                f"{organizer} 공식 게시물 ({date_str} 게시)",
+                "세부 일정·대상·신청 방법은 원문 공지에서 확인",
+                "공식 출처 원문 링크로 바로 이동 가능",
+            ],
+            so_what="정부·교육청 공식 발표이므로 일정과 신청 조건은 원문을 기준으로 확인하세요.",
+            action_todos=["원문 공지에서 일정·신청 기간 확인", "해당 시 캘린더에 일정 등록"],
+            credibility_score=100,
+            source_name=source_name,
+            source_url=detail_url,
+            urgency="NORMAL",
+            category=category,
+            expires_at=expires_at,
+        )
+
+    # ------------------------------------------------------------------
+    # Offline sample / demo data (never touches the network)
+    # ------------------------------------------------------------------
+    def collect_sample_events(self) -> list[AdmissionEvent]:
+        """Hardcoded sample events for --demo / --seed flows (no network)."""
+        return self.collect_public_education_notices() + self.collect_major_academy_seminars()
+
+    def seed_sample_collection(self) -> dict[str, Any]:
+        """Saves offline sample events into the DB; used by --demo."""
+        events = self.collect_sample_events()
+        for evt in events:
+            self.db.save_event(evt)
+        return {"total_saved": len(events), "sample": True}
 
     def collect_public_education_notices(self) -> list[AdmissionEvent]:
         """Collects official admission fairs and public seminars from public educational entities.
@@ -476,20 +850,34 @@ class AdmissionCollector:
         )
         return event
 
-    def run_collection(self) -> dict[str, int]:
-        """Runs complete automated collection pipeline and saves events to DB."""
-        public_events = self.collect_public_education_notices()
-        academy_events = self.collect_major_academy_seminars()
+    def run_collection(self, now_kst: Optional[datetime] = None) -> dict[str, Any]:
+        """Runs the live official-source pipeline (SEN 1069/1068 + MOE 294) and upserts results.
 
-        all_collected = public_events + academy_events
+        A failing source contributes 0 events and an `errors` entry; existing DB rows are
+        never deleted, so a network outage cannot wipe previously collected events.
+        """
+        self.last_errors = []
+        sen_events: list[AdmissionEvent] = []
+        for bbs_sn, (grade, category) in SEN_BOARDS.items():
+            sen_events += self.collect_sen_board(bbs_sn, grade, category, now_kst=now_kst)
+        moe_events = self.collect_moe_press("294", now_kst=now_kst)
+
         saved_count = 0
-        for evt in all_collected:
-            self.db.save_event(evt)
-            saved_count += 1
+        for evt in sen_events + moe_events:
+            try:
+                self.db.save_event(evt)
+                saved_count += 1
+            except Exception as e:
+                self._record_error(f"save:{evt.event_id}", e)
 
-        logger.info("Admission collection finished: %d event(s) saved.", saved_count)
+        logger.info(
+            "Admission live collection finished: %d saved (sen=%d, moe=%d, errors=%d).",
+            saved_count, len(sen_events), len(moe_events), len(self.last_errors),
+        )
         return {
-            "public_count": len(public_events),
-            "academy_count": len(academy_events),
+            "sen_count": len(sen_events),
+            "moe_count": len(moe_events),
+            "public_count": len(sen_events) + len(moe_events),
             "total_saved": saved_count,
+            "errors": list(self.last_errors),
         }

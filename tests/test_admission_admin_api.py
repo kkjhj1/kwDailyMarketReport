@@ -84,11 +84,20 @@ class AdmissionAdminApiTests(unittest.TestCase):
         self.assertIn("대치동 2028 수능 개편 심층 세미나", titles)
 
     def test_admission_collect_endpoint(self):
-        res = self.client.post("/api/admission/collect", headers=self.auth_headers())
+        # Never rely on live internet: stub the live collector result.
+        from admission_brief.collector import AdmissionCollector
+        fake = {"sen_count": 2, "moe_count": 1, "public_count": 3, "total_saved": 3,
+                "errors": ["moe_294: URLError: timeout"]}
+        with patch.object(AdmissionCollector, "run_collection", return_value=fake) as run_mock:
+            res = self.client.post("/api/admission/collect", headers=self.auth_headers())
+        self.assertEqual(run_mock.call_count, 1)
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(data["success"])
-        self.assertGreaterEqual(data["total_saved"], 1)
+        self.assertEqual(data["total_saved"], 3)
+        self.assertEqual(data["sen_count"], 2)
+        self.assertEqual(data["moe_count"], 1)
+        self.assertEqual(data["errors"], ["moe_294: URLError: timeout"])
 
     def test_admission_dispatch_dry_run_endpoint(self):
         payload = {
