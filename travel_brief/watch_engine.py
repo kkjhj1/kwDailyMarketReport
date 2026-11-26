@@ -41,10 +41,11 @@ from travel_brief.flight_engine import (
     calc_required_leave_days,
     normalize_weekday_option,
 )
-from travel_brief.models import BudgetBreakdown, FlightDeal, round_man
+from travel_brief.models import BudgetBreakdown, FlightDeal, SSEFlightCandidate, round_man
 from travel_brief.storage.db import (
     TravelBriefDatabase,
     WATCH_MIN_REDROP_KRW,
+    validate_time_pair,
     make_watch_daily_key,
     make_watch_delivery_key,
     make_watch_drop_key_v2,
@@ -82,6 +83,157 @@ class WatchFetchSpec:
     horizon_months: int = 6
     weekday_option: str = "WEEKEND"
     sse_cap: int = SSE_VERIFY_PER_CITY
+    # Time-window watches: SSE-verify EVERY fresh price-graph slot under the ceiling (no `sse_cap` truncation).
+    needs_time_coverage: bool = False
+    price_ceiling_krw: Optional[int] = None
+
+
+class WatchDeals(list):
+    """Fetch result list carrying coverage metadata. `partial_coverage=True` means a time-coverage fetch could
+    not SSE-verify every eligible slot (deadline / failure) -> time-filtered alerts are suppressed ([DATA-01])."""
+    partial_coverage: bool = False
+
+
+def matches_time_window(hhmm: str, from_min: Optional[int], to_min: Optional[int]) -> bool:
+    """No filter (either bound None) -> True. Strict `HH:MM`; missing/malformed -> False.
+    `from <= to`: inclusive range; `from > to`: overnight wrap (`m >= from or m <= to`)."""
+    if from_min is None or to_min is None:
+        return True
+    m = _hhmm_to_minutes(hhmm or "")
+    if m is None:
+        return False
+    f, t = int(from_min), int(to_min)
+    if f <= t:
+        return f <= m <= t
+    return m >= f or m <= t
+
+
+def watch_time_filters(watch: dict[str, Any]) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    """(dep_from, dep_to, arr_from, arr_to); an invalid / half-set stored pair is ignored (treated as no filter)."""
+    def _pair(f_key: str, t_key: str) -> tuple[Optional[int], Optional[int]]:
+        try:
+            return validate_time_pair(watch.get(f_key), watch.get(t_key))
+        except (TypeError, ValueError):
+            return None, None
+
+    dep_f, dep_t = _pair("dep_time_from_min", "dep_time_to_min")
+    arr_f, arr_t = _pair("ret_arr_from_min", "ret_arr_to_min")
+    return dep_f, dep_t, arr_f, arr_t
+
+
+def has_time_filter(watch: dict[str, Any]) -> bool:
+    dep_f, _dt, arr_f, _at = watch_time_filters(watch)
+    return dep_f is not None or arr_f is not None
+
+
+def format_minutes(m: int) -> str:
+    return f"{int(m) // 60:02d}:{int(m) % 60:02d}"
+
+
+def time_window_label(watch: dict[str, Any]) -> str:
+    """`출국 09:00~12:00 · 귀국 인천도착 18:00~23:59` (empty when no filter)."""
+    dep_f, dep_t, arr_f, arr_t = watch_time_filters(watch)
+    parts = []
+    if dep_f is not None:
+        parts.append(f"출국 {format_minutes(dep_f)}~{format_minutes(dep_t)}")
+    if arr_f is not None:
+        parts.append(f"귀국 인천도착 {format_minutes(arr_f)}~{format_minutes(arr_t)}")
+    return " · ".join(parts)
+
+
+_MATCH, _NO, _UNKNOWN = "MATCH", "NO", "UNKNOWN"
+
+
+def _candidate_status(
+    cand: SSEFlightCandidate,
+    filters: tuple[Optional[int], Optional[int], Optional[int], Optional[int]],
+    office: bool,
+    dep_day: Optional[date],
+    ret_day: Optional[date],
+    leave_days: Optional[float] = None,
+) -> str:
+    """MATCH / NO (verified mismatch) / UNKNOWN (a needed time or arrival date is missing)."""
+    dep_f, dep_t, arr_f, arr_t = filters
+    statuses: list[str] = []
+    dep_m = _hhmm_to_minutes(cand.dep_time or "")
+    arr_m = _hhmm_to_minutes(cand.ret_arr_time or "")
+    if dep_f is not None:
+        statuses.append(_UNKNOWN if dep_m is None else (_MATCH if matches_time_window(cand.dep_time, dep_f, dep_t) else _NO))
+    if arr_f is not None:
+        if arr_m is None or cand.next_day_arrival is None:
+            statuses.append(_UNKNOWN)
+        else:
+            statuses.append(_MATCH if matches_time_window(cand.ret_arr_time, arr_f, arr_t) else _NO)
+    if office:
+        if dep_m is None or arr_m is None or cand.next_day_arrival is None or dep_day is None or ret_day is None:
+            statuses.append(_UNKNOWN)
+        elif cand.next_day_arrival or arr_m < OFFICE_RET_MIN_ARR_MINUTES:
+            statuses.append(_NO)
+        else:
+            leave = leave_days if leave_days is not None else calc_required_leave_days(dep_day, ret_day, cand.dep_time)
+            statuses.append(_MATCH if float(leave) <= OFFICE_MAX_LEAVE_DAYS else _NO)
+    if _NO in statuses:
+        return _NO
+    if _UNKNOWN in statuses:
+        return _UNKNOWN
+    return _MATCH
+
+
+def resolve_time_window_deal(
+    deal: FlightDeal,
+    filters: tuple[Optional[int], Optional[int], Optional[int], Optional[int]],
+    office: bool = False,
+) -> tuple[Optional[FlightDeal], Optional[int]]:
+    """Primary (cheapest matching itinerary) of one verified slot + the cheapest price whose match is UNKNOWN.
+    Returns (effective_deal | None, unknown_floor_krw | None). Only `LIVE_SSE` + `FRESH` deals are evaluated.
+    Without `sse_candidates` the deal's own exact times are the only (cheapest) itinerary known: if it does not
+    verifiably match, pricier itineraries of the slot are unknown -> the slot price becomes the unknown floor."""
+    if getattr(deal, "data_source", "") != "LIVE_SSE" or getattr(deal, "freshness", "FRESH") != "FRESH":
+        return None, None
+    dep_day, ret_day = _parse_day(deal.departure_date), _parse_day(deal.return_date)
+    cands: list[tuple[SSEFlightCandidate, Optional[float]]] = [(c, None) for c in (deal.sse_candidates or ())]
+    fallback = not cands
+    if fallback:
+        cands.append((SSEFlightCandidate(
+            airline=deal.airline or "", dep_time=deal.exact_dep_time or "", ret_dep_time=deal.exact_ret_time or "",
+            ret_arr_time=deal.exact_ret_arr_time or "", next_day_arrival=deal.next_day_arrival,
+            min_card=int(deal.price_krw or 0), min_general=int(deal.general_fare_krw or 0),
+        ), None))
+        if office and int(getattr(deal, "office_fare_krw", 0) or 0) > 0:
+            cands.append((SSEFlightCandidate(
+                airline=deal.office_airline or deal.airline or "", dep_time=deal.office_dep_time or "",
+                ret_dep_time="", ret_arr_time=deal.office_ret_arr_time or "", next_day_arrival=False,
+                min_card=int(deal.office_fare_krw), min_general=int(deal.office_fare_krw),
+            ), deal.office_leave_days))
+    best: Optional[SSEFlightCandidate] = None
+    unknown_floor: Optional[int] = None
+    for cand, leave in sorted(cands, key=lambda x: (x[0].min_card, x[0].min_general)):
+        if cand.min_card <= 0:
+            continue
+        status = _candidate_status(cand, filters, office, dep_day, ret_day, leave)
+        if status == _MATCH:
+            if best is None or cand.min_card < best.min_card:
+                best = cand
+        elif status == _UNKNOWN or fallback:
+            unknown_floor = cand.min_card if unknown_floor is None else min(unknown_floor, cand.min_card)
+    if fallback and best is None:
+        # Only the cheapest itinerary is known and it does not match: the slot's in-window fare is unknown.
+        unknown_floor = int(deal.price_krw or 0) or unknown_floor
+    if best is None:
+        return None, unknown_floor
+    eff = replace(
+        deal,
+        price_krw=best.min_card,
+        price_min_krw=best.min_card,
+        general_fare_krw=max(best.min_general, best.min_card),
+        airline=best.airline or deal.airline,
+        exact_dep_time=best.dep_time,
+        exact_ret_time=best.ret_dep_time,
+        exact_ret_arr_time=best.ret_arr_time,
+        next_day_arrival=best.next_day_arrival,
+        candidate_fingerprint=best.fingerprint,
+    )
+    return eff, unknown_floor
 
 
 @dataclass
@@ -106,6 +258,7 @@ class WatchTickResult:
     daily_count: int = 0
     daily_skipped_window_count: int = 0
     daily_no_data_count: int = 0
+    time_partial_suppressed_count: int = 0
     sent_count: int = 0
     unknown_count: int = 0
     failed_count: int = 0
@@ -181,7 +334,7 @@ def _resolve_office_deal(deal: FlightDeal) -> Optional[FlightDeal]:
         dep_m is not None
         and arr_m is not None
         and arr_m >= OFFICE_RET_MIN_ARR_MINUTES
-        and not getattr(deal, "next_day_arrival", False)
+        and getattr(deal, "next_day_arrival", False) is False  # unknown (None) arrival date == rejected
         and calc_required_leave_days(dep, ret, deal.exact_dep_time) <= OFFICE_MAX_LEAVE_DAYS
     ):
         return deal
@@ -200,6 +353,7 @@ def _resolve_office_deal(deal: FlightDeal) -> Optional[FlightDeal]:
         and off_leave is not None
         and float(off_leave) <= OFFICE_MAX_LEAVE_DAYS
     ):
+        # The `office_*` itinerary itself was selected with a verified same-day arrival (parse_sse_final_object).
         return replace(
             deal,
             price_krw=off_fare,
@@ -207,6 +361,7 @@ def _resolve_office_deal(deal: FlightDeal) -> Optional[FlightDeal]:
             airline=getattr(deal, "office_airline", "") or deal.airline,
             exact_dep_time=off_dep,
             exact_ret_arr_time=off_arr,
+            next_day_arrival=False,
         )
     return None
 
@@ -295,6 +450,34 @@ def make_live_quote_fetcher(engine: FlightEngine, sse_verify_top: int = SSE_VERI
         upgraded = {(d.departure_date, d.return_date): d for d in verified or [] if d.data_source == "LIVE_SSE"}
         return [upgraded.get((d.departure_date, d.return_date), d) for d in deals]
 
+    def _verify_all(code: str, custom: Optional[dict], deals: list[FlightDeal], ceiling: int,
+                    deadline: float) -> WatchDeals:
+        """Time-coverage mode: SSE-verify EVERY fresh PG slot priced <= ceiling (no cap). Any eligible slot left
+        unverified (deadline / failure / live off) marks the result `partial_coverage`."""
+        out = WatchDeals(deals)
+        eligible = [d for d in deals if d.data_source == "LIVE_PG" and d.freshness == "FRESH" and d.price_krw <= ceiling]
+        if not eligible:
+            return out
+        if not getattr(engine, "live_naver", False) or time.monotonic() >= deadline:
+            out.partial_coverage = True
+            return out
+        kwargs: dict[str, Any] = {"live_deadline": deadline}
+        if custom:
+            kwargs["custom_destinations"] = custom
+        try:
+            verified = engine.ensure_deals_sse_verified(eligible, **kwargs)
+        except Exception as exc:
+            logger.warning("Watch time-coverage SSE verification failed for %s: %s", code, exc)
+            out.partial_coverage = True
+            return out
+        upgraded = {(d.departure_date, d.return_date): d for d in verified or [] if d.data_source == "LIVE_SSE"}
+        merged = WatchDeals(upgraded.get((d.departure_date, d.return_date), d) for d in deals)
+        merged.partial_coverage = any((d.departure_date, d.return_date) not in upgraded for d in eligible)
+        if merged.partial_coverage:
+            logger.info("[WATCH] %s time coverage partial: %d/%d slots verified.", code,
+                        sum(1 for d in eligible if (d.departure_date, d.return_date) in upgraded), len(eligible))
+        return merged
+
     def fetch(code: str, custom: Optional[dict], max_target: int, spec: Optional[WatchFetchSpec] = None) -> list[FlightDeal]:
         if spec is None:
             kwargs: dict[str, Any] = {"dest_code": code, "months_ahead": 6, "fast_live": True}
@@ -311,9 +494,18 @@ def make_live_quote_fetcher(engine: FlightEngine, sse_verify_top: int = SSE_VERI
             fast_live=True,
             live_deadline=deadline,
         ) or [])
+        coverage = bool(getattr(spec, "needs_time_coverage", False))
         if time.monotonic() >= deadline:
+            if coverage:
+                out = WatchDeals(deals)
+                out.partial_coverage = True
+                return out
             return deals
-        return _verify(code, custom, deals, max_target, min(sse_verify_top, spec.sse_cap))
+        verified = _verify(code, custom, deals, max_target, min(sse_verify_top, spec.sse_cap))
+        if not coverage:
+            return verified
+        ceiling = int(spec.price_ceiling_krw or max_target)
+        return _verify_all(code, custom, verified, ceiling, deadline)
 
     def fetch_fixed(code: str, custom: Optional[dict], dep_iso: str, ret_iso: str,
                     include_neighbors: bool = True) -> list[FlightDeal]:
@@ -448,6 +640,7 @@ class WatchCheckEngine:
 
         # 1) FLEX: one fetch per airport (union horizon / weekday option across its watches)
         flex_fresh: dict[str, list[FlightDeal]] = {}
+        flex_partial: set[str] = set()
         for code, city_watches in flex_by_code.items():
             if self.monotonic_fn() >= tick_deadline:
                 result.deadline_skipped_count += 1
@@ -458,17 +651,29 @@ class WatchCheckEngine:
             else:
                 max_target = max(int(w["target_price_krw"]) for w in city_watches)
             city_scoped = any(str(w["dest_code"]).upper() == code for w in city_watches)
+            timed = [w for w in city_watches if has_time_filter(w)]
+            ceiling: Optional[int] = None
+            if timed:
+                if any(_notify_mode(w) == "DAILY" for w in timed):
+                    ceiling = DAILY_PRICE_CEILING_KRW
+                else:
+                    ceiling = max(int(w["target_price_krw"]) for w in timed)
             spec = WatchFetchSpec(
                 horizon_months=max(int(w.get("horizon_months") or 6) for w in city_watches),
                 weekday_option=union_weekday_option([w.get("weekday_option") or "ANY" for w in city_watches]),
                 sse_cap=SSE_VERIFY_PER_CITY if city_scoped else COUNTRY_SSE_VERIFY_PER_AIRPORT,
+                needs_time_coverage=bool(timed),
+                price_ceiling_krw=ceiling,
             )
             try:
-                deals = list(self._call_quote_fetcher(code, custom, max_target, spec) or [])
+                raw = self._call_quote_fetcher(code, custom, max_target, spec)
+                deals = list(raw or [])
             except Exception as exc:
                 logger.warning("[WATCH] quote fetch failed for %s: %s", code, exc)
                 result.fetch_error_count += 1
                 continue
+            if getattr(raw, "partial_coverage", False):
+                flex_partial.add(code)
             flex_fresh[code] = self._classify_into(deals, {code}, result)
 
         # 2) FIXED: exact dates (+ ±1d neighbours for city scopes) per (airport, dep, ret)
@@ -497,33 +702,88 @@ class WatchCheckEngine:
             if not codes:
                 continue
             try:
+                timed = has_time_filter(w)
                 if _watch_mode(w) == "FIXED":
                     dep_iso, ret_iso = w["fixed_dep_date"], w["fixed_ret_date"]
                     pool = [d for c in codes for d in fixed_fresh.get((c, dep_iso, ret_iso), [])]
                     main = [d for d in pool if d.departure_date == dep_iso and d.return_date == ret_iso]
                     neighbors = [d for d in pool if not (d.departure_date == dep_iso and d.return_date == ret_iso)]
-                    self._process_watch(w, main, result, kst_now, neighbors=neighbors)
+                    if not timed:
+                        self._process_watch(w, main, result, kst_now, neighbors=neighbors)
+                        continue
+                    sel_main, reference, complete = self._select_time_window(w, main)
+                    sel_nb, _ref_nb, _complete_nb = self._select_time_window(w, neighbors)
+                    if not complete:
+                        result.time_partial_suppressed_count += 1
+                        continue
+                    self._process_watch(w, sel_main, result, kst_now, neighbors=sel_nb, reference=reference)
                 else:
                     pool = [d for c in codes for d in flex_fresh.get(c, [])]
-                    self._process_watch(w, self._filter_flex(w, pool, today), result, kst_now)
+                    if not timed:
+                        self._process_watch(w, self._filter_flex(w, pool, today), result, kst_now)
+                        continue
+                    if any(c in flex_partial or c not in flex_fresh for c in codes):
+                        # [DATA-01] fail-closed: an incomplete slot sweep can neither prove nor rule out a fare.
+                        result.time_partial_suppressed_count += 1
+                        continue
+                    scoped = self._filter_flex_dates(w, pool, today)
+                    selected, reference, complete = self._select_time_window(w, scoped)
+                    if not complete:
+                        result.time_partial_suppressed_count += 1
+                        continue
+                    self._process_watch(w, selected, result, kst_now, reference=reference)
             except Exception as exc:
                 logger.error("[WATCH] watch %s failed: %s", w.get("watch_id"), exc, exc_info=True)
 
     @staticmethod
-    def _filter_flex(watch: dict[str, Any], deals: list[FlightDeal], today: date) -> list[FlightDeal]:
+    def _filter_flex_dates(watch: dict[str, Any], deals: list[FlightDeal], today: date) -> list[FlightDeal]:
+        """Date scope only (weekday option / horizon / day pattern / peak); no OFFICE time resolution."""
         include_peak = bool(watch["include_peak"])
         horizon = int(watch.get("horizon_months") or 6)
         option = watch.get("weekday_option") or "ANY"
+        return [
+            d for d in deals
+            if matches_weekday_option(d, option)
+            and within_horizon(d, today, horizon)
+            and matches_day_pattern(d, watch["day_pattern"])
+            and (include_peak or not is_peak_deal(d))
+        ]
+
+    @staticmethod
+    def _select_time_window(
+        watch: dict[str, Any], scoped: list[FlightDeal]
+    ) -> tuple[list[FlightDeal], Optional[FlightDeal], bool]:
+        """Time-window watch selection over date-scoped verified deals.
+        Returns (primary deals — one cheapest matching itinerary per slot, unfiltered_best reference, complete).
+        `complete=False` when an itinerary whose match is UNKNOWN is cheaper than the chosen primary (or when
+        there is no primary at all but unknown itineraries exist): the watch is then suppressed ([DATA-01])."""
+        filters = watch_time_filters(watch)
+        office = _watch_mode(watch) == "FLEX" and normalize_weekday_option(watch.get("weekday_option") or "ANY") == "OFFICE"
+        primaries: list[FlightDeal] = []
+        unknown_floors: list[int] = []
+        unfiltered: list[FlightDeal] = []
+        for d in scoped:
+            if classify_quote(d) != "SSE_FRESH":
+                continue
+            plain = _resolve_office_deal(d) if office else d
+            if plain is not None:
+                unfiltered.append(plain)
+            eff, unknown = resolve_time_window_deal(d, filters, office=office)
+            if eff is not None:
+                primaries.append(eff)
+            if unknown is not None:
+                unknown_floors.append(int(unknown))
+        best_price = min((p.price_krw for p in primaries), default=None)
+        complete = not any(best_price is None or u < best_price for u in unknown_floors)
+        reference = min(unfiltered, key=lambda x: (x.price_krw, x.departure_date, x.destination_code), default=None)
+        return primaries, reference, complete
+
+    @classmethod
+    def _filter_flex(cls, watch: dict[str, Any], deals: list[FlightDeal], today: date) -> list[FlightDeal]:
+        option = watch.get("weekday_option") or "ANY"
         norm_opt = normalize_weekday_option(option)
         out: list[FlightDeal] = []
-        for d in deals:
-            if not (
-                matches_weekday_option(d, option)
-                and within_horizon(d, today, horizon)
-                and matches_day_pattern(d, watch["day_pattern"])
-                and (include_peak or not is_peak_deal(d))
-            ):
-                continue
+        for d in cls._filter_flex_dates(watch, deals, today):
             if norm_opt == "OFFICE":
                 eff = _resolve_office_deal(d)
                 if eff is not None:
@@ -543,6 +803,7 @@ class WatchCheckEngine:
         result: WatchTickResult,
         kst_now: datetime,
         neighbors: Optional[list[FlightDeal]] = None,
+        reference: Optional[FlightDeal] = None,
     ) -> None:
         matching = sorted(deals, key=lambda d: (d.price_krw, d.departure_date, d.destination_code))
         notify = _notify_mode(watch)
@@ -564,7 +825,7 @@ class WatchCheckEngine:
 
         if notify == "DAILY":
             if in_window:
-                if self._try_daily(watch, best, result, kst_now, prev_seen, initial, neighbor_best):
+                if self._try_daily(watch, best, result, kst_now, prev_seen, initial, neighbor_best, reference):
                     return  # never DAILY + DROP for the same watch in one tick
             else:
                 result.daily_skipped_window_count += 1  # no compensatory briefing outside the morning
@@ -589,8 +850,9 @@ class WatchCheckEngine:
 
         for deal in candidates:  # cheapest first; at most ONE alert per watch per tick
             tip = neighbor_best if deal is best else self._cheaper_neighbor(neighbors or [], deal)
+            fingerprint = getattr(deal, "candidate_fingerprint", "") or ""
             if self.dry_run:
-                if self._preview_block_reason(watch, deal, allow_same_slot, key_version):
+                if self._preview_block_reason(watch, deal, allow_same_slot, key_version, fingerprint):
                     continue
                 result.events.append(self._event(watch, deal, "DRY_RUN", kind="DROP"))
                 return
@@ -606,12 +868,14 @@ class WatchCheckEngine:
                 now=self.now_fn(),
                 allow_same_slot_drop=allow_same_slot,
                 key_version=key_version,
+                fingerprint=fingerprint,
             )
             if not claim.claimed:
                 continue
             text = build_watch_alert_card(
                 watch, deal, self.catalog.get(deal.destination_code), prev_seen,
                 kind="DROP", neighbor_deal=tip, scope_label=self._scope_label(watch), initial_price=initial,
+                reference_deal=reference,
             )
             markup = build_watch_alert_keyboard(watch["dest_code"], deal, include_list=True)
             self._send_and_finalize(watch, deal, claim, text, markup, result, kind="DROP")
@@ -627,6 +891,7 @@ class WatchCheckEngine:
         prev_seen: Optional[int],
         initial: Optional[int],
         neighbor_best: Optional[FlightDeal],
+        reference: Optional[FlightDeal] = None,
     ) -> bool:
         """Returns True when this tick produced (or attempted) the day's briefing for the watch."""
         kst_date = kst_now.date().isoformat()
@@ -653,6 +918,7 @@ class WatchCheckEngine:
         text = build_watch_alert_card(
             watch, best, self.catalog.get(best.destination_code), prev_seen,
             kind="DAILY", neighbor_deal=neighbor_best, scope_label=self._scope_label(watch), initial_price=initial,
+            reference_deal=reference,
         )
         markup = build_watch_alert_keyboard(watch["dest_code"], best, include_list=True)
         self._send_and_finalize(watch, best, claim, text, markup, result, kind="DAILY")
@@ -683,14 +949,17 @@ class WatchCheckEngine:
         return min(verified, key=lambda n: (n.price_krw, n.departure_date)) if verified else None
 
     def _preview_block_reason(
-        self, watch: dict[str, Any], deal: FlightDeal, allow_same_slot: bool = False, key_version: int = 1
+        self, watch: dict[str, Any], deal: FlightDeal, allow_same_slot: bool = False, key_version: int = 1,
+        fingerprint: str = "",
     ) -> Optional[str]:
         if key_version == 2:
-            key = make_watch_drop_key_v2(watch["watch_id"], deal.departure_date, deal.return_date, deal.price_krw)
+            key = make_watch_drop_key_v2(
+                watch["watch_id"], deal.departure_date, deal.return_date, deal.price_krw, fingerprint
+            )
         else:
             key = make_watch_delivery_key(
                 watch["watch_id"], watch["chat_id"], watch["dest_code"], deal.departure_date, deal.return_date,
-                deal.price_krw,
+                deal.price_krw, fingerprint,
             )
         dup = self.db.is_watch_delivery_blocked(key)
         if dup:
@@ -746,9 +1015,12 @@ def build_watch_alert_card(
     neighbor_deal: Optional[FlightDeal] = None,
     scope_label: str = "",
     initial_price: Optional[int] = None,
+    reference_deal: Optional[FlightDeal] = None,
 ) -> str:
     """Single-screen decision card: headline, exact itinerary/times, short-stay traps, target / anchor /
-    last-seen comparisons, N-night budget, verified ±1d tip, LCC baggage & far-horizon disclosures."""
+    last-seen comparisons, N-night budget, verified ±1d tip, LCC baggage & far-horizon disclosures.
+    Time-window watches: `deal` is the in-window Primary; a strictly cheaper verified `reference_deal`
+    (time-agnostic best) adds ONE optional line, the first to be trimmed for [TG-01]."""
     target = int(watch["target_price_krw"])
     price = int(deal.price_krw)
     saving = target - price
@@ -785,7 +1057,12 @@ def build_watch_alert_card(
         core.append("⚠️ 귀국편 오전 출발(10시 전) — 마지막 날 일정이 짧아요")
     if deal.next_day_arrival:
         core.append("⚠️ 귀국 다음날 도착 편입니다")
-    core.append(f"💰 실시간 최저가: <b>{price:,}원</b> (네이버 실시간 왕복·1인)")
+    window = time_window_label(watch)
+    if window:
+        core.append(f"⏱ 시간 조건: {html.escape(window)}")
+        core.append(f"💰 조건 내 실시간 최저가: <b>{price:,}원</b> (네이버 실시간 왕복·1인)")
+    else:
+        core.append(f"💰 실시간 최저가: <b>{price:,}원</b> (네이버 실시간 왕복·1인)")
     if saving >= 0:
         core.append(f"🎯 내 목표가 {target:,}원 대비 <b>{saving:,}원({saving_pct:.1f}%)</b> 저렴")
     else:
@@ -821,7 +1098,21 @@ def build_watch_alert_card(
         optional.append("🎒 특가 운임은 위탁수하물 불포함 경우가 많습니다.")
     if int(watch.get("horizon_months") or 0) > 6 and _watch_mode(watch) == "FLEX":
         optional.append("ℹ️ 9~12개월 먼 일정은 LCC 특가가 아직 미오픈일 수 있어요 (실시간 검증 요금만 안내).")
-    footer = "⚠️ 결제 단계에서 요금·재고가 변동될 수 있습니다."
+    if (
+        window
+        and reference_deal is not None
+        and classify_quote(reference_deal) == "SSE_FRESH"
+        and int(reference_deal.price_krw) < price
+    ):
+        ref_dep = _hhmm(reference_deal.exact_dep_time) or "--:--"
+        ref_arr = _hhmm(reference_deal.exact_ret_arr_time) or "--:--"
+        ref_dates = f"{_short_date(reference_deal.departure_date)}~{_short_date(reference_deal.return_date)}"
+        # Appended LAST so the [TG-01] trim loop (pops from the end) drops it first.
+        optional.append(
+            f"💡 참고(시간 무관 최저 특가): {int(reference_deal.price_krw):,}원~ "
+            f"({html.escape(ref_dep)} 출발 · {html.escape(ref_arr)} 인천도착 · {html.escape(ref_dates)})"
+        )
+    footer ="⚠️ 결제 단계에서 요금·재고가 변동될 수 있습니다."
 
     lines = core + optional + [footer]
     while optional and _visible_len("\n".join(lines)) > CARD_MAX_VISIBLE:

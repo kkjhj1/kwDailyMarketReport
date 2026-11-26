@@ -1,7 +1,8 @@
 from __future__ import annotations
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal, Optional
 
 # Long-haul trip profile (NA / EU / OCE regions, the HAWAII budget profile, or >= 7h nonstop flights).
 # Long-haul copy recommends 5+ nights instead of the short-haul 3박 4일 weekend default.
@@ -184,6 +185,44 @@ def format_live_schedule_slots(
     return dep_slot, ret_slot
 
 
+@dataclass(frozen=True)
+class SSEFlightCandidate:
+    """One verified nonstop round-trip itinerary from a Naver `searchFlights` SSE response.
+    `next_day_arrival=None` means the Incheon arrival date was not reported (unknown, never guessed)."""
+    airline: str
+    dep_time: str
+    ret_dep_time: str
+    ret_arr_time: str
+    ret_arr_date: str = ""
+    next_day_arrival: Optional[bool] = None
+    min_card: int = 0
+    min_general: int = 0
+    outbound_id: str = ""
+    return_id: str = ""
+
+    @property
+    def fingerprint(self) -> str:
+        if self.outbound_id and self.return_id:
+            return f"{self.outbound_id}:{self.return_id}"
+        return f"{self.airline}|{self.dep_time}|{self.ret_arr_time}"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SSEFlightCandidate":
+        nda = data.get("next_day_arrival")
+        return cls(
+            airline=str(data.get("airline") or ""),
+            dep_time=str(data.get("dep_time") or ""),
+            ret_dep_time=str(data.get("ret_dep_time") or ""),
+            ret_arr_time=str(data.get("ret_arr_time") or ""),
+            ret_arr_date=str(data.get("ret_arr_date") or ""),
+            next_day_arrival=None if nda is None else bool(nda),
+            min_card=int(data.get("min_card") or 0),
+            min_general=int(data.get("min_general") or 0),
+            outbound_id=str(data.get("outbound_id") or ""),
+            return_id=str(data.get("return_id") or ""),
+        )
+
+
 @dataclass
 class FlightDeal:
     destination_code: str
@@ -213,15 +252,39 @@ class FlightDeal:
     exact_dep_time: str = ""
     exact_ret_time: str = ""
     exact_ret_arr_time: str = ""
-    next_day_arrival: bool = False
+    # None == SSE did not report the Incheon arrival date (unknown); False/True == verified.
+    next_day_arrival: Optional[bool] = False
     freshness: Literal["FRESH", "STALE"] = "FRESH"
     office_fare_krw: int = 0
     office_airline: str = ""
     office_dep_time: str = ""
     office_ret_arr_time: str = ""
     office_leave_days: Optional[float] = None
+    sse_candidates: tuple[SSEFlightCandidate, ...] = ()
+    # Set only on time-window effective deals (watch engine); "" for every other deal.
+    candidate_fingerprint: str = ""
+
+    def to_cache_dict(self) -> dict[str, Any]:
+        """JSON-safe dict (disk cache); `sse_candidates` become a list of plain dicts."""
+        out = dataclasses.asdict(self)
+        out["sse_candidates"] = [dataclasses.asdict(c) for c in self.sse_candidates]
+        return out
+
+    @classmethod
+    def from_cache_dict(cls, data: dict[str, Any]) -> "FlightDeal":
+        known = {f.name for f in dataclasses.fields(cls)}
+        kwargs = {k: v for k, v in dict(data).items() if k in known}
+        raw_cands = kwargs.pop("sse_candidates", None) or []
+        cands = tuple(
+            c if isinstance(c, SSEFlightCandidate) else SSEFlightCandidate.from_dict(c)
+            for c in raw_cands
+            if isinstance(c, (dict, SSEFlightCandidate))
+        )
+        return cls(**kwargs, sse_candidates=cands)
 
     def __post_init__(self):
+        if self.sse_candidates and not isinstance(self.sse_candidates, tuple):
+            self.sse_candidates = tuple(self.sse_candidates)
         if self.exact_dep_time and (
             not self.departure_time_slot
             or self.departure_time_slot == "오전 08:30~10:30 (직장인 반차 추천)"

@@ -1829,5 +1829,183 @@ class TestTravelLiveBudgetCacheAndTerminalGuard(unittest.TestCase):
         self.assertNotIn("💼 연차", format_telegram_briefing([lh_rec], engine=engine, target_city="CDG"))
 
 
+# ----------------------------------------------------------------------
+# Time-window watch UI: `9-12` parser, 2-tap hour grid, AWAITING_WATCH_TIME
+# ----------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from travel_brief.interactive import (  # noqa: E402
+    STATE_AWAITING_WATCH_TIME,
+    STATE_IDLE,
+    parse_time_window_text,
+)
+from travel_brief.storage.db import TravelBriefDatabase  # noqa: E402
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("9-12", (540, 720)), ("09-12", (540, 720)), ("9~12", (540, 720)), ("9 12", (540, 720)),
+    ("9시-12시", (540, 720)), ("9시부터 12시까지", (540, 720)), ("09:30-13:00", (570, 780)),
+    ("09:30~13:00", (570, 780)), ("0930-1330", (570, 810)), ("18-24", (1080, 1439)),
+    ("18-24:00", (1080, 1439)), ("22-02", (1320, 120)), ("0-24", (0, 1439)), ("９－１２", (540, 720)),
+])
+def test_parse_time_window_text_accepts(raw, expected):
+    assert parse_time_window_text(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "9-9", "24:30", "9", "25-26", "24-3", "9-24:01", "09:60-10", "9-10:75", "abc", "", "912", "12", "9-12-15",
+    "0930", "9:5-10",
+])
+def test_parse_time_window_text_rejects(raw):
+    with pytest.raises(ValueError):
+        parse_time_window_text(raw)
+
+
+@pytest.fixture
+def tw_handler():
+    db = TravelBriefDatabase(db_path=":memory:")
+    db.add_recipient("c1", name="u", topic="TRAVEL")
+    h = TravelInteractiveHandler(bot_token="dummy", db=db)
+    h.tg = MagicMock()
+    h.tg.send_text.return_value = "900"
+    h._submit_ui = lambda fn, *a: fn(*a)
+    h.edits = []
+
+    def fake_edit(chat_id, message_id, text, reply_markup=None):
+        h.edits.append((message_id, text, reply_markup))
+        return True
+
+    h._safe_edit_message = fake_edit
+    yield h, db
+    h.shutdown()
+    db.close()
+
+
+def _tw_cb(h, data, user="u1", mid=900):
+    n = h.tg.answer_callback.call_count
+    h.handle_callback_query("cq", "c1", mid, data, {"id": user})
+    assert h.tg.answer_callback.call_count == n + 1  # exactly one immediate ack (TG-04)
+
+
+def _cbs(markup):
+    return [b["callback_data"] for row in markup["inline_keyboard"] for b in row if "callback_data" in b]
+
+
+def _last(h):
+    if h.edits:
+        return h.edits[-1][1], h.edits[-1][2]
+    return h.tg.send_text.call_args[0][1], h.tg.send_text.call_args[1]["reply_markup"]
+
+
+def test_time_picker_two_tap_grid_presets_and_save(tw_handler):
+    h, db = tw_handler
+    _tw_cb(h, "trv:w:s:FUK")
+    _tw_cb(h, "trv:w:a:FUK")
+    text, markup = _last(h)
+    assert "⏱ 시간 조건" in text and "무관" in text
+    assert {"trv:w:q:FUK:D", "trv:w:q:FUK:R"} <= set(_cbs(markup))
+
+    _tw_cb(h, "trv:w:q:FUK:D")
+    text, markup = _last(h)
+    cbs = _cbs(markup)
+    assert {f"trv:w:tp:FUK:D:{k}" for k in ("M", "0006", "0612", "1218", "1824")} <= set(cbs)
+    grid = [r for r in markup["inline_keyboard"] if r and r[0]["callback_data"].startswith("trv:w:tf:")]
+    assert len(grid) == 4 and all(len(r) == 6 for r in grid)  # 4 rows x 6 cols, 00..23
+    assert [b["callback_data"] for r in grid for b in r] == [f"trv:w:tf:FUK:D:{i}" for i in range(24)]
+    assert {"trv:w:tc:FUK:D", "trv:w:s:FUK"} <= set(cbs)
+
+    _tw_cb(h, "trv:w:tf:FUK:D:9")
+    text, markup = _last(h)
+    to_cbs = [c for c in _cbs(markup) if c.startswith("trv:w:tt:")]
+    assert len(to_cbs) == 23 and "trv:w:tt:FUK:D:9" not in to_cbs and to_cbs[-1] == "trv:w:tt:FUK:D:24"
+    to_rows = [r for r in markup["inline_keyboard"] if r and r[0]["callback_data"].startswith("trv:w:tt:")]
+    assert len(to_rows) == 4 and all(len(r) <= 6 for r in to_rows)
+    assert "09시 선택됨" in text
+
+    _tw_cb(h, "trv:w:tt:FUK:D:12")
+    text, _markup = _last(h)
+    assert "09:00 ━━━━ 12:00" in text and "저장 버튼" in text
+    assert db.get_travel_watch("c1", "FUK") is None  # nothing persisted before an explicit save
+
+    _tw_cb(h, "trv:w:tp:FUK:R:1824")
+    assert "18:00 ━━━━ 23:59" in _last(h)[0]
+    _tw_cb(h, "trv:w:k:FUK:1")
+    w = db.get_travel_watch("c1", "FUK")
+    assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"], w["ret_arr_to_min"]) == \
+        (540, 720, 1080, 1439)
+    assert "⏱ 시간 조건" in _last(h)[0]
+
+    # edit (reload from DB) -> clear departure with the 무관 preset -> save clears to NULL
+    _tw_cb(h, "trv:w:e:FUK")
+    assert h._get_draft("c1", "u1", "FUK").dep_time_from_min == 540
+    _tw_cb(h, "trv:w:tp:FUK:D:M")
+    _tw_cb(h, "trv:w:k:FUK:1")
+    w = db.get_travel_watch("c1", "FUK")
+    assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"]) == (None, None, 1080)
+
+    # overnight wrap via the grid: 22 -> 02
+    _tw_cb(h, "trv:w:q:FUK:R")
+    _tw_cb(h, "trv:w:tf:FUK:R:22")
+    _tw_cb(h, "trv:w:tt:FUK:R:2")
+    d = h._get_draft("c1", "u1", "FUK")
+    assert (d.ret_arr_from_min, d.ret_arr_to_min) == (1320, 120) and "자정 넘김" in _last(h)[0]
+
+    # step 2 without step 1 -> asks for the start hour again (no write)
+    _tw_cb(h, "trv:w:tt:FUK:D:12")
+    assert "시작 시각을 먼저" in _last(h)[0]
+
+    for mk in [e[2] for e in h.edits if e[2]]:
+        for cb in _cbs(mk):
+            assert cb.startswith("trv:") and len(cb.encode("utf-8")) <= 64, cb
+
+
+def test_time_callbacks_strict_allowlist(tw_handler):
+    h, db = tw_handler
+    for bad in ("trv:w:q:FUK:X", "trv:w:q:FUK", "trv:w:q:FUK:D:1", "trv:w:tf:FUK:D:24", "trv:w:tf:FUK:D:09",
+                "trv:w:tf:FUK:D:-1", "trv:w:tt:FUK:D:0", "trv:w:tt:FUK:D:25", "trv:w:tp:FUK:D:0007",
+                "trv:w:tp:FUK:D", "trv:w:tc:FUK:D:1", "trv:w:q:ALL:D", "trv:w:q:ZZZ:D"):
+        _tw_cb(h, bad)
+        assert "지원하지 않는" in h.tg.answer_callback.call_args[1]["text"], bad
+    assert h.edits == [] and db.get_travel_watch("c1", "FUK") is None
+    for k in ("q", "tp", "tf", "tt", "tc"):
+        assert k in h._WATCH_TOASTS and k in h._TIME_WATCH_SUBS
+
+
+def test_awaiting_watch_time_state_isolation_input_and_cancel(tw_handler):
+    h, db = tw_handler
+    _tw_cb(h, "trv:w:tc:FUK:R")
+    assert "직접 입력" in _last(h)[0]
+    assert h.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_TIME
+    ctx = h.get_chat_context("c1", "u1")
+    assert (ctx.dest_code, ctx.direction) == ("FUK", "R")
+    assert h.get_chat_state("c1", "u2") == STATE_IDLE  # (chat_id, user_id) isolation
+    # another member's text never fills u1's prompt
+    assert h.handle_text_message("c1", 11, "u2", "9-12")[1] != "travel_watch_time_set"
+    assert h.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_TIME
+
+    assert h.handle_text_message("c1", 12, "u1", "25-26") == (True, "travel_watch_time_invalid")
+    assert h.get_chat_state("c1", "u1") == STATE_AWAITING_WATCH_TIME  # invalid keeps the prompt
+    assert h.handle_text_message("c1", 13, "u1", "09:30~13:00") == (True, "travel_watch_time_set")
+    assert h.get_chat_state("c1", "u1") == STATE_IDLE
+    d = h._get_draft("c1", "u1", "FUK")
+    assert (d.ret_arr_from_min, d.ret_arr_to_min, d.dep_time_from_min) == (570, 780, None)
+
+    # 무관 clears; /cancel abandons the prompt
+    _tw_cb(h, "trv:w:tc:FUK:R")
+    assert h.handle_text_message("c1", 14, "u1", "무관") == (True, "travel_watch_time_set")
+    assert h._get_draft("c1", "u1", "FUK").ret_arr_from_min is None
+    _tw_cb(h, "trv:w:tc:FUK:D")
+    assert h.handle_text_message("c1", 15, "u1", "/cancel") == (True, "travel_cancel")
+    assert h.get_chat_state("c1", "u1") == STATE_IDLE
+    # navigation away (another watch callback) also drops the pending time prompt
+    _tw_cb(h, "trv:w:tc:FUK:D")
+    _tw_cb(h, "trv:w:q:FUK:D")
+    assert h.get_chat_state("c1", "u1") == STATE_IDLE
+    # TTL expiry
+    _tw_cb(h, "trv:w:tc:FUK:D")
+    h._chat_states[("c1", "u1")].expires_at = time.monotonic() - 1
+    assert h.get_chat_state("c1", "u1") == STATE_IDLE
+
+
 if __name__ == "__main__":
     unittest.main()

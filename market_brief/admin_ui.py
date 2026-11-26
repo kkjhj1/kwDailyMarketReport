@@ -4374,6 +4374,7 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
         if (w.last_seen_price_text) parts.push(`최근 ${w.last_seen_price_text}`);
         if (w.watch_mode) parts.push(w.watch_mode);
         if (w.notify_mode) parts.push(w.notify_mode);
+        if (w.time_window_text) parts.push(`⏱ ${w.time_window_text}`);
         return parts.join(' · ');
       }
       const parts = [`${w.condition_type || '-'} ${w.direction || ''} ${w.threshold_value || '-'} ${w.threshold_unit || ''}`.trim()];

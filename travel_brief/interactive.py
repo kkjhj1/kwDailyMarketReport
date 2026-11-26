@@ -211,6 +211,105 @@ class WatchDraft:
     fixed_ret_date: str = ""
     expires_at: float = 0.0
     show_advanced: bool = False
+    # Time windows (minutes 0..1439, None == 무관; from > to == overnight wrap)
+    dep_time_from_min: Optional[int] = None
+    dep_time_to_min: Optional[int] = None
+    ret_arr_from_min: Optional[int] = None
+    ret_arr_to_min: Optional[int] = None
+    # Transient 2-tap hour-grid state ("D"/"R" + chosen From hour 0..23)
+    time_pick_dir: str = ""
+    time_pick_from: Optional[int] = None
+
+    def time_window(self, direction: str) -> tuple[Optional[int], Optional[int]]:
+        if direction == "D":
+            return self.dep_time_from_min, self.dep_time_to_min
+        return self.ret_arr_from_min, self.ret_arr_to_min
+
+    def set_time_window(self, direction: str, from_min: Optional[int], to_min: Optional[int]) -> None:
+        if direction == "D":
+            self.dep_time_from_min, self.dep_time_to_min = from_min, to_min
+        else:
+            self.ret_arr_from_min, self.ret_arr_to_min = from_min, to_min
+        self.time_pick_dir, self.time_pick_from = "", None
+
+
+# ----------------------------------------------------------------------
+# Time-window watch filter (출국 출발 / 귀국 인천도착)
+# ----------------------------------------------------------------------
+STATE_AWAITING_WATCH_TIME = "AWAITING_WATCH_TIME"
+WATCH_TIME_DIRECTIONS = ("D", "R")
+WATCH_TIME_DIR_LABELS = {"D": "🛫 출국 시간", "R": "🛬 귀국 인천도착"}
+WATCH_TIME_DIR_TITLES = {"D": "출국편 출발 시간", "R": "귀국편 인천 도착 시간"}
+# code -> (from_min, to_min) ; "M" == 무관 (clear)
+WATCH_TIME_PRESETS: dict[str, tuple[str, Optional[tuple[int, int]]]] = {
+    "M": ("무관", None),
+    "0006": ("새벽 00-06", (0, 360)),
+    "0612": ("오전 06-12", (360, 720)),
+    "1218": ("오후 12-18", (720, 1080)),
+    "1824": ("저녁 18-24", (1080, 1439)),
+}
+WATCH_TIME_CLEAR_WORDS = {"무관", "상관없음", "상관없어", "없음", "해제"}
+_TIME_WINDOW_RE = re.compile(
+    r"^\s*(\d{1,2})(?::(\d{2}))?\s*시?\s*(?:[-~〜–—]|부터)?\s*(\d{1,2})(?::(\d{2}))?\s*시?\s*(?:까지)?\s*$"
+)
+_TIME_COMPACT_RE = re.compile(r"^\s*(\d{4})\s*[-~〜–—]?\s*(\d{4})\s*$")
+
+
+def _time_point(hh: str, mm: Optional[str], is_end: bool) -> int:
+    h, m = int(hh), int(mm or 0)
+    if m >= 60:
+        raise ValueError("minutes must be < 60")
+    if h == 24:
+        if not is_end or m != 0:
+            raise ValueError("24:00 is only valid as an end time")
+        return 1439  # canonical 23:59
+    if not 0 <= h <= 23:
+        raise ValueError("hour out of range")
+    return h * 60 + m
+
+
+def parse_time_window_text(raw: str) -> tuple[int, int]:
+    """`9-12` / `09-12` / `9~12` / `9 12` / `9시-12시` / `09:30-13:00` / `0930-1330` / `18-24` -> (from, to) minutes.
+    `24`/`24:00` is valid only as the end and becomes 1439 (23:59). Raises ValueError for minutes >= 60,
+    `24:01+`, from == to, a single number or malformed text. from > to is allowed (overnight wrap)."""
+    text = unicodedata.normalize("NFKC", raw or "").strip()
+    if not text:
+        raise ValueError("empty time window")
+    m = _TIME_COMPACT_RE.match(text)
+    if m:
+        a, b = m.group(1), m.group(2)
+        start = _time_point(a[:2], a[2:], is_end=False)
+        end = _time_point(b[:2], b[2:], is_end=True)
+    else:
+        m = _TIME_WINDOW_RE.match(text)
+        if not m:
+            raise ValueError("unrecognised time window")
+        # A bare `9 12` needs whitespace between the numbers; `912` alone is a single number (rejected).
+        if not re.search(r"\d\s*(?::\d{2})?\s*시?\s*(?:[-~〜–—]|부터|\s)\s*\d", text):
+            raise ValueError("two times are required")
+        start = _time_point(m.group(1), m.group(2), is_end=False)
+        end = _time_point(m.group(3), m.group(4), is_end=True)
+    if start == end:
+        raise ValueError("from and to must differ")
+    return start, end
+
+
+def format_time_window(from_min: Optional[int], to_min: Optional[int]) -> str:
+    if from_min is None or to_min is None:
+        return "무관"
+    return f"{int(from_min) // 60:02d}:{int(from_min) % 60:02d}~{int(to_min) // 60:02d}:{int(to_min) % 60:02d}"
+
+
+def time_window_bar(from_min: Optional[int], to_min: Optional[int]) -> str:
+    """Compact mobile timeline, e.g. `00 ── [09:00 ━━━━ 12:00] ── 24` (or `무관`); `(익일)` marks a wrap."""
+    if from_min is None or to_min is None:
+        return "00 ────────── 24 · 무관"
+    f, t = int(from_min), int(to_min)
+    a = f"{f // 60:02d}:{f % 60:02d}"
+    b = f"{t // 60:02d}:{t % 60:02d}"
+    if f > t:
+        return f"00 ━ {b}] ── [{a} ━ 24 (자정 넘김)"
+    return f"00 ── [{a} ━━━━ {b}] ── 24"
 
 
 _PRICE_TEXT_RE = re.compile(r"^(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,4}))?(만)?(?:원)?(?:이하|미만)?$")
@@ -307,6 +406,7 @@ class ChatState:
     state: str
     expires_at: float
     dest_code: str = ""
+    direction: str = ""  # STATE_AWAITING_WATCH_TIME only: "D" (출국 출발) / "R" (귀국 인천도착)
 
 
 @dataclass
@@ -1185,6 +1285,7 @@ class TravelInteractiveHandler:
         user_id: Optional[str] = None,
         dest_code: str = "",
         ttl: Optional[float] = None,
+        direction: str = "",
     ) -> None:
         """IDLE with `user_id=None` clears every member state of the chat (e.g. /stop)."""
         with self._seq_lock:
@@ -1200,7 +1301,9 @@ class TravelInteractiveHandler:
                 return
             key = self._state_key(chat_id, user_id)
             expires = time.monotonic() + (self.chat_state_ttl if ttl is None else ttl)
-            self._chat_states[key] = ChatState(state=state, expires_at=expires, dest_code=dest_code)
+            self._chat_states[key] = ChatState(
+                state=state, expires_at=expires, dest_code=dest_code, direction=direction
+            )
             self._chat_states.move_to_end(key)
             while len(self._chat_states) > MAX_CHAT_STATES:
                 self._chat_states.popitem(last=False)
@@ -1432,6 +1535,13 @@ class TravelInteractiveHandler:
             # The ALL keyword escapes the watch-city prompt into the normal search (never traps the user).
             self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
             ctx = None
+        if ctx is not None and ctx.state == STATE_AWAITING_WATCH_TIME:
+            handled = self._handle_watch_time_input(chat_id, user_id, query, ctx)
+            if handled is not None:
+                return handled
+            # A recognised city / ALL keyword escapes the time prompt (never traps the user).
+            self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            ctx = None
         if ctx is not None and ctx.state == STATE_AWAITING_WATCH_DATES:
             handled = self._handle_watch_dates_input(chat_id, user_id, query, ctx)
             if handled is not None:
@@ -1541,7 +1651,15 @@ class TravelInteractiveHandler:
         "rgp": "🧭 관심권역을 골라 주세요.",
         "rgn": "🧭 관심권역을 변경합니다.",
         "th": "🎯 여행스타일을 변경합니다.",
+        # ⏱ time-window picker (draft-only toggles ack silently; `tc` opens the typed-input prompt)
+        "q": "",
+        "tp": "",
+        "tf": "",
+        "tt": "",
+        "tc": "⌨️ 시간을 채팅창에 입력해 주세요 (예: 9-12)",
     }
+    # `trv:w:q|tc:<CODE>:<D|R>` and `trv:w:tp|tf|tt:<CODE>:<D|R>:<VAL>` (parsed by `_parse_time_watch`).
+    _TIME_WATCH_SUBS = frozenset({"q", "tp", "tf", "tt", "tc"})
     # Sub-actions with their own strict argument layout (parsed by `_parse_nav_watch`).
     _NAV_WATCH_SUBS = frozenset({"rg", "ct", "ki", "fq", "rgp", "rgn", "th"})
     # Sub-actions that take no city/country scope argument.
@@ -1594,7 +1712,8 @@ class TravelInteractiveHandler:
             else:
                 st = self.get_chat_context(chat_id, user_id)
                 if st is not None and st.state in (
-                    STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY
+                    STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY,
+                STATE_AWAITING_WATCH_TIME,
                 ):
                     self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
             if read_only:
@@ -1604,6 +1723,29 @@ class TravelInteractiveHandler:
                 )
             else:
                 self._submit_ui(self._run_watch_nav_action, chat_id, message_id, sub, parsed, user_id)
+            return
+        if sub in self._TIME_WATCH_SUBS:
+            parsed_t = self._parse_time_watch(sub, parts)
+            if parsed_t is None:
+                self._answer(cq_id, "지원하지 않는 알림 메뉴입니다.")
+                return
+            t_code, direction, value = parsed_t
+            st = self.get_chat_context(chat_id, user_id)
+            if sub == "tc":
+                self._answer(cq_id, self._WATCH_TOASTS[sub])
+                self._set_chat_state(
+                    chat_id, STATE_AWAITING_WATCH_TIME, user_id=user_id, dest_code=t_code, direction=direction
+                )
+            else:
+                if st is not None and st.state in (
+                    STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY,
+                    STATE_AWAITING_WATCH_TIME,
+                ):
+                    self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+            # Draft-only UI (no DB write): edit first on ui_pool, then the (silent) ack — TG-04 still 1 ack.
+            self._submit_ui(self._run_watch_time_action, chat_id, message_id, sub, t_code, direction, value, user_id)
+            if sub != "tc":
+                self._answer(cq_id, self._WATCH_TOASTS[sub])
             return
         code = ""
         arg = parts[4] if len(parts) > 4 else ""
@@ -1631,7 +1773,8 @@ class TravelInteractiveHandler:
             # ack (silently) so answerCallbackQuery runs in parallel. Still acked before returning (TG-04).
             st = self.get_chat_context(chat_id, user_id)
             if st is not None and st.state in (
-                STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY
+                STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY,
+                STATE_AWAITING_WATCH_TIME,
             ):
                 self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
             self._submit_ui(self._run_watch_action, chat_id, message_id, sub, code, arg, user_id)
@@ -1651,7 +1794,8 @@ class TravelInteractiveHandler:
         else:
             st = self.get_chat_context(chat_id, user_id)
             if st is not None and st.state in (
-                STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY
+                STATE_AWAITING_WATCH_PRICE, STATE_AWAITING_WATCH_DATES, STATE_AWAITING_WATCH_CITY,
+                STATE_AWAITING_WATCH_TIME,
             ):
                 self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
         if read_only:
@@ -1689,6 +1833,193 @@ class TravelInteractiveHandler:
         if sub == "th":
             return {"theme": THEME_CB_CODES[parts[3]]} if parts[3] in THEME_CB_CODES else None
         return None
+
+    def _parse_time_watch(self, sub: str, parts: list[str]) -> Optional[tuple[str, str, str]]:
+        """Strict allowlist: `q`/`tc` take exactly <CODE>:<D|R>; `tp` a preset code; `tf` an hour 0..23;
+        `tt` an hour 1..24. Returns (code, direction, value) or None."""
+        n = len(parts)
+        expected = 5 if sub in ("q", "tc") else 6
+        if n != expected:
+            return None
+        code = self.normalize_watch_scope(parts[3])
+        direction = parts[4]
+        if not code or direction not in WATCH_TIME_DIRECTIONS:
+            return None
+        value = parts[5] if n == 6 else ""
+        if sub == "tp" and value not in WATCH_TIME_PRESETS:
+            return None
+        if sub in ("tf", "tt"):
+            if not value.isdigit() or len(value) > 2 or value != str(int(value)):
+                return None
+            hour = int(value)
+            if (sub == "tf" and not 0 <= hour <= 23) or (sub == "tt" and not 1 <= hour <= 24):
+                return None
+        return code, direction, value
+
+    def _run_watch_time_action(
+        self, chat_id: str, message_id: int, sub: str, code: str, direction: str, value: str, user_id: str = ""
+    ) -> None:
+        uid = str(user_id or chat_id)
+        try:
+            if is_country_watch_code(code):
+                existing = self._get_watch(chat_id, code)
+                if not (existing and existing.get("is_active")):
+                    self._drop_draft(chat_id, uid, code)
+                    text, markup = self.build_watch_target_picker_card(notice=COUNTRY_WATCH_RETIRED_NOTICE)
+                    self._render_watch_card(chat_id, message_id, text, markup)
+                    return
+            draft = self._get_draft(chat_id, uid, code)
+            draft.show_advanced = True
+            if sub == "q":
+                draft.time_pick_dir, draft.time_pick_from = direction, None
+                text, markup = self.build_watch_time_picker_card(code, draft, direction)
+            elif sub == "tp":
+                window = WATCH_TIME_PRESETS[value][1]
+                draft.set_time_window(direction, *(window if window else (None, None)))
+                label = WATCH_TIME_DIR_TITLES[direction]
+                text, markup = self.build_watch_setup_card(
+                    chat_id, uid, code,
+                    notice=f"⏱ {label}: {format_time_window(*draft.time_window(direction))} 로 정했어요. 저장 버튼을 눌러야 반영돼요.",
+                )
+            elif sub == "tf":
+                draft.time_pick_dir, draft.time_pick_from = direction, int(value)
+                text, markup = self.build_watch_time_picker_card(code, draft, direction)
+            elif sub == "tt":
+                if draft.time_pick_dir != direction or draft.time_pick_from is None:
+                    draft.time_pick_dir, draft.time_pick_from = direction, None
+                    text, markup = self.build_watch_time_picker_card(
+                        code, draft, direction, notice="ℹ️ 시작 시각을 먼저 골라 주세요."
+                    )
+                else:
+                    start_h, end_h = int(draft.time_pick_from), int(value)
+                    if start_h == end_h:
+                        text, markup = self.build_watch_time_picker_card(
+                            code, draft, direction, notice="⚠️ 시작과 끝 시각이 같아요. 다른 끝 시각을 골라 주세요."
+                        )
+                    else:
+                        to_min = 1439 if end_h == 24 else end_h * 60
+                        draft.set_time_window(direction, start_h * 60, to_min)
+                        wrap = " (자정 넘김)" if start_h * 60 > to_min else ""
+                        text, markup = self.build_watch_setup_card(
+                            chat_id, uid, code,
+                            notice=f"⏱ {WATCH_TIME_DIR_TITLES[direction]}: "
+                                   f"{format_time_window(*draft.time_window(direction))}{wrap} 로 정했어요. "
+                                   "저장 버튼을 눌러야 반영돼요.",
+                        )
+            else:  # tc
+                text, markup = self.build_watch_time_input_card(code, direction)
+            self._render_watch_card(chat_id, message_id, text, markup)
+        except Exception as exc:
+            logger.error("Watch time %s/%s failed for %s: %s", sub, code, chat_id, exc, exc_info=True)
+            self._render_watch_card(
+                chat_id, message_id,
+                "⚠️ 알림 설정 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+                {"inline_keyboard": [[{"text": "📋 내 알림 목록", "callback_data": "trv:w:l"}]]},
+            )
+
+    def build_watch_time_picker_card(
+        self, code: str, draft: WatchDraft, direction: str, notice: str = ""
+    ) -> tuple[str, dict[str, Any]]:
+        """Presets row + 2-tap hour grid (step 1: From 00..23, step 2: To 01..24 excluding From), 4x6 each."""
+        label = self.label_for(code)
+        cur_f, cur_t = draft.time_window(direction)
+        picking_to = draft.time_pick_dir == direction and draft.time_pick_from is not None
+        lines = [notice] if notice else []
+        lines += [
+            f"⏱ <b>[{html.escape(label)} · {WATCH_TIME_DIR_TITLES[direction]}]</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"현재: {html.escape(format_time_window(cur_f, cur_t))}",
+            html.escape(time_window_bar(cur_f, cur_t)),
+        ]
+        if picking_to:
+            lines.append(f"2/2 끝 시각을 골라 주세요 (시작 {int(draft.time_pick_from):02d}시 선택됨).")
+        else:
+            lines.append("1/2 시작 시각을 골라 주세요. 또는 위 프리셋을 누르세요.")
+        lines.append("• 끝 시각이 시작보다 빠르면 자정을 넘기는 구간이에요 (예: 22-02).")
+        rows: list[list[dict[str, Any]]] = []
+        presets = list(WATCH_TIME_PRESETS.items())
+        # Presets: 무관 + 4 day parts (2 rows keep 360px widths readable)
+        rows.append([
+            {"text": ("✅ " if cur_f is None and k == "M" else "") + name, "callback_data": f"trv:w:tp:{code}:{direction}:{k}"}
+            for k, (name, _w) in presets[:3]
+        ])
+        rows.append([
+            {"text": name, "callback_data": f"trv:w:tp:{code}:{direction}:{k}"}
+            for k, (name, _w) in presets[3:]
+        ])
+        if picking_to:
+            start_h = int(draft.time_pick_from)
+            hours = [h for h in range(1, 25) if h != start_h]
+            sub = "tt"
+        else:
+            hours = list(range(0, 24))
+            sub = "tf"
+        for i in range(0, len(hours), 6):
+            rows.append([
+                {"text": f"{h:02d}", "callback_data": f"trv:w:{sub}:{code}:{direction}:{h}"}
+                for h in hours[i:i + 6]
+            ])
+        rows.append([
+            {"text": "✍️ 직접 입력 (9-12 / 9:30-12:30)", "callback_data": f"trv:w:tc:{code}:{direction}"},
+            {"text": "↩️ 돌아가기", "callback_data": f"trv:w:s:{code}"},
+        ])
+        return "\n".join(lines), {"inline_keyboard": rows}
+
+    def build_watch_time_input_card(self, code: str, direction: str, notice: str = "") -> tuple[str, dict[str, Any]]:
+        label = self.label_for(code)
+        minutes = max(1, int(self.chat_state_ttl // 60))
+        lines = [notice] if notice else []
+        lines += [
+            f"✍️ <b>[{html.escape(label)} · {WATCH_TIME_DIR_TITLES[direction]} 직접 입력]</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"원하는 시간대를 채팅창에 입력해 주세요 ({minutes}분 안에).",
+            "예) <code>9-12</code> · <code>09:30-13:00</code> · <code>0930-1330</code> · <code>18-24</code> · <code>22-02</code>",
+            "• <code>무관</code> 입력 시 시간 조건 해제 · 취소: /cancel",
+        ]
+        return "\n".join(lines), {"inline_keyboard": [[{"text": "↩️ 돌아가기", "callback_data": f"trv:w:q:{code}:{direction}"}]]}
+
+    def _handle_watch_time_input(
+        self, chat_id: str, user_id: str, query: str, ctx: ChatState
+    ) -> Optional[tuple[bool, str]]:
+        """STATE_AWAITING_WATCH_TIME: `9-12`-style text -> draft time window; `무관` clears it.
+        A recognised city / ALL keyword escapes (returns None); other text keeps the prompt."""
+        code, direction = ctx.dest_code, ctx.direction if ctx.direction in WATCH_TIME_DIRECTIONS else "D"
+        compact = query.replace(" ", "")
+        if compact in WATCH_TIME_CLEAR_WORDS:
+            window: Optional[tuple[int, int]] = None
+        elif _HAS_DIGIT_RE.search(query):
+            try:
+                window = parse_time_window_text(query)
+            except ValueError:
+                text, markup = self.build_watch_time_input_card(
+                    code, direction,
+                    notice=f"⚠️ '<b>{html.escape(query[:20])}</b>'은(는) 시간대로 인식할 수 없어요.",
+                )
+                self._send_card(chat_id, text, markup)
+                return True, "travel_watch_time_invalid"
+        else:
+            folded = query.casefold().replace(" ", "")
+            if folded in ALL_WORDS or self.catalog.resolve(query) is not None:
+                return None
+            text, markup = self.build_watch_time_input_card(
+                code, direction, notice="⚠️ 시간대로 인식할 수 없어요. 예) 9-12"
+            )
+            self._send_card(chat_id, text, markup)
+            return True, "travel_watch_time_invalid"
+        self._set_chat_state(chat_id, STATE_IDLE, user_id=user_id)
+        if self.db is None:
+            self._send_card(chat_id, "⚠️ 특가 알림 기능을 일시적으로 사용할 수 없습니다.")
+            return True, "travel_watch_unavailable"
+        draft = self._get_draft(chat_id, user_id, code)
+        draft.show_advanced = True
+        draft.set_time_window(direction, *(window if window else (None, None)))
+        text, markup = self.build_watch_setup_card(
+            chat_id, user_id, code,
+            notice=f"⏱ {WATCH_TIME_DIR_TITLES[direction]}: {format_time_window(*draft.time_window(direction))} "
+                   "로 정했어요. 저장 버튼을 눌러야 반영돼요.",
+        )
+        self._render_watch_card(chat_id, 0, text, markup, edit=False)
+        return True, "travel_watch_time_set"
 
     def _run_watch_nav_action(
         self, chat_id: str, message_id: int, sub: str, p: dict[str, Any], user_id: str = ""
@@ -2011,6 +2342,11 @@ class TravelInteractiveHandler:
             else:
                 v2 = {"watch_mode": "FLEX", "horizon_months": draft.horizon_months,
                       "weekday_option": draft.weekday_option, "notify_mode": draft.notify_mode}
+            # The draft is the full truth for the time windows: None explicitly clears the stored pair.
+            v2.update({
+                "dep_time_from_min": draft.dep_time_from_min, "dep_time_to_min": draft.dep_time_to_min,
+                "ret_arr_from_min": draft.ret_arr_from_min, "ret_arr_to_min": draft.ret_arr_to_min,
+            })
         try:
             watch = self.db.upsert_travel_watch(chat_id, code, target, preset_kind=kind, **v2)
         except WatchLimitError as exc:
@@ -2070,6 +2406,11 @@ class TravelInteractiveHandler:
                 draft.notify_mode = str(watch.get("notify_mode") or "DROP").upper()
                 draft.fixed_dep_date = watch.get("fixed_dep_date") or ""
                 draft.fixed_ret_date = watch.get("fixed_ret_date") or ""
+                for f_key, t_key in (("dep_time_from_min", "dep_time_to_min"), ("ret_arr_from_min", "ret_arr_to_min")):
+                    f_val, t_val = watch.get(f_key), watch.get(t_key)
+                    if f_val is not None and t_val is not None:
+                        setattr(draft, f_key, int(f_val))
+                        setattr(draft, t_key, int(t_val))
                 if draft.watch_mode == "FIXED":
                     draft.show_advanced = True
         key = self._draft_key(chat_id, user_id, scope)
@@ -2211,6 +2552,9 @@ class TravelInteractiveHandler:
         day = WATCH_DAY_LABELS.get(watch.get("day_pattern") or "ANY", "전체 요일")
         peak = "연휴 포함" if watch.get("include_peak") else "연휴 제외"
         daily = " · 매일 브리핑" if str(watch.get("notify_mode") or "") == "DAILY" else ""
+        time_txt = self._time_summary(watch)
+        if time_txt:
+            daily += f" · ⏱ {time_txt}"
         if str(watch.get("watch_mode") or "") == "FIXED" and watch.get("fixed_dep_date"):
             return f"📌 {_short_iso(watch.get('fixed_dep_date'))}~{_short_iso(watch.get('fixed_ret_date'))}{daily}"
         horizon = watch.get("horizon_months")
@@ -2220,13 +2564,27 @@ class TravelInteractiveHandler:
             span = f"{int(horizon)}개월·{wopt} · "
         return f"{span}{day} · {peak}{daily}"
 
+    @staticmethod
+    def _time_summary(src: Any) -> str:
+        """`🛫 09:00~12:00 · 🛬 18:00~23:59` from a WatchDraft or a watch row ("" when no filter)."""
+        get = (lambda k: getattr(src, k, None)) if isinstance(src, WatchDraft) else (lambda k: src.get(k))
+        parts = []
+        for icon, f_key, t_key in (("🛫 출국", "dep_time_from_min", "dep_time_to_min"),
+                                   ("🛬 인천도착", "ret_arr_from_min", "ret_arr_to_min")):
+            f_val, t_val = get(f_key), get(t_key)
+            if f_val is not None and t_val is not None:
+                parts.append(f"{icon} {format_time_window(int(f_val), int(t_val))}")
+        return " · ".join(parts)
+
     def _watch_schedule_lines(self, watch: dict[str, Any]) -> list[str]:
+        time_txt = self._time_summary(watch)
+        extra = [f"⏱ 시간 조건: {html.escape(time_txt)}"] if time_txt else []
         if str(watch.get("watch_mode") or "") == "FIXED" and watch.get("fixed_dep_date"):
             dep, ret = watch.get("fixed_dep_date"), watch.get("fixed_ret_date")
-            return [f"📌 날짜 고정: {_short_iso(dep)}~{_short_iso(ret)} · {_trip_nights_iso(dep, ret)}박 (±1일 비교)"]
+            return [f"📌 날짜 고정: {_short_iso(dep)}~{_short_iso(ret)} · {_trip_nights_iso(dep, ret)}박 (±1일 비교)"] + extra
         horizon = int(watch.get("horizon_months") or 6)
         wopt = WATCH_WEEKDAY_LABELS.get(str(watch.get("weekday_option") or "ANY"), "주말+평일 전체")
-        return [f"📅 기간 탐색: 앞으로 {horizon}개월 · {wopt}"]
+        return [f"📅 기간 탐색: 앞으로 {horizon}개월 · {wopt}"] + extra
 
     def build_watch_manage_card(
         self, chat_id: str, code: str, notice: str = ""
@@ -2471,6 +2829,15 @@ class TravelInteractiveHandler:
             if draft.horizon_months > 6:
                 lines.append("ℹ️ 9~12개월 먼 일정은 LCC 특가가 아직 미오픈일 수 있어요.")
         lines.append(f"🔔 알림: {WATCH_NOTIFY_LABELS.get(draft.notify_mode, WATCH_NOTIFY_LABELS['DROP'])}")
+        if draft.show_advanced:
+            lines.append("⏱ 시간 조건")
+            for d in WATCH_TIME_DIRECTIONS:
+                f_min, t_min = draft.time_window(d)
+                lines.append(f"• {WATCH_TIME_DIR_LABELS[d]}: {html.escape(time_window_bar(f_min, t_min))}")
+            if draft.dep_time_from_min is not None or draft.ret_arr_from_min is not None:
+                lines.append("💡 시간 조건에 맞는 편 중 최저가로 알려드려요 (더 싼 시간 무관 특가는 참고로 한 줄).")
+        elif draft.dep_time_from_min is not None or draft.ret_arr_from_min is not None:
+            lines.append(f"⏱ 시간 조건: {html.escape(self._time_summary(draft))}")
         lines.append("👇 아래 목표가 버튼(실속/평균)을 누르거나 [✍️ 목표가 직접 입력]으로 바로 저장할 수 있어요. (실시간 검증 요금만 알림)")
 
         def mark(selected: bool, text: str) -> str:
@@ -2504,6 +2871,11 @@ class TravelInteractiveHandler:
             rows.append([
                 {"text": mark(draft.notify_mode == "DROP", "🔔 하락 시 알림"), "callback_data": f"trv:w:n:{code}:D"},
                 {"text": mark(draft.notify_mode == "DAILY", "📰 매일 아침"), "callback_data": f"trv:w:n:{code}:Y"},
+            ])
+            rows.append([
+                {"text": mark(draft.time_window(d)[0] is not None, WATCH_TIME_DIR_LABELS[d]),
+                 "callback_data": f"trv:w:q:{code}:{d}"}
+                for d in WATCH_TIME_DIRECTIONS
             ])
         # Compact 2-column save / input rows (mobile: fewer rows, same callbacks).
         save_row: list[dict[str, Any]] = []

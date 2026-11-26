@@ -119,6 +119,40 @@ _WATCH_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("initial_price_krw", "INTEGER DEFAULT NULL"),
     ("last_daily_sent_date", "TEXT DEFAULT NULL"),
 )
+# Time-window filter (minutes of day 0..1439; NULL == no filter; from > to == overnight wrap).
+WATCH_TIME_COLUMNS = ("dep_time_from_min", "dep_time_to_min", "ret_arr_from_min", "ret_arr_to_min")
+_WATCH_TIME_COLUMNS: tuple[tuple[str, str], ...] = tuple((c, "INTEGER DEFAULT NULL") for c in WATCH_TIME_COLUMNS)
+
+
+class _Unset:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+# Omitted-argument sentinel: `UNSET` keeps the stored value, `None` explicitly clears it to NULL.
+UNSET: Any = _Unset()
+
+
+def validate_time_pair(from_min: Any, to_min: Any) -> tuple[Optional[int], Optional[int]]:
+    """Both None (no filter) or both ints in 0..1439 with from != to (from > to == overnight wrap)."""
+    if from_min is None and to_min is None:
+        return None, None
+    if from_min is None or to_min is None:
+        raise ValueError("time window requires both from and to (or neither)")
+    if isinstance(from_min, bool) or isinstance(to_min, bool):
+        raise ValueError("time window bounds must be integers")
+    f, t = int(from_min), int(to_min)
+    if f != from_min or t != to_min:
+        raise ValueError("time window bounds must be integers")
+    if not (0 <= f <= 1439 and 0 <= t <= 1439):
+        raise ValueError("time window bounds must be within 0..1439")
+    if f == t:
+        raise ValueError("time window from and to must differ")
+    return f, t
+
+
 _DELIVERY_V2_COLUMNS: tuple[tuple[str, str], ...] = (
     ("delivery_kind", "TEXT NOT NULL DEFAULT 'DROP'"),
     ("kst_date", "TEXT DEFAULT NULL"),
@@ -204,11 +238,21 @@ def watch_cooldown_block_reason(
     return None
 
 
+def _fp_suffix(fingerprint: str) -> str:
+    fp = (fingerprint or "").strip()
+    return f":fp={fp}" if fp else ""
+
+
 def make_watch_delivery_key(
-    watch_id: int, chat_id: str, dest_code: str, dep_date: str, ret_date: str, price_krw: int
+    watch_id: int, chat_id: str, dest_code: str, dep_date: str, ret_date: str, price_krw: int,
+    fingerprint: str = "",
 ) -> str:
-    """Ledger key always embeds `watch_id` so two watches can never collide on the same candidate."""
-    return f"watch:{int(watch_id)}:{str(chat_id).strip()}:{dest_code.upper()}:{dep_date}:{ret_date}:{int(price_krw)}"
+    """Ledger key always embeds `watch_id` so two watches can never collide on the same candidate.
+    A time-window watch appends the itinerary fingerprint (bit-identical key when `fingerprint` is empty)."""
+    return (
+        f"watch:{int(watch_id)}:{str(chat_id).strip()}:{dest_code.upper()}:{dep_date}:{ret_date}:{int(price_krw)}"
+        + _fp_suffix(fingerprint)
+    )
 
 
 def make_watch_daily_key(watch_id: int, kst_date: str) -> str:
@@ -216,8 +260,8 @@ def make_watch_daily_key(watch_id: int, kst_date: str) -> str:
     return f"travel-watch:v2:{int(watch_id)}:DAILY:{kst_date}"
 
 
-def make_watch_drop_key_v2(watch_id: int, dep_date: str, ret_date: str, price_krw: int) -> str:
-    return f"travel-watch:v2:{int(watch_id)}:DROP:{dep_date}:{ret_date}:{int(price_krw)}"
+def make_watch_drop_key_v2(watch_id: int, dep_date: str, ret_date: str, price_krw: int, fingerprint: str = "") -> str:
+    return f"travel-watch:v2:{int(watch_id)}:DROP:{dep_date}:{ret_date}:{int(price_krw)}" + _fp_suffix(fingerprint)
 
 
 def kst_date_of(dt: Optional[datetime] = None) -> str:
@@ -576,6 +620,8 @@ class TravelBriefDatabase:
                 "UPDATE travel_price_watches SET horizon_months = ?, weekday_option = ?",
                 (LEGACY_WATCH_BACKFILL["horizon_months"], LEGACY_WATCH_BACKFILL["weekday_option"]),
             )
+        # Time-window columns: nullable, no backfill (NULL == no filter keeps every existing scope).
+        added_watch += _add_missing_columns(conn, "travel_price_watches", _WATCH_TIME_COLUMNS)
         added_delivery = _add_missing_columns(conn, "travel_watch_deliveries", _DELIVERY_V2_COLUMNS)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_travel_watch_deliveries_kind "
@@ -979,8 +1025,14 @@ class TravelBriefDatabase:
         fixed_ret_date: Optional[str] = None,
         notify_mode: Optional[str] = None,
         initial_price_krw: Optional[int] = None,
+        dep_time_from_min: Any = UNSET,
+        dep_time_to_min: Any = UNSET,
+        ret_arr_from_min: Any = UNSET,
+        ret_arr_to_min: Any = UNSET,
     ) -> dict[str, Any]:
         """Creates/updates/re-activates the `(chat_id, dest_code)` watch atomically.
+        Time windows (`dep_time_*` / `ret_arr_*`, minutes 0..1439) are set per pair: `UNSET` (omitted) keeps the
+        stored pair, `None` clears it to NULL (no filter). A pair must be both-None or both-int with from != to.
         `day_pattern` / `include_peak` default to ANY / 1 for new watches and keep existing toggles otherwise.
         V2 options (`watch_mode` .. `notify_mode`) follow the same rule: `None` keeps the stored value (column
         defaults for new rows). `dest_code` may be a city code or an `@`-country scope (e.g. `@JP`).
@@ -1016,6 +1068,18 @@ class TravelBriefDatabase:
                 date.fromisoformat(raw)  # ValueError on malformed dates
         if initial_price_krw is not None and int(initial_price_krw) <= 0:
             raise ValueError("initial_price_krw must be positive")
+        time_sets: dict[str, Optional[int]] = {}
+        for f_name, t_name, f_val, t_val in (
+            ("dep_time_from_min", "dep_time_to_min", dep_time_from_min, dep_time_to_min),
+            ("ret_arr_from_min", "ret_arr_to_min", ret_arr_from_min, ret_arr_to_min),
+        ):
+            f_unset, t_unset = f_val is UNSET, t_val is UNSET
+            if f_unset and t_unset:
+                continue
+            if f_unset or t_unset:
+                raise ValueError(f"{f_name}/{t_name} must be passed together")
+            f_ok, t_ok = validate_time_pair(f_val, t_val)
+            time_sets[f_name], time_sets[t_name] = f_ok, t_ok
         now = _utc_str()
 
         with self._immediate_tx() as db:
@@ -1076,6 +1140,11 @@ class TravelBriefDatabase:
             schedule_changed = row is not None and "fixed_dep_date" in v2_sets and (
                 cur_mode != row["watch_mode"] or dep != row["fixed_dep_date"] or ret != row["fixed_ret_date"]
             )
+            if time_sets:
+                v2_sets.update(time_sets)
+                # A different time window changes what "the price" means -> re-anchor like a schedule change.
+                if row is not None and any(row[k] != v for k, v in time_sets.items()):
+                    schedule_changed = True
             if initial_price_krw is not None:
                 v2_sets["initial_price_krw"] = int(initial_price_krw)
             elif row is not None and (reactivating or schedule_changed):
@@ -1518,6 +1587,7 @@ class TravelBriefDatabase:
         *,
         allow_same_slot_drop: bool = False,
         key_version: int = 1,
+        fingerprint: str = "",
     ) -> WatchClaim:
         """Atomically claims an IN_FLIGHT lease for one DROP watch alert.
         Rules (inside one `BEGIN IMMEDIATE`):
@@ -1530,9 +1600,9 @@ class TravelBriefDatabase:
         """
         now_dt = now or datetime.now(timezone.utc)
         if key_version == 2:
-            key = make_watch_drop_key_v2(watch_id, dep_date, ret_date, price_krw)
+            key = make_watch_drop_key_v2(watch_id, dep_date, ret_date, price_krw, fingerprint)
         else:
-            key = make_watch_delivery_key(watch_id, chat_id, dest_code, dep_date, ret_date, price_krw)
+            key = make_watch_delivery_key(watch_id, chat_id, dest_code, dep_date, ret_date, price_krw, fingerprint)
         return self._claim_delivery(
             key, watch_id, chat_id, dest_code, dep_date, ret_date, int(price_krw), lease_owner, lease_ttl_seconds,
             now_dt, kind="DROP", cooldown_days=cooldown_days, min_drop_krw=min_drop_krw,

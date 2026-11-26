@@ -628,6 +628,88 @@ class TravelNaverLiveTests(unittest.TestCase):
         self.assertEqual(upgraded.office_leave_days, 0.0)
         self.assertEqual(upgraded.office_ret_arr_time, "18:10")
 
+    # ------------------------------------------------------------------
+    # Time-window watch: SSE candidates, unknown next-day arrival, cache roundtrip
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tw_payload():
+        def leg(iid, code, dep_date, dep_time, arr_date=None, arr_time=None):
+            seg = {"marketingCarrier": {"airlineCode": code}, "departure": {"date": dep_date, "time": dep_time}}
+            if arr_date is not None or arr_time is not None:
+                seg["arrival"] = {"date": arr_date or "", "time": arr_time or ""}
+            return {"itineraryId": iid, "segments": [seg]}
+
+        return {
+            "status": {"airlinesCodeMap": {"7C": "제주항공", "KE": "대한항공"}},
+            "itineraries": [
+                leg("O1", "7C", "20261204", "0700"), leg("R1", "7C", "20261206", "1030", "20261206", "1200"),
+                leg("O2", "KE", "20261204", "0930"), leg("R2", "KE", "20261206", "1640", "20261206", "1810"),
+                leg("O3", "7C", "20261204", "1000"), leg("R3", "7C", "20261206", "1500", "", "1630"),  # no arr date
+            ],
+            "fareMappings": [
+                {"itineraryIds": "O1-R1", "fares": [{"fareType": "A01", "adult": {"totalFare": 180000}}]},
+                {"itineraryIds": "O2-R2", "fares": [{"fareType": "A01", "adult": {"totalFare": 260000}}]},
+                {"itineraryIds": "O3-R3", "fares": [{"fareType": "A01", "adult": {"totalFare": 220000}}]},
+            ],
+        }
+
+    def test_sse_candidates_ids_and_unknown_next_day_arrival(self):
+        parsed = parse_sse_final_object(
+            self._tw_payload(), ret_compact="20261206", dep_date=date(2026, 12, 4), ret_date=date(2026, 12, 6)
+        )
+        cands = parsed["candidates"]
+        self.assertEqual([c["min_card"] for c in cands], [180000, 220000, 260000])
+        self.assertEqual((cands[0]["outbound_id"], cands[0]["return_id"]), ("O1", "R1"))
+        self.assertIs(cands[0]["next_day_arrival"], False)
+        self.assertIsNone(cands[1]["next_day_arrival"])  # missing arrival date -> unknown, never "same day"
+        self.assertEqual(cands[1]["ret_arr_date"], "")
+        self.assertEqual(parsed["cheapest"]["min_card"], 180000)
+        # OFFICE needs a VERIFIED same-day arrival: the unknown-date 220k decoy is never the office pick
+        self.assertEqual(parsed["office"]["min_card"], 260000)
+        # requested return date missing -> every candidate unknown
+        unknown = parse_sse_final_object(self._tw_payload(), ret_compact="")
+        self.assertTrue(all(c["next_day_arrival"] is None for c in unknown["candidates"]))
+
+    def test_apply_sse_populates_candidates_and_cache_roundtrip(self):
+        from dataclasses import replace
+
+        from travel_brief.models import SSEFlightCandidate
+        from travel_brief.naver_live import NaverFlightLiveClient
+
+        parsed = parse_sse_final_object(
+            self._tw_payload(), ret_compact="20261206", dep_date=date(2026, 12, 4), ret_date=date(2026, 12, 6)
+        )
+        engine = FlightEngine(live_naver=False)
+        dest = engine.get_destination("FUK")
+        base = engine.search_deals(dest_code="FUK", months_ahead=1, ref_date=date(2026, 11, 20))[0]
+        base = replace(base, departure_date="2026-12-04", return_date="2026-12-06", nights=2)
+        deal = NaverFlightLiveClient.apply_sse_to_deal(base, dest, parsed)
+        self.assertEqual(deal.data_source, "LIVE_SSE")
+        self.assertEqual(len(deal.sse_candidates), 3)
+        self.assertIsInstance(deal.sse_candidates[0], SSEFlightCandidate)
+        self.assertEqual(deal.sse_candidates[0].fingerprint, "O1:R1")
+        self.assertEqual(deal.sse_candidates[2].airline, "대한항공")
+        self.assertEqual(deal.office_fare_krw, 260000)
+
+        # JSON roundtrip through the disk-cache dict form keeps candidates (incl. the None arrival flag)
+        blob = json.loads(json.dumps(deal.to_cache_dict(), ensure_ascii=False))
+        self.assertIsInstance(blob["sse_candidates"], list)
+        back = FlightDeal.from_cache_dict(blob)
+        self.assertEqual(back.sse_candidates, deal.sse_candidates)
+        self.assertIsNone(back.sse_candidates[1].next_day_arrival)
+        self.assertEqual((back.price_krw, back.exact_dep_time), (deal.price_krw, deal.exact_dep_time))
+        # legacy cache rows (no `sse_candidates` key) still load
+        legacy = deal.to_cache_dict()
+        legacy.pop("sse_candidates")
+        legacy.pop("candidate_fingerprint")
+        self.assertEqual(FlightDeal.from_cache_dict(legacy).sse_candidates, ())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = NaverFlightLiveClient(cache_path=Path(tmp) / "c.json")
+            client._save_disk_cache("k1", [deal])
+            loaded = client._load_disk_cache("k1", max_age_sec=600)
+            self.assertEqual(loaded[0].sse_candidates, deal.sse_candidates)
+
 
 if __name__ == "__main__":
     unittest.main()

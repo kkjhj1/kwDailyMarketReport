@@ -176,6 +176,47 @@ class AdminSyncContractTests(unittest.TestCase):
                 with self.subTest(table=table, api=api):
                     self.assertIn(api, routes)
 
+    def test_admin_watch_list_exposes_travel_time_window_with_legacy_null_fallback(self):
+        import sqlite3
+        import tempfile
+
+        from market_brief.storage.db import MarketBriefDatabase
+        from travel_brief.storage.db import TravelBriefDatabase
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # new schema: time columns present
+            path = str(Path(tmp) / "new.sqlite3")
+            tdb = TravelBriefDatabase(db_path=path)
+            tdb.upsert_travel_watch("c1", "FUK", 250_000, dep_time_from_min=540, dep_time_to_min=720,
+                                    ret_arr_from_min=1320, ret_arr_to_min=120)
+            tdb.upsert_travel_watch("c2", "NRT", 300_000)
+            items = {w["target"]: w for w in MarketBriefDatabase(path).list_all_watches("travel_bot")["items"]
+                     if w["bot_id"] == "travel_bot"}
+            fuk, nrt = items["FUK"], items["NRT"]
+            self.assertEqual((fuk["dep_time_from_min"], fuk["dep_time_to_min"],
+                              fuk["ret_arr_from_min"], fuk["ret_arr_to_min"]), (540, 720, 1320, 120))
+            self.assertEqual(fuk["time_window_text"], "출국 09:00~12:00 · 귀국도착 22:00~02:00")
+            self.assertEqual((nrt["dep_time_from_min"], nrt["time_window_text"]), (None, ""))
+
+            # pre-migration schema: columns absent -> NULL fallback, never an error
+            old = str(Path(tmp) / "old.sqlite3")
+            conn = sqlite3.connect(old)
+            conn.execute("""CREATE TABLE travel_price_watches (
+                watch_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, dest_code TEXT NOT NULL,
+                target_price_krw INTEGER NOT NULL, is_active INTEGER NOT NULL DEFAULT 1,
+                last_seen_price_krw INTEGER, last_seen_at TEXT, created_at TEXT, updated_at TEXT)""")
+            conn.execute("INSERT INTO travel_price_watches (chat_id, dest_code, target_price_krw) VALUES ('c', 'KIX', 1)")
+            conn.commit()
+            conn.close()
+            rows = [w for w in MarketBriefDatabase(old).list_all_watches("travel_bot")["items"]
+                    if w["bot_id"] == "travel_bot"]
+            self.assertEqual(len(rows), 1)
+            self.assertIsNone(rows[0]["ret_arr_to_min"])
+            self.assertEqual(rows[0]["time_window_text"], "")
+
+        ui = (Path(__file__).resolve().parent.parent / "market_brief" / "admin_ui.py").read_text(encoding="utf-8")
+        self.assertIn("w.time_window_text", ui)
+
 
 if __name__ == "__main__":
     unittest.main()

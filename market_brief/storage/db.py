@@ -2004,6 +2004,24 @@ class MarketBriefDatabase:
         has_more = len(items) > limit
         return items[:limit], has_more
 
+    @staticmethod
+    def _fmt_travel_time_window(row: dict[str, Any]) -> str:
+        """`출국 09:00~12:00 · 귀국도착 18:00~23:59` ("" when no / invalid / pre-migration time columns)."""
+        def _hm(v: Any) -> "str | None":
+            try:
+                m = int(v)
+            except (TypeError, ValueError):
+                return None
+            return f"{m // 60:02d}:{m % 60:02d}" if 0 <= m <= 1439 else None
+
+        parts = []
+        for label, f_key, t_key in (("출국", "dep_time_from_min", "dep_time_to_min"),
+                                    ("귀국도착", "ret_arr_from_min", "ret_arr_to_min")):
+            f_txt, t_txt = _hm(row.get(f_key)), _hm(row.get(t_key))
+            if f_txt and t_txt:
+                parts.append(f"{label} {f_txt}~{t_txt}")
+        return " · ".join(parts)
+
     def list_all_watches(self, bot_id: str = "all", active_only: bool = True) -> dict[str, Any]:
         """Cross-bot custom watch listing + travel 2-track prefs (no row / no table == defaults)."""
         items: list[dict[str, Any]] = []
@@ -2052,7 +2070,8 @@ class MarketBriefDatabase:
                     extra = ", ".join(
                         f"w.{c}" if c in cols else f"NULL AS {c}"
                         for c in ("watch_mode", "horizon_months", "weekday_option", "fixed_dep_date",
-                                  "fixed_ret_date", "notify_mode", "initial_price_krw")
+                                  "fixed_ret_date", "notify_mode", "initial_price_krw",
+                                  "dep_time_from_min", "dep_time_to_min", "ret_arr_from_min", "ret_arr_to_min")
                     )
                     sql = f"""SELECT w.watch_id, w.chat_id, w.dest_code, w.target_price_krw, w.is_active,
                                      w.last_seen_price_krw, w.last_seen_at, w.created_at, w.updated_at, {extra},
@@ -2084,6 +2103,11 @@ class MarketBriefDatabase:
                                 "fixed_dep_date": d.get("fixed_dep_date"),
                                 "fixed_ret_date": d.get("fixed_ret_date"),
                                 "notify_mode": d.get("notify_mode"),
+                                "dep_time_from_min": d.get("dep_time_from_min"),
+                                "dep_time_to_min": d.get("dep_time_to_min"),
+                                "ret_arr_from_min": d.get("ret_arr_from_min"),
+                                "ret_arr_to_min": d.get("ret_arr_to_min"),
+                                "time_window_text": self._fmt_travel_time_window(d),
                                 "is_active": bool(d.get("is_active")),
                                 "last_seen_at": d.get("last_seen_at"),
                                 "created_at": d.get("created_at"),

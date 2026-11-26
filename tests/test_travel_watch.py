@@ -2512,3 +2512,259 @@ def test_office_watch_union_strict_matching_long_haul_and_ui(handler, mem_db):
     assert res.sent_count == 1 if hasattr(res, "sent_count") else True
     assert len(rec.calls) == 1
     assert "265,000원" in rec.calls[0][1] and "대한항공" in rec.calls[0][1]
+
+
+# ----------------------------------------------------------------------
+# Time-window watch filter (From~To) + Primary / Secondary inversion
+# ----------------------------------------------------------------------
+from dataclasses import replace as _dc_replace  # noqa: E402
+
+from travel_brief import watch_engine as _we  # noqa: E402
+from travel_brief.models import SSEFlightCandidate  # noqa: E402
+from travel_brief.storage.db import UNSET, make_watch_drop_key_v2  # noqa: E402
+from travel_brief.watch_engine import (  # noqa: E402
+    DAILY_PRICE_CEILING_KRW,
+    WatchDeals,
+    matches_time_window,
+    resolve_time_window_deal,
+)
+
+
+def tw_cand(price, dep, arr, nd=False, oid=None, airline="제주항공"):
+    oid = oid or f"O{dep.replace(':', '')}"
+    return SSEFlightCandidate(airline=airline, dep_time=dep, ret_dep_time="15:00", ret_arr_time=arr,
+                              ret_arr_date="", next_day_arrival=nd, min_card=price, min_general=price,
+                              outbound_id=oid, return_id=f"R{arr.replace(':', '')}")
+
+
+def tw_deal(cands, code="FUK", dep="2027-01-14", ret="2027-01-17"):
+    cheapest = min(cands, key=lambda c: c.min_card)
+    base = mk_live(code, dep, ret, cheapest.min_card, airline=cheapest.airline, dep_time=cheapest.dep_time,
+                   ret_time=cheapest.ret_dep_time, arr_time=cheapest.ret_arr_time)
+    return _dc_replace(base, sse_candidates=tuple(cands), next_day_arrival=cheapest.next_day_arrival)
+
+
+def _tw_watch(db, chat="c1", code="FUK", target=250_000, **kw):
+    seed_recipient(db, chat)
+    return db.upsert_travel_watch(chat, code, target, watch_mode="FLEX", horizon_months=3, weekday_option="ANY", **kw)
+
+
+def test_matches_time_window_normal_wrap_and_strict_parse():
+    assert matches_time_window("10:00", None, None) and matches_time_window("", None, 600)
+    assert matches_time_window("09:00", 540, 720) and matches_time_window("12:00", 540, 720)
+    assert not matches_time_window("12:01", 540, 720) and not matches_time_window("08:59", 540, 720)
+    # overnight wrap 22:00~02:00
+    assert matches_time_window("23:30", 1320, 120) and matches_time_window("01:59", 1320, 120)
+    assert not matches_time_window("12:00", 1320, 120)
+    for bad in ("", "9:00", "24:00", "09:60", "0900", None):
+        assert not matches_time_window(bad, 540, 720)
+
+
+def test_time_window_db_migration_unset_vs_none_and_validation(tmp_path):
+    path = tmp_path / "legacy_tw.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(LEGACY_WATCH_DDL)
+    conn.execute(LEGACY_DELIVERY_DDL)
+    conn.execute("""INSERT INTO travel_price_watches (chat_id, dest_code, target_price_krw, created_at, updated_at)
+                    VALUES ('c1', 'FUK', 250000, '2026-11-01 00:00:00', '2026-11-01 00:00:00')""")
+    conn.commit()
+    conn.close()
+    db = TravelBriefDatabase(db_path=str(path))
+    legacy = db.get_travel_watch("c1", "FUK")
+    assert all(legacy[c] is None for c in ("dep_time_from_min", "dep_time_to_min", "ret_arr_from_min", "ret_arr_to_min"))
+    probe = TravelBriefDatabase(db_path=str(path))._open_file_conn()
+    try:  # idempotent second migration
+        assert TravelBriefDatabase._migrate_travel_watch_schema(probe)["travel_price_watches"] == []
+    finally:
+        probe.close()
+
+    w = db.upsert_travel_watch("c1", "FUK", 250_000, dep_time_from_min=540, dep_time_to_min=720)
+    assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"]) == (540, 720, None)
+    # omitted (UNSET) keeps the stored window
+    w = db.upsert_travel_watch("c1", "FUK", 240_000, ret_arr_from_min=1320, ret_arr_to_min=120)
+    assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"], w["ret_arr_to_min"]) == (540, 720, 1320, 120)
+    db.set_watch_initial_price_if_null(w["watch_id"], 230_000)
+    w = db.upsert_travel_watch("c1", "FUK", 240_000, dep_time_from_min=UNSET, dep_time_to_min=UNSET)
+    assert (w["dep_time_from_min"], w["target_price_krw"], w["initial_price_krw"]) == (540, 240_000, 230_000)
+    # explicit None clears to NULL (and a changed window re-anchors)
+    w = db.upsert_travel_watch("c1", "FUK", 240_000, dep_time_from_min=None, dep_time_to_min=None)
+    assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"]) == (None, None, 1320)
+    assert w["initial_price_krw"] is None
+    for bad in ({"dep_time_from_min": 540, "dep_time_to_min": None},
+                {"dep_time_from_min": 540, "dep_time_to_min": 540},
+                {"dep_time_from_min": 0, "dep_time_to_min": 1440},
+                {"dep_time_from_min": -1, "dep_time_to_min": 60},
+                {"dep_time_from_min": "540", "dep_time_to_min": 720},
+                {"dep_time_from_min": True, "dep_time_to_min": 720},
+                {"dep_time_from_min": 540}):  # half-passed pair
+        with pytest.raises(ValueError):
+            db.upsert_travel_watch("c1", "FUK", 240_000, **bad)
+    assert db.get_travel_watch("c1", "FUK")["ret_arr_from_min"] == 1320  # failed writes changed nothing
+
+
+def test_time_window_primary_reference_line_and_fingerprint_key(mem_db):
+    w = _tw_watch(mem_db, dep_time_from_min=540, dep_time_to_min=720)
+    deal = tw_deal([tw_cand(180_000, "07:00", "12:00"), tw_cand(230_000, "09:30", "18:10", oid="O2"),
+                    tw_cand(240_000, "10:00", "20:00")])
+    fetch = spec_fetcher_from({"FUK": [deal]})
+    sender = Recorder()
+    res = WatchCheckEngine(mem_db, fetch, sender=sender, now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    spec = fetch.calls[0][1]
+    assert (spec.needs_time_coverage, spec.price_ceiling_krw) == (True, 250_000)
+    assert res.sent_count == 1 and len(sender.calls) == 1
+    text = sender.calls[0][1]
+    assert "조건 내 실시간 최저가: <b>230,000원</b>" in text and "출국 09:00~12:00" in text
+    assert "09:30" in text and "18:10" in text
+    assert "💡 참고(시간 무관 최저 특가): 180,000원~ (07:00 출발 · 12:00 인천도착 · 01/14(목)~01/17(일))" in text
+    assert text.count("💡 참고(시간 무관") == 1
+    stored = mem_db.get_travel_watch("c1", "FUK")
+    assert stored["last_seen_price_krw"] == 230_000  # the in-window Primary is the observed metric
+    rows = ledger_rows(mem_db, w["watch_id"])
+    assert len(rows) == 1 and rows[0]["delivery_key"].endswith(":fp=O2:R1810") and rows[0]["price_krw"] == 230_000
+
+
+def test_reference_line_omitted_when_not_cheaper_and_trimmed_first(monkeypatch):
+    from travel_bot_runner import visible_text_len
+
+    res = CityCatalog(FlightEngine(live_naver=False).destinations).get("FUK")
+    watch = {"dest_code": "FUK", "target_price_krw": 300_000, "watch_mode": "FLEX", "horizon_months": 3,
+             "dep_time_from_min": 540, "dep_time_to_min": 720}
+    primary = mk_live(price=250_000, dep_time="09:30", ret_time="15:00", arr_time="18:10")
+    cheaper = mk_live(price=200_000, dep_time="07:00", ret_time="10:00", arr_time="12:00")
+    same = mk_live(price=250_000, dep_time="07:00", arr_time="12:00")
+    assert "참고(시간 무관" not in build_watch_alert_card(watch, primary, res, reference_deal=same)
+    pg_ref = _dc_replace(cheaper, data_source="LIVE_PG")
+    assert "참고(시간 무관" not in build_watch_alert_card(watch, primary, res, reference_deal=pg_ref)
+    no_tw = {k: v for k, v in watch.items() if not k.startswith("dep_time")}
+    assert "참고(시간 무관" not in build_watch_alert_card(no_tw, primary, res, reference_deal=cheaper)
+    full = build_watch_alert_card(watch, primary, res, reference_deal=cheaper)
+    bare = build_watch_alert_card(watch, primary, res)
+    assert "참고(시간 무관" in full and "참고(시간 무관" not in bare
+    monkeypatch.setattr(_we, "CARD_MAX_VISIBLE", visible_text_len(bare))
+    assert build_watch_alert_card(watch, primary, res, reference_deal=cheaper) == bare  # reference trimmed first
+
+
+def test_partial_coverage_suppresses_time_watches_only_drop_and_daily(mem_db):
+    _tw_watch(mem_db, "a", dep_time_from_min=540, dep_time_to_min=720)
+    _tw_watch(mem_db, "b", notify_mode="DAILY", ret_arr_from_min=1080, ret_arr_to_min=1439)
+    _tw_watch(mem_db, "c")  # no time filter: unaffected by time coverage
+    deal = tw_deal([tw_cand(180_000, "09:30", "19:00")])
+
+    def raw_fetcher(partial_flag):
+        def fetch(code, custom, max_target, spec=None):
+            out = WatchDeals([deal] if code == "FUK" else [])
+            out.partial_coverage = partial_flag
+            return out  # returned as-is: the engine must read the coverage flag off the fetch result
+
+        fetch.accepts_spec = True
+        return fetch
+
+    sent_to: list[str] = []
+    for clock in (kst_clock(2026, 12, 1, 12, 30), kst_clock(2026, 12, 1, 7, 30)):
+        sender = Recorder()
+        res = WatchCheckEngine(mem_db, raw_fetcher(True), sender=sender, now_fn=clock).run_once()
+        sent_to += [c[0] for c in sender.calls]
+        assert res.time_partial_suppressed_count == 2  # DROP (a) and DAILY (b) both fail closed
+    assert sent_to == ["c"]  # only the untimed watch alerted (once; same-slot cooldown afterwards)
+    # full coverage -> both time-filtered watches alert (DAILY in its morning window)
+    sender = Recorder()
+    WatchCheckEngine(mem_db, raw_fetcher(False), sender=sender, now_fn=kst_clock(2026, 12, 2, 7, 30)).run_once()
+    assert sorted(c[0] for c in sender.calls) == ["a", "b"]
+
+
+def test_unknown_cheaper_candidate_or_unknown_arrival_fails_closed(mem_db):
+    _tw_watch(mem_db, "a", ret_arr_from_min=1080, ret_arr_to_min=1439)
+    # 190k itinerary has no verified arrival date -> it may be the true in-window Primary -> suppress
+    deal = tw_deal([tw_cand(190_000, "09:00", "19:00", nd=None), tw_cand(220_000, "10:00", "20:00")])
+    sender = Recorder()
+    res = WatchCheckEngine(mem_db, spec_fetcher_from({"FUK": [deal]}), sender=sender,
+                           now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    assert sender.calls == [] and res.time_partial_suppressed_count == 1
+    # the unknown one is pricier than the verified Primary -> Primary stands
+    ok = tw_deal([tw_cand(200_000, "10:00", "20:00"), tw_cand(230_000, "09:00", "19:00", nd=None)])
+    eff, unknown = resolve_time_window_deal(ok, (None, None, 1080, 1439))
+    assert (eff.price_krw, unknown) == (200_000, 230_000)
+    # fallback (no candidates): exact times of the cheapest itinerary only
+    flat = mk_live(price=210_000, dep_time="09:00", arr_time="19:30")
+    assert resolve_time_window_deal(flat, (None, None, 1080, 1439))[0].price_krw == 210_000
+    unknown_nd = _dc_replace(flat, next_day_arrival=None)
+    assert resolve_time_window_deal(unknown_nd, (None, None, 1080, 1439)) == (None, 210_000)
+    miss = mk_live(price=210_000, dep_time="07:00", arr_time="19:30")
+    assert resolve_time_window_deal(miss, (540, 720, None, None)) == (None, 210_000)  # pricier fares unknown
+    assert resolve_time_window_deal(_dc_replace(flat, data_source="LIVE_PG"), (540, 720, None, None)) == (None, None)
+
+
+def test_time_coverage_ceiling_daily_vs_drop_spec(mem_db):
+    _tw_watch(mem_db, "a", target=200_000, dep_time_from_min=540, dep_time_to_min=720)
+    _tw_watch(mem_db, "b", target=320_000)  # untimed, higher target: not part of the time ceiling
+    fetch = spec_fetcher_from({})
+    WatchCheckEngine(mem_db, fetch, sender=Recorder(), now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    assert (fetch.calls[0][1].needs_time_coverage, fetch.calls[0][1].price_ceiling_krw) == (True, 200_000)
+    _tw_watch(mem_db, "d", target=150_000, notify_mode="DAILY", ret_arr_from_min=600, ret_arr_to_min=900)
+    fetch = spec_fetcher_from({})
+    WatchCheckEngine(mem_db, fetch, sender=Recorder(), now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    assert fetch.calls[0][1].price_ceiling_krw == DAILY_PRICE_CEILING_KRW
+    mem_db.deactivate_travel_watch("a", "FUK")
+    mem_db.deactivate_travel_watch("d", "FUK")
+    fetch = spec_fetcher_from({})
+    WatchCheckEngine(mem_db, fetch, sender=Recorder(), now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    assert (fetch.calls[0][1].needs_time_coverage, fetch.calls[0][1].price_ceiling_krw) == (False, None)
+
+
+def test_live_fetcher_time_coverage_verifies_all_under_ceiling_and_flags_partial():
+    pg = [mk_live(dep=f"2027-01-{d:02d}", ret=f"2027-01-{d + 3:02d}", price=p, source="LIVE_PG")
+          for d, p in ((7, 100_000), (8, 200_000), (14, 300_000), (15, 400_000), (21, 500_000))]
+    eng = MagicMock()
+    eng.live_naver = True
+    eng.search_watch_deals.return_value = list(pg)
+    seen: list[int] = []
+
+    def verify_all(deals, **kw):
+        seen.extend(d.price_krw for d in deals)
+        return [_dc_replace(d, data_source="LIVE_SSE") for d in deals]
+
+    eng.ensure_deals_sse_verified.side_effect = verify_all
+    fetch = make_live_quote_fetcher(eng)
+    spec = WatchFetchSpec(3, "ANY", 3, needs_time_coverage=True, price_ceiling_krw=400_000)
+    out = fetch("FUK", None, 250_000, spec)
+    # cap round (<= 250k: 100k, 200k) + coverage round = EVERY remaining PG slot <= 400k (no sse_cap truncation)
+    assert sorted(seen) == [100_000, 200_000, 300_000, 400_000]
+    assert "live_deadline" in eng.ensure_deals_sse_verified.call_args.kwargs
+    assert out.partial_coverage is False
+    assert {d.price_krw for d in out if d.data_source == "LIVE_SSE"} == {100_000, 200_000, 300_000, 400_000}
+    eng.ensure_deals_sse_verified.side_effect = lambda deals, **kw: list(deals)  # nothing verified
+    assert fetch("FUK", None, 250_000, spec).partial_coverage is True
+    eng.live_naver = False
+    assert fetch("FUK", None, 250_000, spec).partial_coverage is True
+    plain = fetch("FUK", None, 250_000, WatchFetchSpec(3, "ANY", 3))
+    assert not getattr(plain, "partial_coverage", False)
+
+
+def test_office_and_time_window_intersection(mem_db):
+    seed_recipient(mem_db, "o")
+    mem_db.upsert_travel_watch("o", "FUK", 300_000, watch_mode="FLEX", horizon_months=3, weekday_option="OFFICE",
+                               dep_time_from_min=1080, dep_time_to_min=1439)
+    # Fri 2027-01-15 -> Sun 2027-01-17 (2N)
+    deal = tw_deal([
+        tw_cand(210_000, "08:30", "12:00"),            # outside dep window (and arrives < 13:00)
+        tw_cand(230_000, "19:00", "00:30", nd=True),   # in dep window but next-day arrival -> not OFFICE
+        tw_cand(265_000, "19:20", "18:10", airline="대한항공"),  # in window + OFFICE-valid
+    ], dep="2027-01-15", ret="2027-01-17")
+    sender = Recorder()
+    WatchCheckEngine(mem_db, spec_fetcher_from({"FUK": [deal]}), sender=sender,
+                     now_fn=kst_clock(2026, 12, 1, 12, 30)).run_once()
+    assert len(sender.calls) == 1
+    text = sender.calls[0][1]
+    assert "265,000원" in text and "대한항공" in text and "230,000" not in text
+
+
+def test_fingerprint_keys_unique_and_legacy_bit_identical():
+    assert make_watch_drop_key_v2(1, "2027-01-14", "2027-01-17", 200_000) == \
+        "travel-watch:v2:1:DROP:2027-01-14:2027-01-17:200000"
+    a = make_watch_drop_key_v2(1, "2027-01-14", "2027-01-17", 200_000, "O1:R1")
+    b = make_watch_drop_key_v2(1, "2027-01-14", "2027-01-17", 200_000, "O2:R2")
+    assert a != b and a.endswith(":fp=O1:R1")
+    assert make_watch_delivery_key(1, "c", "FUK", "2027-01-14", "2027-01-17", 200_000) == \
+        "watch:1:c:FUK:2027-01-14:2027-01-17:200000"
+    assert make_watch_delivery_key(1, "c", "FUK", "2027-01-14", "2027-01-17", 200_000, "7C|09:00|18:00").endswith(
+        ":fp=7C|09:00|18:00")

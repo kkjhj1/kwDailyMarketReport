@@ -28,6 +28,7 @@ from typing import Callable, Iterable, Optional
 from travel_brief.models import (
     DestinationMeta,
     FlightDeal,
+    SSEFlightCandidate,
     format_departure_time_slot,
     format_live_schedule_slots,
 )
@@ -467,16 +468,22 @@ def parse_sse_final_object(
         ret_arr_info = ret_seg.get("arrival") or {}
         ret_arr_time = _format_hhmm(ret_arr_info.get("time") or "")
         ret_arr_date = str(ret_arr_info.get("date") or "").replace("-", "").strip()
-        next_day_arr = bool(ret_arr_date and ret_compact and ret_arr_date > ret_compact)
+        # [DATA-01] unknown (None) when the arrival date or the requested return date is missing.
+        next_day_arr: Optional[bool] = (
+            None if (not ret_arr_date or not ret_compact) else bool(ret_arr_date > ret_compact)
+        )
 
         return {
             "airline": airline_str,
             "dep_time": dep_time,
             "ret_dep_time": ret_dep_time,
             "ret_arr_time": ret_arr_time,
+            "ret_arr_date": ret_arr_date,
             "next_day_arrival": next_day_arr,
             "min_card": min_card,
             "min_general": min_gen,
+            "outbound_id": str(ids[0]),
+            "return_id": str(ids[1]),
         }
 
     parsed_fms = [p for m in (obj.get("fareMappings") or []) if (p := _parse_mapping(m)) is not None]
@@ -498,8 +505,8 @@ def parse_sse_final_object(
     for cand in parsed_fms:
         dep_m = _hhmm_to_minutes(cand.get("dep_time") or "")
         arr_m = _hhmm_to_minutes(cand.get("ret_arr_time") or "")
-        if dep_m is None or arr_m is None or cand.get("next_day_arrival"):
-            continue
+        if dep_m is None or arr_m is None or cand.get("next_day_arrival") is not False:
+            continue  # OFFICE needs a verified same-day arrival (unknown == rejected)
         if arr_m < OFFICE_RET_MIN_ARR_MINUTES:
             continue
         if dep_date is not None and ret_date is not None:
@@ -518,6 +525,7 @@ def parse_sse_final_object(
         "cheapest": cheapest,
         "popular": popular,
         "office": office,
+        "candidates": parsed_fms,
     }
 
 
@@ -799,6 +807,17 @@ class NaverFlightLiveClient:
                     off_dep,
                 )
 
+        candidates: list[SSEFlightCandidate] = []
+        for raw in sse_result.get("candidates") or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                cand = SSEFlightCandidate.from_dict(raw)
+            except (TypeError, ValueError):
+                continue
+            if cand.min_card > 0:
+                candidates.append(cand)
+
         return FlightDeal(
             destination_code=deal.destination_code,
             destination_name=deal.destination_name,
@@ -833,6 +852,7 @@ class NaverFlightLiveClient:
             office_dep_time=off_dep,
             office_ret_arr_time=off_ret_arr,
             office_leave_days=off_leave,
+            sse_candidates=tuple(candidates),
         )
 
     def _read_disk_sections(self) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -853,7 +873,7 @@ class NaverFlightLiveClient:
             items = entry.get("deals") or []
             if not items:
                 return None
-            return [FlightDeal(**it) for it in items]
+            return [FlightDeal.from_cache_dict(it) for it in items]
         except Exception:
             return None
 
@@ -888,7 +908,7 @@ class NaverFlightLiveClient:
             entries, backup = self._read_disk_sections()
             entries[cache_key] = {
                 "saved_at": time.time(),
-                "deals": [dataclasses.asdict(d) for d in deals],
+                "deals": [d.to_cache_dict() for d in deals],
             }
             backup.pop(cache_key, None)
             _write_disk_payload(self.cache_path, entries, backup)
