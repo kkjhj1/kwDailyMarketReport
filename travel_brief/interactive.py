@@ -243,11 +243,20 @@ WATCH_TIME_DIR_TITLES = {"D": "출국편 출발 시간", "R": "귀국편 인천 
 # code -> (from_min, to_min) ; "M" == 무관 (clear)
 WATCH_TIME_PRESETS: dict[str, tuple[str, Optional[tuple[int, int]]]] = {
     "M": ("무관", None),
+    "2206": ("야간 22-06", (22 * 60, 6 * 60)),
+    "0610": ("아침 06-10", (6 * 60, 10 * 60)),
+    "1014": ("점심 10-14", (10 * 60, 14 * 60)),
+    "1418": ("저녁 14-18", (14 * 60, 18 * 60)),
+    "1822": ("밤 18-22", (18 * 60, 22 * 60)),
+}
+# [TG-06] legacy preset codes: no longer rendered, still accepted from old in-chat buttons.
+WATCH_TIME_LEGACY_PRESETS: dict[str, tuple[str, Optional[tuple[int, int]]]] = {
     "0006": ("새벽 00-06", (0, 360)),
     "0612": ("오전 06-12", (360, 720)),
     "1218": ("오후 12-18", (720, 1080)),
     "1824": ("저녁 18-24", (1080, 1439)),
 }
+_WATCH_TIME_ACCEPTED_PRESETS = {**WATCH_TIME_LEGACY_PRESETS, **WATCH_TIME_PRESETS}
 WATCH_TIME_CLEAR_WORDS = {"무관", "상관없음", "상관없어", "없음", "해제"}
 _TIME_WINDOW_RE = re.compile(
     r"^\s*(\d{1,2})(?::(\d{2}))?\s*시?\s*(?:[-~〜–—]|부터)?\s*(\d{1,2})(?::(\d{2}))?\s*시?\s*(?:까지)?\s*$"
@@ -1846,7 +1855,7 @@ class TravelInteractiveHandler:
         if not code or direction not in WATCH_TIME_DIRECTIONS:
             return None
         value = parts[5] if n == 6 else ""
-        if sub == "tp" and value not in WATCH_TIME_PRESETS:
+        if sub == "tp" and value not in _WATCH_TIME_ACCEPTED_PRESETS:
             return None
         if sub in ("tf", "tt"):
             if not value.isdigit() or len(value) > 2 or value != str(int(value)):
@@ -1874,7 +1883,7 @@ class TravelInteractiveHandler:
                 draft.time_pick_dir, draft.time_pick_from = direction, None
                 text, markup = self.build_watch_time_picker_card(code, draft, direction)
             elif sub == "tp":
-                window = WATCH_TIME_PRESETS[value][1]
+                window = _WATCH_TIME_ACCEPTED_PRESETS[value][1]
                 draft.set_time_window(direction, *(window if window else (None, None)))
                 label = WATCH_TIME_DIR_TITLES[direction]
                 text, markup = self.build_watch_setup_card(
@@ -1920,45 +1929,29 @@ class TravelInteractiveHandler:
     def build_watch_time_picker_card(
         self, code: str, draft: WatchDraft, direction: str, notice: str = ""
     ) -> tuple[str, dict[str, Any]]:
-        """Presets row + 2-tap hour grid (step 1: From 00..23, step 2: To 01..24 excluding From), 4x6 each."""
+        """6 one-tap presets (2 rows x 3) + direct input. The legacy `tf`/`tt` hour grid is no longer
+        rendered but its callbacks are still accepted ([TG-06])."""
         label = self.label_for(code)
         cur_f, cur_t = draft.time_window(direction)
-        picking_to = draft.time_pick_dir == direction and draft.time_pick_from is not None
         lines = [notice] if notice else []
         lines += [
             f"⏱ <b>[{html.escape(label)} · {WATCH_TIME_DIR_TITLES[direction]}]</b>",
             "━━━━━━━━━━━━━━━━━━",
             f"현재: {html.escape(format_time_window(cur_f, cur_t))}",
             html.escape(time_window_bar(cur_f, cur_t)),
+            "원하는 시간대를 한 번 눌러 고르세요. 다른 구간은 ✍️ 직접 입력으로 정할 수 있어요.",
+            "• 끝 시각이 시작보다 빠르면 자정을 넘기는 구간이에요 (예: 22-06).",
         ]
-        if picking_to:
-            lines.append(f"2/2 끝 시각을 골라 주세요 (시작 {int(draft.time_pick_from):02d}시 선택됨).")
-        else:
-            lines.append("1/2 시작 시각을 골라 주세요. 또는 위 프리셋을 누르세요.")
-        lines.append("• 끝 시각이 시작보다 빠르면 자정을 넘기는 구간이에요 (예: 22-02).")
-        rows: list[list[dict[str, Any]]] = []
+
+        def _preset_btn(k: str, name: str, w: Optional[tuple[int, int]]) -> dict[str, Any]:
+            active = (cur_f is None) if w is None else (cur_f, cur_t) == w
+            return {"text": ("✅ " if active else "") + name, "callback_data": f"trv:w:tp:{code}:{direction}:{k}"}
+
         presets = list(WATCH_TIME_PRESETS.items())
-        # Presets: 무관 + 4 day parts (2 rows keep 360px widths readable)
-        rows.append([
-            {"text": ("✅ " if cur_f is None and k == "M" else "") + name, "callback_data": f"trv:w:tp:{code}:{direction}:{k}"}
-            for k, (name, _w) in presets[:3]
-        ])
-        rows.append([
-            {"text": name, "callback_data": f"trv:w:tp:{code}:{direction}:{k}"}
-            for k, (name, _w) in presets[3:]
-        ])
-        if picking_to:
-            start_h = int(draft.time_pick_from)
-            hours = [h for h in range(1, 25) if h != start_h]
-            sub = "tt"
-        else:
-            hours = list(range(0, 24))
-            sub = "tf"
-        for i in range(0, len(hours), 6):
-            rows.append([
-                {"text": f"{h:02d}", "callback_data": f"trv:w:{sub}:{code}:{direction}:{h}"}
-                for h in hours[i:i + 6]
-            ])
+        rows: list[list[dict[str, Any]]] = [
+            [_preset_btn(k, name, w) for k, (name, w) in presets[:3]],
+            [_preset_btn(k, name, w) for k, (name, w) in presets[3:]],
+        ]
         rows.append([
             {"text": "✍️ 직접 입력 (9-12 / 9:30-12:30)", "callback_data": f"trv:w:tc:{code}:{direction}"},
             {"text": "↩️ 돌아가기", "callback_data": f"trv:w:s:{code}"},

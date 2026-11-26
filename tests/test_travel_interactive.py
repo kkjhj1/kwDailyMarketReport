@@ -1908,31 +1908,45 @@ def test_time_picker_two_tap_grid_presets_and_save(tw_handler):
     _tw_cb(h, "trv:w:q:FUK:D")
     text, markup = _last(h)
     cbs = _cbs(markup)
-    assert {f"trv:w:tp:FUK:D:{k}" for k in ("M", "0006", "0612", "1218", "1824")} <= set(cbs)
-    grid = [r for r in markup["inline_keyboard"] if r and r[0]["callback_data"].startswith("trv:w:tf:")]
-    assert len(grid) == 4 and all(len(r) == 6 for r in grid)  # 4 rows x 6 cols, 00..23
-    assert [b["callback_data"] for r in grid for b in r] == [f"trv:w:tf:FUK:D:{i}" for i in range(24)]
-    assert {"trv:w:tc:FUK:D", "trv:w:s:FUK"} <= set(cbs)
+    kb = markup["inline_keyboard"]
+    preset_keys = ("M", "2206", "0610", "1014", "1418", "1822")
+    # 6 presets in 2 rows of 3, then [직접 입력 | 돌아가기]; no 00..23 hour grid
+    assert [[b["callback_data"] for b in r] for r in kb[:2]] == [
+        [f"trv:w:tp:FUK:D:{k}" for k in preset_keys[:3]],
+        [f"trv:w:tp:FUK:D:{k}" for k in preset_keys[3:]],
+    ]
+    assert [b["callback_data"] for b in kb[-1]] == ["trv:w:tc:FUK:D", "trv:w:s:FUK"] and len(kb) == 3
+    assert not any(c.startswith(("trv:w:tf:", "trv:w:tt:")) for c in cbs)
+    assert "1/2 시작 시각" not in text
+    assert kb[0][0]["text"] == "✅ 무관"  # nothing set yet -> 무관 active
+    assert sum(b["text"].startswith("✅ ") for r in kb for b in r) == 1
 
-    _tw_cb(h, "trv:w:tf:FUK:D:9")
+    # direct input entry
+    _tw_cb(h, "trv:w:tc:FUK:D")
     text, markup = _last(h)
-    to_cbs = [c for c in _cbs(markup) if c.startswith("trv:w:tt:")]
-    assert len(to_cbs) == 23 and "trv:w:tt:FUK:D:9" not in to_cbs and to_cbs[-1] == "trv:w:tt:FUK:D:24"
-    to_rows = [r for r in markup["inline_keyboard"] if r and r[0]["callback_data"].startswith("trv:w:tt:")]
-    assert len(to_rows) == 4 and all(len(r) <= 6 for r in to_rows)
-    assert "09시 선택됨" in text
+    assert "직접 입력" in text and _cbs(markup) == ["trv:w:q:FUK:D"]
 
+    # 1-tap preset 06-10 -> active marker moves to it
+    _tw_cb(h, "trv:w:tp:FUK:D:0610")
+    assert "06:00 ━━━━ 10:00" in _last(h)[0]
+    _tw_cb(h, "trv:w:q:FUK:D")
+    kb = _last(h)[1]["inline_keyboard"]
+    active = [b["callback_data"] for r in kb for b in r if b["text"].startswith("✅ ")]
+    assert active == ["trv:w:tp:FUK:D:0610"]
+
+    # [TG-06] legacy 2-tap tf/tt callbacks from old messages still work
+    _tw_cb(h, "trv:w:tf:FUK:D:9")
     _tw_cb(h, "trv:w:tt:FUK:D:12")
     text, _markup = _last(h)
     assert "09:00 ━━━━ 12:00" in text and "저장 버튼" in text
     assert db.get_travel_watch("c1", "FUK") is None  # nothing persisted before an explicit save
 
-    _tw_cb(h, "trv:w:tp:FUK:R:1824")
-    assert "18:00 ━━━━ 23:59" in _last(h)[0]
+    _tw_cb(h, "trv:w:tp:FUK:R:1822")
+    assert "18:00 ━━━━ 22:00" in _last(h)[0]
     _tw_cb(h, "trv:w:k:FUK:1")
     w = db.get_travel_watch("c1", "FUK")
     assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"], w["ret_arr_to_min"]) == \
-        (540, 720, 1080, 1439)
+        (540, 720, 1080, 1320)
     assert "⏱ 시간 조건" in _last(h)[0]
 
     # edit (reload from DB) -> clear departure with the 무관 preset -> save clears to NULL
@@ -1943,7 +1957,20 @@ def test_time_picker_two_tap_grid_presets_and_save(tw_handler):
     w = db.get_travel_watch("c1", "FUK")
     assert (w["dep_time_from_min"], w["dep_time_to_min"], w["ret_arr_from_min"]) == (None, None, 1080)
 
-    # overnight wrap via the grid: 22 -> 02
+    # overnight wrap via the 2206 preset (22:00 -> 06:00)
+    _tw_cb(h, "trv:w:tp:FUK:D:2206")
+    d = h._get_draft("c1", "u1", "FUK")
+    assert (d.dep_time_from_min, d.dep_time_to_min) == (1320, 360)
+    _tw_cb(h, "trv:w:q:FUK:D")
+    kb = _last(h)[1]["inline_keyboard"]
+    assert [b["callback_data"] for r in kb for b in r if b["text"].startswith("✅ ")] == ["trv:w:tp:FUK:D:2206"]
+
+    # [TG-06] legacy preset code still accepted
+    _tw_cb(h, "trv:w:tp:FUK:D:1824")
+    d = h._get_draft("c1", "u1", "FUK")
+    assert (d.dep_time_from_min, d.dep_time_to_min) == (1080, 1439)
+
+    # legacy overnight wrap via tf/tt: 22 -> 02
     _tw_cb(h, "trv:w:q:FUK:R")
     _tw_cb(h, "trv:w:tf:FUK:R:22")
     _tw_cb(h, "trv:w:tt:FUK:R:2")
