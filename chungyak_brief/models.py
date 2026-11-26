@@ -248,6 +248,51 @@ class UserProfile:
         return self.custom_alert_enabled is not False
 
 
+AREA_BUCKETS: tuple[str, ...] = ("59", "84", "85+")
+AREA_BUCKET_LABELS: dict[str, str] = {"59": "~59㎡", "84": "60~84㎡", "85+": "85㎡+"}
+
+
+def area_bucket_of(area_m2: Optional[Decimal]) -> Optional[str]:
+    """`~59`: area < 60, `84`: 60 <= area <= 85, `85+`: area > 85. None -> None (unknown)."""
+    if area_m2 is None:
+        return None
+    if area_m2 < Decimal("60"):
+        return "59"
+    if area_m2 <= Decimal("85"):
+        return "84"
+    return "85+"
+
+
+@dataclass
+class RegularSubPrefs:
+    """08:00 정기 다이제스트 구독 + 필터 (`chungyak_regular_subs`). `areas=None` -> 전체 면적."""
+
+    chat_id: str
+    is_enabled: bool = False
+    moosunwi: bool = True
+    public: bool = True
+    general: bool = True
+    areas: Optional[list[str]] = None
+    deadline_d1: bool = False
+
+    def wants_type(self, notice_type: NoticeType) -> bool:
+        if notice_type == NoticeType.MOOSUNWI:
+            return self.moosunwi
+        if notice_type == NoticeType.PUBLIC:
+            return self.public
+        return self.general  # APT_GENERAL / IMUI / CANCEL_RE
+
+    def wants_area(self, notice: "ChungyakNotice") -> bool:
+        if not self.areas:
+            return True
+        lo = area_bucket_of(notice.min_area_m2) or area_bucket_of(notice.max_area_m2)
+        hi = area_bucket_of(notice.max_area_m2) or lo
+        if lo is None or hi is None:
+            return True  # 면적 미상 -> 제외하지 않음 (unknown != false)
+        i, j = sorted((AREA_BUCKETS.index(lo), AREA_BUCKETS.index(hi)))
+        return bool(set(AREA_BUCKETS[i:j + 1]) & set(self.areas))
+
+
 @dataclass
 class EligibilityResult:
     status: EligibilityStatus

@@ -2643,15 +2643,23 @@ class DynamicBotManager:
                 yolo_db.close()
 
     def _dispatch_chungyak_bot_update(self, bot_token: str, item: dict[str, Any], opener=None) -> tuple[bool, str]:
-        """Dispatches Chungyak Bot callbacks (`cy:`) and domain commands to ChungyakInteractiveBot.
+        """Dispatches Chungyak Bot callbacks (`cy:`), domain commands and one-line condition text to
+        ChungyakInteractiveBot.
 
         The subscription access gate has already run upstream; ChungyakInteractiveBot ACKs every callback
-        first (once) per [TG-04]. Live alert dispatch is NOT triggered here ([PROD-LIVE]: cron runner only)."""
+        first (once) per [TG-04]. Free text is routed only for private chats whose text the pure parser
+        recognizes (>= 1 condition); it only produces an unsaved draft preview. Live alert dispatch is NOT
+        triggered here ([PROD-LIVE]: cron runner only)."""
         try:
             from pathlib import Path
             from chungyak_brief import DB_FILENAME as CHUNGYAK_DB_FILENAME
             from chungyak_brief.channels.telegram import ChungyakTelegramChannel
-            from chungyak_brief.interactive_bot import COMMANDS_ALL, ChungyakInteractiveBot
+            from chungyak_brief.interactive_bot import (
+                COMMANDS_ALL,
+                ChungyakInteractiveBot,
+                is_private_chat,
+                parse_condition_text,
+            )
             from chungyak_brief.storage.db import ChungyakDatabase
         except ImportError:
             return False, "chungyak_interactive_not_available"
@@ -2661,10 +2669,16 @@ class DynamicBotManager:
             if not str((item["callback_query"] or {}).get("data") or "").startswith("cy:"):
                 return False, "not_chungyak_domain_callback"
         elif "message" in item:
-            text = str((item.get("message") or {}).get("text") or "").strip()
-            cmd = text.split()[0].lower().split("@")[0] if text else ""
-            if cmd == "/start" or cmd not in COMMANDS_ALL:
-                return False, "not_chungyak_interactive_event"  # /start keeps the shared onboarding flow
+            message = item.get("message") or {}
+            text = str(message.get("text") or "").strip()
+            if not text:
+                return False, "not_chungyak_interactive_event"
+            if text.startswith("/"):
+                cmd = text.split()[0].lower().split("@")[0]
+                if cmd == "/start" or cmd not in COMMANDS_ALL:
+                    return False, "not_chungyak_interactive_event"  # /start keeps the shared onboarding flow
+            elif not is_private_chat(message.get("chat") or {}) or not parse_condition_text(text):
+                return False, "not_chungyak_interactive_event"
         else:
             return False, "not_chungyak_interactive_event"
 

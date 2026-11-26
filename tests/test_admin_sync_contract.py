@@ -125,6 +125,19 @@ class AdminSyncContractTests(unittest.TestCase):
 
                 self.assertTrue(callable(getattr(MarketBriefDatabase, meta["db_reader"].split(".", 1)[1], None)))
 
+    def test_chungyak_regular_sub_migrated_columns_are_surfaced(self):
+        """Additive ALTER TABLE columns on chungyak_regular_subs must be exposed by the Admin reader + UI."""
+        from chungyak_brief.storage.db import REGULAR_SUB_MIGRATIONS
+
+        reader = (ROOT / "market_brief/storage/db.py").read_text(encoding="utf-8")
+        ui = (ROOT / "market_brief/admin_ui.py").read_text(encoding="utf-8")
+        self.assertTrue(REGULAR_SUB_MIGRATIONS)
+        for col, ddl in REGULAR_SUB_MIGRATIONS:
+            with self.subTest(col=col):
+                self.assertTrue(ddl.startswith(f"ALTER TABLE chungyak_regular_subs ADD COLUMN {col} "))
+                self.assertIn(f'"{col}"', reader)
+                self.assertIn(f"r.{col}", ui)
+
     def test_chungyak_pii_endpoint_is_fail_closed(self):
         import os
         import tempfile

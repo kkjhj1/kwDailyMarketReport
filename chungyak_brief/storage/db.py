@@ -24,7 +24,9 @@ import uuid
 
 from chungyak_brief import BOT_ID
 from chungyak_brief.models import (
+    AREA_BUCKETS,
     ChannelType,
+    RegularSubPrefs,
     ChungyakNotice,
     DeliveryStatus,
     HouseType,
@@ -115,6 +117,17 @@ SCHEMA_SQL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_chungyak_deliv_status ON chungyak_deliveries(status, scheduled_at_kst)",
     "CREATE INDEX IF NOT EXISTS idx_chungyak_deliv_created ON chungyak_deliveries(created_at)",
 )
+
+# Additive, idempotent migrations (allowlisted column name -> fixed DDL). Old DBs gain the columns with defaults
+# equivalent to the legacy behaviour (all categories ON, all areas, no D-1 filter).
+REGULAR_SUB_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("sub_moosunwi", "ALTER TABLE chungyak_regular_subs ADD COLUMN sub_moosunwi INTEGER NOT NULL DEFAULT 1"),
+    ("sub_public", "ALTER TABLE chungyak_regular_subs ADD COLUMN sub_public INTEGER NOT NULL DEFAULT 1"),
+    ("sub_general", "ALTER TABLE chungyak_regular_subs ADD COLUMN sub_general INTEGER NOT NULL DEFAULT 1"),
+    ("sub_areas_json", "ALTER TABLE chungyak_regular_subs ADD COLUMN sub_areas_json TEXT DEFAULT NULL"),
+    ("sub_deadline_d1", "ALTER TABLE chungyak_regular_subs ADD COLUMN sub_deadline_d1 INTEGER NOT NULL DEFAULT 0"),
+)
+REGULAR_PREF_FIELDS: tuple[str, ...] = ("moosunwi", "public", "general", "areas", "deadline_d1")
 
 PROFILE_COLUMNS: tuple[str, ...] = (
     "residence_sido", "residence_sigungu", "residence_years", "is_homeless", "is_household_head",
@@ -223,6 +236,10 @@ class ChungyakDatabase:
         with self._tx() as conn:
             for stmt in SCHEMA_SQL:
                 conn.execute(stmt)
+            existing = {str(r[1]) for r in conn.execute("PRAGMA table_info(chungyak_regular_subs)").fetchall()}
+            for col, ddl in REGULAR_SUB_MIGRATIONS:
+                if col not in existing:
+                    conn.execute(ddl)
 
     def close(self) -> None:
         if self._mem_conn is not None:
@@ -439,6 +456,71 @@ class ChungyakDatabase:
                 "SELECT is_enabled FROM chungyak_regular_subs WHERE chat_id = ?", (str(chat_id),)
             ).fetchone()
         return None if row is None else bool(row["is_enabled"])
+
+    @staticmethod
+    def _decode_areas(raw: Any) -> Optional[list[str]]:
+        if raw in (None, ""):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, list):
+            return None
+        areas = [a for a in AREA_BUCKETS if a in {str(x) for x in parsed}]
+        return areas or None
+
+    def get_regular_prefs(self, chat_id: str) -> RegularSubPrefs:
+        """Regular digest subscription + filters. Missing row -> disabled with legacy defaults."""
+        with self._read() as conn:
+            row = conn.execute("SELECT * FROM chungyak_regular_subs WHERE chat_id = ?", (str(chat_id),)).fetchone()
+        if row is None:
+            return RegularSubPrefs(chat_id=str(chat_id))
+        d = dict(row)
+        return RegularSubPrefs(
+            chat_id=str(chat_id),
+            is_enabled=bool(d.get("is_enabled")),
+            moosunwi=bool(d.get("sub_moosunwi", 1)),
+            public=bool(d.get("sub_public", 1)),
+            general=bool(d.get("sub_general", 1)),
+            areas=self._decode_areas(d.get("sub_areas_json")),
+            deadline_d1=bool(d.get("sub_deadline_d1", 0)),
+        )
+
+    def update_regular_prefs(
+        self, chat_id: str, *, enabled: Optional[bool] = None, now: Optional[datetime] = None, **prefs: Any
+    ) -> RegularSubPrefs:
+        """Upserts filter fields (`moosunwi`/`public`/`general`/`areas`/`deadline_d1`) without touching the others.
+
+        A new row is created disabled unless `enabled` is given; `enabled=None` keeps the current on/off state.
+        """
+        unknown = set(prefs) - set(REGULAR_PREF_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown regular pref fields: {sorted(unknown)}")
+        ts = _utc_text(now)
+        cols: dict[str, Any] = {}
+        for name in ("moosunwi", "public", "general", "deadline_d1"):
+            if name in prefs:
+                cols[f"sub_{name}"] = int(bool(prefs[name]))
+        if "areas" in prefs:
+            areas = [a for a in AREA_BUCKETS if a in {str(x) for x in (prefs["areas"] or [])}]
+            cols["sub_areas_json"] = json.dumps(areas) if areas else None
+        if enabled is not None:
+            cols["is_enabled"] = int(bool(enabled))
+        with self._tx() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO chungyak_regular_subs (chat_id, is_enabled, created_at, updated_at)
+                   VALUES (?, 0, ?, ?)""",
+                (str(chat_id), ts, ts),
+            )
+            if cols:
+                names = list(cols)  # allowlisted column names only (built above)
+                conn.execute(
+                    f"UPDATE chungyak_regular_subs SET {', '.join(f'{c} = ?' for c in names)}, updated_at = ? "
+                    "WHERE chat_id = ?",
+                    [cols[c] for c in names] + [ts, str(chat_id)],
+                )
+        return self.get_regular_prefs(chat_id)
 
     def list_regular_sub_chat_ids(self) -> list[str]:
         with self._read() as conn:
