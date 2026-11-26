@@ -31,14 +31,18 @@ from chungyak_brief.channels.telegram import (
 from chungyak_brief.channels.telegram_limiter import SafeTelegramDispatcher, TelegramRateLimiter
 from chungyak_brief.collector import ChungyakCollector, sample_notices
 from chungyak_brief.eligibility import EligibilityEngine, should_notify
+from chungyak_brief import interactive_bot as ib
 from chungyak_brief.interactive_bot import (
     ChungyakAlertService,
     ChungyakInteractiveBot,
     _btn,
     build_demo_dispatcher,
+    filter_regular_notices,
     in_morning_window,
+    is_private_chat,
     is_quiet_hours,
     next_morning_slot,
+    parse_condition_text,
 )
 from chungyak_brief.models import (
     ChannelType,
@@ -47,10 +51,16 @@ from chungyak_brief.models import (
     EligibilityStatus,
     HouseType,
     NoticeType,
+    RegularSubPrefs,
     TriggerContext,
     UserProfile,
 )
-from chungyak_brief.storage.db import ChungyakDatabase, SubscriptionGateBlocked, load_active_chat_ids
+from chungyak_brief.storage.db import (
+    REGULAR_SUB_MIGRATIONS,
+    ChungyakDatabase,
+    SubscriptionGateBlocked,
+    load_active_chat_ids,
+)
 
 KST = ZoneInfo("Asia/Seoul")
 ROOT = Path(__file__).resolve().parents[1]
@@ -851,6 +861,452 @@ class CatalogueWiringTests(unittest.TestCase):
         cmds = {"/" + c["command"] for c in OFFICIAL_BOT_COMMANDS["chungyak_bot"]}
         self.assertTrue(cmds <= set(COMMANDS_ALL), cmds - set(COMMANDS_ALL))
         self.assertTrue(callable(getattr(DynamicBotManager, "_dispatch_chungyak_bot_update", None)))
+
+
+# =========================================================================================================
+# UX overhaul: additive migration, presets, wizard, one-line parser, regular multi-filter, routing
+# =========================================================================================================
+LEGACY_REGULAR_SUBS_SQL = """CREATE TABLE chungyak_regular_subs (
+    chat_id TEXT PRIMARY KEY,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    send_time_kst TEXT NOT NULL DEFAULT '08:00',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)"""
+
+
+def _make_legacy_sidecar(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(LEGACY_REGULAR_SUBS_SQL)
+        conn.execute("INSERT INTO chungyak_regular_subs VALUES ('777', 1, '08:00', '2026-11-01 00:00:00', "
+                     "'2026-11-01 00:00:00')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class MigrationTests(unittest.TestCase):
+    def test_additive_migration_is_idempotent_and_backward_compatible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chungyak_brief.sqlite3"
+            _make_legacy_sidecar(path)
+            for _ in range(2):  # re-open: ALTERs must not run twice
+                db = ChungyakDatabase(path)
+                db.close()
+            conn = sqlite3.connect(path)
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(chungyak_regular_subs)").fetchall()}
+            finally:
+                conn.close()
+            self.assertTrue({c for c, _ in REGULAR_SUB_MIGRATIONS} <= cols)
+            db = ChungyakDatabase(path)
+            try:
+                self.assertTrue(db.get_regular_sub("777"))
+                self.assertEqual(db.list_regular_sub_chat_ids(), ["777"])
+                prefs = db.get_regular_prefs("777")
+                self.assertEqual(
+                    (prefs.is_enabled, prefs.moosunwi, prefs.public, prefs.general, prefs.areas, prefs.deadline_d1),
+                    (True, True, True, True, None, False),
+                )
+                db.set_regular_sub("777", False)
+                self.assertFalse(db.get_regular_prefs("777").is_enabled)
+            finally:
+                db.close()
+
+    def test_update_regular_prefs_merges_and_validates(self):
+        db = ChungyakDatabase(":memory:")
+        try:
+            self.assertIsNone(db.get_regular_sub("n1"))
+            prefs = db.update_regular_prefs("n1", public=False, areas=["84", "bogus", "59"])
+            self.assertFalse(prefs.is_enabled)  # filter edits never silently subscribe
+            self.assertEqual(prefs.areas, ["59", "84"])
+            self.assertEqual((prefs.moosunwi, prefs.public, prefs.general), (True, False, True))
+            db.set_regular_sub("n1", True)
+            prefs = db.update_regular_prefs("n1", deadline_d1=True)
+            self.assertTrue(prefs.is_enabled and prefs.deadline_d1 and not prefs.public)
+            self.assertEqual(db.update_regular_prefs("n1", areas=None).areas, None)
+            with self.assertRaises(ValueError):
+                db.update_regular_prefs("n1", is_enabled=True)
+            self.assertTrue(UserProfile(chat_id="n1").is_empty())
+        finally:
+            db.close()
+
+
+class ParserTests(unittest.TestCase):
+    def test_full_sentence(self):
+        got = parse_condition_text("서울, 경기 84 9억 무주택 세대주 24개월 신혼 생애최초 줍줍")
+        self.assertEqual(got["preferred_regions"], ["서울", "경기"])
+        self.assertEqual(got["areas"], ["84"])
+        self.assertEqual(got["max_price_eok"], Decimal("9"))
+        self.assertIs(got["is_homeless"], True)
+        self.assertIs(got["is_household_head"], True)
+        self.assertEqual(got["account_months"], 24)
+        self.assertEqual(got["special_types"], ["FIRST_LIFE", "NEWLYWED"])
+        self.assertIs(got["moosunwi_only"], True)
+
+    def test_areas_aliases_and_units(self):
+        self.assertEqual(parse_condition_text("34평 85+ 59㎡")["areas"], ["59", "84", "85+"])
+        self.assertEqual(parse_condition_text("74")["areas"], ["84"])
+        self.assertEqual(parse_condition_text("2년")["account_months"], 24)
+        self.assertEqual(parse_condition_text("9.5억")["max_price_eok"], Decimal("9.5"))
+        self.assertEqual(parse_condition_text("서울특별시 경기도")["preferred_regions"], ["서울", "경기"])
+        self.assertEqual(parse_condition_text("전국")["preferred_regions"], [])
+        self.assertEqual(parse_condition_text("다자녀 노부모 신생아 청년")["special_types"],
+                         ["ELDERLY_PARENT", "MULTI_CHILD", "NEWBORN", "YOUTH"])
+        # price / months are consumed before the area scan (9억 is not "9", 24개월 is not an area)
+        self.assertNotIn("areas", parse_condition_text("10억 24개월"))
+
+    def test_unrecognized_text_is_empty(self):
+        for text in ("", "hello", "/start", "/today 서울", "ㅋㅋ 고마워요", "1", "2024년"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_condition_text(text), {})
+
+    def test_private_chat_detection(self):
+        self.assertTrue(is_private_chat({"id": 5, "type": "private"}))
+        self.assertTrue(is_private_chat({"id": "u1"}))
+        self.assertFalse(is_private_chat({"id": -100, "type": "supergroup"}))
+        self.assertFalse(is_private_chat({"id": 5, "type": "group"}))
+        self.assertFalse(is_private_chat({"id": "-42"}))
+
+
+class UxFlowTests(unittest.TestCase):
+    def setUp(self):
+        ib._DRAFTS.clear()
+        self.db = ChungyakDatabase(":memory:")
+        for n in sample_notices():
+            self.db.upsert_notice(n)
+        self.channel = ChungyakTelegramChannel(token="", dry_run=True)
+        self.clock = [1000.0]
+        self.bot = ChungyakInteractiveBot(db=self.db, channel=self.channel, include_samples=True,
+                                          today_provider=lambda: date(2026, 11, 24),
+                                          draft_clock=lambda: self.clock[0])
+
+    def tearDown(self):
+        ib._DRAFTS.clear()
+        self.db.close()
+
+    def cb(self, data: str, chat: str = "u1"):
+        return self.bot.handle_update({"callback_query": {"id": "q", "data": data,
+                                                          "message": {"chat": {"id": chat}, "message_id": 7}}})
+
+    def text(self, text: str, chat: str = "u1", ctype: str | None = "private"):
+        chat_obj = {"id": chat} if ctype is None else {"id": chat, "type": ctype}
+        return self.bot.handle_update({"message": {"chat": chat_obj, "text": text}})
+
+    def last_view(self) -> dict:
+        return [p for m, p in self.channel.call_log if m in ("editMessageText", "sendMessage")][-1]
+
+    @staticmethod
+    def datas(markup: dict) -> list[str]:
+        return [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+
+    def test_home_is_compact_and_advanced_holds_granular_buttons(self):
+        profile = self.db.ensure_profile("u1")
+        text, kb = self.bot.render_home(profile)
+        self.assertEqual(self.datas(kb), ["cy:wiz:1", "cy:pre:menu", "cy:regv", "cy:list", "cy:adv", "cy:set"])
+        self.assertTrue(within_limits(text))
+        _t, adv = self.bot.render_advanced(profile)
+        asks = [d for d in self.datas(adv) if d.startswith("cy:ask:")]
+        self.assertEqual(len(asks), 10)
+        self.assertIn("cy:home", self.datas(adv))
+        self.assertIn("cy:reset:ask", self.datas(self.bot.render_settings(profile)[1]))
+        self.cb("cy:ask:hl")
+        self.assertIn("cy:adv", self.datas(self.last_view()["reply_markup"]))
+        self.cb("cy:hl:Y")
+        self.assertIn("상세 조건", self.last_view()["text"])
+
+    def test_all_new_callbacks_ascii_within_64_bytes(self):
+        profile = self.db.update_profile("u1", preferred_regions=["서울"], special_types=["YOUTH"])
+        self.db.update_regular_prefs("u1", areas=["85+"], deadline_d1=True)
+        views = [self.bot.render_home(profile), self.bot.render_advanced(profile), self.bot.render_presets(),
+                 self.bot.render_regular(profile), self.bot.render_settings(profile)]
+        views += [self.bot.render_wizard(profile, s) for s in ("1", "2", "3")]
+        views.append(self.bot.render_draft_preview("서울 84", parse_condition_text("서울 84"), "a1b2c3d4"))
+        count = 0
+        for _text, markup in views:
+            self.assertTrue(within_limits(_text))
+            for data in self.datas(markup):
+                count += 1
+                self.assertTrue(data.startswith("cy:") and callback_ok(data), data)
+        self.assertGreater(count, 60)
+
+    def test_three_step_wizard(self):
+        self.cb("cy:wiz:1")
+        self.assertIn("1/3", self.last_view()["text"])
+        for data in ("cy:w1:SEL", "cy:w1:GGI", "cy:w1:SEL"):
+            self.cb(data)
+        self.assertEqual(self.db.get_profile("u1").preferred_regions, ["경기"])
+        self.assertIn("✅경기", [b["text"] for row in self.last_view()["reply_markup"]["inline_keyboard"] for b in row])
+        self.cb("cy:wiz:2")
+        self.assertIn("2/3", self.last_view()["text"])
+        self.cb("cy:w2:7")
+        self.assertEqual(self.db.get_profile("u1").max_price_eok, Decimal("7"))
+        self.assertIn("3/3", self.last_view()["text"])  # 1-tap auto-advance
+        self.cb("cy:w2:999")  # not an offered choice -> no write, stays on step 2
+        self.assertEqual(self.db.get_profile("u1").max_price_eok, Decimal("7"))
+        self.cb("cy:w3:SEL")
+        self.assertEqual(self.db.get_profile("u1").residence_sido, "서울")
+        view = self.last_view()
+        self.assertIn("빠른 설정 완료", view["text"])
+        self.assertEqual(self.datas(view["reply_markup"])[0], "cy:wiz:1")  # home keyboard
+        self.cb("cy:w2:U")
+        self.assertIsNone(self.db.get_profile("u1").max_price_eok)
+
+    def test_presets_merge_without_wiping(self):
+        self.db.update_profile("u1", residence_sido="부산", special_types=["YOUTH"], account_months=36,
+                               custom_alert_enabled=False)
+        self.cb("cy:pre:menu")
+        self.assertEqual(self.datas(self.last_view()["reply_markup"]),
+                         ["cy:pre:mo", "cy:pre:nw", "cy:pre:g1", "cy:home"])
+        self.cb("cy:pre:nw")
+        p = self.db.get_profile("u1")
+        self.assertEqual((p.residence_sido, p.is_homeless), ("부산", True))
+        self.assertEqual(p.special_types, ["FIRST_LIFE", "NEWLYWED", "YOUTH"])
+        self.cb("cy:pre:g1")
+        p = self.db.get_profile("u1")
+        self.assertEqual((p.is_homeless, p.is_household_head, p.account_months), (True, True, 36))
+        self.db.update_profile("u1", account_months=6)
+        self.cb("cy:pre:g1")
+        self.assertEqual(self.db.get_profile("u1").account_months, 24)
+        self.cb("cy:pre:mo")
+        prefs = self.db.get_regular_prefs("u1")
+        self.assertEqual((prefs.is_enabled, prefs.moosunwi, prefs.public, prefs.general), (True, True, False, False))
+        p = self.db.get_profile("u1")
+        self.assertTrue(p.custom_alert_enabled)
+        self.assertEqual((p.residence_sido, p.special_types), ("부산", ["FIRST_LIFE", "NEWLYWED", "YOUTH"]))
+
+    def test_free_text_preview_does_not_touch_db_until_save(self):
+        self.assertEqual(self.text("<b>서울</b> 84 9억 무주택 <script>alert(1)</script>"), "draft")
+        self.assertIsNone(self.db.get_profile("u1"))
+        self.assertIsNone(self.db.get_regular_sub("u1"))
+        preview = self.last_view()
+        self.assertNotIn("<script>", preview["text"])
+        self.assertIn("&lt;script&gt;", preview["text"])
+        self.assertTrue(within_limits(preview["text"]))
+        save, cancel = self.datas(preview["reply_markup"])
+        nonce = save.split(":")[2]
+        self.assertEqual(cancel, f"cy:cancel:{nonce}")
+        self.assertTrue(callback_ok(save) and len(nonce) <= 16 and nonce.isascii())
+
+        self.cb(save, chat="u9")  # foreign chat cannot redeem u1's draft
+        self.assertIn("저장할 수 없는", self.last_view()["text"])
+        self.assertIsNone(self.db.get_profile("u9").preferred_regions)
+
+        self.cb(save)
+        p = self.db.get_profile("u1")
+        self.assertEqual((p.preferred_regions, p.max_price_eok, p.is_homeless), (["서울"], Decimal("9"), True))
+        self.assertEqual(self.db.get_regular_prefs("u1").areas, ["84"])
+        self.assertFalse(self.db.get_regular_prefs("u1").is_enabled)  # area filter alone never subscribes
+        self.assertIn("저장했어요", self.last_view()["text"])
+
+        self.db.update_profile("u1", preferred_regions=["부산"])
+        self.cb(save)  # single-use nonce
+        self.assertEqual(self.db.get_profile("u1").preferred_regions, ["부산"])
+        self.assertIn("저장할 수 없는", self.last_view()["text"])
+
+    def test_free_text_cancel_and_expiry(self):
+        self.text("경기 5억")
+        nonce = self.datas(self.last_view()["reply_markup"])[0].split(":")[2]
+        self.cb(f"cy:cancel:{nonce}")
+        self.cb(f"cy:save:{nonce}")
+        self.assertIsNone(self.db.get_profile("u1").max_price_eok)
+
+        self.text("경기 5억")
+        nonce = self.datas(self.last_view()["reply_markup"])[0].split(":")[2]
+        self.clock[0] += ib.DRAFT_TTL_SECONDS + 1
+        self.cb(f"cy:save:{nonce}")
+        self.assertIsNone(self.db.get_profile("u1").max_price_eok)
+        self.assertIn("만료", self.last_view()["text"])
+
+    def test_free_text_ignored_in_groups_and_when_unmatched(self):
+        self.assertIsNone(self.text("서울 84", chat="-1001", ctype="supergroup"))
+        self.assertIsNone(self.text("서울 84", chat="-42", ctype=None))
+        self.assertIsNone(self.text("고마워요"))
+        self.assertEqual(sends(self.channel), [])
+        self.assertEqual(ib._DRAFTS, {})
+        self.assertEqual(self.text("서울 84", ctype=None), "draft")  # legacy/test update without chat.type
+
+    def test_free_text_locked_user(self):
+        self.bot.access_checker = lambda _c: False
+        self.assertEqual(self.text("서울 84"), "locked")
+        self.assertEqual(ib._DRAFTS, {})
+        self.assertIsNone(self.db.get_profile("u1"))
+
+    def test_regular_multi_select_toggles(self):
+        self.cb("cy:regv")
+        kb = self.datas(self.last_view()["reply_markup"])
+        for data in ("cy:rt:m", "cy:rt:p", "cy:rt:g", "cy:rt:d", "cy:ra:59", "cy:ra:84", "cy:ra:85+", "cy:ra:X",
+                     "cy:reg:onv"):
+            self.assertIn(data, kb)
+        self.cb("cy:rt:p")
+        self.cb("cy:rt:d")
+        self.cb("cy:ra:84")
+        self.cb("cy:ra:85+")
+        self.cb("cy:ra:84")
+        prefs = self.db.get_regular_prefs("u1")
+        self.assertEqual((prefs.public, prefs.deadline_d1, prefs.areas, prefs.is_enabled), (False, True, ["85+"], False))
+        self.assertIn("⬜ 공공분양", [b["text"] for row in self.last_view()["reply_markup"]["inline_keyboard"] for b in row])
+        self.cb("cy:reg:onv")
+        self.assertTrue(self.db.get_regular_sub("u1"))
+        self.assertIn("cy:reg:off", self.datas(self.last_view()["reply_markup"]))
+        self.cb("cy:reg:off")  # OFF still needs the 2-step confirm
+        self.assertTrue(self.db.get_regular_sub("u1"))
+        self.cb("cy:ra:X")
+        self.assertIsNone(self.db.get_regular_prefs("u1").areas)
+
+
+class RegularFilterTests(unittest.TestCase):
+    TODAY = date(2026, 11, 26)
+
+    def setUp(self):
+        tomorrow = self.TODAY + timedelta(days=1)
+        self.n = {
+            "MO": make_notice("MO", notice_type=NoticeType.MOOSUNWI, min_area_m2=Decimal("59")),
+            "PU": make_notice("PU", notice_type=NoticeType.PUBLIC, min_area_m2=Decimal("84")),
+            "GE": make_notice("GE", min_area_m2=Decimal("101")),
+            "IM": make_notice("IM", notice_type=NoticeType.IMUI, min_area_m2=None),
+            "D1": make_notice("D1", min_area_m2=Decimal("84.9"), receipt_end=tomorrow),
+            "SP": make_notice("SP", notice_type=NoticeType.CANCEL_RE, min_area_m2=Decimal("49"),
+                              max_area_m2=Decimal("110")),
+        }
+        self.order = list(self.n.values())
+
+    def keys(self, **kw) -> list[str]:
+        prefs = RegularSubPrefs(chat_id="c1", is_enabled=True, **kw)
+        return [n.notice_key.split(":")[1] for n in filter_regular_notices(self.order, prefs, self.TODAY)]
+
+    def test_category_filters(self):
+        self.assertEqual(self.keys(), ["MO", "PU", "GE", "IM", "D1", "SP"])
+        self.assertEqual(self.keys(public=False, general=False), ["MO"])
+        self.assertEqual(self.keys(moosunwi=False, general=False), ["PU"])
+        self.assertEqual(self.keys(moosunwi=False, public=False), ["GE", "IM", "D1", "SP"])
+
+    def test_area_buckets(self):
+        self.assertEqual(self.keys(areas=["59"]), ["MO", "IM", "SP"])  # unknown area kept; span 49~110 touches 59
+        self.assertEqual(self.keys(areas=["84"]), ["PU", "IM", "D1", "SP"])
+        self.assertEqual(self.keys(areas=["85+"]), ["GE", "IM", "SP"])
+
+    def test_deadline_d1_semantics(self):
+        self.assertEqual(self.keys(deadline_d1=True)[0], "D1")  # prioritized, nothing dropped
+        self.assertEqual(len(self.keys(deadline_d1=True)), 6)
+        self.assertEqual(self.keys(moosunwi=False, public=False, general=False, deadline_d1=True), ["D1"])
+        self.assertEqual(self.keys(moosunwi=False, public=False, general=False), [])
+
+    def test_bucket_boundaries(self):
+        from chungyak_brief.models import area_bucket_of
+
+        cases = {"59.99": "59", "60": "84", "85": "84", "85.01": "85+"}
+        for raw, bucket in cases.items():
+            with self.subTest(area=raw):
+                self.assertEqual(area_bucket_of(Decimal(raw)), bucket)
+
+
+class RegularDigestFilterServiceTests(_ServiceBase):
+    def test_digest_respects_category_prefs(self):
+        self.db.update_regular_prefs("c1", enabled=True, moosunwi=True, public=False, general=False)
+        st = self.service().run_tick(TriggerContext.CRON_TICK, now=kst(2026, 11, 26, 8, 1))
+        self.assertEqual(st["regular_daily"]["chats"], 0)  # APT_GENERAL filtered out of the digest
+        self.assertEqual([r["channel_type"] for r in self.db.list_deliveries()], ["CUSTOM_MATCH"])
+
+    def test_digest_legacy_defaults_unchanged(self):
+        self.db.set_regular_sub("c1", True)
+        st = self.service().run_tick(TriggerContext.CRON_TICK, now=kst(2026, 11, 26, 8, 1))
+        self.assertEqual(st["regular_daily"]["sent"], 1)
+
+
+class ManagerFreeTextRoutingTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import MagicMock
+
+        from market_brief.multi_bot_manager import DynamicBotManager
+
+        engine = MagicMock()
+        engine.db.db_path = ":memory:"
+        self.mgr = DynamicBotManager(engine, router=MagicMock())
+
+    def route(self, text: str, chat: dict) -> tuple[bool, str]:
+        item = {"update_id": 1, "message": {"message_id": 1, "chat": chat, "text": text}}
+        return self.mgr._dispatch_chungyak_bot_update("1:A", item)
+
+    def test_private_free_text_routing(self):
+        priv = {"id": 5, "type": "private"}
+        with patch.object(ChungyakInteractiveBot, "handle_update", return_value="draft") as handle, \
+                patch.object(ChungyakAlertService, "run_tick", side_effect=AssertionError("no alert dispatch")):
+            self.assertEqual(self.route("서울 84 9억", priv), (True, "chungyak_message_handled"))
+            self.assertEqual(self.route("/today", priv), (True, "chungyak_message_handled"))
+            self.assertEqual(self.route("/start", priv), (False, "not_chungyak_interactive_event"))
+            self.assertEqual(self.route("hello", priv), (False, "not_chungyak_interactive_event"))
+            self.assertEqual(self.route("/unknown 서울", priv), (False, "not_chungyak_interactive_event"))
+            self.assertEqual(self.route("서울 84", {"id": -100, "type": "supergroup"}),
+                             (False, "not_chungyak_interactive_event"))
+            self.assertEqual(self.route("서울 84", {"id": 7, "type": "group"}), (False, "not_chungyak_interactive_event"))
+        self.assertEqual(handle.call_count, 2)
+
+
+class AdminRegularPrefsApiTests(unittest.TestCase):
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        from admin_server import create_admin_app
+
+        os.environ.pop("ADMIN_API_TOKEN", None)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.client = TestClient(create_admin_app(db_path=str(self.dir / "alerts.sqlite3"),
+                                                  env_path=self.dir / "empty.env"))
+        self.sidecar = self.dir / "chungyak_brief.sqlite3"
+
+    def tearDown(self):
+        try:
+            self.tmp.cleanup()
+        except Exception:
+            pass
+
+    def subscribers(self) -> list[dict]:
+        with patch.dict(os.environ, {"ADMIN_API_TOKEN": "t0k"}):
+            res = self.client.get("/api/chungyak/subscribers", headers={"X-Admin-Token": "t0k"})
+        self.assertEqual(res.status_code, 200)
+        return res.json()
+
+    def test_legacy_sidecar_without_new_columns_gets_defaults(self):
+        _make_legacy_sidecar(self.sidecar)
+        subs = self.subscribers()
+        self.assertEqual(len(subs), 1)
+        s = subs[0]
+        self.assertEqual((s["chat_id"], s["is_enabled"]), ("777", True))
+        self.assertEqual((s["sub_moosunwi"], s["sub_public"], s["sub_general"], s["sub_areas_json"],
+                          s["sub_deadline_d1"]), (True, True, True, None, False))
+        conn = sqlite3.connect(self.sidecar)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(chungyak_regular_subs)").fetchall()}
+        finally:
+            conn.close()
+        self.assertNotIn("sub_moosunwi", cols)  # admin stays read-only: never migrates the sidecar
+
+    def test_prefs_surface_in_subscribers_and_masked_watches(self):
+        cdb = ChungyakDatabase(self.sidecar)
+        cdb.update_profile("123456789", residence_sido="서울")
+        cdb.update_regular_prefs("123456789", enabled=True, public=False, areas=["85+", "59"], deadline_d1=True)
+        cdb.ensure_profile("555555555")
+        cdb.close()
+        s = self.subscribers()[0]
+        self.assertEqual((s["sub_public"], s["sub_areas_json"], s["sub_deadline_d1"]), (False, ["59", "85+"], True))
+        watches = {w["chat_id_masked"]: w for w in self.client.get("/api/chungyak/watches").json()}
+        self.assertEqual(watches["12*****89"]["regular"]["sub_areas_json"], ["59", "85+"])
+        self.assertTrue(watches["12*****89"]["regular"]["is_enabled"])
+        self.assertIsNone(watches["55*****55"]["regular"])
+        self.assertNotIn("123456789", json.dumps(watches, ensure_ascii=False))
+
+    def test_admin_ui_renders_regular_prefs_safely(self):
+        from market_brief.admin_ui import ADMIN_DASHBOARD_HTML as html
+
+        js = html[html.index("function chungyakStatusBadge("):html.index("(function bindChungyakUi()")]
+        self.assertIn("function chungyakRegularLine(", js)
+        self.assertIn("esc(chungyakRegularLine(p.regular))", js)
+        self.assertIn('data-regular="', js)
+        self.assertNotIn("JSON.stringify", js)
+        self.assertNotIn("onclick", js)
 
 
 if __name__ == "__main__":

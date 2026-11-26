@@ -100,6 +100,14 @@ def run_demo(now_kst: Optional[datetime] = None) -> int:
     listing = channel.call_log[-1][1]["text"]
     print("-" * 72)
     print(f"[2] 진행중 공고 (visible={measure_message(listing)[0]}, html={measure_message(listing)[1]})\n{listing}")
+    bot.handle_update({"message": {"chat": {"id": chat, "type": "private"}, "text": "서울 경기 84 10억 무주택 신혼"}})
+    preview = channel.call_log[-1][1]
+    save_cb = preview["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    print("-" * 72)
+    print(f"[2b] 한 줄 입력 미리보기 (저장 전, {save_cb})\n{preview['text']}")
+    bot.handle_update({"callback_query": {"id": "cb_save", "data": save_cb,
+                                          "message": {"chat": {"id": chat}, "message_id": 10}}})
+    print(f"[2c] 저장 후 관심지역={db.get_profile(chat).preferred_regions} 면적={db.get_regular_prefs(chat).areas}")
 
     db.set_regular_sub(chat, True)
     db.ensure_profile("demo_chat_2")  # empty profile -> PARTIAL_UNKNOWN only (no custom alert)

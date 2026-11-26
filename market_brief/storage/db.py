@@ -1756,6 +1756,13 @@ class MarketBriefDatabase:
             "residence_sido", "residence_years", "is_homeless", "is_household_head", "account_months",
             "deposit_manwon", "payment_count", "preferred_regions", "max_price_eok", "desired_area_m2", "special_types",
         )
+        regular_by_chat: dict[str, dict[str, Any]] = {}
+        if rows:
+            for s in self._chungyak_query("chungyak_regular_subs", "SELECT * FROM chungyak_regular_subs"):
+                regular_by_chat[str(s.get("chat_id"))] = {
+                    "is_enabled": bool(s.get("is_enabled")),
+                    **self._chungyak_regular_prefs(s),
+                }
         items = []
         for r in rows:
             regions = self._json_list(r.get("preferred_regions"))
@@ -1778,6 +1785,7 @@ class MarketBriefDatabase:
                 "custom_alert_enabled": r.get("custom_alert_enabled") is None or bool(r.get("custom_alert_enabled")),
                 "answered_fields": answered,
                 "is_empty": answered == 0,
+                "regular": regular_by_chat.get(str(r.get("chat_id"))),  # None = no regular-digest row
                 "updated_at": r.get("updated_at"),
             })
         return items
@@ -1785,10 +1793,10 @@ class MarketBriefDatabase:
     def list_chungyak_regular_subs(self, limit: int = 200) -> list[dict[str, Any]]:
         """Regular digest subscribers with raw chat_id (PII) — served only behind the fail-closed token."""
         limit = max(1, min(int(limit or 200), 1000))
+        # SELECT * (not a column list): pre-migration sidecars lack the sub_* filter columns -> safe defaults below.
         rows = self._chungyak_query(
             "chungyak_regular_subs",
-            "SELECT chat_id, is_enabled, send_time_kst, created_at, updated_at FROM chungyak_regular_subs "
-            "ORDER BY updated_at DESC, chat_id LIMIT ?",
+            "SELECT * FROM chungyak_regular_subs ORDER BY updated_at DESC, chat_id LIMIT ?",
             (limit,),
         )
         names: dict[str, str] = {}
@@ -1811,11 +1819,32 @@ class MarketBriefDatabase:
                 "display_name": names.get(str(r.get("chat_id"))) or str(r.get("chat_id")),
                 "is_enabled": bool(r.get("is_enabled")),
                 "send_time_kst": r.get("send_time_kst"),
+                **self._chungyak_regular_prefs(r),
                 "created_at": r.get("created_at"),
                 "updated_at": r.get("updated_at"),
             }
             for r in rows
         ]
+
+    _CHUNGYAK_AREA_BUCKETS = ("59", "84", "85+")
+
+    @classmethod
+    def _chungyak_regular_prefs(cls, r: dict[str, Any]) -> dict[str, Any]:
+        """Regular-digest filter columns with legacy defaults (old sidecar: all types ON, all areas, no D-1)."""
+
+        def flag(col: str, default: int) -> bool:
+            v = r.get(col)
+            return bool(default if v is None else v)
+
+        areas = cls._json_list(r.get("sub_areas_json"))
+        areas = [a for a in cls._CHUNGYAK_AREA_BUCKETS if a in {str(x) for x in (areas or [])}] or None
+        return {
+            "sub_moosunwi": flag("sub_moosunwi", 1),
+            "sub_public": flag("sub_public", 1),
+            "sub_general": flag("sub_general", 1),
+            "sub_areas_json": areas,
+            "sub_deadline_d1": flag("sub_deadline_d1", 0),
+        }
 
     def list_chungyak_deliveries(
         self, status: str | None = None, limit: int = 50

@@ -4479,6 +4479,17 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
       return v ? yes : no;
     }
 
+    // Regular (08:00) digest filters: parsed area buckets only (never raw JSON); every value esc()'d.
+    const CHUNGYAK_AREA_LABELS = { '59': '~59㎡', '84': '60~84㎡', '85+': '85㎡+' };
+    function chungyakRegularLine(r) {
+      if (!r) return '정기 미구독';
+      const types = [['무순위', r.sub_moosunwi], ['공공', r.sub_public], ['일반APT', r.sub_general]]
+        .filter(([, on]) => on).map(([label]) => label);
+      const areas = Array.isArray(r.sub_areas_json) && r.sub_areas_json.length
+        ? r.sub_areas_json.map(a => CHUNGYAK_AREA_LABELS[a] || String(a)).join(', ') : '전체';
+      return `정기 ${r.is_enabled ? 'ON' : 'OFF'} · 유형 ${types.join(', ') || '없음'} · 면적 ${areas}${r.sub_deadline_d1 ? ' · 마감 D-1' : ''}`;
+    }
+
     async function loadChungyakPanel() {
       const statsEl = document.getElementById('chungyakStats');
       const delivEl = document.getElementById('chungyakDeliveryList');
@@ -4516,13 +4527,14 @@ ADMIN_DASHBOARD_HTML = """<!DOCTYPE html>
           const regions = Array.isArray(p.preferred_regions) && p.preferred_regions.length ? p.preferred_regions.join(', ') : '전국';
           const specials = Array.isArray(p.special_types) && p.special_types.length ? p.special_types.join(', ') : '-';
           return `
-          <div class="hist-card">
+          <div class="hist-card" data-regular="${esc(p.regular ? (p.regular.is_enabled ? 'on' : 'off') : 'none')}">
             <div class="hist-card-top">
               <span><code>${esc(p.chat_id_masked)}</code> · 거주 <b>${esc(p.residence_sido || '미입력')}</b></span>
               <span class="hist-badge ${p.custom_alert_enabled ? 'ok' : 'bad'}">맞춤 ${p.custom_alert_enabled ? 'ON' : 'OFF'}</span>
             </div>
             <div class="hist-diff-line">무주택 ${esc(chungyakTri(p.is_homeless, '예', '아니오'))} · 세대주 ${esc(chungyakTri(p.is_household_head, '예', '아니오'))} · 예산 ${esc(p.max_price_eok ? p.max_price_eok + '억' : '제한없음')}</div>
             <div class="hist-meta">관심지역 ${esc(regions)} · 특공 ${esc(specials)} · 입력 ${esc(p.answered_fields)}항목${p.is_empty ? ' (미입력 → 정보 부족)' : ''}</div>
+            <div class="hist-meta chungyak-regular">📰 ${esc(chungyakRegularLine(p.regular))}</div>
           </div>`;
         }).join('') || '<div class="hist-meta">등록된 맞춤 조건이 없습니다.</div>';
 
