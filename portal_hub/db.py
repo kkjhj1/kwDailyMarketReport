@@ -134,6 +134,11 @@ class PortalDatabase:
                     ('silver_bot', 'INFO', '실버케어', '건강·실버', '👵', 1, 4),
                     ('kids_bot', 'INFO', '자녀', '육아·자녀', '👶', 1, 5),
                     ('yolo_bot', 'INFO', '욜로', '여가·라이프', '🏄', 1, 6);
+                INSERT OR IGNORE INTO bots (bot_id, bot_type, name, telegram_username, category, icon_emoji, topic_code, is_active, sort_order)
+                VALUES ('chungyak_bot', 'INFO', '청약', 'KwAptApply_bot', '부동산·청약', '🏠', 'CHUNGYAK', 1, 7);
+                -- One-shot promotion of the legacy WIP seed row (blank username); later ADMIN toggles are kept.
+                UPDATE bots SET is_active = 1, telegram_username = 'KwAptApply_bot'
+                WHERE bot_id = 'chungyak_bot' AND (telegram_username IS NULL OR telegram_username = '');
             """)
 
             # Idempotent migration for users table columns

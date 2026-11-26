@@ -41,6 +41,7 @@ class MultiBotSubscriptionPlatformTests(unittest.TestCase):
         self.assertIn("brief_bot", bot_ids)
         self.assertIn("travel_bot", bot_ids)
         self.assertIn("admission_bot", bot_ids)
+        self.assertIn("chungyak_bot", bot_ids)
 
         menu_bot = self.engine.get_menu_bot()
         self.assertIsNotNone(menu_bot)
@@ -308,6 +309,7 @@ DOMAIN_DISPATCHERS = (
     "_dispatch_silver_bot_update",
     "_dispatch_kids_bot_update",
     "_dispatch_yolo_bot_update",
+    "_dispatch_chungyak_bot_update",
     "_dispatch_brief_watch_callback",
 )
 
@@ -315,7 +317,7 @@ DOMAIN_DISPATCHERS = (
 class SubscriptionAccessGateTests(unittest.TestCase):
     """Fail-closed inbound gate: un-subscribed callers never reach `mbw:` or any domain dispatcher."""
 
-    INFO_BOTS = ("brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot")
+    INFO_BOTS = ("brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot", "chungyak_bot")
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -444,6 +446,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
             "silver_bot": (["SC:home"], ["/parents", "/bookmarks"]),
             "kids_bot": (["k:home"], ["/fever", "/weekend"]),
             "yolo_bot": (["yolo:home"], ["/weekend", "/curation"]),
+            "chungyak_bot": (["cy:home"], ["/today", "/regular", "/settings"]),
         }
         n = 300
         for bot_id, (cbs, texts) in cases.items():
@@ -530,7 +533,7 @@ class SubscriptionAccessGateTests(unittest.TestCase):
 
         uid = "60008"
         self.assertFalse(self.engine.is_user_subscribed(uid, "brief_bot"))  # unknown user
-        self.engine.attempt_subscribe(uid, "admission_bot", actor="ADMIN")  # WIP bot: admin assignment
+        self.engine.attempt_subscribe(uid, "admission_bot", actor="ADMIN")  # admin assignment (bypasses tier quota)
         self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
         self.assertTrue(self.engine.is_user_subscribed(uid, "edu_bot"))  # legacy alias
 

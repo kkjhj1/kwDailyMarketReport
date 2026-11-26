@@ -836,23 +836,76 @@ class AdminChungyakApiTests(unittest.TestCase):
 
 
 class CatalogueWiringTests(unittest.TestCase):
-    def test_portal_enum_is_hidden_wip(self):
+    def test_portal_enum_is_public(self):
+        from market_brief.bot_visibility import is_wip_bot_id
         from portal_hub.models import BotServiceType
 
         bot = BotServiceType("chungyak_bot")
-        self.assertFalse(bot.is_public)
+        self.assertIs(bot, BotServiceType.CHUNGYAK)
+        self.assertIs(bot.is_public, True)
+        self.assertIs(is_wip_bot_id("chungyak_bot"), False)
         self.assertTrue(bot.title and bot.short_name and bot.icon and bot.one_line_desc)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("APTAPP_TELEGRAM_BOT_USERNAME", "CHUNGYAK_BOT_USERNAME")}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(bot.telegram_handle, "KwAptApply_bot")
 
-    def test_portal_runner_registers_inactive_idempotently(self):
+    def test_portal_runner_registers_active_idempotently(self):
         import portal_bot_runner
         from portal_hub import PortalDatabase
 
         db = PortalDatabase(":memory:")
+        # Schema seeds chungyak_bot as active, so the runner is a no-op on a fresh DB.
+        self.assertFalse(portal_bot_runner.ensure_chungyak_bot_registered(db))
+        # Insert path: when the row is missing, it is inserted once and then left alone.
+        with db._get_conn() as conn:
+            conn.execute("DELETE FROM bots WHERE bot_id = 'chungyak_bot'")
+            conn.commit()
         self.assertTrue(portal_bot_runner.ensure_chungyak_bot_registered(db))
         self.assertFalse(portal_bot_runner.ensure_chungyak_bot_registered(db))
         with db._get_conn() as conn:
-            row = conn.execute("SELECT is_active FROM bots WHERE bot_id = 'chungyak_bot'").fetchone()
+            rows = conn.execute(
+                "SELECT is_active, telegram_username FROM bots WHERE bot_id = 'chungyak_bot'"
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 1)
+        self.assertEqual(rows[0][1], "KwAptApply_bot")
+
+    def test_portal_runner_preserves_explicit_admin_disable(self):
+        import portal_bot_runner
+        from portal_hub import PortalDatabase
+
+        db = PortalDatabase(":memory:")
+        portal_bot_runner.ensure_chungyak_bot_registered(db)
+        with db._get_conn() as conn:
+            conn.execute("UPDATE bots SET is_active = 0 WHERE bot_id = 'chungyak_bot'")
+            conn.commit()
+        self.assertFalse(portal_bot_runner.ensure_chungyak_bot_registered(db))
+        with db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT is_active, telegram_username FROM bots WHERE bot_id = 'chungyak_bot'"
+            ).fetchone()
         self.assertEqual(row[0], 0)
+        self.assertEqual(row[1], "KwAptApply_bot")
+
+    def test_portal_runner_promotes_legacy_wip_seed_row(self):
+        import portal_bot_runner
+        from portal_hub import PortalDatabase
+
+        db = PortalDatabase(":memory:")
+        portal_bot_runner.ensure_chungyak_bot_registered(db)
+        with db._get_conn() as conn:
+            conn.execute(
+                "UPDATE bots SET is_active = 0, telegram_username = '' WHERE bot_id = 'chungyak_bot'"
+            )
+            conn.commit()
+        self.assertFalse(portal_bot_runner.ensure_chungyak_bot_registered(db))
+        with db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT is_active, telegram_username FROM bots WHERE bot_id = 'chungyak_bot'"
+            ).fetchone()
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], "KwAptApply_bot")
 
     def test_manager_commands_route_to_interactive_bot(self):
         from chungyak_brief.interactive_bot import COMMANDS_ALL

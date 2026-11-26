@@ -382,8 +382,8 @@ def render_category_home_view() -> tuple[str, dict[str, Any]]:
         f"📂 <b>전체 카테고리 탐색</b>\n"
         f"{TG_DIVIDER}\n"
         f"원하시는 분야를 선택하시면 세부 봇 목록을 확인하실 수 있습니다.\n\n"
-        f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율 등 (시황 브리핑)\n"
-        f"• 🎓 <b>교육 / 입시</b>: 신규 교육 봇 출시 예정 (준비중)\n"
+        f"• 💰 <b>금융 / 재테크</b>: 글로벌 시황, 증시, 환율, 아파트 청약 등 (시황, 청약)\n"
+        f"• 🎓 <b>교육 / 입시</b>: 대입 To-Do, 입시 설명회 요약 등 (입시)\n"
         f"• ✈️ <b>라이프 / 여가</b>: 특가 항공권, 주말 나들이·육아 등 (여행, 키즈)\n"
         f"• 💼 <b>업무 / 생산성</b>: 뉴스 클리핑, 생산성 도구 등 (준비중)\n"
         f"{TG_DIVIDER}"
@@ -411,6 +411,8 @@ CATALOG_ALL_ORDER = (
     BotServiceType.BRIEF,
     BotServiceType.TRAVEL,
     BotServiceType.KIDS,
+    BotServiceType.ADMISSION,
+    BotServiceType.CHUNGYAK,
 )
 
 CALLBACK_DATA_MAX_BYTES = 64
@@ -526,6 +528,7 @@ def render_subscribe_onboarding_view(
         BotServiceType.SILVER: "매주 일요일 오전 09:00 (부모님 복지 브리핑)",
         BotServiceType.KIDS: "매주 금요일 오전 10:00 (주말 나들이 & 육아 대처)",
         BotServiceType.YOLO: "매주 금요일 오후 14:00 (주말 1인 취미 & 힐링)",
+        BotServiceType.CHUNGYAK: "매일 아침 08:00 (맞춤 청약 공고 다이제스트)",
     }
     sched = schedule_map.get(bot_type, "정기 발행 스케줄에 맞춰 발송")
     text = (

@@ -1168,3 +1168,32 @@ def test_phase_b_latest_state_locker_and_profile_callbacks(
     assert updated_user.solo_level == 2
 
 
+
+
+def test_last_seen_batch_not_merged_when_two_batches_share_one_second(memory_db: YoloDatabase) -> None:
+    """Regression: two SEEN batches logged within the same second must not merge into 6 ids."""
+    from datetime import datetime, timedelta, timezone
+
+    ids = [c.id for c in memory_db.list_active_curations()][:7]
+    assert len(ids) == 7
+    same_second = datetime(2026, 11, 26, 10, 0, 0, tzinfo=timezone(timedelta(hours=9)))
+    for cid in ids[:3]:
+        memory_db.log_curation_action("u_batch", cid, "SEEN", now=same_second)
+    for cid in ids[3:6]:
+        memory_db.log_curation_action("u_batch", cid, "SEEN", now=same_second)
+
+    batch_at, seen = memory_db.get_last_seen_batch("u_batch")
+    assert batch_at == same_second.isoformat()
+    assert seen == ids[3:6]  # newest 3 only, in display (log_id ASC) order
+
+    # A later short batch (1 item) never borrows rows from the older second
+    later = same_second + timedelta(seconds=5)
+    memory_db.log_curation_action("u_batch", ids[6], "SEEN", now=later)
+    batch_at, seen = memory_db.get_last_seen_batch("u_batch")
+    assert batch_at == later.isoformat()
+    assert seen == [ids[6]]
+
+    # Other chats and non-SEEN actions are ignored
+    memory_db.log_curation_action("u_batch", ids[0], "SAVED", now=later + timedelta(seconds=1))
+    assert memory_db.get_last_seen_batch("u_batch")[1] == [ids[6]]
+    assert memory_db.get_last_seen_batch("u_other") == (None, [])

@@ -95,15 +95,10 @@ class OnboardingBriefingDeliveryTests(unittest.TestCase):
         """Type B (admission_bot): Step 1 target selection -> Step 2 [정보보기] button -> Step 3 grade-specific briefing."""
         self.assertFalse(self.router.is_common_briefing_bot("admission_bot"))
 
-        # admission_bot is a WIP bot: direct /start subscription is blocked (BOT_WIP) for non-ADMIN users.
-        # Pre-subscribe as an admin-assigned subscriber so the onboarding flow can be verified.
-        self.engine.attempt_subscribe(
-            "u_test_1", "admission_bot", full_name="학부모", actor="ADMIN", bypass_quota=True
-        )
-
+        # admission_bot is public: a USER /start subscribes directly (no ADMIN pre-assignment needed).
         # Step 1: Enter admission_bot (/start) -> NO extra_messages; shows target selection buttons
         r1 = self.router.handle_interaction("admission_bot", "u_test_1", full_name="학부모", text="/start")
-        self.assertEqual(r1["result_code"], "ALREADY_SUBSCRIBED")
+        self.assertEqual(r1["result_code"], "SUBSCRIBED")
         self.assertEqual(len(r1.get("extra_messages") or []), 0)
         self.assertIn("자녀 학년 선택", r1["reply_html"])
 

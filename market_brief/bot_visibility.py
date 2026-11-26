@@ -13,8 +13,8 @@ from __future__ import annotations
 
 BOT_ID_ALIASES: dict[str, str] = {"edu_bot": "admission_bot"}
 
-PUBLIC_BOT_IDS: frozenset[str] = frozenset({"brief_bot", "travel_bot", "kids_bot"})
-WIP_BOT_IDS: frozenset[str] = frozenset({"admission_bot", "silver_bot", "yolo_bot"})
+PUBLIC_BOT_IDS: frozenset[str] = frozenset({"brief_bot", "travel_bot", "kids_bot", "admission_bot", "chungyak_bot"})
+WIP_BOT_IDS: frozenset[str] = frozenset({"silver_bot", "yolo_bot"})
 
 BOT_WIP_CODE = "BOT_WIP"
 BOT_WIP_MESSAGE = "🚧 현재 서비스 준비 중인 봇입니다."

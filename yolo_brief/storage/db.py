@@ -981,29 +981,28 @@ class YoloDatabase:
             return cur.rowcount == 1
 
     def get_last_seen_batch(self, chat_id: str) -> tuple[Optional[str], list[str]]:
-        """Returns `(created_at, curation_ids)` of the most recent SEEN batch (the card on screen)."""
+        """Returns `(created_at, curation_ids)` of the most recent SEEN batch (the card on screen).
+
+        Takes the latest 3 SEEN rows by `(created_at DESC, log_id DESC)` instead of matching
+        `created_at = ?`, so two batches logged within the same second are not merged (3+3=6).
+        Rows outside the newest `created_at` are dropped (short batches) and the rest are
+        returned in display order (`log_id ASC`)."""
         cid = str(chat_id).strip()
         with self._connect() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
-                SELECT created_at FROM yolo_user_curation_logs
+                SELECT curation_id, created_at, log_id FROM yolo_user_curation_logs
                 WHERE chat_id = ? AND action = 'SEEN'
-                ORDER BY created_at DESC, log_id DESC LIMIT 1
+                ORDER BY created_at DESC, log_id DESC LIMIT 3
                 """,
                 (cid,),
-            ).fetchone()
-            if row is None:
-                return None, []
-            batch_at = str(row["created_at"])
-            ids = conn.execute(
-                """
-                SELECT curation_id FROM yolo_user_curation_logs
-                WHERE chat_id = ? AND action = 'SEEN' AND created_at = ?
-                ORDER BY log_id ASC
-                """,
-                (cid, batch_at),
             ).fetchall()
-            return batch_at, list(dict.fromkeys(str(r["curation_id"]) for r in ids))
+            if not rows:
+                return None, []
+            batch_at = str(rows[0]["created_at"])
+            # Short batches (<3 items) must not borrow rows from an older second.
+            ordered = [r for r in reversed(rows) if str(r["created_at"]) == batch_at]
+            return batch_at, list(dict.fromkeys(str(r["curation_id"]) for r in ordered))
 
     def get_user_locker(self, chat_id: str) -> dict[str, list[str]]:
         """Latest-state locker rule (`ORDER BY created_at DESC, log_id DESC` over SAVED/DONE):

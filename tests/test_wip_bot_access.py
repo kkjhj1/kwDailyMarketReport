@@ -40,9 +40,10 @@ DOMAIN_DISPATCHERS = (
     "_dispatch_silver_bot_update",
     "_dispatch_kids_bot_update",
     "_dispatch_yolo_bot_update",
+    "_dispatch_chungyak_bot_update",
     "_dispatch_brief_watch_callback",
 )
-INFO_BOTS = ("brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot")
+INFO_BOTS = ("brief_bot", "travel_bot", "admission_bot", "silver_bot", "kids_bot", "yolo_bot", "chungyak_bot")
 
 
 class WipBotAccessTests(unittest.TestCase):
@@ -134,26 +135,34 @@ class WipBotAccessTests(unittest.TestCase):
 
     # ---- SSOT ----------------------------------------------------------------
     def test_ssot_public_and_wip_sets(self):
-        self.assertEqual(PUBLIC_BOT_IDS, frozenset({"brief_bot", "travel_bot", "kids_bot"}))
+        self.assertEqual(
+            PUBLIC_BOT_IDS,
+            frozenset({"brief_bot", "travel_bot", "kids_bot", "admission_bot", "chungyak_bot"}),
+        )
+        self.assertEqual(WIP_BOT_IDS, frozenset({"silver_bot", "yolo_bot"}))
         self.assertEqual({m.value for m in PUBLIC_BOT_SERVICES}, set(PUBLIC_BOT_IDS))
-        self.assertFalse(BotServiceType.ADMISSION.is_public)
-        for bid in ("admission_bot", "silver_bot", "yolo_bot", "edu_bot"):
+        self.assertTrue(BotServiceType.ADMISSION.is_public)
+        self.assertTrue(BotServiceType.CHUNGYAK.is_public)
+        for bid in ("silver_bot", "yolo_bot"):
             self.assertTrue(is_wip_bot_id(bid), bid)
             self.assertFalse(is_public_bot_id(bid), bid)
-        for bid in ("brief_bot", "travel_bot", "kids_bot", "custom_bot", "", None):
+        for bid in ("admission_bot", "edu_bot", "chungyak_bot"):
+            self.assertTrue(is_public_bot_id(bid), bid)
+        for bid in ("brief_bot", "travel_bot", "kids_bot", "admission_bot", "edu_bot", "chungyak_bot",
+                    "custom_bot", "", None):
             self.assertFalse(is_wip_bot_id(bid), bid)
         self.assertFalse(PUBLIC_BOT_IDS & WIP_BOT_IDS)
 
     # ---- 1) WIP USER /start -> BOT_WIP, no user / subscription row ------------
     def test_01_wip_start_blocked_without_db_rows(self):
         uid = "81001"
-        res = self.engine.attempt_subscribe(uid, "admission_bot", full_name="신규")
+        res = self.engine.attempt_subscribe(uid, "yolo_bot", full_name="신규")
         self.assertFalse(res["success"])
         self.assertEqual(res["code"], BOT_WIP_CODE)
         self.assertEqual(res["message"], BOT_WIP_MESSAGE)
 
         mgr = self._manager_with_tripwires()
-        self._run(mgr, "admission_bot", self._msg(uid, "/start"))
+        self._run(mgr, "yolo_bot", self._msg(uid, "/start"))
         self._assert_wip_card()
 
         self.assertEqual(self._rows("SELECT 1 FROM users WHERE telegram_user_id = ?", (uid,)), [])
@@ -180,9 +189,8 @@ class WipBotAccessTests(unittest.TestCase):
         uid = "81003"
         mgr = self._manager_with_tripwires()  # any dispatcher call raises AssertionError
         cases = {
-            "admission_bot": ["/todo", "/briefing", "안녕", "/구독"],
-            "yolo_bot": ["/weekend", "/curation", "/start"],
-            "silver_bot": ["/parents"],
+            "yolo_bot": ["/weekend", "/curation", "/start", "안녕", "/구독"],
+            "silver_bot": ["/parents", "/briefing", "안녕"],
         }
         n = 300
         for bot_id, texts in cases.items():
@@ -219,8 +227,8 @@ class WipBotAccessTests(unittest.TestCase):
         self.assertNotIn("info:sub:", json.dumps(sends[0].get("reply_markup", {})))
 
         # router-level /stop & info:unsub on a subscribed WIP bot -> UNSUBSCRIBED, no re-subscribe button
-        self.engine.attempt_subscribe(uid, "admission_bot", actor="ADMIN")
-        out = self.router.handle_interaction("admission_bot", uid, callback_data="info:unsub:admission_bot")
+        self.engine.attempt_subscribe(uid, "silver_bot", actor="ADMIN")
+        out = self.router.handle_interaction("silver_bot", uid, callback_data="info:unsub:silver_bot")
         self.assertEqual(out["result_code"], "UNSUBSCRIBED")
         self.assertNotIn("info:sub:", json.dumps(out["inline_keyboard"]))
 
@@ -237,16 +245,16 @@ class WipBotAccessTests(unittest.TestCase):
     def test_06_admin_actor_allowed(self):
         uid = "81006"
         for actor in ("ADMIN", "admin", " Admin "):
-            self.engine.unsubscribe_bot(uid, "admission_bot")
-            res = self.engine.attempt_subscribe(uid, "admission_bot", actor=actor)
+            self.engine.unsubscribe_bot(uid, "silver_bot")
+            res = self.engine.attempt_subscribe(uid, "silver_bot", actor=actor)
             self.assertTrue(res["success"], actor)
             self.assertEqual(res["code"], "SUBSCRIBED")
-        self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
+        self.assertTrue(self.engine.is_user_subscribed(uid, "silver_bot"))
 
         # Grandfathered subscriber passes the Telegram gate (reaches the domain dispatcher)
         mgr = DynamicBotManager(self.engine, self.router)
-        with patch.object(mgr, "_dispatch_admission_bot_update", return_value=(True, "adm_handled")) as disp:
-            self._run(mgr, "admission_bot", self._cb(uid, "adm:home", 600))
+        with patch.object(mgr, "_dispatch_silver_bot_update", return_value=(True, "sc_handled")) as disp:
+            self._run(mgr, "silver_bot", self._cb(uid, "SC:home", 600))
         disp.assert_called_once()
 
     # ---- 7) public -> WIP swap fails; old subscription kept --------------------
@@ -254,14 +262,14 @@ class WipBotAccessTests(unittest.TestCase):
         uid = "81007"
         self.assertEqual(self.engine.attempt_subscribe(uid, "travel_bot")["code"], "SUBSCRIBED")
 
-        res = self.engine.atomic_swap_subscription(uid, "travel_bot", "admission_bot", actor="USER")
+        res = self.engine.atomic_swap_subscription(uid, "travel_bot", "yolo_bot", actor="USER")
         self.assertFalse(res["success"])
         self.assertEqual(res["code"], BOT_WIP_CODE)
         self.assertTrue(self.engine.is_user_subscribed(uid, "travel_bot"))
-        self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        self.assertFalse(self.engine.is_user_subscribed(uid, "yolo_bot"))
 
         out = self.router.handle_interaction(
-            "admission_bot", uid, callback_data="info:swap:travel_bot:admission_bot"
+            "yolo_bot", uid, callback_data="info:swap:travel_bot:yolo_bot"
         )
         self.assertEqual(out["result_code"], BOT_WIP_CODE)
         self.assertTrue(self.engine.is_user_subscribed(uid, "travel_bot"))
@@ -269,7 +277,7 @@ class WipBotAccessTests(unittest.TestCase):
         self.assertEqual(active, ["travel_bot"])
 
         # ADMIN swap into WIP is allowed
-        res = self.engine.atomic_swap_subscription(uid, "travel_bot", "admission_bot", actor="ADMIN")
+        res = self.engine.atomic_swap_subscription(uid, "travel_bot", "yolo_bot", actor="ADMIN")
         self.assertTrue(res["success"])
 
     # ---- 8) WIP -> public swap succeeds ---------------------------------------
@@ -282,24 +290,47 @@ class WipBotAccessTests(unittest.TestCase):
         self.assertFalse(self.engine.is_user_subscribed(uid, "silver_bot"))
         self.assertTrue(self.engine.is_user_subscribed(uid, "kids_bot"))
 
-    # ---- 9) edu_bot alias -> blocked ------------------------------------------
-    def test_09_edu_bot_alias_blocked(self):
+    # ---- 9) edu_bot alias -> canonical admission_bot (now PUBLIC, not blocked) ---
+    def test_09_edu_bot_alias_resolves_to_public_admission(self):
         uid = "81009"
+        # Not WIP-gated any more; the engine looks up the raw id (no `edu_bot` row) -> BOT_NOT_FOUND.
         res = self.engine.attempt_subscribe(uid, "edu_bot")
-        self.assertEqual(res["code"], BOT_WIP_CODE)
-        self.assertEqual(res["bot_id"], "admission_bot")
-        self.engine.attempt_subscribe(uid, "brief_bot")
-        res = self.engine.atomic_swap_subscription(uid, "brief_bot", "edu_bot")
-        self.assertEqual(res["code"], BOT_WIP_CODE)
-        self.assertTrue(self.engine.is_user_subscribed(uid, "brief_bot"))
+        self.assertFalse(res["success"], res)
+        self.assertNotEqual(res["code"], BOT_WIP_CODE)
+        self.assertEqual(res["code"], "BOT_NOT_FOUND")
+        self.assertFalse(self.engine.is_user_subscribed(uid, "admission_bot"))
+        # The canonical id is publicly subscribable.
+        res = self.engine.attempt_subscribe(uid, "admission_bot")
+        self.assertTrue(res["success"], res)
+        self.assertEqual(res["code"], "SUBSCRIBED")
 
-        # Router path for a bot record registered under the legacy alias id
+        # Router path for a bot record registered under the legacy alias id is not WIP-gated
         bot = self.engine.get_bot("admission_bot")
         bot.bot_id = "edu_bot"
         with patch.object(self.engine, "get_bot", return_value=bot):
             out = self.router.handle_interaction("edu_bot", "81010", text="/start")
-        self.assertEqual(out["result_code"], BOT_WIP_CODE)
-        self.assertEqual(self._rows("SELECT 1 FROM users WHERE telegram_user_id = '81010'"), [])
+        self.assertNotEqual(out["result_code"], BOT_WIP_CODE)
+
+    # ---- 9b) newly public bots (admission / chungyak) -> USER self-service allowed --
+    def test_09b_newly_public_bots_user_subscribe_and_swap(self):
+        uid = "81012"
+        for bid in ("admission_bot", "chungyak_bot"):
+            bot = self.engine.get_bot(bid)
+            self.assertIsNotNone(bot, bid)  # no BOT_NOT_FOUND
+            self.assertTrue(bot.is_active, bid)  # no BOT_INACTIVE
+        res = self.engine.attempt_subscribe(uid, "chungyak_bot", actor="USER")
+        self.assertTrue(res["success"], res)
+        self.assertEqual(res["code"], "SUBSCRIBED")
+        res = self.engine.atomic_swap_subscription(uid, "chungyak_bot", "admission_bot", actor="USER")
+        self.assertTrue(res["success"], res)
+        self.assertEqual(res["code"], "SWAPPED")
+        self.assertTrue(self.engine.is_user_subscribed(uid, "admission_bot"))
+        self.assertFalse(self.engine.is_user_subscribed(uid, "chungyak_bot"))
+        with self.db._connect() as conn:
+            row = conn.execute(
+                "SELECT is_active, telegram_username FROM bots WHERE bot_id = 'chungyak_bot'"
+            ).fetchone()
+        self.assertEqual(tuple(row), (1, "KwAptApply_bot"))
 
     # ---- 10) HTML 3,500 chars & callback_data 64 bytes -------------------------
     def test_10_wip_response_respects_telegram_limits(self):

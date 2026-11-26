@@ -492,7 +492,7 @@ class MarketBriefDatabase:
                     ),
                 )
 
-            # Seed Default Multi-Bot Catalog (1 Menu Portal + 6 Real Info Bots: 시황, 여행, 입시, 실버케어, 자녀, 욜로)
+            # Seed Default Multi-Bot Catalog (1 Menu Portal + 7 Real Info Bots: 시황, 여행, 입시, 실버케어, 자녀, 욜로, 청약)
             default_bots = [
                 (
                     "menu_bot",
@@ -585,6 +585,19 @@ class MarketBriefDatabase:
                     1,
                     6,
                 ),
+                (
+                    "chungyak_bot",
+                    BotType.INFO.value,
+                    "청약",
+                    "KwAptApply_bot",
+                    "",
+                    "부동산·청약",
+                    "🏠",
+                    "내 조건 맞춤 청약 공고 3단계 자격 판정 및 08:00 정기 다이제스트를 제공합니다.",
+                    "CHUNGYAK",
+                    1,
+                    7,
+                ),
             ]
 
             bot_count = db.execute("SELECT COUNT(*) FROM bots").fetchone()[0]
@@ -624,6 +637,12 @@ class MarketBriefDatabase:
                     ("kids_bot", "KwKids_bot", env_kids_token),
                     ("yolo_bot", "KwYolo_bot", env_yolo_token),
                 ]
+                # One-shot promotion of the legacy WIP chungyak seed row (is_active=0, blank username).
+                # Must run BEFORE the username backfill below; later ADMIN deactivation is kept.
+                db.execute(
+                    "UPDATE bots SET is_active = 1, telegram_username = 'KwAptApply_bot' "
+                    "WHERE bot_id = 'chungyak_bot' AND (telegram_username IS NULL OR telegram_username = '')"
+                )
                 for bid, un, tok in bot_updates:
                     db.execute(
                         "UPDATE bots SET telegram_username = ? WHERE bot_id = ? AND (telegram_username IS NULL OR telegram_username = '')",

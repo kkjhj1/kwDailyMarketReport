@@ -96,11 +96,16 @@ class AdminOverhaulApiTests(unittest.TestCase):
         response = self.client.get("/api/platform/bots")
         self.assertEqual(response.status_code, 200)
         by_id = {bot["bot_id"]: bot for bot in response.json()["bots"]}
-        for bot_id in ("brief_bot", "travel_bot", "kids_bot"):
+        public_ids = {"brief_bot", "travel_bot", "kids_bot", "admission_bot", "chungyak_bot"}
+        wip_ids = {"silver_bot", "yolo_bot"}
+        for bot_id in public_ids:
+            self.assertIn(bot_id, by_id)
             self.assertEqual(by_id[bot_id]["visibility"], "PUBLIC")
-        for bot_id in ("admission_bot", "edu_bot", "silver_bot", "yolo_bot"):
-            if bot_id in by_id:
-                self.assertEqual(by_id[bot_id]["visibility"], "WIP")
+        for bot_id in wip_ids:
+            self.assertIn(bot_id, by_id)
+            self.assertEqual(by_id[bot_id]["visibility"], "WIP")
+        self.assertEqual({b for b, v in by_id.items() if v["visibility"] == "PUBLIC"}, public_ids)
+        self.assertEqual({b for b, v in by_id.items() if v["visibility"] == "WIP"}, wip_ids)
         self.assertEqual(by_id["menu_bot"]["visibility"], "CUSTOM")
         self.assertIn("name", by_id["brief_bot"])
 

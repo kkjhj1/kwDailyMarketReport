@@ -243,13 +243,23 @@ def get_portal_token() -> str:
 
 
 CHUNGYAK_BOT_ROW: tuple = (
-    "chungyak_bot", "INFO", "청약", "", "", "부동산·청약", "🏠",
-    "내 조건 맞춤 청약 공고 3단계 자격 판정 및 08:00 정기 다이제스트를 제공합니다.", "CHUNGYAK", 0, 7,
+    "chungyak_bot", "INFO", "청약", "KwAptApply_bot", "", "부동산·청약", "🏠",
+    "내 조건 맞춤 청약 공고 3단계 자격 판정 및 08:00 정기 다이제스트를 제공합니다.", "CHUNGYAK", 1, 7,
+)
+CHUNGYAK_BOT_USERNAME = "KwAptApply_bot"
+
+# One-shot public promotion of the legacy WIP seed row (is_active=0, blank username). Keyed on the blank
+# username so a later ADMIN deactivation (username already filled) is never silently reverted.
+CHUNGYAK_PROMOTE_SQL = (
+    "UPDATE bots SET is_active = 1, telegram_username = ?, updated_at = CURRENT_TIMESTAMP "
+    "WHERE bot_id = 'chungyak_bot' AND (telegram_username IS NULL OR telegram_username = '')"
 )
 
 
 def ensure_chungyak_bot_registered(db: PortalDatabase) -> bool:
-    """Registers chungyak_bot in the `bots` catalogue (INSERT OR IGNORE, is_active=0 → WIP, never overwrites).
+    """Registers chungyak_bot in the `bots` catalogue as a PUBLIC bot (INSERT OR IGNORE, is_active=1).
+    A legacy WIP seed row (blank username) is promoted once to is_active=1 / `KwAptApply_bot` to prevent
+    BOT_NOT_FOUND / BOT_INACTIVE; otherwise existing rows are never overwritten.
     Returns True only when the row was newly inserted."""
     with db._get_conn() as conn:
         cur = conn.execute(
@@ -259,8 +269,10 @@ def ensure_chungyak_bot_registered(db: PortalDatabase) -> bool:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             CHUNGYAK_BOT_ROW,
         )
+        inserted = cur.rowcount == 1
+        conn.execute(CHUNGYAK_PROMOTE_SQL, (CHUNGYAK_BOT_USERNAME,))
         conn.commit()
-        return cur.rowcount == 1
+        return inserted
 
 
 def run_polling(token: str) -> None:

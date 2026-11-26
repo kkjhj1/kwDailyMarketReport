@@ -102,7 +102,7 @@ class BotServiceType(str, Enum):
     SILVER = "silver_bot"        # 실버케어 부모님 복지 비서
     KIDS = "kids_bot"            # 키즈 나침반 체험 & 응급육아
     YOLO = "yolo_bot"            # 욜로봇 1인 라이프 큐레이션
-    CHUNGYAK = "chungyak_bot"    # 아파트 청약 알림봇 (WIP, 기본 비공개)
+    CHUNGYAK = "chungyak_bot"    # 아파트 청약 알림봇
 
     @property
     def title(self) -> str:
@@ -192,7 +192,7 @@ class BotServiceType(str, Enum):
             BotServiceType.SILVER: os.environ.get("SILVER_TELEGRAM_BOT_USERNAME") or os.environ.get("SILVER_BOT_USERNAME", "KwSilver_bot"),
             BotServiceType.KIDS: os.environ.get("KIDS_TELEGRAM_BOT_USERNAME") or os.environ.get("KIDS_BOT_USERNAME", "KwKids_bot"),
             BotServiceType.YOLO: os.environ.get("YOLO_TELEGRAM_BOT_USERNAME") or os.environ.get("YOLO_BOT_USERNAME", "KwYolo_bot"),
-            BotServiceType.CHUNGYAK: os.environ.get("APTAPP_TELEGRAM_BOT_USERNAME") or os.environ.get("CHUNGYAK_BOT_USERNAME", ""),
+            BotServiceType.CHUNGYAK: os.environ.get("APTAPP_TELEGRAM_BOT_USERNAME") or os.environ.get("CHUNGYAK_BOT_USERNAME", "KwAptApply_bot"),
         }
         raw = handles.get(self, "")
         return raw.strip().lstrip("@")
@@ -211,7 +211,7 @@ class BotServiceType(str, Enum):
         return self in PUBLIC_BOT_SERVICES
 
 
-# Bots visible in Menu Bot. ADMISSION / SILVER / YOLO are WIP and hidden (enum members kept for DB compat).
+# Bots visible in Menu Bot. SILVER / YOLO are WIP and hidden (enum members kept for DB compat).
 # Derived from the SSOT `market_brief.bot_visibility.PUBLIC_BOT_IDS`.
 PUBLIC_BOT_SERVICES: frozenset[BotServiceType] = frozenset(
     member for member in BotServiceType if member.value in PUBLIC_BOT_IDS

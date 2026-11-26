@@ -73,23 +73,38 @@ class PortalHubUnitTests(unittest.TestCase):
         self.assertEqual(build_slot_gauge(3, UserTier.BLACK), "[ ⬛ ⬛ ⬛ ★ ] 3개 활성화 (무제한)")
 
     def test_hidden_bots_keep_enum_but_are_not_public(self):
-        """All 7 enum members stay for DB/backend compat; only BRIEF/TRAVEL/KIDS are public (chungyak_bot WIP)."""
+        """All 7 enum members stay for DB/backend compat; BRIEF/TRAVEL/KIDS/ADMISSION/CHUNGYAK are public."""
         self.assertEqual(
             {b.value for b in BotServiceType},
             {"brief_bot", "admission_bot", "travel_bot", "silver_bot", "kids_bot", "yolo_bot", "chungyak_bot"},
         )
         public = {b for b in BotServiceType if b.is_public}
-        self.assertEqual(public, {BotServiceType.BRIEF, BotServiceType.TRAVEL, BotServiceType.KIDS})
+        self.assertEqual(
+            public,
+            {BotServiceType.BRIEF, BotServiceType.TRAVEL, BotServiceType.KIDS,
+             BotServiceType.ADMISSION, BotServiceType.CHUNGYAK},
+        )
+        self.assertFalse(BotServiceType.SILVER.is_public)
+        self.assertFalse(BotServiceType.YOLO.is_public)
         mock_db = PortalDatabase(":memory:")
-        self.assertEqual(mock_db.get_bots_by_category(BotCategory.EDU), [])
+        self.assertEqual(mock_db.get_bots_by_category(BotCategory.EDU), [BotServiceType.ADMISSION])
+        self.assertEqual(
+            mock_db.get_bots_by_category(BotCategory.FINANCE), [BotServiceType.BRIEF, BotServiceType.CHUNGYAK]
+        )
         self.assertEqual(
             mock_db.get_bots_by_category(BotCategory.LIFE), [BotServiceType.TRAVEL, BotServiceType.KIDS]
         )
+        # chungyak_bot is seeded active with its public handle (no BOT_NOT_FOUND / BOT_INACTIVE)
+        with mock_db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT is_active, telegram_username FROM bots WHERE bot_id = 'chungyak_bot'"
+            ).fetchone()
+        self.assertEqual(tuple(row), (1, "KwAptApply_bot"))
 
     def test_public_views_omit_hidden_bot_names(self):
         user = UserProfile(user_id=1, chat_id=1, first_name="t", tier=UserTier.BLACK)
         subs = {b: b.is_public for b in BotServiceType}
-        hidden_names = ("입시", "실버", "욜로", "수능", "부모님 복지")
+        hidden_names = ("실버", "욜로", "부모님 복지", "욜로 라이프")
         views = {
             "main": render_main_menu(user, subs)[0],
             "cat_home": render_category_home_view()[0],
@@ -99,18 +114,20 @@ class PortalHubUnitTests(unittest.TestCase):
         }
         for key, text in views.items():
             for name in hidden_names:
-                if key == "cat_home" and name == "입시":
-                    continue  # category label "교육 / 입시" itself is kept (described as 준비중)
                 self.assertNotIn(name, text, f"{key} leaks {name}")
             self.assertNotIn("6대", text, key)
-        self.assertIn("준비중", views["cat_home"])
+        self.assertIn("준비중", views["cat_home"])  # BIZ is still a placeholder category
         self.assertIn("(여행, 키즈)", views["cat_home"])
+        self.assertIn("(입시)", views["cat_home"])
+        self.assertIn("(시황, 청약)", views["cat_home"])
         self.assertIn("전체 봇 한눈에 보기", views["catalog"])
+        for name in ("입시 정보", "청약 알림"):
+            self.assertIn(name, views["catalog"])
 
         # Even when hidden bots are actively subscribed, main-menu chips and subscription rows omit them
         all_subs = {b: True for b in BotServiceType}
         main_text, _ = render_main_menu(user, all_subs)
-        self.assertIn("내 활성 구독 (3개)", main_text)
+        self.assertIn("내 활성 구독 (5개)", main_text)
         self.assertIn(
             "📊 <b>구독 슬롯</b>: <b>[ ⬛ ⬛ ⬛ ★ ] 7개 활성화 (무제한)</b>",
             main_text,
@@ -119,16 +136,21 @@ class PortalHubUnitTests(unittest.TestCase):
             self.assertNotIn(name, main_text)
         _, sub_markup = render_subscription_view(user, all_subs)
         cbs = [b.get("callback_data", "") for row in sub_markup["inline_keyboard"] for b in row]
-        for hidden in ("admission_bot", "silver_bot", "yolo_bot", "chungyak_bot"):
+        for hidden in ("silver_bot", "yolo_bot"):
             self.assertFalse(any(hidden in cb for cb in cbs), hidden)
 
-        edu_text, _ = render_category_view(BotCategory.EDU, user, subs)
-        self.assertIn("현재 준비 중인 카테고리입니다", edu_text)
+        edu_text, edu_markup = render_category_view(BotCategory.EDU, user, subs)
+        self.assertNotIn("현재 준비 중인 카테고리입니다", edu_text)
+        self.assertIn("입시 정보", edu_text)
+        biz_text, _ = render_category_view(BotCategory.BIZ, user, subs)
+        self.assertIn("현재 준비 중인 카테고리입니다", biz_text)
 
         _, search_markup = render_search_results_view("x", list(BotServiceType), user, subs)
         cbs = [b.get("callback_data", "") for row in search_markup["inline_keyboard"] for b in row]
-        for hidden in ("admission_bot", "silver_bot", "yolo_bot", "chungyak_bot"):
+        for hidden in ("silver_bot", "yolo_bot"):
             self.assertFalse(any(hidden in cb for cb in cbs), hidden)
+        for public in ("admission_bot", "chungyak_bot"):
+            self.assertTrue(any(public in cb for cb in cbs), public)
 
     def test_html_safety_and_xss_escaping(self):
         """Ensure special characters in user names are escaped and HTML is valid."""
@@ -163,7 +185,10 @@ class PortalHubUnitTests(unittest.TestCase):
         mock_db = PortalDatabase(":memory:")
         self.assertEqual(mock_db.search_bots("환율"), [BotServiceType.BRIEF])
         self.assertEqual(mock_db.search_bots("항공"), [BotServiceType.TRAVEL])
-        for hidden_q in ("수시", "입시", "실버", "욜로"):
+        self.assertEqual(mock_db.search_bots("수시"), [BotServiceType.ADMISSION])
+        self.assertEqual(mock_db.search_bots("입시"), [BotServiceType.ADMISSION])
+        self.assertEqual(mock_db.search_bots("청약"), [BotServiceType.CHUNGYAK])
+        for hidden_q in ("실버", "욜로"):
             self.assertEqual(mock_db.search_bots(hidden_q), [], hidden_q)
         self.assertEqual(mock_db.search_bots("없는키워드123"), [])
 
@@ -616,10 +641,10 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         for data in (
             "menu:sub:yolo_bot",
             "info:sub:silver_bot",
-            "sub:ask_sub:admission_bot:subs",
+            "sub:ask_sub:yolo_bot:subs",
             "sub:ask_sub:silver_bot:all",
             "sub:do_sub:yolo_bot:subs",
-            "sub:do_sub:admission_bot:cat:EDU",
+            "sub:do_sub:silver_bot:cat:LIFE",
             "sub:toggle:silver_bot",
         ):
             self._assert_hidden_blocked(data)
@@ -628,7 +653,7 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
     def test_swap_into_hidden_bot_is_blocked_without_db_mutation(self):
         self.portal_db.subscribe(self.uid, BotServiceType.BRIEF)
         for data in (
-            "sub:swap:brief_bot:admission_bot:subs",
+            "sub:swap:brief_bot:silver_bot:subs",
             "menu:swap:brief_bot:yolo_bot",
             "info:swap:brief_bot:silver_bot",
         ):
@@ -665,7 +690,7 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
             self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
 
     def test_quota_swap_view_hides_hidden_bot_swap_buttons(self):
-        self.portal_db.subscribe(self.uid, BotServiceType.ADMISSION)
+        self.portal_db.subscribe(self.uid, BotServiceType.SILVER)
         self._click("sub:do_sub:brief_bot:subs")
         markup = self.mock_client.send_message.call_args.kwargs["reply_markup"]
         cbs = [b["callback_data"] for b in _all_buttons(markup)]
@@ -777,23 +802,26 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         text, markup = render_catalog_all_view(user, subs)
         order = [text.index(b.short_name) for b in (
             BotServiceType.BRIEF, BotServiceType.TRAVEL, BotServiceType.KIDS,
+            BotServiceType.ADMISSION, BotServiceType.CHUNGYAK,
         )]
         self.assertEqual(order, sorted(order))
-        for hidden in (BotServiceType.ADMISSION, BotServiceType.SILVER, BotServiceType.YOLO):
+        for hidden in (BotServiceType.SILVER, BotServiceType.YOLO):
             self.assertNotIn(hidden.short_name, text)
         self.assertIn("전체 봇 한눈에 보기", text)
         self.assertNotIn("6개", text)
         self.assertEqual(text.count("[🟢 구독중]"), 1)
-        self.assertEqual(text.count("[⚪ 미구독]"), 2)
+        self.assertEqual(text.count("[⚪ 미구독]"), 4)
         cbs = [b.get("callback_data") for b in _all_buttons(markup) if "callback_data" in b]
         self.assertIn("sub:ask_unsub:travel_bot:all", cbs)
         self.assertIn("sub:ask_sub:brief_bot:all", cbs)
         for nav in ("cat:home", "nav:subs", "nav:main"):
             self.assertIn(nav, cbs)
-        # Only the subscribed bot (TRAVEL) exposes its chat-room URL; the other 2 get a single subscribe CTA
+        self.assertIn("sub:ask_sub:admission_bot:all", cbs)
+        self.assertIn("sub:ask_sub:chungyak_bot:all", cbs)
+        # Only the subscribed bot (TRAVEL) exposes its chat-room URL; the other 4 get a single subscribe CTA
         self.assertEqual(sum(1 for b in _all_buttons(markup) if "url" in b), 1)
         self.assertFalse(any(cb.startswith("sub:locked:") for cb in cbs))
-        self.assertEqual(sum(1 for cb in cbs if cb.startswith("sub:ask_sub:")), 2)
+        self.assertEqual(sum(1 for cb in cbs if cb.startswith("sub:ask_sub:")), 4)
         for cb in cbs:
             self.assertLessEqual(len(cb.encode("utf-8")), 64)
         self.assertLessEqual(len(text), 3500)
@@ -982,11 +1010,18 @@ class PortalHubUxEnhancementTests(unittest.TestCase):
         self.assertEqual(m1["inline_keyboard"][0][0]["text"], "🚀 키즈 나침반 바로가기")
         self.assertIn("url", m1["inline_keyboard"][0][0])
         # 3 active -> 2 + 1 compact entry rows
-        three = {b: b.is_public for b in BotServiceType}
+        three = {b: b in (BotServiceType.BRIEF, BotServiceType.TRAVEL, BotServiceType.KIDS) for b in BotServiceType}
         _, m3 = render_main_menu(user, three)
         rows = m3["inline_keyboard"]
         self.assertEqual([len(rows[0]), len(rows[1])], [2, 1])
         self.assertEqual([b["text"] for b in rows[0] + rows[1]], ["🚀 시황 입장", "🚀 여행 입장", "🚀 키즈 입장"])
+        # all 5 public active -> 2 + 2 + 1 compact entry rows, all URL buttons
+        five = {b: b.is_public for b in BotServiceType}
+        _, m5 = render_main_menu(user, five)
+        rows = m5["inline_keyboard"]
+        self.assertEqual([len(rows[0]), len(rows[1]), len(rows[2])], [2, 2, 1])
+        self.assertTrue(all("url" in b for b in rows[0] + rows[1] + rows[2]))
+        self.assertEqual(rows[3], [{"text": "📋 봇 둘러보기 · 구독", "callback_data": "nav:subs"}])
         # Hidden (non-public) bots never get an entry button
         hidden_only = {b: not b.is_public for b in BotServiceType}
         _, mh = render_main_menu(user, hidden_only)
@@ -1211,18 +1246,10 @@ class PortalHubSubscriptionLockTests(unittest.TestCase):
             row = conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()
         self.assertEqual(row["alert_enabled"], 0)
 
-        # Menu Bot re-subscribe to the hidden admission_bot is blocked: switch stays off, no DB change
+        # Menu Bot re-subscribe to the now-public admission_bot succeeds and restores the switch,
+        # and swap-out into another public bot clears it again
         self._click("sub:do_sub:admission_bot:subs")
-        self.assertFalse(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.ADMISSION])
-        with self.mb_db._connect() as conn:
-            self.assertEqual(
-                conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()[0], 0
-            )
-
-        # Backend re-subscribe (DB layer stays compatible with hidden bots) restores the switch,
-        # and swap-out into a public bot clears it again
-        self.portal_db.subscribe(self.uid, BotServiceType.ADMISSION)
-        _sync_domain_alerts(self.portal_db, self.uid, BotServiceType.ADMISSION.value, active=True)
+        self.assertTrue(self.portal_db.get_user_subscriptions(self.uid)[BotServiceType.ADMISSION])
         with self.mb_db._connect() as conn:
             self.assertEqual(
                 conn.execute("SELECT alert_enabled FROM admission_subscribers WHERE chat_id = ?", (uid_s,)).fetchone()[0], 1
